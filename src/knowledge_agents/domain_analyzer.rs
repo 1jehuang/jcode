@@ -2,12 +2,11 @@
 //! 移植自: Understand-Anything agents/domain-analyzer
 //! 基于文件路径语义和命名约定的业务域识别
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::file_analyzer::FileAnalysis;
-use super::{KGNode, KnowledgeGraph};
+use super::KnowledgeGraph;
 
 /// 业务域规则
 struct DomainRule {
@@ -61,8 +60,8 @@ pub fn detect_domain(file_path: &str) -> Option<&'static str> {
     let path_parts: Vec<&str> = path.split(&['/', '\\'][..]).collect();
     let filename = path_parts.last().unwrap_or(&"");
 
-    for rule in DOMAIN_RULES {
-        for keyword in &rule.keywords {
+    for rule in DOMAIN_RULES.iter() {
+        for keyword in rule.keywords {
             if filename.contains(keyword) || path_parts.iter().any(|p| p.contains(keyword)) {
                 return Some(rule.domain_name);
             }
@@ -90,7 +89,7 @@ pub async fn analyze_domains(
 
 pub fn domain_help() -> String {
     let mut help = String::from("Supported Business Domains:\n");
-    for rule in DOMAIN_RULES {
+    for rule in DOMAIN_RULES.iter() {
         help.push_str(&format!("  - {}: {}\n", rule.domain_name, rule.description));
     }
     help

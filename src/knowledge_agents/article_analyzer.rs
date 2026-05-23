@@ -71,7 +71,7 @@ impl ArticleAnalyzer {
         let graph = self.build_graph(&all_articles, root);
 
         // 4. 输出 JSON
-        export::to_json(&graph, output_path)?;
+        export::to_json(&graph, output_path).await;
 
         Ok(graph)
     }

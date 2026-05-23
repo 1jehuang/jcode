@@ -234,9 +234,10 @@ pub enum RoutingStrategy {
 }
 
 /// 调度器状态机
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SchedulerState {
     /// 初始化中
+    #[default]
     Initializing,
     /// 就绪, 等待任务
     Idle,
@@ -358,12 +359,6 @@ pub struct SchedulerMetricsSnapshot {
     pub goap_plan_failures: u64,
     #[serde(with = "chrono::serde::ts_seconds")]
     pub collected_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl Default for SchedulerState {
-    fn default() -> Self {
-        SchedulerState::Initializing
-    }
 }
 
 impl UnifiedScheduler {
@@ -1012,7 +1007,7 @@ impl UnifiedScheduler {
                 if running_count >= self.config.max_concurrent_tasks as u64 {
                     None // 达到最大并发限制
                 } else {
-                    queue.pop_ready(&*self.task_registry)?
+                    queue.pop_ready(&self.task_registry)?
                 }
             };
 
@@ -1102,7 +1097,7 @@ impl UnifiedScheduler {
             // Fall back to CPU scheduling if GPU scheduling fails
         }
 
-        let nodes: Vec<Arc<NodeInfo>> = { let mgr = self.node_manager.read().await; mgr.active_nodes().into_iter().map(|n| Arc::new(n)).collect() };
+        let nodes: Vec<Arc<NodeInfo>> = { let mgr = self.node_manager.read().await; mgr.active_nodes().into_iter().map(Arc::new).collect() };
 
         if nodes.is_empty() {
             return Ok(None); // 无可用节点
@@ -1110,7 +1105,7 @@ impl UnifiedScheduler {
 
         // 对于非推理类任务 (如代码生成/文件操作), 使用简化的资源匹配
         if !task.requires_inference {
-            return self.match_simple_task(&nodes.iter().map(|n| n.clone()).collect::<Vec<_>>(), task).await;
+            return self.match_simple_task(&nodes.iter().cloned().collect::<Vec<_>>(), task).await;
         }
 
         // ===== Parallax 两阶段调度 =====
@@ -1135,14 +1130,14 @@ impl UnifiedScheduler {
         // 根据模型大小确定需要的 "层数" (这里抽象化: 大模型=多层数, 小模型=少层数)
         let virtual_layers = self.model_to_virtual_layers(&task.required_model);
 
-        let result = router.find_optimal_path(virtual_layers, &nodes.iter().map(|n| n.clone()).collect::<Vec<_>>())?;
+        let result = router.find_optimal_path(virtual_layers, &nodes.to_vec())?;
 
         // 更新 Phase 1 计数
         {
             self.metrics.phase1_allocations.fetch_add(1, Ordering::Relaxed);
         }
 
-        Ok(result.map(|(path, lat)| (path, lat)))
+        Ok(result)
     }
 
     /// 非推理任务的简化资源匹配
@@ -1209,7 +1204,7 @@ impl UnifiedScheduler {
         };
         let active_nodes_refs: Vec<&NodeInfo> = active_nodes.iter().collect();
         let needs = allocator.should_rebalance(&active_nodes_refs)?;
-        drop(allocator);
+        let _ = allocator;
 
         if needs {
             self.execute_global_rebalance().await?;
@@ -1242,7 +1237,7 @@ impl UnifiedScheduler {
     async fn trigger_incremental_rebalance(&self) -> Result<(), SchedulerError> {
         let new_node = {
             let mgr = self.node_manager.read().await;
-            mgr.last_registered_node().map(|n| n.clone())
+            mgr.last_registered_node().cloned()
         };
 
         if let Some(node) = new_node {
@@ -1356,11 +1351,7 @@ impl UnifiedScheduler {
     /// Get GPU statistics (if GPU balancer is available)
     pub async fn get_gpu_stats(&self) -> Option<gpu_load_balancer::GpuStats> {
         let balancer_guard = self.gpu_balancer.read().await;
-        if let Some(balancer) = balancer_guard.as_ref() {
-            Some(balancer.get_stats())
-        } else {
-            None
-        }
+        balancer_guard.as_ref().map(|balancer| balancer.get_stats())
     }
 
     /// Get GPU utilization for Prometheus export

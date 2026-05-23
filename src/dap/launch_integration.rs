@@ -187,9 +187,9 @@ impl DebugSkill {
         }
         let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
         let mut dir = tokio::fs::read_dir(&self.log_dir).await.ok()?;
-        while let Some(Ok(entry)) = dir.next_entry().await.ok() {
+        while let Some(entry) = dir.next_entry().await.ok().flatten() {
             if entry.file_type().await.map(|t| t.is_file()).unwrap_or(false) {
-                if let Ok(modified) = entry.metadata().await.and_then(|m| m.modified()) {
+                if let Ok(modified) = entry.metadata().await.and_then(|m: std::fs::Metadata| m.modified()) {
                     match &latest {
                         Some((_, ts)) if modified > *ts => {
                             latest = Some((entry.path(), modified));

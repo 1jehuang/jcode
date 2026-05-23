@@ -750,7 +750,6 @@ impl FishParser {
                         if let FishAstNode::Command(cmd) = self.build_command_node(current_cmd_words) {
                             commands.push(cmd);
                         }
-                        current_cmd_words = vec![];
                     }
                     let func_name = if !tokens.is_empty() {
                         match tokens.remove(0) {
@@ -772,7 +771,6 @@ impl FishParser {
                         if let FishAstNode::Command(cmd) = self.build_command_node(current_cmd_words) {
                             commands.push(cmd);
                         }
-                        current_cmd_words = vec![];
                     }
                     let abbr_word = if !tokens.is_empty() {
                         match tokens.remove(0) {

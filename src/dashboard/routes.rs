@@ -227,7 +227,7 @@ async fn handle_websocket(socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     
     // 创建一个简单的metrics广播（在实际实现中会从DashboardServer传入）
-    let (_tx, mut rx) = broadcast::channel::<Arc<SystemMetrics>>(100);
+    let (_tx, _rx) = broadcast::channel::<Arc<SystemMetrics>>(100);
     
     // 发送初始消息
     let init_msg = serde_json::json!({
@@ -235,7 +235,7 @@ async fn handle_websocket(socket: WebSocket) {
         "message": "WebSocket connected successfully"
     });
     
-    if sender.send(axum::extract::ws::Message::Text(init_msg.to_string())).await.is_err() {
+    if sender.send(axum::extract::ws::Message::Text(init_msg.to_string().into())).await.is_err() {
         return;
     }
     
@@ -249,7 +249,7 @@ async fn handle_websocket(socket: WebSocket) {
                     // 响应ping
                     if text == "ping" {
                         let pong = serde_json::json!({"type": "pong", "timestamp": chrono::Utc::now().to_rfc3339()});
-                        let _ = sender.send(axum::extract::ws::Message::Text(pong.to_string())).await;
+                        let _ = sender.send(axum::extract::ws::Message::Text(pong.to_string().into())).await;
                     }
                 }
                 axum::extract::ws::Message::Close(_) => {

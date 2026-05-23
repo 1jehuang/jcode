@@ -375,7 +375,7 @@ impl LayerAllocator {
                     base_cap
                 };
 
-                if assign <= 0 {
+                if assign == 0 {
                     continue; // 此节点无法容纳任何层
                 }
 
@@ -393,7 +393,7 @@ impl LayerAllocator {
                 remaining -= assign;
                 remaining_cap_total -= base_cap as usize;
 
-                if remaining <= 0 {
+                if remaining == 0 {
                     break;
                 }
             }
@@ -437,6 +437,7 @@ impl LayerAllocator {
     /// - finished_pipes: 已完成的流水线数量
     fn dp_allocate(&mut self) -> Result<(), SchedulerError> {
         let n = self.active_nodes.len();
+        #[allow(non_snake_case)]
         let L = self.total_layers as usize;
         if n == 0 || L == 0 {
             return Ok(());
@@ -511,7 +512,7 @@ impl LayerAllocator {
     }
 
     /// DP 搜索核心
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::type_complexity)]
     fn dp_search(
         &self,
         k_target: usize,
@@ -527,6 +528,7 @@ impl LayerAllocator {
         // 这里简化为带记忆化的递归实现
         // 生产环境应改为迭代式 DP
 
+        #[allow(clippy::too_many_arguments)]
         fn solve(
             i: usize,
             open_residuals: Vec<i32>,
@@ -554,7 +556,7 @@ impl LayerAllocator {
             let new_needed = k_target.saturating_sub(finished) - open_residuals.len();
             let need_open: i64 = open_residuals.iter().map(|&x| x as i64).sum();
             let remaining_cap = suffix_sum[i];
-            if remaining_cap < (need_open.max(0) as usize + new_needed as usize * L)
+            if remaining_cap < (need_open.max(0) as usize + new_needed * L)
                 || finished + open_residuals.len() + (n - i) < k_target
             {
                 return f64::INFINITY;
@@ -666,12 +668,10 @@ impl LayerAllocator {
                     if j < open_list.len() {
                         let (_, ref mut nodes) = open_list[j];
                         nodes.push(node);
-                        if closed {
-                            if j < pipelines.len() {
-                                pipelines[finished] = std::mem::take(&mut open_list[j].1);
-                                open_list.remove(j);
-                                finished += 1;
-                            }
+                        if closed && j < pipelines.len() {
+                            pipelines[finished] = std::mem::take(&mut open_list[j].1);
+                            open_list.remove(j);
+                            finished += 1;
                         }
                     }
                     i += 1;
@@ -767,7 +767,7 @@ impl LayerAllocator {
         // 4. 整数化 (floor) + 余数分配
         let mut stage_counts: Vec<u32> = target.iter().map(|t| t.floor() as u32).collect();
         let assigned: u32 = stage_counts.iter().sum();
-        let mut remaining = (L as usize).saturating_sub(assigned as usize) as i32;
+        let mut remaining = L.saturating_sub(assigned as usize) as i32;
 
         if remaining > 0 {
             // 按小数部分降序分配余数
@@ -874,7 +874,7 @@ impl LayerAllocator {
                     .iter()
                     .find(|n| &n.node_id == nid)
                     .cloned()
-                    .ok_or_else(|| SchedulerError::NodeNotFound(*nid))
+                    .ok_or(SchedulerError::NodeNotFound(*nid))
             })
             .collect()
     }

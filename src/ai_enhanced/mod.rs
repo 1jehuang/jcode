@@ -118,10 +118,17 @@ impl std::fmt::Display for AnomalyType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataPoint {
     #[serde(skip, default = "Instant::now")]
-    #[allow(dead_code)]
     timestamp: Instant,
     value: f64,
     metadata: HashMap<String, String>,
+}
+
+impl DataPoint {
+    /// Seconds since this data point was recorded
+    #[allow(dead_code)]
+    fn age_secs(&self) -> f64 {
+        self.timestamp.elapsed().as_secs_f64()
+    }
 }
 
 impl Default for DataPoint {

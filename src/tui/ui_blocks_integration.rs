@@ -262,7 +262,7 @@ fn add_default_actions(block: &mut CommandBlock) {
 pub fn render_messages_with_blocks(
     messages: &[SimpleMessage],
     area: ratatui::layout::Rect,
-    buf: &mut ratatui::buffer::Buffer,
+    _buf: &mut ratatui::buffer::Buffer,
 ) -> u16 {
     let mut y = area.y;
     let width = area.width;

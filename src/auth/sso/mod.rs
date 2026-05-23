@@ -215,7 +215,7 @@ impl SsoProviderManager {
 
     /// 设置默认提供商
     pub async fn set_default_provider(&self, id: &str) -> Result<(), SsoError> {
-        let mut providers = self.providers.read().await;
+        let providers = self.providers.read().await;
         if !providers.contains_key(id) {
             return Err(SsoError::ProviderNotFound(id.to_string()));
         }

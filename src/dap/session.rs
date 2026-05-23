@@ -210,7 +210,7 @@ impl DebugSession {
     }
 
     pub fn set_exception_breakpoints(&mut self, filters: &[String]) {
-        for filter in filters {
+        for _filter in filters {
         }
     }
 
@@ -243,7 +243,7 @@ impl DebugSession {
         self.variables_cache.get(&variables_reference).cloned()
     }
 
-    pub fn evaluate(&self, expression: &str, frame_id: Option<StackFrameId>) -> EvaluateResponse {
+    pub fn evaluate(&self, expression: &str, _frame_id: Option<StackFrameId>) -> EvaluateResponse {
         EvaluateResponse {
             result: format!("Evaluated: {}", expression),
             type_: Some("string".to_string()),
@@ -346,7 +346,7 @@ impl DebugSession {
         thread.current_frame_index = 0;
     }
 
-    fn generate_scopes(&mut self, frame_id: StackFrameId) -> Vec<Scope> {
+    fn generate_scopes(&mut self, _frame_id: StackFrameId) -> Vec<Scope> {
         let local_vars_id = self.next_variable_id;
         self.next_variable_id += 1;
         let args_id = self.next_variable_id;

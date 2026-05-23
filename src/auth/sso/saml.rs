@@ -1,6 +1,7 @@
 //! SAML 2.0 支持模块
 
 use super::{SsoError, SsoProviderConfig, SsoUserInfo};
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
@@ -71,7 +72,7 @@ pub fn parse_saml_response(response: &str) -> Result<SamlResponse, SsoError> {
         assertion: None,
     };
 
-    let mut in_status_code = false;
+    let mut _in_status_code = false;
     let mut in_status_message = false;
     let mut in_issuer = false;
     let mut current_element: Option<&str> = None;
@@ -122,7 +123,7 @@ pub fn parse_saml_response(response: &str) -> Result<SamlResponse, SsoError> {
             Ok(Token::ElementEnd { .. }) => {
                 if let Some(elem) = current_element {
                     match elem {
-                        "StatusCode" => in_status_code = true,
+                        "StatusCode" => _in_status_code = true,
                         "StatusMessage" => in_status_message = true,
                         "Issuer" => in_issuer = true,
                         _ => {}
@@ -143,7 +144,7 @@ pub fn parse_saml_response(response: &str) -> Result<SamlResponse, SsoError> {
 
 /// 验证 SAML 响应签名
 pub fn verify_saml_signature(
-    response: &str,
+    _response: &str,
     certificate: &str,
     fingerprint: Option<&str>,
 ) -> Result<bool, SsoError> {
@@ -203,7 +204,7 @@ pub fn extract_user_info(assertion: &SamlAssertion) -> SsoUserInfo {
 /// 构建 SAML 认证请求
 pub fn build_saml_auth_request(
     provider: &SsoProviderConfig,
-    relay_state: &str,
+    _relay_state: &str,
 ) -> Result<String, SsoError> {
     let sso_url = provider.saml_sso_url.as_ref()
         .ok_or_else(|| SsoError::ConfigurationError("Missing SAML SSO URL".to_string()))?;
@@ -235,15 +236,15 @@ pub fn build_saml_auth_request(
         provider.client_id
     );
 
-    Ok(base64::encode(request))
+    Ok(base64::engine::general_purpose::STANDARD.encode(request))
 }
 
 /// 验证 SAML 响应并提取用户信息
 pub async fn validate_saml_response(
     response: &str,
-    provider: &SsoProviderConfig,
+    _provider: &SsoProviderConfig,
 ) -> Result<SsoUserInfo, SsoError> {
-    let decoded = base64::decode(response)
+    let decoded = base64::engine::general_purpose::STANDARD.decode(response)
         .map_err(|e| SsoError::TokenValidationFailed(format!("Base64 decode failed: {}", e)))?;
     
     let response_str = String::from_utf8(decoded)
@@ -275,7 +276,7 @@ pub async fn parse_saml_metadata(url: &str) -> Result<SamlMetadata, SsoError> {
         .await
         .map_err(|e| SsoError::InvalidResponse(e.to_string()))?;
 
-    let mut parser = Tokenizer::from(&body);
+    let mut parser = Tokenizer::from(body.as_str());
     
     let mut metadata = SamlMetadata {
         entity_id: String::new(),
@@ -315,26 +316,18 @@ pub async fn parse_saml_metadata(url: &str) -> Result<SamlMetadata, SsoError> {
             Ok(Token::ElementEnd { .. }) => {
                 if let Some(elem) = current_element {
                     if elem == "X509Certificate" {
-                        in_certificate = false;
-                        metadata.certificate = cert_buffer.clone();
-                        cert_buffer.clear();
+                        if in_certificate {
+                            metadata.certificate = cert_buffer.trim().to_string();
+                            in_certificate = false;
+                            cert_buffer.clear();
+                        } else {
+                            in_certificate = true;
+                        }
                     } else if elem == "NameIDFormat" {
                         metadata.name_id_format = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress".to_string();
                     }
                 }
-                if let Some(elem) = current_element {
-                    if elem == "X509Certificate" {
-                        in_certificate = true;
-                    }
-                }
                 current_element = None;
-            }
-            Ok(Token::ElementEnd { .. }) => {
-                if in_certificate {
-                    metadata.certificate = cert_buffer.trim().to_string();
-                    in_certificate = false;
-                    cert_buffer.clear();
-                }
             }
             Err(_) => {}
             _ => {}

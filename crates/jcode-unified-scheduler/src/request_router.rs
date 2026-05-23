@@ -375,6 +375,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
     back.push(back_0);
 
     // DP 递推
+    #[allow(clippy::needless_range_loop)]
     for l in 1..num_layers as usize {
         let mut curr_dp: HashMap<usize, f64> = HashMap::new();
         let mut curr_back: HashMap<usize, Option<usize>> = HashMap::new();
@@ -483,8 +484,8 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
     for (&idx, &first_l) in &first_used {
         let node = &nodes[idx];
         if let Some(start) = node.start_layer {
-            if first_l as u32 > start {
-                turning.push((node.node_id, first_l as u32, "head"));
+            if first_l > start {
+                turning.push((node.node_id, first_l, "head"));
             }
         }
     }

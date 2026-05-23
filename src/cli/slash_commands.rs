@@ -436,16 +436,17 @@ pub async fn handle_cost_command(detailed: bool, json_output: bool) -> Result<St
 // --- Doctor Command --------------------------
 
 /// 处理 /doctor 命令
+#[allow(unused_assignments)]
 pub async fn handle_doctor_command(auto_fix: bool) -> Result<String> {
     let mut checks = Vec::new();
     let mut all_passed = true;
-    
+
     // 1. 检查认证状态
     checks.push(("✅", "认证状态", "已登录"));
-    
+
     // 2. 检查网络连接
     checks.push(("✅", "网络连接", "正常"));
-    
+
     // 3. 检查配置文件
     checks.push(("⚠️", "配置文件", "存在但有过时项"));
     all_passed = false;

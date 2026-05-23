@@ -160,7 +160,7 @@ impl BackpressureController {
         }
 
         // Try to acquire concurrency permit (with timeout)
-        let effective_concurrent = self.current_max_concurrent.load(Ordering::Relaxed);
+        let _effective_concurrent = self.current_max_concurrent.load(Ordering::Relaxed);
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             self.concurrency_limiter.acquire(),

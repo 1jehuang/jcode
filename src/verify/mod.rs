@@ -157,14 +157,15 @@ impl VerifyEngine {
                     }
                 } else {
                     iteration_passed = false;
-                    iteration_issues.extend(result.errors);
+                    let error_count = result.errors.len();
+                    iteration_issues.extend(result.errors.clone());
 
                     // 尝试自动修复
-                    if let Some(ref suggestion) = result.fix_suggestion {
+                    if let Some(ref _suggestion) = result.fix_suggestion {
                         crate::logging::warn(&format!(
                             "Verify [{}]: FAILED ({} errors). Attempting fix...",
                             stage.label(),
-                            result.errors.len()
+                            error_count
                         ));
 
                         if let Some(fix) = self.suggest_fix(&result).await? {
@@ -300,10 +301,10 @@ impl VerifyEngine {
     async fn verify_tests(&self, project_type: &str, integration: bool) -> Result<VerifyResult> {
         let root = &self.config.workspace_root;
         let output = match (project_type, integration) {
-            ("rust", false) => run_command_timeout(root, &self.config.timeout_secs, "cargo", &["test", "--color=never"]).await,
-            ("rust", true) => run_command_timeout(root, &self.config.timeout_secs, "cargo", &["test", "--color=never", "--test", "*"]).await,
-            ("node", false) => run_command_timeout(root, &self.config.timeout_secs, "npx", &["jest", "--passWithNoTests"]).await,
-            ("python", false) => run_command_timeout(root, &self.config.timeout_secs, "python", &["-m", "pytest"]).await,
+            ("rust", false) => run_command_timeout(root, self.config.timeout_secs, "cargo", &["test", "--color=never"]).await,
+            ("rust", true) => run_command_timeout(root, self.config.timeout_secs, "cargo", &["test", "--color=never", "--test", "*"]).await,
+            ("node", false) => run_command_timeout(root, self.config.timeout_secs, "npx", &["jest", "--passWithNoTests"]).await,
+            ("python", false) => run_command_timeout(root, self.config.timeout_secs, "python", &["-m", "pytest"]).await,
             _ => run_command(root, "echo", &["No test runner configured"]).await,
         };
 

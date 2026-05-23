@@ -57,14 +57,18 @@ pub fn create_batch_processor(kv_cache: Arc<KvCacheManager>) -> BatchProcessor {
 /// 启动推理任务的包装函数
 /// 替代原始的 `CpuEngine::start()`
 pub async fn start_inference_with_optimizations(
-    model_path: &str,
-    ctx_size: u32,
-    threads: u32,
+    _model_path: &str,
+    _ctx_size: u32,
+    _threads: u32,
 ) -> anyhow::Result<()> {
     if !is_inference_enabled() {
         tracing::info!("Inference optimizations disabled, starting vanilla engine");
         return Ok(());
     }
+
+    let stats = _INFERENCE_STATS.get()
+        .map(|s| s.blocking_read().clone())
+        .unwrap_or_default();
 
     tracing::info!("Starting inference with optimizations:");
     tracing::info!("  Batch size: 32, KV block: 256, Quant: FP8");
@@ -75,9 +79,18 @@ pub async fn start_inference_with_optimizations(
     tracing::info!("  NVMe direct I/O: enabled (aligned to {} bytes)",
         NvmeOptimizer::optimal_io_size(),
     );
+    tracing::info!("  Previous stats: {} requests, {:.1} tok/s",
+        stats.total_requests, stats.avg_tokens_per_sec,
+    );
 
     // 实际推理启动由调用方完成
     Ok(())
+}
+
+/// 启动推理（带优化选项）
+pub async fn start_inference(model_path: &str, ctx_size: u32, threads: u32) -> anyhow::Result<()> {
+    init_inference_optimizer();
+    start_inference_with_optimizations(model_path, ctx_size, threads).await
 }
 
 /// 提交推理请求到批处理系统
@@ -88,7 +101,7 @@ pub async fn submit_inference_request(
     let start = Instant::now();
 
     // 1. 分配 KV 缓存
-    let num_blocks = (request.max_tokens as f64 / kv_cache.block_size as f64).ceil() as usize;
+    let num_blocks = (request.max_tokens as f64 / kv_cache.block_size() as f64).ceil() as usize;
     let _blocks = match kv_cache.allocate(num_blocks).await {
         Ok(b) => b,
         Err(_) => {

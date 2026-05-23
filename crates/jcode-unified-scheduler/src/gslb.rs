@@ -96,6 +96,28 @@ impl GslbRouter {
         }
     }
 
+    /// Pre-compute distance matrix for all registered clusters.
+    /// Uses estimated geo-coordinates based on region names.
+    /// Call after registering all clusters.
+    pub fn init_distance_matrix(&mut self) {
+        let region_ids: Vec<String> = self.clusters.values()
+            .map(|c| c.region.0.clone())
+            .collect();
+        for a in &region_ids {
+            for b in &region_ids {
+                if a != b {
+                    let dist = self.geo_distance(0.0, 0.0, a);
+                    self.distance_matrix.insert((a.clone(), b.clone()), dist);
+                }
+            }
+        }
+    }
+
+    /// Get pre-computed distance between two regions
+    pub fn get_distance(&self, from: &str, to: &str) -> Option<f64> {
+        self.distance_matrix.get(&(from.to_string(), to.to_string())).copied()
+    }
+
     /// Register a regional cluster
     pub fn register_cluster(&mut self, cluster: RegionalCluster) {
         self.clusters.insert(cluster.cluster_id.clone(), cluster);

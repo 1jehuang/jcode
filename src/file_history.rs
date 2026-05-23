@@ -60,7 +60,9 @@ impl FileHistory {
         let prefix = {
             let mut hasher = Sha256::new();
             hasher.update(path.to_string_lossy().as_bytes());
-            format!("{:x}", &hasher.finish()[..16])
+            let hash = hasher.finalize();
+            let hex_string: String = hash[..16].iter().map(|byte| format!("{:02x}", byte)).collect();
+            format!("{hex_string}")
         };
         // 扫描目录匹配前缀
         let mut max_v = 0usize;

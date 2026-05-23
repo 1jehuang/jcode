@@ -38,8 +38,8 @@ pub enum TokenScope {
 }
 
 impl TokenScope {
-    #[allow(dead_code)]
-    fn from_str(s: &str) -> Self {
+    /// Parse scope from a config string: "readonly", "full", "services:svc1,svc2"
+    pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "readonly" | "read-only" | "ro" => TokenScope::ReadOnly,
             s if s.starts_with("services:") => {

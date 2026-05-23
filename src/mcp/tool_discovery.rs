@@ -127,7 +127,7 @@ impl ToolDiscoveryEngine {
                     description: tool.description.clone(),
                     category: tool.category.clone(),
                     score,
-                    input_schema: tool.input_schema.clone(),
+                    input_schema: Some(tool.input_schema.clone()),
                 };
                 scored_tools.push((discovered, score));
             }

@@ -71,7 +71,7 @@ impl FimCompleter {
         );
 
         let mut candidates = Vec::new();
-        for i in 0..3 {
+        for _i in 0..3 {
             // 多次调用生成候选
             if let Some(text) = self.call_fim_api(&fim_prompt, req).await {
                 let syntax_ok = syntax_valid(&text, &req.file_path);
@@ -494,7 +494,7 @@ impl SmartCompleter {
         let mut response = self.fim.complete(&fim_req).await;
 
         // Step 3: 如果有语法提示, 注入到第一个候选项
-        if let Some(hint) = &ctx.syntax_hint {
+        if let Some(_hint) = &ctx.syntax_hint {
             if let Some(first) = response.items.first_mut() {
                 if first.syntax_valid {
                     first.score += 0.1; // 语法有效加分

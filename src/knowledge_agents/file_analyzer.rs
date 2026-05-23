@@ -7,8 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use super::project_scanner::FileEntry;
-use super::{KGNode, NodeKind, RelationType, ComplexityLevel};
+use super::ComplexityLevel;
 
 /// 文件分析结果
 #[derive(Debug, Clone)]

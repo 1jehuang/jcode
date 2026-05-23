@@ -8,7 +8,7 @@ use tracing::{info, warn, error};
 
 use jcode_cross_file_repair::{
     CrossFileRepairEngine, TreeSitterAstAdapter, TypeChecker, EditBridge,
-    AstEdit, AstEditOp,
+    AstEdit, AstEditOp, LanguageKind,
 };
 
 /// Wrapper for cross-file repair engine in Agent context
@@ -19,7 +19,7 @@ pub struct AgentCrossFileRepair {
 impl AgentCrossFileRepair {
     /// Create a new cross-file repair instance
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let ast_adapter = Arc::new(TreeSitterAstAdapter::new());
+        let ast_adapter = Arc::new(TreeSitterAstAdapter::new(LanguageKind::Rust));
         let type_checker = TypeChecker::new();
         
         let engine = Arc::new(CrossFileRepairEngine::new(ast_adapter, type_checker));
@@ -65,18 +65,27 @@ impl AgentCrossFileRepair {
 
         for edit in edits {
             let op = match edit.operation.as_str() {
-                "insert" => AstEditOp::Insert,
-                "delete" => AstEditOp::Delete,
-                "replace" => AstEditOp::Replace,
+                "insert" => AstEditOp::Insert {
+                    content: edit.content,
+                    line: edit.start_line,
+                    column: 0,
+                },
+                "delete" => AstEditOp::Delete {
+                    start_line: edit.start_line,
+                    end_line: edit.end_line,
+                },
+                "replace" => AstEditOp::Replace {
+                    start_line: edit.start_line,
+                    end_line: edit.end_line,
+                    content: edit.content,
+                },
                 _ => return Err(format!("Unknown operation: {}", edit.operation).into()),
             };
 
             ast_edits.push(AstEdit {
                 file_path: edit.file_path,
-                operation: op,
-                start_line: edit.start_line,
-                end_line: edit.end_line,
-                content: edit.content,
+                language: LanguageKind::Generic,
+                operations: vec![op],
             });
         }
 
@@ -88,19 +97,34 @@ impl AgentCrossFileRepair {
         let mut agent_edits = Vec::new();
 
         for edit in edits {
-            let operation = match edit.operation {
-                AstEditOp::Insert => "insert".to_string(),
-                AstEditOp::Delete => "delete".to_string(),
-                AstEditOp::Replace => "replace".to_string(),
-            };
+            for op in edit.operations {
+                let (operation, start_line, end_line, content) = match op {
+                    AstEditOp::Insert { content, line, .. } => {
+                        ("insert".to_string(), line, line, content)
+                    }
+                    AstEditOp::Delete { start_line, end_line } => {
+                        ("delete".to_string(), start_line, end_line, String::new())
+                    }
+                    AstEditOp::Replace { start_line, end_line, content } => {
+                        ("replace".to_string(), start_line, end_line, content)
+                    }
+                    AstEditOp::ReplaceFunction { name: _, new_body } => {
+                        ("replace".to_string(), 0, 0, new_body)
+                    }
+                    AstEditOp::AddImport { import } => {
+                        ("insert".to_string(), 0, 0, import)
+                    }
+                    _ => continue,
+                };
 
-            agent_edits.push(AgentEdit {
-                file_path: edit.file_path,
-                operation,
-                start_line: edit.start_line,
-                end_line: edit.end_line,
-                content: edit.content,
-            });
+                agent_edits.push(AgentEdit {
+                    file_path: edit.file_path.clone(),
+                    operation,
+                    start_line,
+                    end_line,
+                    content,
+                });
+            }
         }
 
         Ok(agent_edits)

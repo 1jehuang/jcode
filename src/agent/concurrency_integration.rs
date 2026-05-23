@@ -52,8 +52,12 @@ where
         None => return f().await,
     };
 
-    optimizer.execute(prompt, priority, f).await
-        .map_err(|e| format!("Concurrency error: {}", e))
+    let wrapped_f = || async {
+        f().await.map_err(|e| anyhow::anyhow!(e))
+    };
+
+    optimizer.execute(prompt, priority, wrapped_f).await
+        .map_err(|e| e.to_string())
 }
 
 /// 在 Agent 工具执行前调用。

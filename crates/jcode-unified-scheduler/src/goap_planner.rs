@@ -85,8 +85,26 @@ struct SearchNode {
     f_cost: f64,
     /// 到达此状态的动作历史
     path: Vec<usize>, // indices into the action list
-    #[allow(dead_code)]
+    /// 父节点指针 (用于路径回溯)
     parent: Option<Box<SearchNode>>,
+}
+
+impl SearchNode {
+    /// 从 parent 指针链重构路径 (从根到当前节点)
+    #[allow(dead_code)]
+    fn reconstruct_path(&self) -> Vec<usize> {
+        let mut path = Vec::new();
+        let mut current = Some(self);
+        while let Some(node) = current {
+            path.push(node.state.0.get("current_action").and_then(|v| match v {
+                WorldStateValue::Int(i) => Some(*i as usize),
+                _ => None,
+            }).unwrap_or(0));
+            current = node.parent.as_ref().map(|p| p.as_ref());
+        }
+        path.reverse();
+        path
+    }
 }
 
 // 为了让 BinaryHeap 作为最小堆 (弹出 f_cost 最小的)

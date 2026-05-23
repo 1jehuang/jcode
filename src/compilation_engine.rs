@@ -148,8 +148,8 @@ impl CompilationEngine {
                     // 解析 file:line:col: 格式
                     let parts: Vec<&str> = before.split(':').collect();
                     let file = parts.first().map(|s| s.to_string());
-                    let line_num = parts.get(1).and_then(|s| s.parse().ok());
-                    let col = parts.get(2).and_then(|s| s.parse().ok());
+                    let _line_num: Option<u32> = parts.get(1).and_then(|s| s.parse().ok());
+                    let _col: Option<u32> = parts.get(2).and_then(|s| s.parse().ok());
                     (file, after.to_string())
                 } else {
                     (None, trimmed.to_string())
@@ -260,7 +260,7 @@ impl FixEngine {
     /// 将编译错误送入 LLM, 获取修复后的代码
     /// 对标: Claude Code 的 tool_use_error → LLM 重新生成
     pub async fn fix_errors(
-        &self, errors: &[CompileError], full_output: &str,
+        &self, errors: &[CompileError], _full_output: &str,
     ) -> Result<Vec<FixResult>, String> {
         if errors.is_empty() {
             return Ok(vec![]);
@@ -556,13 +556,17 @@ impl OutputPersister {
         if !self.storage_dir.exists() { return; }
         let max_age = Duration::from_secs(max_age_hours * 3600);
         let mut dir = tokio::fs::read_dir(&self.storage_dir).await.ok();
-        while let Some(Ok(entry)) = dir.as_mut().and_then(|d| d.next_entry().await.ok()) {
-            if let Ok(metadata) = entry.metadata() {
-                if let Ok(modified) = metadata.modified() {
-                    if modified.elapsed().unwrap_or(Duration::ZERO) > max_age {
-                        let _ = tokio::fs::remove_file(entry.path()).await;
+        while let Some(dir_ref) = dir.as_mut() {
+            if let Ok(Some(entry)) = dir_ref.next_entry().await {
+                if let Ok(metadata) = entry.metadata().await {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified.elapsed().unwrap_or(Duration::ZERO) > max_age {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                        }
                     }
                 }
+            } else {
+                break;
             }
         }
     }

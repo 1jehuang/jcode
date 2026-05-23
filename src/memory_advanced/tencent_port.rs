@@ -10,9 +10,9 @@
 //! 源项目: https://github.com/Tencent/TencentDB-Agent-Memory
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 // ========================================================================
@@ -366,7 +366,7 @@ impl MemoryPipeline {
             persisted_to_file: None,
             embedding: None,
         };
-        self.personas.write().await.push(persona);
+        self.personas.write().await.push(persona.clone());
 
         // 持久化画像到 Markdown 文件
         self.persist_persona_to_markdown(&persona).await;
@@ -537,183 +537,8 @@ impl MemoryPipeline {
     }
 
     // ========================================================================
-    // [3] 混合检索 (BM25 + Vector + RRF)
-    // 移植自: TencentDB-Agent-Memory hybrid retrieval + sqlite-vec
+    // [3] 混合检索 (BM25 + Vector + RRF) - 见下方独立函数定义
     // ========================================================================
-
-    /// BM25 评分器 (Okapi BM25)
-    pub struct Bm25Scorer {
-        /// 所有文档的词频统计
-        doc_freqs: HashMap<String, usize>,
-        /// 文档数
-        num_docs: usize,
-        /// 平均文档长度
-        avg_doc_len: f64,
-        /// k1 参数 (默认 1.5)
-        k1: f64,
-        /// b 参数 (默认 0.75)
-        b: f64,
-        /// 文档长度缓存
-        doc_lengths: HashMap<String, usize>,
-    }
-
-    impl Bm25Scorer {
-        pub fn new(k1: f64, b: f64) -> Self {
-            Self {
-                doc_freqs: HashMap::new(),
-                num_docs: 0,
-                avg_doc_len: 0.0,
-                k1,
-                b,
-                doc_lengths: HashMap::new(),
-            }
-        }
-
-        /// 索引文档集合
-        pub fn index(&mut self, documents: &[(String, String)]) {
-            self.num_docs = documents.len();
-            let mut total_len = 0usize;
-
-            // 构建倒排索引
-            for (id, content) in documents {
-                let words: Vec<&str> = content.split_whitespace().collect();
-                let doc_len = words.len();
-                self.doc_lengths.insert(id.clone(), doc_len);
-                total_len += doc_len;
-
-                let mut seen = std::collections::HashSet::new();
-                for word in words {
-                    let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-                    if !w.is_empty() && seen.insert(w.clone()) {
-                        *self.doc_freqs.entry(w).or_insert(0) += 1;
-                    }
-                }
-            }
-
-            self.avg_doc_len = total_len as f64 / self.num_docs.max(1) as f64;
-        }
-
-        /// 计算单个文档的 BM25 分数
-        pub fn score(&self, query: &str, doc_id: &str, doc_content: &str) -> f64 {
-            let idf = |term: &str| -> f64 {
-                let df = self.doc_freqs.get(term).copied().unwrap_or(1).max(1);
-                ((self.num_docs as f64 - df as f64 + 0.5) / (df as f64 + 0.5) + 1.0).ln()
-            };
-
-            let doc_len = self.doc_lengths.get(doc_id).copied().unwrap_or(doc_content.len()) as f64;
-
-            let mut score = 0.0;
-            let words: Vec<&str> = doc_content.split_whitespace().collect();
-            let query_terms: std::collections::HashSet<String> = query.split_whitespace()
-                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
-                .filter(|w| !w.is_empty())
-                .collect();
-
-            for term in &query_terms {
-                let tf = words.iter()
-                    .filter(|w| {
-                        w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase() == *term
-                    })
-                    .count() as f64;
-
-                if tf == 0.0 {
-                    continue;
-                }
-
-                let term_idf = idf(term);
-                let numerator = tf * (self.k1 + 1.0);
-                let denominator = tf + self.k1 * (1.0 - self.b + self.b * doc_len / self.avg_doc_len);
-                score += term_idf * numerator / denominator;
-            }
-
-            score
-        }
-
-        /// 批量计算 BM25 分数
-        pub fn search(&self, query: &str, documents: &[(String, String)], top_k: usize) -> Vec<(String, f64)> {
-            let mut scored: Vec<(String, f64)> = documents.iter()
-                .map(|(id, content)| {
-                    (id.clone(), self.score(query, id, content))
-                })
-                .filter(|(_, s)| *s > 0.0)
-                .collect();
-
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(top_k);
-            scored
-        }
-    }
-
-    /// 向量检索适配器 (基于 sqlite-vec)
-    pub struct VectorSearchEngine {
-        /// 存储嵌入
-        embeddings: HashMap<String, Vec<f32>>,
-    }
-
-    impl VectorSearchEngine {
-        pub fn new() -> Self {
-            Self { embeddings: HashMap::new() }
-        }
-
-        pub fn upsert(&mut self, id: &str, embedding: Vec<f32>) {
-            self.embeddings.insert(id.to_string(), embedding);
-        }
-
-        /// 余弦相似度搜索
-        pub fn search(&self, query_embedding: &[f32], top_k: usize) -> Vec<(String, f64)> {
-            let mut scored: Vec<(String, f64)> = self.embeddings.iter()
-                .map(|(id, emb)| {
-                    let sim = cosine_similarity(query_embedding, emb);
-                    (id.clone(), sim)
-                })
-                .filter(|(_, s)| *s > 0.1)
-                .collect();
-
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(top_k);
-            scored
-        }
-    }
-
-    /// 余弦相似度
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-        if a.len() != b.len() || a.is_empty() {
-            return 0.0;
-        }
-        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-        (dot / (norm_a * norm_b)) as f64
-    }
-
-    /// RRF (Reciprocal Rank Fusion) 融合策略
-    /// 将 BM25 和 向量检索的结果融合
-    pub fn rrf_fusion(
-        bm25_results: &[(String, f64)],
-        vector_results: &[(String, f64)],
-        k: f64,    // RRF 参数 (默认 60)
-        top_k: usize,
-    ) -> Vec<(String, f64)> {
-        let mut rrf_scores: HashMap<String, f64> = HashMap::new();
-
-        // BM25 排名贡献
-        for (rank, (id, _)) in bm25_results.iter().enumerate() {
-            *rrf_scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
-        }
-
-        // 向量检索排名贡献
-        for (rank, (id, _)) in vector_results.iter().enumerate() {
-            *rrf_scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
-        }
-
-        let mut ranked: Vec<(String, f64)> = rrf_scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        ranked.truncate(top_k);
-        ranked
-    }
 
     /// === 混合检索: BM25 + Vector + RRF ===
     pub async fn hybrid_search(
@@ -761,7 +586,7 @@ impl MemoryPipeline {
         }
 
         // RRF 融合
-        let fused = Self::rrf_fusion(
+        let fused = rrf_fusion(
             &bm25_results,
             &vector_results,
             60.0,
@@ -850,6 +675,181 @@ impl MemoryPipeline {
             stats.hybrid_searches,
             self.store_root.display(),
         )
+    }
+}
+
+/// 余弦相似度
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)) as f64
+}
+
+/// RRF (Reciprocal Rank Fusion) 融合策略
+/// 将 BM25 和 向量检索的结果融合
+pub fn rrf_fusion(
+    bm25_results: &[(String, f64)],
+    vector_results: &[(String, f64)],
+    k: f64,
+    top_k: usize,
+) -> Vec<(String, f64)> {
+    let mut rrf_scores: HashMap<String, f64> = HashMap::new();
+
+    for (rank, (id, _)) in bm25_results.iter().enumerate() {
+        *rrf_scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+    }
+
+    for (rank, (id, _)) in vector_results.iter().enumerate() {
+        *rrf_scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+    }
+
+    let mut ranked: Vec<(String, f64)> = rrf_scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(top_k);
+    ranked
+}
+
+// ========================================================================
+// [3] 混合检索 (BM25 + Vector + RRF)
+// 移植自: TencentDB-Agent-Memory hybrid retrieval + sqlite-vec
+// ========================================================================
+
+/// BM25 评分器 (Okapi BM25)
+pub struct Bm25Scorer {
+    /// 所有文档的词频统计
+    doc_freqs: HashMap<String, usize>,
+    /// 文档数
+    num_docs: usize,
+    /// 平均文档长度
+    avg_doc_len: f64,
+    /// k1 参数 (默认 1.5)
+    k1: f64,
+    /// b 参数 (默认 0.75)
+    b: f64,
+    /// 文档长度缓存
+    doc_lengths: HashMap<String, usize>,
+}
+
+impl Bm25Scorer {
+    pub fn new(k1: f64, b: f64) -> Self {
+        Self {
+            doc_freqs: HashMap::new(),
+            num_docs: 0,
+            avg_doc_len: 0.0,
+            k1,
+            b,
+            doc_lengths: HashMap::new(),
+        }
+    }
+
+    /// 索引文档集合
+    pub fn index(&mut self, documents: &[(String, String)]) {
+        self.num_docs = documents.len();
+        let mut total_len = 0usize;
+
+        for (id, content) in documents {
+            let words: Vec<&str> = content.split_whitespace().collect();
+            let doc_len = words.len();
+            self.doc_lengths.insert(id.clone(), doc_len);
+            total_len += doc_len;
+
+            let mut seen = std::collections::HashSet::new();
+            for word in words {
+                let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if !w.is_empty() && seen.insert(w.clone()) {
+                    *self.doc_freqs.entry(w).or_insert(0) += 1;
+                }
+            }
+        }
+
+        self.avg_doc_len = total_len as f64 / self.num_docs.max(1) as f64;
+    }
+
+    /// 计算单个文档的 BM25 分数
+    pub fn score(&self, query: &str, doc_id: &str, doc_content: &str) -> f64 {
+        let idf = |term: &str| -> f64 {
+            let df = self.doc_freqs.get(term).copied().unwrap_or(1).max(1);
+            ((self.num_docs as f64 - df as f64 + 0.5) / (df as f64 + 0.5) + 1.0).ln()
+        };
+
+        let doc_len = self.doc_lengths.get(doc_id).copied().unwrap_or(doc_content.len()) as f64;
+
+        let mut score = 0.0;
+        let words: Vec<&str> = doc_content.split_whitespace().collect();
+        let query_terms: std::collections::HashSet<String> = query.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        for term in &query_terms {
+            let tf = words.iter()
+                .filter(|w| {
+                    w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase() == *term
+                })
+                .count() as f64;
+
+            if tf == 0.0 {
+                continue;
+            }
+
+            let term_idf = idf(term);
+            let numerator = tf * (self.k1 + 1.0);
+            let denominator = tf + self.k1 * (1.0 - self.b + self.b * doc_len / self.avg_doc_len);
+            score += term_idf * numerator / denominator;
+        }
+
+        score
+    }
+
+    /// 批量计算 BM25 分数
+    pub fn search(&self, query: &str, documents: &[(String, String)], top_k: usize) -> Vec<(String, f64)> {
+        let mut scored: Vec<(String, f64)> = documents.iter()
+            .map(|(id, content)| {
+                (id.clone(), self.score(query, id, content))
+            })
+            .filter(|(_, s)| *s > 0.0)
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        scored
+    }
+}
+
+/// 向量检索适配器 (基于 sqlite-vec)
+pub struct VectorSearchEngine {
+    embeddings: HashMap<String, Vec<f32>>,
+}
+
+impl VectorSearchEngine {
+    pub fn new() -> Self {
+        Self { embeddings: HashMap::new() }
+    }
+
+    pub fn upsert(&mut self, id: &str, embedding: Vec<f32>) {
+        self.embeddings.insert(id.to_string(), embedding);
+    }
+
+    /// 余弦相似度搜索
+    pub fn search(&self, query_embedding: &[f32], top_k: usize) -> Vec<(String, f64)> {
+        let mut scored: Vec<(String, f64)> = self.embeddings.iter()
+            .map(|(id, emb)| {
+                let sim = cosine_similarity(query_embedding, emb);
+                (id.clone(), sim)
+            })
+            .filter(|(_, s)| *s > 0.1)
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        scored
     }
 }
 

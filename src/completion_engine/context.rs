@@ -1,7 +1,7 @@
 use lsp_types::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use tree_sitter::{Language, Parser, Tree, Node};
+use tree_sitter::{Language, Parser};
 use serde::{Serialize, Deserialize};
 use tokio::sync::RwLock;
 use std::sync::Arc;
@@ -37,10 +37,18 @@ pub struct TreeContext {
     pub expected_types: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ContextAnalyzer {
     parsers: Arc<RwLock<HashMap<String, Parser>>>,
     language_mappings: HashMap<String, Language>,
+}
+
+impl std::fmt::Debug for ContextAnalyzer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextAnalyzer")
+            .field("language_mappings", &self.language_mappings)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ContextAnalyzer {
@@ -219,7 +227,7 @@ impl ContextAnalyzer {
         comments
     }
 
-    fn analyze_syntax_tree(&self, content: &str, position: Position, language: &str) -> Option<TreeContext> {
+    fn analyze_syntax_tree(&self, _content: &str, _position: Position, language: &str) -> Option<TreeContext> {
         Some(TreeContext {
             current_node_type: "expression".to_string(),
             parent_node_types: vec!["function".to_string(), "block".to_string()],

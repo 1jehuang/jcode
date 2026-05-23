@@ -63,7 +63,7 @@ pub async fn begin_render_frame() -> bool {
     };
 
     // 帧率控制: 确保 >= 16ms 间隔
-    let frame_start = Instant::now();
+    let _frame_start = Instant::now();
     let needs_render = renderer.begin_frame().await;
 
     if !needs_render {

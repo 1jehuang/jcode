@@ -56,7 +56,7 @@ impl SymbolResolver {
             }
         }
         // 第二遍: 解析引用关系
-        self.resolve_dependencies().await;
+        self.resolve_dependencies();
         Ok(())
     }
 
@@ -100,7 +100,7 @@ impl SymbolResolver {
 
     fn extract_symbols(&self, path: &Path, content: &str) -> Vec<SymbolInfo> {
         let mut symbols = Vec::new();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let _ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let lines: Vec<&str> = content.lines().collect();
 
         for (i, line) in lines.iter().enumerate() {
@@ -115,7 +115,7 @@ impl SymbolResolver {
                     line: i + 1, column: trimmed.find("fn ").unwrap_or(0) + 1,
                     visibility: if trimmed.starts_with("pub") { Visibility::Public } else { Visibility::Private },
                     signature: trimmed.to_string(),
-                    doc_comment: self.extract_doc(lines, i),
+                    doc_comment: self.extract_doc(&lines, i),
                     dependencies: vec![], dependents: vec![],
                 });
             } else if trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ") {
@@ -125,7 +125,7 @@ impl SymbolResolver {
                     file_path: path.to_string_lossy().to_string(),
                     line: i + 1, column: trimmed.find("struct ").unwrap_or(0) + 1,
                     visibility: if trimmed.starts_with("pub") { Visibility::Public } else { Visibility::Private },
-                    signature: trimmed.to_string(), doc_comment: self.extract_doc(lines, i),
+                    signature: trimmed.to_string(), doc_comment: self.extract_doc(&lines, i),
                     dependencies: vec![], dependents: vec![],
                 });
             } else if trimmed.starts_with("pub enum ") || trimmed.starts_with("enum ") {
@@ -134,7 +134,7 @@ impl SymbolResolver {
                     file_path: path.to_string_lossy().to_string(),
                     line: i + 1, column: trimmed.find("enum ").unwrap_or(0) + 1,
                     visibility: if trimmed.starts_with("pub") { Visibility::Public } else { Visibility::Private },
-                    signature: trimmed.to_string(), doc_comment: self.extract_doc(lines, i),
+                    signature: trimmed.to_string(), doc_comment: self.extract_doc(&lines, i),
                     dependencies: vec![], dependents: vec![],
                 });
             } else if trimmed.starts_with("pub trait ") || trimmed.starts_with("trait ") {
@@ -143,7 +143,7 @@ impl SymbolResolver {
                     file_path: path.to_string_lossy().to_string(),
                     line: i + 1, column: trimmed.find("trait ").unwrap_or(0) + 1,
                     visibility: if trimmed.starts_with("pub") { Visibility::Public } else { Visibility::Private },
-                    signature: trimmed.to_string(), doc_comment: self.extract_doc(lines, i),
+                    signature: trimmed.to_string(), doc_comment: self.extract_doc(&lines, i),
                     dependencies: vec![], dependents: vec![],
                 });
             } else if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
@@ -258,7 +258,7 @@ pub struct IntentPredictor;
 
 impl IntentPredictor {
     /// 基于编辑上下文预测用户意图
-    pub async fn predict(file_path: &str, content: &str, cursor_line: usize) -> Vec<Intent> {
+    pub async fn predict(_file_path: &str, content: &str, cursor_line: usize) -> Vec<Intent> {
         let mut intents = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
         let current_line = lines.get(cursor_line).unwrap_or(&"").trim();
@@ -321,18 +321,18 @@ impl PatternRecognizer {
         // CRUD 模式
         if contains_all(content, &["create", "read", "update", "delete"]) {
             patterns.push(CodePattern {
-                name: "CRUD",
+                name: "CRUD".to_string(),
                 confidence: 0.9,
-                description: "Create-Read-Update-Delete resource pattern",
-                location: "File level",
+                description: "Create-Read-Update-Delete resource pattern".to_string(),
+                location: "File level".to_string(),
             });
         }
 
         // Builder 模式
         if content.contains(".build()") || content.contains("Builder::new()") {
             patterns.push(CodePattern {
-                name: "Builder", confidence: 0.85,
-                description: "Builder pattern for constructing complex objects",
+                name: "Builder".to_string(), confidence: 0.85,
+                description: "Builder pattern for constructing complex objects".to_string(),
                 location: infer_location(content, "build"),
             });
         }
@@ -340,9 +340,9 @@ impl PatternRecognizer {
         // Error Handling 模式
         if content.contains("thiserror") || content.contains("#[derive(Error)]") {
             patterns.push(CodePattern {
-                name: "Error Handling (thiserror)",
+                name: "Error Handling (thiserror)".to_string(),
                 confidence: 0.9,
-                description: "Custom error types with thiserror derive macros",
+                description: "Custom error types with thiserror derive macros".to_string(),
                 location: infer_location(content, "Error"),
             });
         }
@@ -350,8 +350,8 @@ impl PatternRecognizer {
         // Middleware 模式
         if content.contains("middleware") || content.contains("wrap_fn") {
             patterns.push(CodePattern {
-                name: "Middleware", confidence: 0.8,
-                description: "Request/response middleware chain",
+                name: "Middleware".to_string(), confidence: 0.8,
+                description: "Request/response middleware chain".to_string(),
                 location: infer_location(content, "middleware"),
             });
         }
@@ -359,8 +359,8 @@ impl PatternRecognizer {
         // Singleton 模式
         if content.contains("OnceLock") || content.contains("lazy_static") {
             patterns.push(CodePattern {
-                name: "Singleton (lazy init)", confidence: 0.85,
-                description: "Lazily initialized global state",
+                name: "Singleton (lazy init)".to_string(), confidence: 0.85,
+                description: "Lazily initialized global state".to_string(),
                 location: infer_location(content, "OnceLock"),
             });
         }

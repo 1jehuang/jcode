@@ -126,7 +126,7 @@ impl AutonomousAgent {
             }
 
             // 编译失败 → 生成修复提示 (对标 Claude Code 的工具错误消息)
-            let fix_prompt = self.compiler.read().await.format_fix_prompt(&compile_result);
+            let _fix_prompt = self.compiler.read().await.format_fix_prompt(&compile_result);
 
             // 检查是否超过最大迭代
             if i >= 2 {
@@ -283,7 +283,7 @@ impl AutonomousAgent {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.is_dir() {
-                    self.collect_files_recursive(&path, files, depth + 1).await;
+                    Box::pin(self.collect_files_recursive(&path, files, depth + 1)).await;
                 } else if let Ok(metadata) = entry.metadata().await {
                     if metadata.len() < 50000 { // 跳过 >50KB 的文件
                         if let Some(rel) = path.strip_prefix(&self.workspace).ok() {

@@ -9,12 +9,9 @@
 //!       src/compilation_engine.rs (CompilationEngine + FixEngine)
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::knowledge_agents::{
-    PipelineConfig, KnowledgePipeline, project_scanner, file_analyzer,
-    architecture_analyzer, graph_reviewer,
+    PipelineConfig, project_scanner, file_analyzer,
 };
 use crate::refactor::semantic::AstRenamer;
 use crate::compilation_engine::{CompilationEngine, FixEngine};

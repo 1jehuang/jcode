@@ -1,10 +1,4 @@
-#![allow(
-    unknown_lints,
-    clippy::collapsible_match,
-    clippy::manual_checked_ops,
-    clippy::unnecessary_sort_by,
-    clippy::useless_conversion
-)]
+#![allow(unknown_lints)]
 
 // ═══════════════════════════════════════════════════════════
 // 🎯 CORE MODULES (Must Compile)

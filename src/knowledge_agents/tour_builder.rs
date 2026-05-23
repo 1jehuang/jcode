@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::{KnowledgeGraph, NodeKind, RelationType};
+use super::{KnowledgeGraph, NodeKind};
 
 /// 导览步骤
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

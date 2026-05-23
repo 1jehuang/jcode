@@ -11,7 +11,7 @@ pub mod cache_optimizer;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
 pub use cache_optimizer::{CacheHitOptimizer, CacheOptimizationConfig, CacheHitLevel};
@@ -199,6 +199,7 @@ impl LlmResponseCache {
     }
     
     /// 兼容旧API
+    #[allow(dead_code)]
     pub async fn get(&self, key: u64) -> Option<String> {
         self.get_multi_level(key, None).await
     }
@@ -227,7 +228,7 @@ impl LlmResponseCache {
 
     /// 清理过期条目
     pub async fn evict_expired(&self) {
-        let now = SystemTime::now();
+        let _now = SystemTime::now();
         let mut l2 = self.l2_disk.write().await;
         l2.retain(|_, e| e.created_at.elapsed().map(|d| d < e.ttl).unwrap_or(false));
     }
@@ -764,13 +765,15 @@ impl CdnCache {
         }
     }
     
-    pub async fn get(&self, key: u64) -> Option<String> {
+    #[allow(dead_code)]
+    pub async fn get(&self, _key: u64) -> Option<String> {
         // Placeholder: In production, make HTTP request to CDN
         // For now, return None to simulate CDN miss
         None
     }
     
-    pub async fn set(&self, key: u64, value: &str, ttl: Duration) -> Result<(), String> {
+    #[allow(dead_code)]
+    pub async fn set(&self, _key: u64, _value: &str, _ttl: Duration) -> Result<(), String> {
         // Placeholder: In production, upload to CDN
         Ok(())
     }

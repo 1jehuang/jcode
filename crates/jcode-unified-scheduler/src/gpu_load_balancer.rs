@@ -55,12 +55,10 @@ pub struct GpuInfo {
 impl GpuInfo {
     /// Create estimated GpuInfo from model name (for systems without NVML)
     pub fn estimate(model: &str, gpu_id: u32) -> Self {
-        let vram_gb = if model.contains("H100") { 80.0 }
-            else if model.contains("A100") { 80.0 }
-            else if model.contains("A10") { 24.0 }
+        let vram_gb =
+            if model.contains("H100") || model.contains("A100") { 80.0 }
+            else if model.contains("A10") || model.contains("4090") || model.contains("3090") { 24.0 }
             else if model.contains("V100") { 32.0 }
-            else if model.contains("4090") { 24.0 }
-            else if model.contains("3090") { 24.0 }
             else if model.contains("3080") { 12.0 }
             else if model.contains("4080") { 16.0 }
             else if model.contains("4060") { 8.0 }
@@ -502,7 +500,7 @@ impl GpuLoadBalancer {
     pub fn record_latency(&mut self, gpu_id: u32, latency_ms: f64) {
         self.latency_history
             .entry(gpu_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(latency_ms);
 
         // Keep only last 100 samples

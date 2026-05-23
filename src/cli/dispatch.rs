@@ -49,7 +49,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
             let provider_ms = provider_start.elapsed().as_millis();
             let server_new_start = Instant::now();
-            let mut server = server::Server::new(provider);
+            let server = server::Server::new(provider);
             let server_new_ms = server_new_start.elapsed().as_millis();
             
             // LSP features are enabled per-session when needed

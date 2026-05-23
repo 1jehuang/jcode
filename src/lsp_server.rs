@@ -175,7 +175,7 @@ impl LspServer {
             range: LspRange { start: LspPosition { line: 0, character: 0 }, end: LspPosition { line: 0, character: 0 } },
             context: CodeActionContext { diagnostics: vec![], only: None },
         };
-        let actions = provider.provide_code_actions(&params).await;
+        let actions = provider.provide_code_actions(&params.text_document.uri.replace("file://", ""), params.range.start.line, params.range.start.character).await;
         serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0", "id": id,
             "result": actions

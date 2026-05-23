@@ -10,7 +10,7 @@
 //! - 向量时钟版本控制
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 
@@ -73,7 +73,7 @@ impl LogicalClock {
 
     pub fn happened_before(&self, other: &LogicalClock) -> bool {
         // 如果 self 中的所有计数器都 <= other，且至少有一个 <，则 self happened_before other
-        let mut all_less = true;
+        let all_less = true;
         let mut some_less = false;
 
         for (node, counter) in &self.0 {
@@ -453,7 +453,7 @@ impl CrdtDocument {
         self.state.clock.merge(clock);
     }
 
-    fn apply_update(&mut self, id: &CrdtNodeId, key: &str, value: &str, clock: &LogicalClock) {
+    fn apply_update(&mut self, _id: &CrdtNodeId, key: &str, value: &str, clock: &LogicalClock) {
         self.state.metadata.insert(key.to_string(), value.to_string());
         self.state.clock.merge(clock);
     }
@@ -505,7 +505,7 @@ impl CrdtDocument {
     }
 
     /// 清理过期的墓碑
-    pub fn cleanup_tombstones(&mut self, max_age_secs: u64) {
+    pub fn cleanup_tombstones(&mut self, _max_age_secs: u64) {
         // 简化实现，实际应该检查时间戳
         if self.state.tombstones.len() > 1000 {
             let to_remove = self.state.tombstones.len() - 500;

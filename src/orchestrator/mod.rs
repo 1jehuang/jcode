@@ -6,9 +6,9 @@
 //! - Conflict Detection: 检测文件编辑冲突
 //! - Resource-aware Scheduling: CPU/内存感知的任务调度
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 use tokio::sync::RwLock;
 
 /// Agent 工作负载

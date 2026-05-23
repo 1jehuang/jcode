@@ -132,7 +132,7 @@ impl ConcurrencyController {
         let p99 = self.estimated_p99().await;
 
         // 如果 P99 超过目标，动态缩小并发
-        let adjusted_max = if p99 > P99_TARGET_MS {
+        let _adjusted_max = if p99 > P99_TARGET_MS {
             let current = *self.active.read().await;
             (current as f64 * 0.8) as usize // 降低 20%
         } else {
@@ -158,7 +158,8 @@ impl ConcurrencyController {
         let mut hist = self.latency_histogram.write().await;
         hist.push(latency_us / 1000); // 转为 ms
         if hist.len() > 10_000 {
-            hist.drain(0..hist.len() - 10_000);
+            let keep = hist.len() - 10_000;
+            hist.drain(0..keep);
         }
     }
 
@@ -244,9 +245,10 @@ impl ConcurrencyOptimizer {
     }
 
     /// 提交请求并执行 (带优先级/合并/限流)
-    pub async fn execute<F, T>(&self, prompt: &str, priority: RequestPriority, f: F) -> Result<T>
+    pub async fn execute<F, Fut, T>(&self, prompt: &str, priority: RequestPriority, f: F) -> Result<T>
     where
-        F: Future<Output = Result<T>> + Send,
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<T>> + Send,
         T: Send + 'static,
     {
         let start = Instant::now();

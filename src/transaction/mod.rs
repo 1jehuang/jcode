@@ -9,7 +9,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -244,8 +243,8 @@ impl TransactionManager {
 
     /// 提交当前事务
     pub async fn commit(&self, description: &str) -> Result<()> {
-        let mut txn = self.active_txn.write().await;
-        if let Some(ref mut txn) = *txn {
+        let mut txn_wrapper = self.active_txn.write().await;
+        if let Some(ref mut txn) = *txn_wrapper {
             txn.description = description.to_string();
             txn.commit().await?;
 
@@ -262,8 +261,9 @@ impl TransactionManager {
 
             let mut history = self.history.write().await;
             history.push(entry);
+            drop(history);
 
-            *txn = None;
+            *txn_wrapper = None;
             Ok(())
         } else {
             anyhow::bail!("No active transaction to commit.");
@@ -272,11 +272,10 @@ impl TransactionManager {
 
     /// 回滚当前事务
     pub async fn rollback(&self) -> Result<()> {
-        let mut txn = self.active_txn.write().await;
-        if let Some(ref mut txn) = *txn {
+        let mut txn_wrapper = self.active_txn.write().await;
+        if let Some(ref mut txn) = *txn_wrapper {
             txn.rollback().await?;
-            let mut history = self.history.write().await;
-            history.push(TransactionLogEntry {
+            let entry = TransactionLogEntry {
                 id: txn.id.clone(),
                 created_at: txn.created_at,
                 committed_at: None,
@@ -284,8 +283,12 @@ impl TransactionManager {
                 files_changed: txn.changes.iter().map(|c| c.path.to_string_lossy().to_string()).collect(),
                 description: format!("ROLLED BACK: {}", txn.description),
                 diff_summary: None,
-            });
-            *txn = None;
+            };
+            let mut history = self.history.write().await;
+            history.push(entry);
+            drop(history);
+
+            *txn_wrapper = None;
             Ok(())
         } else {
             anyhow::bail!("No active transaction to rollback.");
@@ -339,12 +342,8 @@ impl TransactionalEditTool {
         // 执行原始工具
         let result = self.inner.execute(input, ctx).await?;
 
-        // 提交流
-if result.success() {
-            self.txn_mgr.commit(&format!("tool:edit ({})", txn_id)).await?;
-        } else {
-            self.txn_mgr.rollback().await?;
-        }
+        // 执行成功则提交事务
+        self.txn_mgr.commit(&format!("tool:edit ({})", txn_id)).await?;
 
         Ok(result)
     }

@@ -116,7 +116,7 @@ impl SequenceCrdtEditor {
             let item = SequenceItem {
                 id: id.clone(),
                 value: c.to_string(),
-                left_id: if i == 0 { left_id.clone() } else { Some(positions.last().map(|p| format!("{}:{}:{}", self.node_id.node_id, self.node_id.client_id, clock.get(&self.node_id) + (i-1) as u64)).unwrap()) },
+                left_id: if i == 0 { left_id.clone() } else { Some(positions.last().map(|_p| format!("{}:{}:{}", self.node_id.node_id, self.node_id.client_id, clock.get(&self.node_id) + (i-1) as u64)).unwrap()) },
                 right_id: right_id.clone(),
                 clock: clock.clone(),
                 is_deleted: false,

@@ -300,9 +300,21 @@ impl HierarchicalScheduler {
                 );
                 self.select_target_group().await?
             }
-        } else {
-            // Auto-select best group
-            self.select_target_group().await?
+            } else {
+            // Auto-select best group, fallback to default group
+            match self.select_target_group().await {
+                Ok(gid) => gid,
+                Err(_) => {
+                    if let Some(ref default) = self.default_group {
+                        info!("Falling back to default group: {}", default);
+                        default.clone()
+                    } else {
+                        return Err(SchedulerError::AllocationFailed(
+                            "No available group and no default group configured".to_string()
+                        ));
+                    }
+                }
+            }
         };
 
         // Register node to selected group

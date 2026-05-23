@@ -330,8 +330,9 @@ pub async fn run_mcp_dispatch(cmd: McpSubcommand) -> Result<()> {
         }
         McpSubcommand::ImportDesktop { scope } => {
             let _ = scope;
-            let desktop_path = match std::env::consts::OS {
+            let desktop_path: Option<std::path::PathBuf> = match std::env::consts::OS {
                 "windows" => std::env::var("APPDATA")
+                    .ok()
                     .map(|a| std::path::PathBuf::from(a).join("Claude").join("claude_desktop_config.json")),
                 "macos" => dirs::home_dir()
                     .map(|h| h.join("Library/Application Support/Claude/claude_desktop_config.json")),

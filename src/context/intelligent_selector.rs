@@ -12,8 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::ast::tree_sitter::{AstParser, FileAnalysis, SupportedLanguage};
-use crate::incremental_index::{get_or_create_indexer, IncrementalIndexConfig};
+use crate::ast::tree_sitter::{CodeAnalyzer, FileAnalysis};
 
 /// Configuration for intelligent context selection
 #[derive(Debug, Clone)]
@@ -82,7 +81,7 @@ pub struct SelectionMetadata {
 /// Intelligent context selector with call graph awareness
 pub struct IntelligentContextSelector {
     config: SelectorConfig,
-    parser: Arc<AstParser>,
+    analyzer: Arc<CodeAnalyzer>,
     /// Call graph: function_name -> list of called functions
     call_graph: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// File importance scores (PageRank)
@@ -93,10 +92,10 @@ pub struct IntelligentContextSelector {
 
 impl IntelligentContextSelector {
     /// Create a new intelligent context selector
-    pub fn new(config: SelectorConfig, parser: Arc<AstParser>) -> Self {
+    pub fn new(config: SelectorConfig, analyzer: Arc<CodeAnalyzer>) -> Self {
         Self {
             config,
-            parser,
+            analyzer,
             call_graph: Arc::new(RwLock::new(HashMap::new())),
             file_importance: Arc::new(RwLock::new(HashMap::new())),
             file_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -105,7 +104,7 @@ impl IntelligentContextSelector {
 
     /// Build call graph from workspace root
     pub async fn build_call_graph(&self, workspace_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let mut call_graph = HashMap::new();
+        let mut call_graph: HashMap<String, Vec<String>> = HashMap::new();
         let mut file_importance = HashMap::new();
 
         // Find all source files
@@ -113,7 +112,7 @@ impl IntelligentContextSelector {
 
         // Parse each file and extract call relationships
         for file_path in &source_files {
-            if let Ok(analysis) = self.parser.analyze_file(file_path).await {
+            if let Ok(analysis) = self.analyzer.analyze_file(file_path).await {
                 // Add to call graph
                 for (caller, callees) in &analysis.call_graph {
                     call_graph
@@ -191,7 +190,7 @@ impl IntelligentContextSelector {
     /// Compute PageRank for files based on call graph
     async fn compute_pagerank(
         &self,
-        call_graph: &HashMap<String, Vec<String>>,
+        _call_graph: &HashMap<String, Vec<String>>,
         files: &[PathBuf],
     ) -> HashMap<PathBuf, f64> {
         let damping = 0.85;
@@ -305,10 +304,10 @@ impl IntelligentContextSelector {
                             selected_functions.push(FunctionSnippet {
                                 name: func_name.clone(),
                                 file: file_path.clone(),
-                                signature: symbol.signature.clone(),
+                                signature: symbol.metadata.get("signature").cloned().unwrap_or_default(),
                                 code,
-                                line_start: symbol.range.0,
-                                line_end: symbol.range.1,
+                                line_start: symbol.start_position.line,
+                                line_end: symbol.end_position.line,
                             });
                         }
                     }
@@ -404,7 +403,7 @@ impl IntelligentContextSelector {
             for (file_path, _score) in file_importance.iter() {
                 if let Some(analysis) = self.file_cache.read().await.get(file_path) {
                     for symbol in &analysis.symbols {
-                        if symbol.kind == "function" || symbol.kind == "method" {
+                        if matches!(symbol.node_type, crate::ast::tree_sitter::NodeType::FunctionDeclaration) {
                             file_funcs.push(symbol.name.clone());
                         }
                     }
@@ -437,11 +436,14 @@ impl IntelligentContextSelector {
         let content = std::fs::read_to_string(file_path)?;
         let lines: Vec<&str> = content.lines().collect();
 
-        if symbol.range.0 < lines.len() && symbol.range.1 <= lines.len() {
-            let code = lines[symbol.range.0..symbol.range.1].join("\n");
+        let start_line = symbol.start_position.line;
+        let end_line = symbol.end_position.line;
+
+        if start_line < lines.len() && end_line <= lines.len() {
+            let code = lines[start_line..end_line].join("\n");
             Ok(code)
         } else {
-            Ok(format!("// Function {} at lines {}-{}", symbol.name, symbol.range.0, symbol.range.1))
+            Ok(format!("// Function {} at lines {}-{}", symbol.name, start_line, end_line))
         }
     }
 
@@ -453,9 +455,9 @@ impl IntelligentContextSelector {
     /// Incremental update when a file changes
     pub async fn incremental_update(&self, changed_file: &Path) -> Result<(), Box<dyn std::error::Error>> {
         // Re-parse the changed file
-        if let Ok(analysis) = self.parser.analyze_file(changed_file).await {
+        if let Ok(analysis) = self.analyzer.analyze_file(changed_file).await {
             // Update call graph
-            let mut call_graph = self.call_graph.write().await;
+            let mut call_graph: tokio::sync::RwLockWriteGuard<'_, HashMap<String, Vec<String>>> = self.call_graph.write().await;
 
             // Remove old entries for this file
             call_graph.retain(|_caller, callees| {
@@ -488,8 +490,8 @@ mod tests {
     #[tokio::test]
     async fn test_selector_creation() {
         let config = SelectorConfig::default();
-        let parser = Arc::new(AstParser::with_defaults().unwrap());
-        let selector = IntelligentContextSelector::new(config, parser);
+        let analyzer = Arc::new(CodeAnalyzer::new().unwrap());
+        let selector = IntelligentContextSelector::new(config, analyzer);
 
         assert_eq!(selector.config.max_tokens, 4096);
         assert_eq!(selector.config.bfs_depth, 3);
@@ -498,8 +500,8 @@ mod tests {
     #[tokio::test]
     async fn test_token_estimation() {
         let config = SelectorConfig::default();
-        let parser = Arc::new(AstParser::with_defaults().unwrap());
-        let selector = IntelligentContextSelector::new(config, parser);
+        let analyzer = Arc::new(CodeAnalyzer::new().unwrap());
+        let selector = IntelligentContextSelector::new(config, analyzer);
 
         let text = "fn hello() { println!(\"world\"); }";
         let tokens = selector.estimate_tokens(text);

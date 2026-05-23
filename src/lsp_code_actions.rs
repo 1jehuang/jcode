@@ -332,7 +332,7 @@ impl RefactoringEngine {
             return Err("Invalid line range".to_string());
         }
 
-        let selected: Vec<&str> = lines[start_line..end_line].iter().collect();
+        let selected: Vec<&str> = lines[start_line..end_line].iter().map(|s| *s).collect();
         let selected_code = selected.join("\n");
         let return_type = self.infer_return_type(&selected_code);
         let params = self.infer_parameters(&selected_code);

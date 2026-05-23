@@ -202,7 +202,8 @@ impl KnowledgePipeline {
         self.stats.write().await.agents_executed += 1;
 
         // Agent 2: 并行分析文件 (最多5并发, 每批20-30文件)
-        let analysis_results = file_analyzer::analyze_files(root, &files, self.config.max_concurrent_files).await
+        let file_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+        let analysis_results = file_analyzer::analyze_files(root, &file_paths, self.config.max_concurrent_files).await
             .map_err(|e| format!("File analysis failed: {}", e))?;
         self.stats.write().await.agents_executed += 1;
 

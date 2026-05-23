@@ -2,13 +2,12 @@
 //! 移植自: Understand-Anything agents/architecture-analyzer
 //! 基于目录结构和文件命名约定识别架构层
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::file_analyzer::FileAnalysis;
-use super::{ArchitectureLayer, KGNode, KnowledgeGraph, NodeKind};
+use super::{ArchitectureLayer, KnowledgeGraph};
 
 /// 架构层识别规则
 struct LayerRule {
@@ -47,15 +46,15 @@ pub fn detect_layer(file_path: &str) -> ArchitectureLayer {
     let path_parts: Vec<&str> = path.split(&['/', '\\'][..]).collect();
     let filename = path_parts.last().unwrap_or(&"");
 
-    for rule in LAYER_RULES {
+    for rule in LAYER_RULES.iter() {
         // 检查目录
-        for dir in &rule.dirs {
+        for dir in rule.dirs {
             if path_parts.iter().any(|p| *p == *dir) {
                 return rule.layer.clone();
             }
         }
         // 检查文件名模式
-        for pat in &rule.file_patterns {
+        for pat in rule.file_patterns {
             if filename.contains(pat) {
                 return rule.layer.clone();
             }

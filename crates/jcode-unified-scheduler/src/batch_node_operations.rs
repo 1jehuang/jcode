@@ -186,6 +186,13 @@ struct BatchOperation {
     pub started_at: Instant,
 }
 
+impl BatchOperation {
+    /// Maximum number of nodes to probe in parallel for this batch
+    pub fn max_parallel_probes(&self) -> usize {
+        self.config.max_parallel_probes
+    }
+}
+
 impl BatchNodeManager {
     pub fn new(
         config: BatchOperationConfig,

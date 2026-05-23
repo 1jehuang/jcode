@@ -37,7 +37,7 @@ impl PrometheusMetrics {
                 name,
                 description,
                 counter.clone(),
-            ).unwrap_or(());
+            );
             counters.insert(name.to_string(), counter);
         }
     }
@@ -57,7 +57,7 @@ impl PrometheusMetrics {
                 name,
                 description,
                 gauge.clone(),
-            ).unwrap_or(());
+            );
             gauges.insert(name.to_string(), gauge);
         }
     }
@@ -65,7 +65,7 @@ impl PrometheusMetrics {
     pub async fn set_gauge(&self, name: &str, value: f64) {
         let gauges = self.gauges.read().await;
         if let Some(gauge) = gauges.get(name) {
-            gauge.set(value);
+            gauge.set(value as i64);
         }
     }
 
@@ -77,7 +77,7 @@ impl PrometheusMetrics {
                 name,
                 description,
                 histogram.clone(),
-            ).unwrap_or(());
+            );
             histograms.insert(name.to_string(), histogram);
         }
     }

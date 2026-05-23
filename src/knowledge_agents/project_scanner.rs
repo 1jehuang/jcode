@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use ignore::WalkBuilder;
 
-use super::{KnowledgeGraph, PipelineConfig, ComplexityLevel, KGNode, NodeKind, KGEdge, RelationType, ArchitectureLayer};
+use super::PipelineConfig;
 
 /// 扫描结果
 #[derive(Debug, Clone)]

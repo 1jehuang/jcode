@@ -449,7 +449,7 @@ impl RetryHook {
     /// 执行自动重试 (带延迟)
     pub async fn auto_retry<F, T>(&self, attempt: u32, f: F) -> Result<T, String>
     where
-        F: Fn() -> futures::future::BoxFuture<'_, Result<T, String>>,
+        F: Fn() -> futures::future::BoxFuture<'static, Result<T, String>>,
     {
         let mut last_error = String::new();
         for i in 0..self.max_retries {

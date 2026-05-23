@@ -10,7 +10,6 @@
 use anyhow::Result;
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -89,7 +88,7 @@ pub struct TokenCacheOptimizer {
 impl TokenCacheOptimizer {
     pub fn new(config: CacheOptimizerConfig) -> Self {
         Self {
-            l1: Arc::new(RwLock::new(LruCache::new(config.l1_capacity))),
+            l1: Arc::new(RwLock::new(LruCache::new(std::num::NonZero::new(config.l1_capacity).unwrap()))),
             l2: Arc::new(RwLock::new(HashMap::new())),
             frequency_map: Arc::new(RwLock::new(HashMap::new())),
             prefix_index: Arc::new(RwLock::new(HashMap::new())),
@@ -224,7 +223,7 @@ impl TokenCacheOptimizer {
 
     /// 清理过期条目
     pub async fn evict_expired(&self, max_age: Duration) {
-        let mut l1 = self.l1.write().await;
+        let l1 = self.l1.write().await;
         // LRU 自动淘汰 — 直接在 put 时处理
         drop(l1);
 

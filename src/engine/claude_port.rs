@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{RwLock, Semaphore, watch, mpsc};
+use serde_json::Value;
+use crate::tool::{Registry, ToolContext};
 
 // ========================================================================
 // [1] Inline Completion — Shell检测 + Ghost Text渲染
@@ -326,10 +328,11 @@ pub enum TransitionReason {
     StopHookBlocking,
 }
 
-/// Agent 自主循环
+/// Agent 自主循环 — 并发工具执行引擎
 pub struct AgentLoop {
     state: AgentLoopState,
     max_concurrency: usize,
+    registry: Arc<Registry>,
     tool_semaphore: Arc<Semaphore>,
     sibling_abort: Arc<RwLock<Option<watch::Sender<bool>>>>,
     stats: Arc<RwLock<LoopStats>>,
@@ -345,11 +348,12 @@ pub struct LoopStats {
 }
 
 impl AgentLoop {
-    pub fn new(max_concurrency: usize) -> Self {
+    pub fn new(registry: Arc<Registry>, max_concurrency: usize) -> Self {
         let (tx, _) = watch::channel(false);
         Self {
             state: AgentLoopState::PreProcessing,
             max_concurrency,
+            registry,
             tool_semaphore: Arc::new(Semaphore::new(max_concurrency)),
             sibling_abort: Arc::new(RwLock::new(Some(tx))),
             stats: Arc::new(RwLock::new(LoopStats::default())),
@@ -430,7 +434,7 @@ impl AgentLoop {
         results
     }
 
-    /// 兄弟取消: Bash 工具错误时取消同级
+    /// 并发执行一批工具，支持兄弟取消
     async fn execute_parallel(&self, batch: &[&ToolDef]) -> Vec<ToolResult> {
         let mut handles = Vec::new();
         let abort_rx = {
@@ -441,18 +445,25 @@ impl AgentLoop {
         for tool in batch {
             let abort = abort_rx.clone();
             let permit = self.tool_semaphore.clone().acquire_owned().await.unwrap();
+            let registry = self.registry.clone();
+            let tool_name = tool.name.clone();
+            let tool_input = tool.input.clone();
+            let tool_ctx = tool.context.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = permit;
                 let mut rx = abort;
                 tokio::select! {
-                    result = async { /* execute tool */ Ok::<_, String>(()) } => {
-                        ToolResult { name: tool.name.clone(), success: result.is_ok(), output: String::new() }
-                    }
+                    result = async {
+                        match registry.execute(&tool_name, tool_input, tool_ctx).await {
+                            Ok(output) => ToolResult { name: tool_name.clone(), success: true, output: output.text() },
+                            Err(e) => ToolResult { name: tool_name.clone(), success: false, output: format!("Tool error: {}", e) },
+                        }
+                    } => result,
                     _ = async {
                         if let Some(ref mut r) = rx { r.changed().await.ok(); }
                     } => {
-                        ToolResult { name: tool.name.clone(), success: false, output: "Cancelled: sibling tool error".into() }
+                        ToolResult { name: tool_name, success: false, output: "Cancelled: sibling tool error".into() }
                     }
                 }
             }));
@@ -473,14 +484,24 @@ impl AgentLoop {
         results
     }
 
+    /// 串行执行一批工具（一个接一个，不并发）
     async fn execute_serially(&self, batch: &[&ToolDef]) -> Vec<ToolResult> {
         let mut results = Vec::new();
         for tool in batch {
-            results.push(ToolResult {
-                name: tool.name.clone(),
-                success: true,
-                output: String::new(),
-            });
+            let registry = self.registry.clone();
+            let result = match registry.execute(&tool.name, tool.input.clone(), tool.context.clone()).await {
+                Ok(output) => ToolResult {
+                    name: tool.name.clone(),
+                    success: true,
+                    output: output.text(),
+                },
+                Err(e) => ToolResult {
+                    name: tool.name.clone(),
+                    success: false,
+                    output: format!("Tool error: {}", e),
+                },
+            };
+            results.push(result);
         }
         results
     }
@@ -498,7 +519,21 @@ impl AgentLoop {
 #[derive(Debug, Clone)]
 pub struct ToolDef {
     pub name: String,
+    pub input: Value,
+    pub context: ToolContext,
     pub is_concurrency_safe: bool,
+}
+
+impl ToolDef {
+    /// 从工具调用创建 ToolDef
+    pub fn new(name: &str, input: Value, context: ToolContext, is_concurrency_safe: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            input,
+            context,
+            is_concurrency_safe,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -506,6 +541,16 @@ pub struct ToolResult {
     pub name: String,
     pub success: bool,
     pub output: String,
+}
+
+/// Helper: 从 ToolOutput 提取文本
+pub trait ToolOutputText {
+    fn text(&self) -> String;
+}
+impl ToolOutputText for crate::tool::ToolOutput {
+    fn text(&self) -> String {
+        self.content.clone()
+    }
 }
 
 // ========================================================================

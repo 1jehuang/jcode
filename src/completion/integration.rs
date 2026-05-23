@@ -195,7 +195,7 @@ pub struct TypeAwareCompleter;
 
 impl TypeAwareCompleter {
     /// 根据类型信息过滤补全
-    pub fn filter_by_type(items: Vec<CompletionItem>, expected_type: &str) -> Vec<CompletionItem> {
+    pub fn filter_by_type(items: Vec<CompletionItem>, _expected_type: &str) -> Vec<CompletionItem> {
         items.into_iter().filter(|_item| {
             // 实际调用 semantic_search 进行类型匹配
             true

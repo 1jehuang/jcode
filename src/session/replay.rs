@@ -98,7 +98,6 @@ pub struct ReplayBranch {
     pub divergence_point: usize,
     pub modified_events: Vec<EventModification>,
     pub created_at: DateTime<Utc>,
-    #[allow(dead_code)]
     pub description: Option<String>,
 }
 
@@ -132,21 +131,53 @@ pub struct PlaybackState {
 #[derive(Clone)]
 pub enum PlaybackSpeed {
     RealTime,
-    #[allow(dead_code)]
     Fast { factor: u8 },
-    #[allow(dead_code)]
     StepByStep,
-    #[allow(dead_code)]
     Auto,
+}
+
+impl PlaybackSpeed {
+    /// Get interval between events in ms based on speed
+    pub fn interval_ms(&self) -> Option<u64> {
+        match self {
+            PlaybackSpeed::RealTime => Some(1000),
+            PlaybackSpeed::Fast { factor } => Some((1000 / *factor as u64).max(50)),
+            PlaybackSpeed::StepByStep => None, // Manual step
+            PlaybackSpeed::Auto => Some(100),
+        }
+    }
+
+    /// Cycle to next speed level
+    pub fn next(&self) -> Self {
+        match self {
+            PlaybackSpeed::RealTime => PlaybackSpeed::Fast { factor: 2 },
+            PlaybackSpeed::Fast { factor } if *factor < 8 => PlaybackSpeed::Fast { factor: factor * 2 },
+            PlaybackSpeed::Fast { .. } => PlaybackSpeed::StepByStep,
+            PlaybackSpeed::StepByStep => PlaybackSpeed::Auto,
+            PlaybackSpeed::Auto => PlaybackSpeed::RealTime,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub enum ReplayMode {
     ViewOnly,
-    #[allow(dead_code)]
     Interactive,
-    #[allow(dead_code)]
     Compare,
+}
+
+impl ReplayMode {
+    pub fn allows_modification(&self) -> bool {
+        matches!(self, ReplayMode::Interactive)
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            ReplayMode::ViewOnly => ReplayMode::Interactive,
+            ReplayMode::Interactive => ReplayMode::Compare,
+            ReplayMode::Compare => ReplayMode::ViewOnly,
+        }
+    }
 }
 
 pub struct SessionReplayer {
@@ -282,9 +313,7 @@ impl SessionReplayer {
 
     pub fn play(&mut self) {
         self.playback_state.paused = false;
-        if matches!(self.playback_state.speed, PlaybackSpeed::Auto) {
-            self.playback_state.auto_play_interval_ms = Some(100);
-        }
+        self.playback_state.auto_play_interval_ms = self.playback_state.speed.interval_ms();
     }
 
     pub fn pause(&mut self) {

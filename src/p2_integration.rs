@@ -5,14 +5,13 @@
 //! - 性能优化（6层缓存 + 命中率优化器）
 //! - Dashboard（实时监控面板）
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::performance_advanced::{
     CacheHitOptimizer, 
     CacheOptimizationConfig,
-    LlmResponseCache,
 };
 use crate::tdd::{TestGenerator, TddConfig};
 use crate::dashboard::DashboardServer;
@@ -128,7 +127,7 @@ impl P2Integration {
             .unwrap_or_else(|_| "127.0.0.1".to_string());
         
         let server = DashboardServer::new(port).with_host(&host);
-        let url = server.url();
+        let _url = server.url();
         
         let handle = tokio::spawn(async move {
             if let Err(e) = server.run().await {
@@ -184,23 +183,21 @@ impl P2Integration {
 }
 
 /// 全局P2集成实例
-static mut P2_INTEGRATION: Option<P2Integration> = None;
+static P2_INTEGRATION: OnceLock<P2Integration> = OnceLock::new();
 
 /// 初始化全局P2集成
 pub async fn init_p2_integration() -> Result<(), String> {
-    unsafe {
-        if P2_INTEGRATION.is_none() {
-            let mut integration = P2Integration::new();
-            integration.initialize().await?;
-            P2_INTEGRATION = Some(integration);
-        }
+    if P2_INTEGRATION.get().is_none() {
+        let mut integration = P2Integration::new();
+        integration.initialize().await?;
+        let _ = P2_INTEGRATION.set(integration);
     }
     Ok(())
 }
 
 /// 获取全局P2集成引用
 pub fn get_p2_integration() -> Option<&'static P2Integration> {
-    unsafe { P2_INTEGRATION.as_ref() }
+    P2_INTEGRATION.get()
 }
 
 /// 便捷函数：记录缓存请求

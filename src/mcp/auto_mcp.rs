@@ -8,8 +8,8 @@
 //! - Periodic health checks
 //! - Graceful shutdown
 
-use crate::mcp::protocol::McpConfig;
-use crate::mcp::{McpManager, McpServerConfig};
+use crate::mcp::protocol::{McpConfig, McpServerConfig};
+use crate::mcp::McpManager;
 use crate::tool::Registry;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -131,7 +131,7 @@ impl AutoMcpManager {
 
     /// Connect a single MCP server.
     async fn connect_single(&self, name: &str, config: &McpServerConfig) -> Result<()> {
-        let mut manager = self.manager.write().await;
+        let manager = self.manager.write().await;
         manager.connect(name, config).await?;
         drop(manager);
 
@@ -229,7 +229,7 @@ impl AutoMcpManager {
         let reg = self.registry.read().await;
         match reg.as_ref() {
             Some(r) => {
-                let defs = r.definitions().await;
+                let defs = r.definitions(None).await;
                 defs.iter()
                     .filter(|d| d.name.starts_with("mcp__"))
                     .map(|d| d.name.clone())

@@ -535,10 +535,15 @@ impl DynamicToolRegistry {
 
     // --- Query -----------------------------------------
 
-    /// 获取所有工具列表
+    /// 获取所有工具列表 (同步，返回Vec)
     pub async fn list_tools(&self) -> Vec<DynamicTool> {
         let tools = self.tools.read().await;
         tools.values().cloned().collect()
+    }
+
+    /// 获取所有工具列表 (Result包装，用于需要?运算符的上下文)
+    pub async fn list_all_tools(&self) -> Result<Vec<DynamicTool>, Box<dyn std::error::Error>> {
+        Ok(self.list_tools().await)
     }
 
     /// 仅获取启用的工具

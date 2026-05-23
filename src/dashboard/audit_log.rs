@@ -25,7 +25,7 @@ pub struct AuditLogEntry {
 }
 
 /// 操作类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ActionType {
     // Agent操作
     AgentStart,
@@ -56,7 +56,7 @@ pub enum ActionType {
 }
 
 /// 日志严重级别
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LogSeverity {
     Info,
     Warning,
@@ -105,15 +105,18 @@ impl AuditLogger {
         // 添加到内存
         let mut entries = self.entries.write().await;
         entries.push(entry.clone());
-        
+
         // 限制内存中的条目数
         if entries.len() > self.max_in_memory {
-            entries.drain(0..entries.len() - self.max_in_memory);
+            let len = entries.len();
+            let to_remove = len.saturating_sub(self.max_in_memory);
+            entries.drain(0..to_remove);
         }
-        
-        // 异步写入文件
-        tokio::spawn(self.write_to_file(entry));
-        
+
+        drop(entries);
+
+        self.write_to_file(entry).await;
+
         Ok(())
     }
     

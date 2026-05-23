@@ -71,9 +71,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use regex::Regex;
-use async_trait::async_trait;
 use jcode_provider_core::Provider;
-use jcode_message_types::{ContentBlock, Message, Role, ToolDefinition, StreamEvent};
+use jcode_message_types::{ContentBlock, Message, Role, StreamEvent};
 use futures::StreamExt;
 
 /// TDD配置
@@ -248,6 +247,7 @@ impl TestGenerator {
 
     /// 为 Rust 函数生成单元测试（使用LLM）
     pub async fn generate_unit_test_llm(
+        &self,
         file_path: &str,
         function_name: &str,
         provider: Arc<dyn Provider>,
@@ -302,10 +302,10 @@ impl TestGenerator {
         let mut test_code = String::new();
         while let Some(event_result) = event_stream.next().await {
             match event_result {
-                Ok(StreamEvent::ContentDelta { delta, .. }) => {
+                Ok(StreamEvent::TextDelta(delta)) => {
                     test_code.push_str(&delta);
                 }
-                Ok(StreamEvent::ContentBlockStop { .. }) => {
+                Ok(StreamEvent::ToolUseEnd) => {
                     break;
                 }
                 Err(e) => {
@@ -372,10 +372,19 @@ impl TestGenerator {
         let signature = Self::extract_signature(&content, function_name)?;
 
         Ok(format!(
-            "#[cfg(test)]\nmod proptest_{} {{\n    use proptest::prelude::*;\n    use super::*;\n\n\
-             \    proptest! {{\n        #[test]\n        fn test_{}_property(#[strategy(\"[a-z]{{1,10}}\")] input: String) {{\n\
-             \            // Property: {} should never panic\n\
-             \            let _ = {}(&input);\n        }}\n    }}\n}}",
+            r#"#[cfg(test)]
+mod proptest_{} {{
+    use proptest::prelude::*;
+    use super::*;
+
+    proptest! {{
+        #[test]
+        fn test_{}_property(#[strategy("[a-z]{{1,10}}")] input: String) {{
+            // Property: {} should never panic
+            let _ = {}(&input);
+        }}
+    }}
+}}"#,
             function_name, function_name, function_name, function_name
         ))
     }
@@ -1017,15 +1026,18 @@ impl BatchTestGenerator {
             let cache_clone = cache.clone();
             
             let task = tokio::spawn(async move {
-                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                let _permit = match sem.acquire().await {
+                    Ok(permit) => permit,
+                    Err(e) => return Err((func.clone(), e.to_string())),
+                };
                 
-                let generator = if let Some(c) = cache_clone {
+                let _generator = if let Some(c) = cache_clone {
                     TestGenerator::with_provider_and_cache(provider.clone(), c)
                 } else {
                     TestGenerator::with_provider(provider.clone())
                 };
                 
-                match generator.generate_unit_test_llm(&file, &func, provider).await {
+                match _generator.generate_unit_test_llm(&file, &func, provider.clone()).await {
                     Ok(test_code) => Ok((func, test_code)),
                     Err(e) => Err((func, e)),
                 }
@@ -1220,7 +1232,8 @@ impl TddRefactorer {
 
         // Step 1: 使用LLM生成智能测试
         steps.push("Generating tests with LLM...".to_string());
-        let test_code = TestGenerator::generate_unit_test_llm(file_path, function_name, provider.clone()).await?;
+        let generator = TestGenerator::with_provider(provider.clone());
+        let test_code = generator.generate_unit_test_llm(file_path, function_name, provider.clone()).await?;
         let test_file = Self::find_test_file(file_path);
         tokio::fs::write(&test_file, &test_code).await.map_err(|e| e.to_string())?;
         steps.push(format!("Test file written to: {}", test_file.display()));

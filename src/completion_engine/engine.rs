@@ -1,13 +1,13 @@
 use lsp_types::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Serialize, Deserialize};
-use tracing::info;
 use super::context::{CodeContext, ContextAnalyzer, SymbolInfo};
 use super::providers::{
     CompletionProvider, CompletionProviderType, CompletionItemEnhanced,
+    CompletionProviderConfig,
     LspCompletionProvider, AiCompletionProvider, BuiltinCompletionProvider,
     SnippetCompletionProvider, LspManager, AiApiClient, Snippet,
 };
@@ -210,11 +210,12 @@ impl DefaultCompletionEngineBuilder {
     }
 
     pub async fn build(self) -> CompletionEngine {
-        let engine = CompletionEngine::new(self.config);
+        let config = self.config.clone();
+        let engine = CompletionEngine::new(config);
 
         if self.config.enable_lsp && self.lsp_manager.is_some() {
             let provider = Arc::new(LspCompletionProvider {
-                config: providers::CompletionProviderConfig {
+                config: CompletionProviderConfig {
                     provider_type: CompletionProviderType::Lsp,
                     priority: 2,
                     enabled: true,
@@ -227,7 +228,7 @@ impl DefaultCompletionEngineBuilder {
 
         if self.config.enable_ai && self.ai_api_client.is_some() {
             let provider = Arc::new(AiCompletionProvider {
-                config: providers::CompletionProviderConfig {
+                config: CompletionProviderConfig {
                     provider_type: CompletionProviderType::Ai,
                     priority: 1,
                     enabled: true,
@@ -240,7 +241,7 @@ impl DefaultCompletionEngineBuilder {
 
         if self.config.enable_builtin {
             let provider = Arc::new(BuiltinCompletionProvider {
-                config: providers::CompletionProviderConfig {
+                config: CompletionProviderConfig {
                     provider_type: CompletionProviderType::Builtin,
                     priority: 3,
                     enabled: true,
@@ -253,7 +254,7 @@ impl DefaultCompletionEngineBuilder {
 
         if self.config.enable_snippets {
             let provider = Arc::new(SnippetCompletionProvider {
-                config: providers::CompletionProviderConfig {
+                config: CompletionProviderConfig {
                     provider_type: CompletionProviderType::Snippet,
                     priority: 4,
                     enabled: true,

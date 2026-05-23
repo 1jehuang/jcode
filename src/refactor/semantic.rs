@@ -7,12 +7,10 @@
 //!
 //! 复用: crates/jcode-cross-file-repair/src/ast.rs 的 TreeSitterAstAdapter
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
-use jcode_cross_file_repair::ast::{TreeSitterAstAdapter, AstNode};
+use jcode_cross_file_repair::{TreeSitterAstAdapter, AstNode, AstAdapter};
 
 // ========================================================================
 // [1] AST 感知重命名 — 基于 Tree-sitter 的精确符号替换
@@ -173,7 +171,7 @@ impl AstRenamer {
             for r in &file_refs {
                 if r.line > 0 && r.line <= lines.len() {
                     let l = &lines[r.line - 1];
-                    if let Some(pos) = l.find(symbol) {
+                    if let Some(_pos) = l.find(symbol) {
                         lines[r.line - 1] = l.replacen(symbol, new_name, 1);
                     }
                 }
@@ -236,7 +234,7 @@ impl AstRenamer {
             for r in &file_lines {
                 if r.line > 0 && r.line <= lines.len() {
                     let l = &lines[r.line - 1];
-                    if let Some(pos) = l.find(symbol) {
+                    if let Some(_pos) = l.find(symbol) {
                         lines[r.line - 1] = l.replacen(symbol, new_name, 1);
                     }
                 }
@@ -339,7 +337,7 @@ impl TypeAwareExtractor {
         }
 
         // 提取选中代码
-        let selected: Vec<&str> = lines[start_line..end_line].iter().collect();
+        let selected: Vec<&str> = lines[start_line..end_line].iter().map(|s| *s).collect();
         let selected_code = selected.join("\n");
 
         // 检测返回类型 (分析最后表达式)
@@ -447,7 +445,7 @@ fn is_comment_line(line: &str, ext: &str) -> bool {
 }
 
 /// 判断是否为定义行
-fn is_definition_line(line: &str, symbol: &str, ext: &str) -> bool {
+fn is_definition_line(line: &str, _symbol: &str, ext: &str) -> bool {
     match ext {
         "rs" => {
             line.starts_with("fn ") || line.starts_with("pub fn ")

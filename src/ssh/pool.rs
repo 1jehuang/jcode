@@ -31,11 +31,17 @@ impl Default for PoolConfig {
 /// Pooled Session with metadata
 struct PooledSession {
     session: SshSession,
-    #[allow(dead_code)]
     created_at: Instant,
     last_used_at: Instant,
     in_use: bool,
     use_count: u64,
+}
+
+impl PooledSession {
+    /// Seconds since session was created
+    fn age_secs(&self) -> f64 {
+        self.created_at.elapsed().as_secs_f64()
+    }
 }
 
 /// Enhanced SSH Connection Pool
@@ -55,6 +61,8 @@ pub struct PoolStats {
     pub idle_count: usize,
     pub wait_count: u64,
     pub checkout_failures: u64,
+    pub oldest_session_age_secs: f64,
+    pub youngest_session_age_secs: f64,
 }
 
 impl SshConnectionPool {
@@ -310,7 +318,20 @@ impl SshConnectionPool {
 
     /// Get pool statistics
     pub fn stats(&self) -> PoolStats {
-        self.stats.lock().map(|s| s.clone()).unwrap_or_default()
+        let mut base = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        // Populate session age info from actual sessions
+        if let Ok(sessions) = self.sessions.read() {
+            let mut oldest = 0.0f64;
+            let mut youngest = f64::MAX;
+            for pooled in sessions.values() {
+                let age = pooled.age_secs();
+                if age > oldest { oldest = age; }
+                if age < youngest { youngest = age; }
+            }
+            base.oldest_session_age_secs = oldest;
+            base.youngest_session_age_secs = if youngest == f64::MAX { 0.0 } else { youngest };
+        }
+        base
     }
 
     /// Get number of active connections
@@ -330,12 +351,15 @@ impl SshConnectionPool {
     /// Evict idle sessions that have exceeded max idle time
     pub fn evict_idle(&self) -> Result<usize, String> {
         let now = Instant::now();
+        let max_session_age = self.config.max_idle_time * 2; // Sessions older than 2x idle time are evicted regardless
         let mut to_remove = vec![];
 
         {
             let sessions = self.sessions.read().map_err(|e| e.to_string())?;
             for (key, pooled) in sessions.iter() {
-                if !pooled.in_use && (now - pooled.last_used_at) > self.config.max_idle_time {
+                let idle_timeout = !pooled.in_use && (now - pooled.last_used_at) > self.config.max_idle_time;
+                let age_timeout = !pooled.in_use && (now - pooled.created_at) > max_session_age;
+                if idle_timeout || age_timeout {
                     to_remove.push(key.clone());
                 }
             }

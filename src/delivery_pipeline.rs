@@ -9,12 +9,8 @@
 //!   Plan → LLM代码 → 编译验证(已有) → 测试验证 → 审查
 //!   → 修复 → Git commit → PR → 交付
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use tokio::time::sleep;
+use std::time::Instant;
 
 use crate::rest_llm::InferenceRouter;
 

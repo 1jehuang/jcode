@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::{KGEdge, KGNode, KnowledgeGraph, PipelineConfig};
+use super::{KnowledgeGraph, PipelineConfig};
 
 /// 变更追踪: 记录哪些文件已变更
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

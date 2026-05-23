@@ -35,15 +35,15 @@ pub struct CompletionItemEnhanced {
 pub trait CompletionProvider: Send + Sync {
     fn get_type(&self) -> CompletionProviderType;
     fn get_priority(&self) -> u32;
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced>;
 }
 
 pub struct LspCompletionProvider {
-    config: CompletionProviderConfig,
-    lsp_manager: Arc<dyn LspManager + Send + Sync>,
+    pub config: CompletionProviderConfig,
+    pub lsp_manager: Arc<dyn LspManager + Send + Sync>,
 }
 
 #[async_trait]
@@ -56,6 +56,7 @@ pub trait LspManager: Send + Sync {
     ) -> Result<CompletionResponse, String>;
 }
 
+#[async_trait]
 impl CompletionProvider for LspCompletionProvider {
     fn get_type(&self) -> CompletionProviderType {
         CompletionProviderType::Lsp
@@ -65,9 +66,9 @@ impl CompletionProvider for LspCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let uri = Url::from_file_path(&context.file_path)
             .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
@@ -107,8 +108,8 @@ impl CompletionProvider for LspCompletionProvider {
 }
 
 pub struct AiCompletionProvider {
-    config: CompletionProviderConfig,
-    api_client: Arc<dyn AiApiClient + Send + Sync>,
+    pub config: CompletionProviderConfig,
+    pub api_client: Arc<dyn AiApiClient + Send + Sync>,
 }
 
 #[async_trait]
@@ -120,6 +121,7 @@ pub trait AiApiClient: Send + Sync {
     ) -> Result<Vec<String>, String>;
 }
 
+#[async_trait]
 impl CompletionProvider for AiCompletionProvider {
     fn get_type(&self) -> CompletionProviderType {
         CompletionProviderType::Ai
@@ -129,9 +131,9 @@ impl CompletionProvider for AiCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let result = self.api_client.generate_completions(context, 512).await;
         
@@ -168,10 +170,12 @@ impl CompletionProvider for AiCompletionProvider {
 }
 
 pub struct BuiltinCompletionProvider {
-    config: CompletionProviderConfig,
-    builtin_symbols: Arc<RwLock<HashMap<String, Vec<SymbolInfo>>>>,
+    pub config: CompletionProviderConfig,
+    pub builtin_symbols: Arc<RwLock<HashMap<String, Vec<SymbolInfo>>>>,
 }
 
+
+#[async_trait]
 impl CompletionProvider for BuiltinCompletionProvider {
     fn get_type(&self) -> CompletionProviderType {
         CompletionProviderType::Builtin
@@ -181,9 +185,9 @@ impl CompletionProvider for BuiltinCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let symbols = self.builtin_symbols.read().await;
         let empty_vec = Vec::new();
@@ -236,8 +240,8 @@ impl CompletionProvider for BuiltinCompletionProvider {
 }
 
 pub struct SnippetCompletionProvider {
-    config: CompletionProviderConfig,
-    snippet_store: Arc<RwLock<HashMap<String, Vec<Snippet>>>>,
+    pub config: CompletionProviderConfig,
+    pub snippet_store: Arc<RwLock<HashMap<String, Vec<Snippet>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +253,7 @@ pub struct Snippet {
     pub language: String,
 }
 
+#[async_trait]
 impl CompletionProvider for SnippetCompletionProvider {
     fn get_type(&self) -> CompletionProviderType {
         CompletionProviderType::Snippet
@@ -258,9 +263,9 @@ impl CompletionProvider for SnippetCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let snippets = self.snippet_store.read().await;
         let default_snippets = Vec::new();

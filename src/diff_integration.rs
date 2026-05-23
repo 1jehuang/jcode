@@ -163,7 +163,7 @@ pub async fn apply_via_ide(ops: &[IdeEditOperation]) -> Result<(), String> {
         // 精确字符串替换 (使用 Claude Code 的规范化链)
         let normalized_old = normalize_for_match(&op.old_string);
         let normalized_content = normalize_for_match(&content);
-        let normalized_new = normalize_for_match(&op.new_string);
+        let _normalized_new = normalize_for_match(&op.new_string);
 
         if let Some(pos) = normalized_content.find(&normalized_old) {
             // 找到精确位置后, 在原内容上替换

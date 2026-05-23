@@ -2,7 +2,7 @@
 //! 移植自: Understand-Anything agents/graph-reviewer
 //! 纯逻辑校验: 引用完整性、节点一致性、结构正确性
 
-use super::{KGEdge, KGNode, KnowledgeGraph, RelationType};
+use super::{KnowledgeGraph};
 
 /// 校验结果
 #[derive(Debug, Clone)]

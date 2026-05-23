@@ -172,7 +172,6 @@ impl EditBridge {
                     });
                 }
             }
-            }
         }
 
         Ok(ops)

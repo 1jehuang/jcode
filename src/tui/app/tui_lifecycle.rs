@@ -850,22 +850,27 @@ impl App {
         use jcode_completion::{CompletionEngine, ProviderCandidateGenerator};
         
         // Create a provider for completion (reuse existing provider if possible)
-        let provider = Box::new(ProviderCandidateGenerator::new(
-            Arc::clone(&self.provider),
-        ));
+        // Note: self.provider is Arc<dyn Provider>, needs adapter to jcode_completion::CompletionProvider
+        if let Some(completion_provider) = self.create_completion_provider() {
+            let engine = CompletionEngine::new(
+                completion_provider,
+                None, // No LSP for now
+                None, // No storage path for now
+            );
+            self.completion_engine = Some(Arc::new(engine));
+        }
         
-        let engine = CompletionEngine::new(
-            provider,
-            None, // No LSP for now
-            None, // No storage path for now
-        );
-        
-        self.completion_engine = Some(Arc::new(engine));
         self.completion_prefetch_state = Some(Arc::new(
-            crate::tui::completion_helper::CompletionPrefetchState::new(200) // 200ms debounce
+            crate::tui::completion_helper::CompletionPrefetchState::Idle
         ));
         
         tracing::info!("Inline Completion Engine initialized");
+    }
+    
+    /// Create a CompletionProvider adapter from the current LLM provider
+    /// TODO: Implement proper adapter when Provider trait alignment is resolved
+    fn create_completion_provider(&self) -> Option<Box<dyn jcode_completion::CompletionProvider>> {
+        None
     }
 
     pub fn new_for_test_harness(provider: Arc<dyn Provider>, registry: Registry) -> Self {

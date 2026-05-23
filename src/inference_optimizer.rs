@@ -95,7 +95,8 @@ impl KvCacheManager {
         if free.len() < count {
             anyhow::bail!("Out of KV cache blocks: need {} but only {} available", count, free.len());
         }
-        Ok(free.drain(free.len() - count..).collect())
+        let len = free.len();
+        Ok(free.drain(len - count..).collect())
     }
 
     /// 释放 KV 缓存块
@@ -108,6 +109,11 @@ impl KvCacheManager {
     pub async fn utilization(&self) -> f64 {
         let free = self.free_blocks.lock().await;
         1.0 - (free.len() as f64 / self.total_blocks as f64)
+    }
+
+    /// 获取块大小
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 }
 
@@ -177,7 +183,7 @@ impl BatchProcessor {
                     continue;
                 }
             };
-            let batch_duration = batch_start.elapsed();
+            let _batch_duration = batch_start.elapsed();
 
             // 3. 更新统计
             let mut stats = self.stats.write().await;
@@ -209,7 +215,8 @@ impl BatchProcessor {
         loop {
             let mut queue = self.pending_queue.lock().await;
             if queue.len() >= self.config.max_batch_size || Instant::now() >= deadline {
-                let batch: Vec<InferenceRequest> = queue.drain(..queue.len().min(self.config.max_batch_size)).collect();
+                let drain_len = queue.len().min(self.config.max_batch_size);
+                let batch: Vec<InferenceRequest> = queue.drain(..drain_len).collect();
                 if !batch.is_empty() {
                     return batch;
                 }

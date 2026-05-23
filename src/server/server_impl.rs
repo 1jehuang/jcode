@@ -1,4 +1,6 @@
 use super::*;
+use tracing::{debug, info};
+use crate::spawn_on;
 
 impl Server {
     /// Initialize GPU scheduler with auto-detection
@@ -723,7 +725,7 @@ impl Server {
                                 metrics.push(("carpai_gpu_avg_utilization".to_string(), gpu_stats.avg_utilization));
                                 metrics.push(("carpai_gpu_vram_total_bytes".to_string(), gpu_stats.total_vram_bytes as f64));
                                 metrics.push(("carpai_gpu_vram_used_bytes".to_string(), gpu_stats.used_vram_bytes as f64));
-                                metrics.push(("carpai_gpu_vram_usage_percent".to_string(), gpu_stats.vram_usage_percent));
+                                metrics.push(("carpai_gpu_vram_usage_percent".to_string(), gpu_stats.vram_usage_percent()));
                                 metrics.push(("carpai_gpu_pending_requests".to_string(), gpu_stats.pending_requests as f64));
 
                                 // Export to Prometheus
@@ -733,7 +735,7 @@ impl Server {
                                     "GPU metrics exported: {} GPUs, {}% utilization, {}% VRAM",
                                     gpu_stats.total_gpus,
                                     gpu_stats.avg_utilization,
-                                    gpu_stats.vram_usage_percent
+                                    gpu_stats.vram_usage_percent()
                                 );
                             }
                         }
@@ -787,7 +789,9 @@ impl Server {
             }
 
             let gc_agent = Arc::new(ServerGcAgent { sessions });
-            gc.start_background_gc(gc_agent).await;
+            tokio::spawn(async move {
+                gc.start_background_gc(gc_agent).await;
+            });
         }
 
         // Spawn the bus monitor for swarm coordination

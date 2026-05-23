@@ -206,8 +206,8 @@ impl UnifiedQueue {
         let now = chrono::Utc::now();
         self.waiting_since
             .iter()
-            .filter(|&(_, ref ts)| {
-                let elapsed = now.signed_duration_since(*ts);
+            .filter(|(_, ts)| {
+                let elapsed = now.signed_duration_since(**ts);
                 elapsed.num_milliseconds() as u64 > timeout_ms
             })
             .map(|(&id, _)| id)

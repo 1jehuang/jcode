@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use serde::{Serialize, Deserialize};
 
@@ -181,7 +181,7 @@ impl CacheHitOptimizer {
     }
     
     /// 记录请求并更新统计
-    pub async fn record_request(&self, key: u64, prompt: &str, hit_level: CacheHitLevel, response_time_ms: f64, tokens_saved: u32) {
+    pub async fn record_request(&self, key: u64, _prompt: &str, hit_level: CacheHitLevel, response_time_ms: f64, tokens_saved: u32) {
         let mut stats = self.stats.write().await;
         stats.total_requests += 1;
         
@@ -308,7 +308,7 @@ impl CacheHitOptimizer {
         
         let patterns = self.access_patterns.read().await;
         
-        if let Some(records) = patterns.get(&current_key) {
+        if let Some(_records) = patterns.get(&current_key) {
             // 简单实现：返回最常一起出现的keys
             // TODO: 使用更复杂的序列预测算法
             let mut stats = self.stats.write().await;

@@ -51,7 +51,7 @@ pub enum AdapterEvent {
 impl DebugAdapter {
     pub async fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel(100);
-        let (event_sender, event_receiver) = mpsc::channel(100);
+        let (event_sender, _event_receiver) = mpsc::channel(100);
         
         let session_manager = Arc::new(Mutex::new(DebugSessionManager::new()));
         
@@ -333,10 +333,10 @@ impl DebugAdapter {
     ) {
         while let Some(command) = receiver.recv().await {
             match command {
-                AdapterCommand::Initialize(id, _) => {
+                AdapterCommand::Initialize(_id, _) => {
                     log::info!("Initialize request received");
                 }
-                AdapterCommand::Launch(id, params) => {
+                AdapterCommand::Launch(_id, params) => {
                     log::info!("Launch request: {:?}", params);
                     let mut sm = session_manager.lock().unwrap();
                     let session_id = sm.create_session();
@@ -349,10 +349,10 @@ impl DebugAdapter {
                         );
                     }
                 }
-                AdapterCommand::Attach(id, params) => {
+                AdapterCommand::Attach(_id, params) => {
                     log::info!("Attach request: {:?}", params);
                 }
-                AdapterCommand::SetBreakpoints(id, params) => {
+                AdapterCommand::SetBreakpoints(_id, params) => {
                     log::info!("Set breakpoints: {:?}", params);
                     let sm = session_manager.lock().unwrap();
                     if let Some(session) = sm.get_session("session-1") {
@@ -364,13 +364,13 @@ impl DebugAdapter {
                         }
                     }
                 }
-                AdapterCommand::Threads(id) => {
+                AdapterCommand::Threads(_id) => {
                     log::info!("Threads request");
                 }
-                AdapterCommand::StackTrace(id, params) => {
+                AdapterCommand::StackTrace(_id, params) => {
                     log::info!("Stack trace request: {:?}", params);
                 }
-                AdapterCommand::Pause(id, params) => {
+                AdapterCommand::Pause(_id, params) => {
                     log::info!("Pause request: {:?}", params);
                     let thread_id = params.thread_id;
                     
@@ -391,7 +391,7 @@ impl DebugAdapter {
                         all_threads_stopped: Some(true),
                     })).await.ok();
                 }
-                AdapterCommand::Continue(id, params) => {
+                AdapterCommand::Continue(_id, params) => {
                     log::info!("Continue request: {:?}", params);
                     let thread_id = params.thread_id;
                     
@@ -408,7 +408,7 @@ impl DebugAdapter {
                         all_threads_continued: Some(true),
                     })).await.ok();
                 }
-                AdapterCommand::Terminate(id, params) => {
+                AdapterCommand::Terminate(_id, params) => {
                     log::info!("Terminate request: {:?}", params);
                     let restart = params.restart;
                     
@@ -424,7 +424,7 @@ impl DebugAdapter {
                         restart,
                     })).await.ok();
                 }
-                AdapterCommand::Disconnect(id, params) => {
+                AdapterCommand::Disconnect(_id, params) => {
                     log::info!("Disconnect request: {:?}", params);
                     let sm = session_manager.lock().unwrap();
                     if let Some(session) = sm.get_session("session-1") {

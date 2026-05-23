@@ -119,7 +119,7 @@ impl LspServerManager {
     /// 执行 LSP 操作（真实 JSON-RPC over stdio，带超时和回退）
     pub async fn execute(&self, op: &LspOperation) -> String {
         let fp = match op {
-            LspOperation::GoToDefinition { file_path, .. } | LspOperation::FindReferences { file_path, .. } | LspOperation::Hover { file_path, .. } | LspOperation::DocumentSymbol { file_path } => file_path,
+            LspOperation::GoToDefinition { file_path, .. } | LspOperation::FindReferences { file_path, .. } | LspOperation::Hover { file_path, .. } | LspOperation::DocumentSymbol { file_path } | LspOperation::CodeAction { file_path, .. } | LspOperation::Rename { file_path, .. } => file_path,
             LspOperation::WorkspaceSymbol { .. } => return format!("Workspace symbol query: {}", op.name()),
         };
 

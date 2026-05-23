@@ -133,9 +133,7 @@ pub fn estimate_fp16_tflops(model: &str, utilization_pct: u32) -> f64 {
         989.0
     } else if model.contains("A100") {
         312.0
-    } else if model.contains("A10") {
-        125.0
-    } else if model.contains("V100") {
+    } else if model.contains("A10") || model.contains("V100") {
         125.0
     } else if model.contains("3090") || model.contains("4090") {
         163.0
