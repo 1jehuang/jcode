@@ -3297,6 +3297,8 @@ dependencies = [
  "jcode-compaction-core",
  "jcode-config-types",
  "jcode-core",
+ "jcode-debate-core",
+ "jcode-debate-orchestrator",
  "jcode-embedding",
  "jcode-gateway-types",
  "jcode-import-core",
@@ -3450,6 +3452,34 @@ dependencies = [
  "libc",
  "rand 0.9.3",
  "serde",
+]
+
+[[package]]
+name = "jcode-debate-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "jcode-message-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jcode-debate-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "indexmap",
+ "parking_lot",
+ "regex",
+ "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

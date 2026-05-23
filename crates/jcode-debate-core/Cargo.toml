@@ -1,0 +1,38 @@
+[package]
+name = "jcode-debate-core"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-perspective debate orchestration system"
+publish = false
+
+[lib]
+name = "jcode_debate_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+thiserror = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+
+# HTTP client for provider calls
+reqwest = { version = "0.12", features = ["json"] }
+
+# Async traits
+async-trait = "0.1"
+
+# Futures utilities
+futures = "0.3"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Message types
+jcode-message-types = { path = "../jcode-message-types" }

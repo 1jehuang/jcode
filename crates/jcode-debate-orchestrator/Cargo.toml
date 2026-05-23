@@ -1,0 +1,13 @@
+[package]
+name = "jcode-debate-orchestrator"
+version = "0.1.0"
+edition = "2024"
+description = "Token/latency-aware debate decision engine"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+regex = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+indexmap = { version = "2", features = ["serde"] }

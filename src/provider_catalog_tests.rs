@@ -111,7 +111,9 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
 #[test]
 fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_international_default() {
     let _lock = crate::storage::lock_test_env();
-    let _guard = EnvGuard::save(&["OPENAI_API_KEY"]);
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _guard = EnvGuard::save(&["JCODE_HOME", "OPENAI_API_KEY"]);
+    crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::remove_var("OPENAI_API_KEY");
 
     let international = resolve_openai_compatible_profile(MINIMAX_PROFILE);

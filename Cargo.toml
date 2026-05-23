@@ -44,6 +44,8 @@ members = [
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
+    "crates/jcode-debate-orchestrator",
+    "crates/jcode-debate-core",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
@@ -201,6 +203,8 @@ jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }
 jcode-session-types = { path = "crates/jcode-session-types" }
 jcode-storage = { path = "crates/jcode-storage" }
 jcode-task-types = { path = "crates/jcode-task-types" }
+jcode-debate-orchestrator = { path = "crates/jcode-debate-orchestrator" }
+jcode-debate-core = { path = "crates/jcode-debate-core" }
 jcode-tool-core = { path = "crates/jcode-tool-core" }
 jcode-tool-types = { path = "crates/jcode-tool-types" }
 jcode-side-panel-types = { path = "crates/jcode-side-panel-types" }
