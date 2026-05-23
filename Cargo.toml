@@ -102,8 +102,7 @@ members = [
     "crates/jcode-grpc",
     # CarpAI Unified Client SDK
     "crates/carpai-sdk",
-    # Enterprise Server (AI-as-a-Service for low-resource deployments)
-    "crates/jcode-enterprise-server",
+    # Enterprise Server 代码已搬迁到 src/enterprise/ (由 enterprise feature 控制)
     "crates/carpai-codebase",
     # CPU Inference Engine (llama.cpp wrapper)
     "crates/jcode-cpu-inference",
@@ -395,6 +394,13 @@ tracing-subscriber = "0.3"
 parking_lot = "0.12"
 xmlparser = "0.13"
 
+# Enterprise features (optional — toggle via --features enterprise)
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid"], optional = true }
+sys-info = "0.9"
+mdns-sd = { version = "0.13", optional = true }
+prometheus = { version = "0.13", optional = true }
+jcode-cpu-inference = { path = "crates/jcode-cpu-inference", optional = true }
+
 # REST dependencies
 axum = { version = "0.8", features = ["ws"] }
 hyper = "1"
@@ -425,6 +431,18 @@ embeddings = ["dep:jcode-embedding"]
 pdf = ["dep:jcode-pdf"]
 # Optional audit trail for auto-mode decisions (see src/auto_mode/engine.rs).
 audit = []
+redis = []
+gpu-discovery = []
+
+# Enterprise Server 特性 — 启用多租户/分布式推理/合规/管理后台
+enterprise = [
+    "dep:sqlx",
+    "dep:mdns-sd",
+    "dep:prometheus",
+    "dep:jcode-cpu-inference",
+]
+enterprise-sqlite = ["enterprise", "sqlx/sqlite"]
+enterprise-postgres = ["enterprise", "sqlx/postgres"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

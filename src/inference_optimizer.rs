@@ -13,7 +13,8 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock};
+use tracing::debug;
 
 /// 批处理配置
 #[derive(Debug, Clone)]
@@ -176,6 +177,7 @@ impl BatchProcessor {
 
             // 2. 执行推理
             let batch_start = Instant::now();
+            let batch_len = batch.len();
             let results = match infer_fn(batch) {
                 Ok(r) => r,
                 Err(e) => {
@@ -183,7 +185,17 @@ impl BatchProcessor {
                     continue;
                 }
             };
-            let _batch_duration = batch_start.elapsed();
+            let batch_duration = batch_start.elapsed();
+            let batch_ms = batch_duration.as_millis() as f64;
+
+            // Adaptive batch size adjustment based on duration
+            if batch_ms > self.config.max_wait_ms as f64 * 1.5 {
+                debug!("Batch took {:.2}ms (>{:.0}ms threshold), consider reducing batch size",
+                       batch_ms, self.config.max_wait_ms as f64 * 1.5);
+            } else if batch_len == self.config.max_batch_size && batch_ms < self.config.max_wait_ms as f64 * 0.5 {
+                debug!("Fast batch: {:.2}ms for {} requests, could increase batch size",
+                       batch_ms, batch_len);
+            }
 
             // 3. 更新统计
             let mut stats = self.stats.write().await;
@@ -245,8 +257,7 @@ impl NvmeOptimizer {
     }
 
     /// 启用直接 I/O (跳过 page cache)
-    pub fn enable_direct_io(path: &std::path::Path) -> Result<std::fs::File> {
-        use std::os::windows::io::FromRawHandle;
+    pub fn enable_direct_io(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
         // Windows 上使用 FILE_FLAG_NO_BUFFERING
         // Linux 上使用 O_DIRECT
 

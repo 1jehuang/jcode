@@ -13,23 +13,23 @@
 //!   - PlanManager         (Plan 持久化)
 //!   - AcceptanceTracker   (接受率追踪)
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::rest_llm::InferenceRouter;
 
-use crate::auto_fallback::{AutoFallbackRouter, InferenceTarget};
 use crate::compilation_engine::{
-    AutoFixLoop, CompilationEngine, CompileError, FixLoopConfig, FixCycleResult, OutputRecoveryManager,
+    AutoFixLoop, CompilationEngine, FixLoopConfig, OutputRecoveryManager,
 };
 use crate::claude_agent_port::{
-    PlanManager, partition_tool_calls, tool_is_readonly, RetryHook,
-    structured_error, with_memory_hint, AgentLoopConfig,
+    PlanManager, RetryHook,
 };
-use crate::lsp_code_actions::{RefactoringEngine, CodeActionProvider};
+use jcode_tool_core::{
+    SubAgentPool, SubAgentConfig, SubAgentTask, SubAgentResult,
+    SubAgentId, SubAgentProgress, AgentRunner,
+};
 
 // ========================================================================
 // [1] 自主 Agent 运行时 — 对标 Claude Code queryLoop()
@@ -67,6 +67,8 @@ pub struct AutonomousAgent {
     current_plan_slug: Arc<RwLock<Option<String>>>,
     /// 迭代计数
     turn_count: Arc<RwLock<u32>>,
+    /// 子 Agent 池 (延迟初始化)
+    sub_agent_pool: Arc<RwLock<Option<SubAgentPool>>>,
 }
 
 impl AutonomousAgent {
@@ -82,6 +84,29 @@ impl AutonomousAgent {
             status: Arc::new(RwLock::new(AgentStatus::Idle)),
             current_plan_slug: Arc::new(RwLock::new(None)),
             turn_count: Arc::new(RwLock::new(0)),
+            sub_agent_pool: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// 初始化子 Agent 池 (需在 Agent 完全构建后调用)
+    pub async fn init_sub_agent_pool(&self) {
+        let config = SubAgentConfig {
+            max_concurrent: 3,
+            max_nesting_depth: 2,
+            default_max_turns: 20,
+            default_timeout_secs: 300,
+            max_memory_mb: 256,
+        };
+        let pool = SubAgentPool::new(config, self.clone());
+        *self.sub_agent_pool.write().await = Some(pool);
+    }
+
+    /// 提交子任务到子 Agent (返回 oneshot receiver)
+    pub async fn spawn_sub_agent(&self, task: SubAgentTask, depth: u32) -> Result<tokio::sync::oneshot::Receiver<SubAgentResult>, String> {
+        let pool = self.sub_agent_pool.read().await;
+        match pool.as_ref() {
+            Some(p) => p.submit(task, depth).await.map_err(|e| e.to_string()),
+            None => Err("Sub-agent pool not initialized".to_string()),
         }
     }
 
@@ -167,7 +192,7 @@ impl AutonomousAgent {
             slug, goal, std::time::SystemTime::now()
         );
 
-        self.plan_manager.read().await.save_plan(slug, &plan_content, None).await?;
+        self.plan_manager.read().await.save_plan(&slug, &plan_content, None).await.ok();
         Ok(plan_content)
     }
 
@@ -315,6 +340,65 @@ impl AutonomousAgent {
             AgentStatus::Error(e) => format!("error: {}", e),
         };
         format!("[Agent] Turns: {} | Status: {} | {}", turn, status_str, compiler)
+    }
+}
+
+// ==================== AgentRunner 实现 — 使 AutonomousAgent 可被子 Agent 池调用 ====================
+
+impl Clone for AutonomousAgent {
+    fn clone(&self) -> Self {
+        Self {
+            workspace: self.workspace.clone(),
+            compiler: self.compiler.clone(),
+            fix_loop: self.fix_loop.clone(),
+            output_recovery: self.output_recovery.clone(),
+            plan_manager: self.plan_manager.clone(),
+            retry_hook: self.retry_hook.clone(),
+            status: self.status.clone(),
+            current_plan_slug: self.current_plan_slug.clone(),
+            turn_count: self.turn_count.clone(),
+            sub_agent_pool: self.sub_agent_pool.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for AutonomousAgent {
+    async fn run_agent_loop(
+        &self,
+        task: &SubAgentTask,
+        agent_id: SubAgentId,
+        _progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentProgress>,
+    ) -> Result<SubAgentResult, anyhow::Error> {
+        tracing::info!(
+            agent_id = %agent_id,
+            task = %task.prompt.chars().take(80).collect::<String>(),
+            "Sub-agent starting"
+        );
+
+        let start = std::time::Instant::now();
+        match self.execute_task(&task.prompt).await {
+            Ok(output) => Ok(SubAgentResult {
+                agent_id,
+                task_id: task.task_id.clone(),
+                success: true,
+                output,
+                turns_used: *self.turn_count.read().await,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: None,
+                artifacts: vec![],
+            }),
+            Err(e) => Ok(SubAgentResult {
+                agent_id,
+                task_id: task.task_id.clone(),
+                success: false,
+                output: String::new(),
+                turns_used: *self.turn_count.read().await,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(e),
+                artifacts: vec![],
+            }),
+        }
     }
 }
 
@@ -479,7 +563,15 @@ impl CrossFileAgent {
         let task = self.analyze_dependencies().await?;
         println!("[CrossFile] {} files, order: {:?}", task.affected_files.len(), task.execution_order);
 
-        // 2. 用 AutonomousAgent 执行
+        // 2. 记录执行计划到 plan_manager
+        let slug = self.plan_manager.read().await.generate_slug();
+        let plan_content = format!(
+            "# Cross-File Task Plan\n\n## Goal\n{}\n\n## Affected Files\n{:?}\n\n## Execution Order\n{:?}",
+            goal, task.affected_files, task.execution_order
+        );
+        self.plan_manager.read().await.save_plan(&slug, &plan_content, None).await.ok();
+
+        // 3. 用 AutonomousAgent 执行
         let result = self.agent.execute_task(goal).await?;
 
         // 3. 一致性检查闭环
