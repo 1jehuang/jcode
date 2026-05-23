@@ -8,10 +8,9 @@ use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::io::BufRead as _;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MockProvider;
@@ -148,7 +147,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
     let client_count = Arc::new(RwLock::new(1usize));
 
-    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (stream_a, stream_b) = crate::transport::stream_pair().expect("stream pair");
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
@@ -172,14 +171,12 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read history event bytes");
-    let mut cursor = std::io::Cursor::new(bytes);
     let mut line = String::new();
-    cursor.read_line(&mut line).expect("read first line");
+    let mut reader = tokio::io::BufReader::new(stream_b);
+    reader
+        .read_line(&mut line)
+        .await
+        .expect("read history event line");
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode history event");
 
