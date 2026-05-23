@@ -1,5 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[cfg(unix)]
+use super::connect_socket;
 use super::socket::sibling_socket_path;
 #[cfg(unix)]
 use super::socket::{
@@ -7,9 +9,10 @@ use super::socket::{
 };
 use super::{
     ReloadPhase, ReloadState, ReloadWaitStatus, await_reload_handoff, cleanup_socket_pair,
-    clear_reload_marker, connect_socket, inspect_reload_wait_status, publish_reload_socket_ready,
+    clear_reload_marker, inspect_reload_wait_status, publish_reload_socket_ready,
     reload_marker_active, reload_marker_path, reload_process_alive, write_reload_state,
 };
+#[cfg(unix)]
 use crate::transport::Listener;
 use std::time::Duration;
 

@@ -3,6 +3,7 @@ use super::{
     format_countdown_until, gather_ambient_info, partition_queued_messages, resume_invocation_args,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
+#[cfg(unix)]
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
 use crate::tui::session_picker::ResumeTarget;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -13,6 +14,7 @@ struct EnvVarGuard {
 }
 
 impl EnvVarGuard {
+    #[cfg(unix)]
     fn set_value(key: &'static str, value: &str) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);

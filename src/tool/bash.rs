@@ -177,11 +177,6 @@ fn parse_progress_marker_with_checkpoint(line: &str) -> Option<(BackgroundTaskPr
     ))
 }
 
-#[cfg(test)]
-fn parse_progress_marker(line: &str) -> Option<BackgroundTaskProgress> {
-    parse_progress_marker_with_checkpoint(line).map(|(progress, _)| progress)
-}
-
 fn parse_checkpoint_marker(line: &str) -> Option<BackgroundTaskProgress> {
     let payload = line.trim().strip_prefix(CHECKPOINT_MARKER_PREFIX)?.trim();
     let marker: ProgressMarker = serde_json::from_str(payload).unwrap_or_else(|_| ProgressMarker {
