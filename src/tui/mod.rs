@@ -6,6 +6,7 @@ pub mod ui_actions;
 pub mod ui_streaming;
 pub mod ui_blocks_integration;
 pub mod ui_actions_integration;
+pub mod completion_helper;
 
 pub use ui_blocks::CommandBlock;
 pub use ui_actions::{ActionRegistry, ActionDefinition, KeyBinding};
@@ -28,6 +29,7 @@ pub mod markdown;
 mod memory_profile;
 pub mod mermaid;
 pub mod permissions;
+pub mod render_integration;
 mod remote_diff;
 pub mod screenshot;
 pub mod session_picker;
@@ -1026,11 +1028,16 @@ pub struct PickerOption {
     pub estimated_reference_cost_micros: Option<u64>,
 }
 
+// Phase 2 optimization: Target <50ms frame time (20 FPS)
 pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
 const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
+
+// Performance target constants (Phase 2)
+pub(crate) const TARGET_FRAME_TIME_MS: u64 = 50; // <50ms per frame
+pub(crate) const TARGET_FPS: u32 = 20;           // 20 FPS for responsive UI
 
 fn idle_donut_active_with_policy(
     state: &dyn TuiState,
