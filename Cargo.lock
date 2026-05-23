@@ -3287,6 +3287,7 @@ dependencies = [
  "hex",
  "ignore",
  "image",
+ "indexmap",
  "jcode-agent-runtime",
  "jcode-ambient-types",
  "jcode-auth-types",
@@ -3462,6 +3463,7 @@ dependencies = [
  "chrono",
  "futures",
  "jcode-message-types",
+ "jcode-provider-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -3474,12 +3476,17 @@ dependencies = [
 name = "jcode-debate-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "indexmap",
+ "jcode-debate-core",
+ "jcode-message-types",
  "parking_lot",
  "regex",
  "serde",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

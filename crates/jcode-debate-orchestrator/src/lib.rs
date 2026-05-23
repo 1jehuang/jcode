@@ -12,6 +12,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, warn};
 
 /// Debate activation state controlled by user.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -648,6 +649,18 @@ pub enum DebateError {
 
     #[error("Agent failed: {0}")]
     AgentFailed(String),
+
+    #[error("Validation failed: {0}")]
+    Validation(String),
+
+    #[error("Circuit breaker open: {0}")]
+    CircuitBreakerOpen(String),
+
+    #[error("Insufficient perspectives: {0}")]
+    InsufficientPerspectives(String),
+
+    #[error("Manipulation detected")]
+    ManipulationDetected,
 }
 
 impl DebateError {
@@ -657,13 +670,50 @@ impl DebateError {
             Self::RateLimit(_) => DebateFallback::RetryWithBackoff,
             Self::Gibberish(_) => DebateFallback::DiscardGibberish,
             Self::AgentFailed(_) => DebateFallback::SimpleResponse,
+            Self::Validation(_) => DebateFallback::DiscardGibberish,
+            Self::CircuitBreakerOpen(_) => DebateFallback::SimpleResponse,
+            Self::InsufficientPerspectives(_) => DebateFallback::SimpleResponse,
+            Self::ManipulationDetected => DebateFallback::DiscardGibberish,
         }
     }
 
     pub fn retry_after_secs(&self) -> Option<u64> {
         match self {
             Self::RateLimit(s) => Some(*s),
+            Self::Timeout(s) => Some(*s),
             _ => None,
+        }
+    }
+
+    /// Check if error is retryable
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimit(_) | Self::Timeout(_) | Self::AgentFailed(_)
+        )
+    }
+
+    /// Get a user-friendly description of the error
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            Self::Timeout(_) => "The debate took too long to complete. Try a shorter question.",
+            Self::RateLimit(_) => "Too many requests. Please wait before trying again.",
+            Self::Gibberish(_) => {
+                "One perspective produced unclear output. Analysis may be incomplete."
+            }
+            Self::AgentFailed(_) => {
+                "A perspective encountered an error. Analysis may be incomplete."
+            }
+            Self::Validation(_) => "Output validation failed. Perspective response was discarded.",
+            Self::CircuitBreakerOpen(_) => {
+                "Debate system is processing too many requests. Try again shortly."
+            }
+            Self::InsufficientPerspectives(_) => {
+                "Not enough perspectives responded. Analysis may be limited."
+            }
+            Self::ManipulationDetected => {
+                "Unusual patterns detected in debate. Using conservative response."
+            }
         }
     }
 
@@ -2081,6 +2131,10 @@ pub struct SafeguardOrchestrator {
     consensus_builder: ConsensusBuilder,
     anti_manipulation: AntiManipulation,
     fallback: EmergencyFallback,
+    /// Track errors encountered during processing
+    errors: Vec<DebateError>,
+    /// Number of perspectives that failed
+    failed_count: usize,
 }
 
 impl SafeguardOrchestrator {
@@ -2091,7 +2145,60 @@ impl SafeguardOrchestrator {
             consensus_builder: ConsensusBuilder::new(),
             anti_manipulation: AntiManipulation::new(),
             fallback: EmergencyFallback::new(),
+            errors: Vec::new(),
+            failed_count: 0,
         }
+    }
+
+    /// Record an error during processing
+    pub fn record_error(&mut self, error: DebateError) {
+        self.errors.push(error.clone());
+
+        match error {
+            DebateError::RateLimit(_) => {
+                warn!("Rate limit encountered, will retry");
+            }
+            DebateError::Timeout(_) => {
+                self.failed_count += 1;
+                warn!("Timeout occurred, perspective failed");
+            }
+            DebateError::AgentFailed(_) => {
+                self.failed_count += 1;
+                warn!("Agent failed during processing");
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if we should attempt recovery
+    pub fn can_recover(&self) -> bool {
+        self.failed_count < 2 && self.errors.iter().any(|e| e.is_retryable())
+    }
+
+    /// Get accumulated errors
+    pub fn get_errors(&self) -> &[DebateError] {
+        &self.errors
+    }
+
+    /// Get error summary for logging
+    pub fn error_summary(&self) -> String {
+        if self.errors.is_empty() {
+            return "No errors".to_string();
+        }
+
+        let error_types: std::collections::HashMap<String, usize> =
+            self.errors
+                .iter()
+                .fold(std::collections::HashMap::new(), |mut acc, e| {
+                    *acc.entry(format!("{:?}", e)).or_insert(0) += 1;
+                    acc
+                });
+
+        error_types
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Validate all perspective outputs.
@@ -2158,13 +2265,19 @@ impl SafeguardOrchestrator {
         consensus
     }
 
-    /// Run full safeguard pipeline.
+    /// Run full safeguard pipeline with error tracking.
     pub fn process(
         &self,
         perspectives: &mut IndexMap<String, PerspectiveOutput>,
     ) -> SafeguardResult {
         let mut warnings = Vec::new();
         let mut excluded = Vec::new();
+
+        // Log processing start
+        debug!(
+            "Starting safeguard pipeline for {} perspectives",
+            perspectives.len()
+        );
 
         // 1. Validate
         let validation_results = self.validate_perspectives(perspectives);
@@ -2174,6 +2287,7 @@ impl SafeguardOrchestrator {
                     "Perspective '{}' failed validation: {:?}",
                     name, result.errors
                 ));
+                debug!("Validation failed for '{}': {:?}", name, result.errors);
             }
         }
 
@@ -2187,6 +2301,7 @@ impl SafeguardOrchestrator {
                     name, circuit_result.reason
                 ));
             }
+            debug!("Circuit breaker excluded: {:?}", excluded);
         }
 
         // 3. Anti-manipulation
@@ -2196,6 +2311,10 @@ impl SafeguardOrchestrator {
                 "Manipulation detected (score: {:.2}): {:?}",
                 manipulation.manipulation_score, manipulation.issues
             ));
+            error!(
+                "Manipulation detected during debate: score={:.2}",
+                manipulation.manipulation_score
+            );
         }
 
         // 4. Build consensus
@@ -2205,6 +2324,12 @@ impl SafeguardOrchestrator {
         let (source, response) =
             self.fallback
                 .select_response(&consensus, perspectives, &FallbackReason::NoConsensus);
+
+        debug!(
+            "Safeguard pipeline complete. Response from '{}', {} excluded",
+            source,
+            excluded.len()
+        );
 
         SafeguardResult {
             response,

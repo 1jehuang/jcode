@@ -11,3 +11,12 @@ thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 parking_lot = "0.12"
 indexmap = { version = "2", features = ["serde"] }
+tracing = "0.1"
+
+# For integration tests
+jcode-debate-core = { path = "../jcode-debate-core" }
+jcode-message-types = { path = "../jcode-message-types" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"

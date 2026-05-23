@@ -47,6 +47,23 @@ fn configure_system_allocator() {
 fn configure_system_allocator() {}
 
 fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .name("jcode-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_main)?
+        .join()
+        .map_err(|panic| {
+            if let Some(message) = panic.downcast_ref::<&str>() {
+                anyhow::anyhow!("jcode main thread panicked: {}", message)
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                anyhow::anyhow!("jcode main thread panicked: {}", message)
+            } else {
+                anyhow::anyhow!("jcode main thread panicked")
+            }
+        })?
+}
+
+fn run_main() -> Result<()> {
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

@@ -6,19 +6,53 @@
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout, Duration};
 
 use jcode_message_types::{ContentBlock, Message, Role};
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use crate::debate_session::{
     DebateConfig, DebatePhase, DebateSession, DebateVerdict, PerspectiveResponse,
 };
 use crate::perspectives::{DebateTopic, Perspective, PerspectiveType};
 use crate::rate_limiter::RateLimiter;
-use crate::DebateResult;
+use crate::DebateError;
 
-use super::DebateError;
+use super::DebateResult;
+
+/// Default timeout for synthesis call (in seconds)
+const DEFAULT_SYNTHESIS_TIMEOUT_SECS: u64 = 45;
+
+/// Maximum retries for rate limit errors
+const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+
+/// Base retry delay in milliseconds
+const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// Typed errors for Coordinator operations
+#[derive(Debug, thiserror::Error)]
+pub enum CoordinatorError {
+    #[error("Perspective '{0}' timed out after {1}s")]
+    PerspectiveTimeout(PerspectiveType, u64),
+
+    #[error("Perspective '{0}' failed after {1} retries: {2}")]
+    PerspectiveFailedAfterRetries(PerspectiveType, u32, String),
+
+    #[error("Debate session has insufficient perspectives: expected at least {0}, got {1}")]
+    InsufficientPerspectives(usize, usize),
+
+    #[error("All perspectives failed, debate cannot continue")]
+    AllPerspectivesFailed,
+
+    #[error("Synthesis timed out after {0}s")]
+    SynthesisTimeout(u64),
+
+    #[error("Context exceeded maximum length")]
+    ContextExceeded,
+
+    #[error("Provider error: {0}")]
+    Provider(String),
+}
 
 /// Provider trait for making LLM calls
 #[async_trait::async_trait]
@@ -108,9 +142,12 @@ impl Coordinator {
         self.emit(DebateEvent::RoundStarted { round: 0 });
     }
 
-    /// Run the full debate
+    /// Run the full debate with error recovery
     pub async fn run_debate(&self) -> DebateResult<DebateVerdict> {
         info!("Starting debate");
+
+        let config = self.config();
+        let perspective_timeout = Duration::from_secs(config.timeout_secs.max(10));
 
         {
             let session = self.session.read().await;
@@ -121,36 +158,166 @@ impl Coordinator {
             }
         }
 
-        // Run advocate-critic rounds
+        // Track failed perspectives for recovery
+        let mut failed_perspectives = Vec::new();
+
+        // Run advocate-critic rounds with error recovery
         for round in 1..=self.config().rounds {
             info!("Starting round {}", round);
             self.emit(DebateEvent::RoundStarted { round });
 
-            // Advocate speaks
-            self.run_perspective(PerspectiveType::Advocate, round)
-                .await?;
+            // Advocate speaks with retry logic
+            match self
+                .run_perspective_with_timeout(PerspectiveType::Advocate, round, perspective_timeout)
+                .await
+            {
+                Ok(_) => {
+                    debug!("Advocate completed round {}", round);
+                }
+                Err(e) => {
+                    error!("Advocate failed in round {}: {}", round, e);
+                    failed_perspectives.push(PerspectiveType::Advocate);
+
+                    // If advocate fails, we can continue with critic
+                    // but log the warning
+                    warn!("Debate continuing with reduced perspectives");
+                }
+            }
 
             // Wait for rate limit clearance for critic
             self.wait_for_rate_limit(PerspectiveType::Critic).await?;
 
-            // Critic speaks
-            self.run_perspective(PerspectiveType::Critic, round).await?;
+            // Critic speaks with retry logic
+            match self
+                .run_perspective_with_timeout(PerspectiveType::Critic, round, perspective_timeout)
+                .await
+            {
+                Ok(_) => {
+                    debug!("Critic completed round {}", round);
+                }
+                Err(e) => {
+                    error!("Critic failed in round {}: {}", round, e);
+                    failed_perspectives.push(PerspectiveType::Critic);
+
+                    // Continue with what we have
+                    warn!("Debate continuing without critic input");
+                }
+            }
         }
 
-        // Synthesizer provides final verdict
+        // Check if we have enough perspectives to proceed
+        if failed_perspectives.contains(&PerspectiveType::Advocate)
+            && failed_perspectives.contains(&PerspectiveType::Critic)
+        {
+            return Err(DebateError::Provider(
+                "Debate cannot continue: both advocate and critic failed".to_string(),
+            ));
+        }
+
+        // Synthesizer provides final verdict with longer timeout
+        let synthesis_timeout = Duration::from_secs(DEFAULT_SYNTHESIS_TIMEOUT_SECS);
         info!("Running synthesizer for final verdict");
-        let verdict = self.run_synthesizer().await?;
 
-        self.emit(DebateEvent::DebateCompleted {
-            verdict: verdict.clone(),
-        });
+        match self.run_synthesizer_with_timeout(synthesis_timeout).await {
+            Ok(verdict) => {
+                // Log which perspectives failed but still return verdict
+                if !failed_perspectives.is_empty() {
+                    warn!(
+                        "Debate completed with {} failed perspective(s): {:?}",
+                        failed_perspectives.len(),
+                        failed_perspectives
+                    );
+                }
 
-        info!("Debate completed with verdict: {}", verdict.recommendation);
-        Ok(verdict)
+                self.emit(DebateEvent::DebateCompleted {
+                    verdict: verdict.clone(),
+                });
+
+                info!("Debate completed with verdict: {}", verdict.recommendation);
+                Ok(verdict)
+            }
+            Err(e) => {
+                // Attempt to generate verdict from existing responses
+                error!("Synthesis failed: {}", e);
+
+                if let Ok(partial_verdict) = self.generate_partial_verdict().await {
+                    warn!("Returning partial verdict based on available responses");
+                    return Ok(partial_verdict);
+                }
+
+                Err(e)
+            }
+        }
     }
 
-    /// Run a single perspective
-    async fn run_perspective(
+    /// Run perspective with timeout and retry logic
+    async fn run_perspective_with_timeout(
+        &self,
+        perspective_type: PerspectiveType,
+        round: u32,
+        timeout_duration: Duration,
+    ) -> DebateResult<PerspectiveResponse> {
+        let mut last_error = String::new();
+
+        for attempt in 1..=MAX_RATE_LIMIT_RETRIES {
+            match timeout(
+                timeout_duration,
+                self.run_perspective_internal(perspective_type, round),
+            )
+            .await
+            {
+                Ok(result) => match result {
+                    Ok(response) => return Ok(response),
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        last_error = err_str.clone();
+
+                        // Check if it's a rate limit error
+                        if matches!(e, DebateError::RateLimit { .. })
+                            && attempt < MAX_RATE_LIMIT_RETRIES
+                        {
+                            let delay = RETRY_BASE_DELAY_MS * attempt as u64;
+                            info!(
+                                "Rate limited for {}: retrying in {}ms (attempt {}/{})",
+                                perspective_type, delay, attempt, MAX_RATE_LIMIT_RETRIES
+                            );
+                            sleep(Duration::from_millis(delay)).await;
+                            continue;
+                        }
+
+                        return Err(e);
+                    }
+                },
+                Err(_) => {
+                    // Timeout occurred
+                    let err = CoordinatorError::PerspectiveTimeout(
+                        perspective_type,
+                        timeout_duration.as_secs(),
+                    );
+                    last_error = err.to_string();
+
+                    if attempt < MAX_RATE_LIMIT_RETRIES {
+                        warn!(
+                            "Perspective {} timed out: retrying (attempt {}/{})",
+                            perspective_type, attempt, MAX_RATE_LIMIT_RETRIES
+                        );
+                        sleep(Duration::from_millis(RETRY_BASE_DELAY_MS * 2)).await;
+                        continue;
+                    }
+
+                    return Err(DebateError::Timeout(err.to_string()));
+                }
+            }
+        }
+
+        Err(DebateError::Provider(format!(
+            "Perspective '{}' failed after {} retries: {}",
+            perspective_type, MAX_RATE_LIMIT_RETRIES, last_error
+        )))
+    }
+
+    /// Internal perspective execution (without timeout wrapper)
+    async fn run_perspective_internal(
         &self,
         perspective_type: PerspectiveType,
         round: u32,
@@ -189,6 +356,8 @@ impl Coordinator {
         // Process the result
         match call_result {
             Ok(text) => {
+                debug!("{} response received in {:?}", perspective_type, duration);
+
                 let mut resp = PerspectiveResponse::new(perspective_type, text, round);
                 resp.duration_ms = Some(duration.as_millis() as u64);
 
@@ -232,8 +401,63 @@ impl Coordinator {
         }
     }
 
+    /// Run synthesizer with timeout
+    async fn run_synthesizer_with_timeout(
+        &self,
+        timeout_duration: Duration,
+    ) -> DebateResult<DebateVerdict> {
+        match timeout(timeout_duration, self.run_synthesizer_internal()).await {
+            Ok(result) => result,
+            Err(_) => {
+                let err = CoordinatorError::SynthesisTimeout(timeout_duration.as_secs());
+                Err(DebateError::Timeout(err.to_string()))
+            }
+        }
+    }
+
+    /// Generate a verdict from partial responses (when synthesis fails)
+    async fn generate_partial_verdict(&self) -> DebateResult<DebateVerdict> {
+        let session = self.session.read().await;
+
+        // Get available responses as slice
+        let responses = session.turns();
+
+        if responses.is_empty() {
+            return Err(DebateError::InvalidState(
+                "Cannot generate verdict: no responses available".to_string(),
+            ));
+        }
+
+        // Use the most recent advocate response as fallback
+        let responses_for_advocate = session.responses_for(PerspectiveType::Advocate);
+        let advocate_text = responses_for_advocate
+            .last()
+            .map(|r| r.text.clone())
+            .unwrap_or_else(|| {
+                "Debate completed with partial information due to system errors.".to_string()
+            });
+
+        let verdict = DebateVerdict {
+            summary: format!(
+                "Partial verdict based on {} available responses (some perspectives failed)",
+                responses.len()
+            ),
+            recommendation: "Review required - debate completed with incomplete information"
+                .to_string(),
+            confidence: "low".to_string(),
+            agreements: vec![],
+            disagreements: vec![],
+            caveats: vec![],
+            timestamp: chrono::Utc::now(),
+            rounds_completed: session.round(),
+        };
+
+        let _ = advocate_text; // Used in summary if needed
+        Ok(verdict)
+    }
+
     /// Run the synthesizer to produce final verdict
-    async fn run_synthesizer(&self) -> DebateResult<DebateVerdict> {
+    async fn run_synthesizer_internal(&self) -> DebateResult<DebateVerdict> {
         {
             let mut session = self.session.write().await;
             session.advance_phase();
@@ -517,7 +741,6 @@ impl Coordinator {
 }
 
 /// Mock LLM provider for testing
-#[cfg(test)]
 pub mod mock {
     use super::*;
 

@@ -30,11 +30,18 @@
 pub mod coordinator;
 pub mod debate_session;
 pub mod perspectives;
+pub mod provider_adapter;
 pub mod rate_limiter;
 
 pub use coordinator::Coordinator;
-pub use debate_session::{DebateConfig, DebatePhase, DebateSession, PerspectiveResponse};
+pub use debate_session::{
+    DebateConfig, DebatePhase, DebateSession, DebateVerdict, PerspectiveResponse,
+};
 pub use perspectives::{DebateTopic, Perspective, PerspectiveType};
+pub use provider_adapter::{
+    create_adapter_from_multi_provider, JcodeProviderAdapter, ProviderAdapterBuilder, ProviderType,
+    RateLimitConfig, RateLimitStrategy,
+};
 pub use rate_limiter::RateLimiter;
 
 use thiserror::Error;

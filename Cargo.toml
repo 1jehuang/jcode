@@ -137,6 +137,7 @@ proctitle = "0.1"
 
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 jcode-embedding = { path = "crates/jcode-embedding", optional = true }
+indexmap = { version = "2", features = ["serde"] }
 jcode-gateway-types = { path = "crates/jcode-gateway-types" }
 jcode-import-core = { path = "crates/jcode-import-core" }
 

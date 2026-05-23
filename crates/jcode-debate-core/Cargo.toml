@@ -29,10 +29,13 @@ reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
 
 # Futures utilities
-futures = "0.3"
+futures = { version = "0.3", features = ["std"] }
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 
 # Message types
 jcode-message-types = { path = "../jcode-message-types" }
+
+# Provider core for real LLM calls
+jcode-provider-core = { path = "../jcode-provider-core" }
