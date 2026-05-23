@@ -48,7 +48,7 @@ fn focus_title_best_effort(title: &str) {
     let _ = crate::platform::spawn_detached(&mut cmd);
 }
 
-#[cfg(any(not(unix), target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn focus_title_best_effort(_title: &str) {}
 
 pub async fn run_client() -> Result<()> {
