@@ -70,7 +70,19 @@ pub async fn connect_socket(path: &std::path::Path) -> Result<Stream> {
 }
 
 pub(super) async fn socket_has_live_listener(path: &std::path::Path) -> bool {
-    crate::transport::is_socket_path(path) && Stream::connect(path).await.is_ok()
+    #[cfg(windows)]
+    {
+        return crate::transport::is_socket_path(path);
+    }
+
+    #[cfg(not(windows))]
+    {
+        crate::transport::is_socket_path(path)
+            && matches!(
+                tokio::time::timeout(Duration::from_millis(100), Stream::connect(path)).await,
+                Ok(Ok(_))
+            )
+    }
 }
 
 /// Return true if a live server process is listening on the socket path.
@@ -274,12 +286,12 @@ async fn probe_server_ready(path: &std::path::Path, ping_timeout: Duration) -> b
         return false;
     }
 
-    let Ok(mut client) = Client::connect_with_path(path.to_path_buf()).await else {
-        return false;
-    };
-
     matches!(
-        tokio::time::timeout(ping_timeout, client.ping()).await,
+        tokio::time::timeout(ping_timeout, async {
+            let mut client = Client::connect_with_path(path.to_path_buf()).await?;
+            client.ping().await
+        })
+        .await,
         Ok(Ok(true))
     )
 }

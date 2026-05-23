@@ -363,7 +363,16 @@ impl io::Write for SyncStream {
 
 pub fn is_socket_path(path: &Path) -> bool {
     let pipe_name = path_to_pipe_name(path);
-    ClientOptions::new().open(&pipe_name).is_ok()
+    match ClientOptions::new().open(&pipe_name) {
+        Ok(_) => true,
+        Err(err)
+            if err.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+        {
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn remove_socket(path: &Path) {

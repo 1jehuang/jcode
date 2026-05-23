@@ -336,7 +336,7 @@ async fn inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead() {
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
     crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
-    let dead_pid = std::process::id().saturating_add(1_000_000);
+    let dead_pid = dead_child_pid();
     assert!(
         !reload_process_alive(dead_pid),
         "test requires a definitely-dead pid"
@@ -362,6 +362,22 @@ async fn inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead() {
     } else {
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
+}
+
+fn dead_child_pid() -> u32 {
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "exit 0"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        command
+    };
+    let mut child = command.spawn().expect("spawn child");
+    let pid = child.id();
+    child.wait().expect("wait for child");
+    pid
 }
 
 #[tokio::test]

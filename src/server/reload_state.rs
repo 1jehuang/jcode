@@ -123,22 +123,7 @@ pub fn reload_process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-
-    #[cfg(unix)]
-    {
-        let rc = unsafe { libc::kill(pid as i32, 0) };
-        if rc == 0 {
-            return true;
-        }
-        let err = std::io::Error::last_os_error();
-        matches!(err.raw_os_error(), Some(libc::EPERM))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
+    crate::platform::is_process_running(pid)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
