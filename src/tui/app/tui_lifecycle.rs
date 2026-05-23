@@ -59,7 +59,13 @@ impl App {
                 // the queue must remain a wait-until-turn-end queue until the history
                 // bootstrap/Done event proves the remote turn is idle. The remote
                 // post-connect/history/tick paths will dispatch once it is safe.
-                self.set_status_notice("Restored queued follow-up after reload");
+                self.pending_queued_dispatch = true;
+                if self.processing_started.is_none() {
+                    self.processing_started = Some(Instant::now());
+                }
+                if self.status_notice.is_none() {
+                    self.set_status_notice("Restored queued follow-up after reload");
+                }
             } else {
                 self.is_processing = true;
                 self.status = ProcessingStatus::Sending;

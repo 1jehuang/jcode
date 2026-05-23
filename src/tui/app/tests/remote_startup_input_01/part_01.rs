@@ -375,6 +375,8 @@ fn test_remote_startup_done_event_does_not_cancel_pending_judge_launch() {
         );
 
         let mut app = App::new_for_remote(Some(session_id.to_string()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
         assert!(app.pending_queued_dispatch);

@@ -104,7 +104,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.contains("Auto-retrying"))
+            .any(|m| m.role == "system" && m.content.contains("retrying (attempt 1/3"))
     );
 }
 
