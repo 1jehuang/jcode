@@ -3,6 +3,7 @@ pub mod antigravity;
 pub mod azure;
 pub mod claude;
 pub mod codex;
+pub mod codex_config;
 mod commands;
 pub mod copilot;
 pub mod cursor;
