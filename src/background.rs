@@ -923,6 +923,9 @@ impl BackgroundTaskManager {
         task_id: &str,
         graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
+        #[cfg(windows)]
+        let _ = graceful_timeout;
+
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.remove(task_id) {
             task.handle.abort();
