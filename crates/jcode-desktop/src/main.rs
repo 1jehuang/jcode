@@ -4635,8 +4635,22 @@ impl DesktopRelaunch {
     }
 
     fn for_app(&self, app: &DesktopApp, binary: PathBuf) -> Self {
+        self.for_app_with_preferences_path(app, binary, None)
+    }
+
+    fn for_app_with_preferences_path(
+        &self,
+        app: &DesktopApp,
+        binary: PathBuf,
+        preferences_path: Option<&Path>,
+    ) -> Self {
         if let DesktopApp::Workspace(workspace) = app
-            && let Err(error) = desktop_prefs::save_preferences(&workspace.preferences())
+            && let Err(error) = match preferences_path {
+                Some(path) => {
+                    desktop_prefs::save_preferences_to_path(path, &workspace.preferences())
+                }
+                None => desktop_prefs::save_preferences(&workspace.preferences()),
+            }
         {
             desktop_log::error(format_args!(
                 "jcode-desktop: failed to persist workspace state before hot reload: {error:#}"

@@ -14,7 +14,7 @@ pub fn load_preferences() -> Result<Option<DesktopPreferences>> {
     load_preferences_from_path(&path)
 }
 
-fn load_preferences_from_path(path: &Path) -> Result<Option<DesktopPreferences>> {
+pub(super) fn load_preferences_from_path(path: &Path) -> Result<Option<DesktopPreferences>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -50,7 +50,10 @@ pub fn save_preferences(preferences: &DesktopPreferences) -> Result<()> {
     save_preferences_to_path(&path, preferences)
 }
 
-fn save_preferences_to_path(path: &Path, preferences: &DesktopPreferences) -> Result<()> {
+pub(super) fn save_preferences_to_path(
+    path: &Path,
+    preferences: &DesktopPreferences,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
