@@ -828,8 +828,6 @@ pub(crate) async fn spawn_server(
             timeout.as_millis()
         );
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
