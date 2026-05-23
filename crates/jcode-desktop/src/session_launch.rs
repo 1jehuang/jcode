@@ -69,7 +69,7 @@ mod terminal;
 
 use server_io::{
     DrainOutcome, connect_server_with_retry, connect_server_with_retry_path, drain_session_events,
-    ensure_server_running, establish_session_id, read_control_response,
+    ensure_server_running, ensure_server_running_path, establish_session_id, read_control_response,
     read_history_reasoning_effort, read_model_catalog, read_model_changed,
     read_reasoning_effort_changed, subscribe_and_establish_session, subscribe_to_server,
     validate_reload_socket_path, write_json_line,
@@ -906,10 +906,28 @@ fn run_server_session(
     event_tx: Option<DesktopSessionEventSender>,
     command_rx: Receiver<DesktopSessionCommand>,
 ) -> Result<String> {
+    run_server_session_at_path(
+        socket_path(),
+        target_session_id,
+        message,
+        images,
+        event_tx,
+        command_rx,
+    )
+}
+
+fn run_server_session_at_path(
+    mut current_socket_path: PathBuf,
+    target_session_id: Option<&str>,
+    message: &str,
+    images: Vec<(String, String)>,
+    event_tx: Option<DesktopSessionEventSender>,
+    command_rx: Receiver<DesktopSessionCommand>,
+) -> Result<String> {
     send_desktop_status(&event_tx, DesktopSessionStatus::StartingSharedServer);
-    ensure_server_running()?;
+    ensure_server_running_path(&current_socket_path)?;
     send_desktop_status(&event_tx, DesktopSessionStatus::ConnectingSharedServer);
-    let stream = connect_server_with_retry(SERVER_START_TIMEOUT)?;
+    let stream = connect_server_with_retry_path(&current_socket_path, SERVER_START_TIMEOUT)?;
     let mut writer = stream
         .try_clone()
         .context("failed to clone server socket writer")?;
@@ -947,7 +965,6 @@ fn run_server_session(
     )?;
     next_request_id += 1;
 
-    let mut current_socket_path = socket_path();
     loop {
         match drain_session_events(
             reader,

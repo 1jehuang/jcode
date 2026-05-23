@@ -30,6 +30,10 @@ type DesktopServerStream = std::fs::File;
 
 pub(super) fn ensure_server_running() -> Result<()> {
     let path = socket_path();
+    ensure_server_running_path(&path)
+}
+
+pub(super) fn ensure_server_running_path(path: &Path) -> Result<()> {
     if try_connect_server_path(&path).is_ok() {
         return Ok(());
     }
@@ -45,7 +49,7 @@ pub(super) fn ensure_server_running() -> Result<()> {
     }
 
     spawn_jcode_server_with_diagnostics()?;
-    connect_server_with_retry_path(&path, SERVER_START_TIMEOUT).map(|_| ())
+    connect_server_with_retry_path(path, SERVER_START_TIMEOUT).map(|_| ())
 }
 
 fn spawn_jcode_server_with_diagnostics() -> Result<()> {

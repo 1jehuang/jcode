@@ -353,11 +353,6 @@ fn desktop_worker_roundtrips_message_with_fake_windows_named_pipe() -> Result<()
             .unwrap()
             .as_nanos()
     ));
-    let previous_socket = std::env::var_os("JCODE_SOCKET");
-    unsafe {
-        std::env::set_var("JCODE_SOCKET", &socket_path);
-    }
-
     let pipe_name = server_io::path_to_windows_pipe_name(&socket_path);
     let pipe = create_windows_pipe_instance(&pipe_name)?;
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -370,15 +365,14 @@ fn desktop_worker_roundtrips_message_with_fake_windows_named_pipe() -> Result<()
 
     let (event_tx, event_rx) = mpsc::channel();
     let (_command_tx, command_rx) = mpsc::channel();
-    let result = run_server_session(
+    let result = run_server_session_at_path(
+        socket_path,
         None,
         "hello desktop",
         vec![("image/png".to_string(), "abc123".to_string())],
         Some(event_tx),
         command_rx,
     );
-
-    restore_env_var("JCODE_SOCKET", previous_socket);
 
     assert_eq!(result?, "session_desktop_fake");
     let requests = server.join().unwrap()?;
@@ -1285,7 +1279,7 @@ fn read_fake_server_request(reader: &mut BufReader<std::fs::File>) -> Result<Val
     Ok(serde_json::from_str(line.trim())?)
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
     unsafe {
         if let Some(value) = value {
