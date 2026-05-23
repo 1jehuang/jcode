@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{info, warn, error, log};
+use tracing::{log};
 
 pub struct DebugAdapter {
     session_manager: Arc<Mutex<DebugSessionManager>>,

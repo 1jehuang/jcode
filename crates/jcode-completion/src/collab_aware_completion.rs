@@ -123,6 +123,17 @@ impl CollabAwareCompleter {
             cached_files: cache.len(),
         }
     }
+
+    /// Look up symbol details from the incremental index
+    pub async fn lookup_symbol_details(&self, symbol_name: &str) -> Option<SymbolEntry> {
+        let results = self.index.query_symbols(symbol_name, 1).await;
+        results.into_iter().find(|s| s.name == symbol_name)
+    }
+
+    /// Get symbols from index that match a prefix (for collaborative suggestions)
+    pub async fn get_index_symbols_for_prefix(&self, prefix: &str, limit: usize) -> Vec<SymbolEntry> {
+        self.index.query_symbols(prefix, limit).await
+    }
 }
 
 #[derive(Debug, Clone)]

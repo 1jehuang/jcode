@@ -2,7 +2,7 @@
 //! 移植自: Understand-Anything agents/file-analyzer
 //! 确定性解析器: tree-sitter + 正则混合
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;

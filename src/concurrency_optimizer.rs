@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
+use tracing::debug;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
 use tokio::time::timeout;
@@ -132,12 +133,25 @@ impl ConcurrencyController {
         let p99 = self.estimated_p99().await;
 
         // 如果 P99 超过目标，动态缩小并发
-        let _adjusted_max = if p99 > P99_TARGET_MS {
+        let adjusted_max = if p99 > P99_TARGET_MS {
             let current = *self.active.read().await;
             (current as f64 * 0.8) as usize // 降低 20%
         } else {
             MAX_CONCURRENT
         };
+
+        // Log adaptive adjustment for monitoring
+        if adjusted_max < MAX_CONCURRENT {
+            debug!("P99={}ms > target, reducing concurrency to {}", p99, adjusted_max);
+        }
+
+        // Add new permits if we've reduced the max (for graceful degradation)
+        let current_permits = self.semaphore.available_permits();
+        if adjusted_max < current_permits && current_permits > 0 {
+            // We'd need to add permits back if we're increasing, but for reduction
+            // the existing permits will naturally drain
+            debug!("Concurrency adjusted: {} available permits (target max: {})", current_permits, adjusted_max);
+        }
 
         let permit = self.semaphore
             .acquire()
@@ -252,7 +266,14 @@ impl ConcurrencyOptimizer {
         T: Send + 'static,
     {
         let start = Instant::now();
+        let request_id = {
+            let mut id = self.next_id.write().await;
+            let current = *id;
+            *id += 1;
+            current
+        };
         let merge_key = self.compute_merge_key(prompt);
+        debug!("[req#{}] Starting execution (priority={:?})", request_id, priority);
 
         // 1. 尝试请求合并
         {

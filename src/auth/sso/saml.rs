@@ -3,7 +3,7 @@
 use super::{SsoError, SsoProviderConfig, SsoUserInfo};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Sha256, Digest};
 use xmlparser::{Tokenizer, Token};
 use std::collections::HashMap;

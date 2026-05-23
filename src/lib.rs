@@ -135,6 +135,8 @@ pub mod diff_engine;
 pub mod file_refs;
 pub mod bridge;
 pub mod error_types;
+// Error recovery system (Claude Code-inspired)
+pub mod error_recovery;
 pub mod completion;
 pub mod auto_test_loop;
 pub mod git_workflow;
@@ -184,9 +186,31 @@ pub mod distributed;
 pub mod ai_optimization;
 pub mod ab_testing;
 
+// CarpAI Server 基础设施模块（多租户/分布式推理/节点发现/管理API等）
+pub mod enterprise;
+
 // Reasoning & Context (Claude Code 级别)
 pub mod context;
 pub mod reasoning;
+
+// 深度借鉴 Claude Code 的功能模块
+pub mod ultraplan;
+pub mod voice;
+pub mod vim;
+pub mod buddy;
+pub mod memdir;
+
+// 代码知识图谱 (借鉴 Understand-Anything)
+pub mod knowledge_graph;
+
+// 分层记忆系统 (借鉴 TencentDB-Agent-Memory)
+pub mod hierarchical_memory;
+
+// BM25 + RRF 混合检索 (借鉴 TencentDB-Agent-Memory)
+pub mod retrieval;
+
+// MAB 多臂老虎机决策引擎 (借鉴 Fidelity MABWiser)
+pub mod mab;
 
 // NLP & Prototype (Claude Code 深度借鉴)
 pub mod nlp;

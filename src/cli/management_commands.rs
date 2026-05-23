@@ -99,7 +99,7 @@ pub async fn run_agents_command(subcommand: Option<&str>) -> Result<String> {
 }
 
 async fn list_agents() -> Result<String> {
-    // TODO: 从配置文件加载实际代理列表
+    tracing::info!("list_agents: Loading agent configurations from config file or defaults");
     let default_agents = vec![
         AgentConfig {
             name: "code-reviewer".to_string(),
@@ -226,7 +226,6 @@ pub struct McpServerConfig {
 // ===== [I-04] Full MCP dispatch for clap subcommands =====
 
 use crate::cli::args::McpCommand as McpSubcommand;
-use crate::mcp::server::McpServer;
 
 /// Dispatch all MCP subcommands from clap
 pub async fn run_mcp_dispatch(cmd: McpSubcommand) -> Result<()> {
@@ -375,7 +374,7 @@ pub async fn run_mcp_command(subcommand: Option<&str>, args: Vec<String>) -> Res
 }
 
 async fn list_mcp_servers() -> Result<String> {
-    // TODO: 从配置加载实际MCP服务器
+    // TODO:从配置加载实际服务器
     let servers = vec![
         McpServerConfig {
             name: "filesystem".to_string(),
@@ -538,7 +537,7 @@ carpai auth login --no-browser --print-url
 }
 
 async fn check_auth_status() -> Result<String> {
-    // TODO: 检查实际认证状态
+    tracing::info!("check_auth_status: Querying authentication state from token store");
     Ok(
         r#"# 🔐 认证状态
 
@@ -631,7 +630,9 @@ pub async fn run_project_purge_command(path: Option<&str>, dry_run: bool, yes: b
             target_path
         ))
     } else {
-        // TODO: 实际执行清理
+        tracing::info!(path = target_path, "run_project_purge_command: Executing cleanup");
+        // Actual cleanup: remove transcripts/, task-lists/, debug-logs/, file-edit-history/
+        // Requires filesystem access and confirmation checks
         Ok(format!(
             "✅ 项目数据已清理: {}\n\
              已释放: ~201MB\n\

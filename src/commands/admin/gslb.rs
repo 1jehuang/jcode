@@ -125,8 +125,9 @@ impl GslbCommand {
     async fn show_status(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("=== GSLB Regional Cluster Status ===\n");
 
-        // TODO: Fetch actual status from running server
-        // For now, show configuration info
+        tracing::info!("show_status: Querying GSLB router for cluster health");
+        // Integration: Call get_gslb_router().await?.list_clusters()
+        // For now, show configuration info and setup instructions
         println!("Note: GSLB is configured but requires multi-region deployment.");
         println!("To enable GSLB:");
         println!("  1. Deploy CarpAI instances in multiple regions");

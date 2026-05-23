@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::inference_optimizer::{
@@ -57,10 +57,31 @@ pub fn create_batch_processor(kv_cache: Arc<KvCacheManager>) -> BatchProcessor {
 /// 启动推理任务的包装函数
 /// 替代原始的 `CpuEngine::start()`
 pub async fn start_inference_with_optimizations(
-    _model_path: &str,
-    _ctx_size: u32,
-    _threads: u32,
+    model_path: &str,
+    ctx_size: u32,
+    threads: u32,
 ) -> anyhow::Result<()> {
+    // Log model configuration for debugging and monitoring
+    tracing::info!("Model configuration:");
+    tracing::info!("  Model path: {}", model_path);
+    tracing::info!("  Context size: {} tokens", ctx_size);
+    tracing::info!("  CPU threads: {}", threads);
+
+    // Validate context size is reasonable
+    if ctx_size < 512 {
+        tracing::warn!("Context size {} is very small, may impact quality", ctx_size);
+    } else if ctx_size > 128000 {
+        tracing::warn!("Context size {} is very large, may require significant memory", ctx_size);
+    }
+
+    // Recommend thread count based on CPU cores
+    let num_cpus = num_cpus::get();
+    if threads == 0 {
+        tracing::info!("Auto-detecting thread count: {} logical CPUs available", num_cpus);
+    } else if threads > num_cpus as u32 * 2 {
+        tracing::warn!("Thread count {} exceeds 2x CPU cores ({}), may cause contention", threads, num_cpus);
+    }
+
     if !is_inference_enabled() {
         tracing::info!("Inference optimizations disabled, starting vanilla engine");
         return Ok(());

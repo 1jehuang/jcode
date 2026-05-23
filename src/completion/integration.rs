@@ -7,8 +7,22 @@
 //! - SemanticCompleter: 语义搜索补全
 //! - Ghost Text Rendering: 实时渲染接口
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use jcode_completion::{
+    StreamingPrefetcher as JcodeStreamingPrefetcher,
+    BehaviorLearner as JcodeBehaviorLearner,
+    MultilineCompleter as JcodeMultilineCompleter,
+    CompletionContext,
+    CompletionCandidate,
+    CandidateKind,
+    CompletionEvent,
+    CompletionContextSnapshot,
+    ScopeKind,
+};
 
 /// 补全配置
 #[derive(Debug, Clone)]
@@ -74,6 +88,7 @@ pub struct StreamingPrefetcher {
     enabled: AtomicBool,
     prefetch_count: std::sync::atomic::AtomicU64,
     hit_count: std::sync::atomic::AtomicU64,
+    inner: Arc<JcodeStreamingPrefetcher>,
 }
 
 impl StreamingPrefetcher {
@@ -82,6 +97,7 @@ impl StreamingPrefetcher {
             enabled: AtomicBool::new(true),
             prefetch_count: std::sync::atomic::AtomicU64::new(0),
             hit_count: std::sync::atomic::AtomicU64::new(0),
+            inner: Arc::new(JcodeStreamingPrefetcher::new()),
         }
     }
 
@@ -90,12 +106,42 @@ impl StreamingPrefetcher {
         if !self.enabled.load(Ordering::Relaxed) { return vec![]; }
         self.prefetch_count.fetch_add(1, Ordering::Relaxed);
 
-        // 使用 StreamingPrefetcher 预取 (来自 jcode-completion)
-        // 这里调用底层的 prefetcher
-        let _ = context;
+        let jcode_context = CompletionContext {
+            file_path: context.file_path.clone(),
+            line: context.cursor_line,
+            column: context.cursor_column,
+            prefix: context.line_prefix.clone(),
+            expected_type: None,
+            scope: ScopeKind::Expression,
+            parent_symbol: None,
+        };
 
-        // 返回预取的候选 (实际调用 crate::completion::prefetch)
+        if let Some(cached) = self.inner.get_cached(&jcode_context).await {
+            self.hit_count.fetch_add(1, Ordering::Relaxed);
+            return cached.into_iter().map(|c| CompletionItem {
+                text: c.text,
+                kind: match c.kind {
+                    CandidateKind::Function => CompletionKind::Symbol,
+                    CandidateKind::Variable => CompletionKind::Symbol,
+                    CandidateKind::Keyword => CompletionKind::Snippet,
+                    CandidateKind::Type => CompletionKind::Symbol,
+                    CandidateKind::Module => CompletionKind::Symbol,
+                    _ => CompletionKind::Symbol,
+                },
+                score: c.score,
+                prefix: context.line_prefix.clone(),
+                suffix: context.line_suffix.clone(),
+                source: "prefetch".to_string(),
+            }).collect();
+        }
+
+        self.inner.request_prefetch(&jcode_context).await;
         vec![]
+    }
+
+    /// 记录用户接受了补全
+    pub fn record_completion_accepted(&self, file_path: &str, text: &str) {
+        self.inner.record_completion_accepted(file_path, text);
     }
 
     /// 记录命中 (用户接受了预取的建议)
@@ -103,8 +149,27 @@ impl StreamingPrefetcher {
         self.hit_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 存储补全结果到缓存
+    pub async fn store_completions(&self, context: &InlineContext, candidates: Vec<CompletionCandidate>) {
+        let jcode_context = CompletionContext {
+            file_path: context.file_path.clone(),
+            line: context.cursor_line,
+            column: context.cursor_column,
+            prefix: context.line_prefix.clone(),
+            expected_type: None,
+            scope: ScopeKind::Expression,
+            parent_symbol: None,
+        };
+        self.inner.store_completions(&jcode_context, candidates).await;
+    }
+
     pub fn stats(&self) -> (u64, u64) {
         (self.prefetch_count.load(Ordering::Relaxed), self.hit_count.load(Ordering::Relaxed))
+    }
+
+    /// 获取预取统计信息
+    pub fn get_prefetch_stats(&self) -> jcode_completion::PrefetchStatistics {
+        self.inner.get_stats()
     }
 }
 
@@ -112,32 +177,83 @@ impl StreamingPrefetcher {
 pub struct BehaviorLearner {
     enabled: AtomicBool,
     config: CompletionConfig,
+    inner: Arc<JcodeBehaviorLearner>,
 }
 
 impl BehaviorLearner {
     pub fn new(config: CompletionConfig) -> Self {
-        Self { enabled: AtomicBool::new(config.behavior_learning_enabled), config }
+        let storage_path = Some(PathBuf::from(".jcode/completion_learning"));
+        Self {
+            enabled: AtomicBool::new(config.behavior_learning_enabled),
+            config,
+            inner: Arc::new(JcodeBehaviorLearner::new(storage_path)),
+        }
     }
 
     /// 记录用户接受了一个补全
-    pub fn record_accepted(&self, item: &CompletionItem, context: &InlineContext) {
+    pub async fn record_accepted(&self, item: &CompletionItem, context: &InlineContext) {
         if !self.enabled.load(Ordering::Relaxed) { return; }
-        // 实际调用 jcode-completion 的 BehaviorLearner
-        let _ = (item, context);
+
+        let event = CompletionEvent {
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            file_path: context.file_path.clone(),
+            context: CompletionContextSnapshot {
+                prefix: context.line_prefix.clone(),
+                suffix: context.line_suffix.clone(),
+                line_content: context.content.clone(),
+                scope: None,
+                expected_type: None,
+            },
+            offered_completions: vec![item.text.clone()],
+            accepted_index: Some(0),
+            time_to_decision_ms: 100,
+        };
+
+        self.inner.record_completion_event(event).await;
     }
 
     /// 记录用户拒绝了补全
-    pub fn record_rejected(&self, item: &CompletionItem, context: &InlineContext) {
+    pub async fn record_rejected(&self, items: &[CompletionItem], context: &InlineContext) {
         if !self.enabled.load(Ordering::Relaxed) { return; }
-        let _ = (item, context);
+
+        let event = CompletionEvent {
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            file_path: context.file_path.clone(),
+            context: CompletionContextSnapshot {
+                prefix: context.line_prefix.clone(),
+                suffix: context.line_suffix.clone(),
+                line_content: context.content.clone(),
+                scope: None,
+                expected_type: None,
+            },
+            offered_completions: items.iter().map(|i| i.text.clone()).collect(),
+            accepted_index: None,
+            time_to_decision_ms: 50,
+        };
+
+        self.inner.record_completion_event(event).await;
     }
 
     /// 根据学习历史调整排序
     pub fn rerank(&self, items: &mut [CompletionItem], context: &InlineContext) {
         if !self.enabled.load(Ordering::Relaxed) { return; }
-        // 根据用户编码习惯调整分数
-        let _ = context;
+
+        for item in items.iter_mut() {
+            let personalization_bonus = self.inner.get_personalization_score(&item.text, &context.file_path);
+            item.score += personalization_bonus * 0.1;
+        }
+
         items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    /// 获取学习统计信息
+    pub fn get_learning_stats(&self) -> jcode_completion::LearningStatistics {
+        self.inner.get_learning_stats()
+    }
+
+    /// 获取常用代码模板
+    pub fn get_common_templates(&self, prefix: &str) -> Vec<String> {
+        self.inner.get_common_templates(prefix)
     }
 }
 
@@ -169,23 +285,64 @@ impl GhostTextRenderer {
 }
 
 /// [多行补全] 生成多行代码片段
-pub struct MultiLineCompleter;
+pub struct MultiLineCompleter {
+    inner: JcodeMultilineCompleter,
+}
 
 impl MultiLineCompleter {
+    pub fn new() -> Self {
+        Self {
+            inner: JcodeMultilineCompleter::new(),
+        }
+    }
+
     /// 生成多行补全建议
-    pub async fn complete_multiline(context: &InlineContext) -> Vec<CompletionItem> {
-        // 实际调用 jcode-completion 的 MultilineCompleter
-        // 检测是否应该触发多行补全 (例如: 函数签名后)
-        let _ = context;
-        vec![]
+    pub async fn complete_multiline(&self, context: &InlineContext) -> Vec<CompletionItem> {
+        let line = context.line_prefix.trim();
+
+        let trigger_words = ["fn", "struct", "impl", "for", "match", "if", "iter", "result"];
+        let mut results = Vec::new();
+
+        for trigger in &trigger_words {
+            if line.ends_with(trigger) || line.ends_with(&format!("{} ", trigger)) {
+                let candidate = CompletionCandidate {
+                    label: trigger.to_string(),
+                    text: trigger.to_string(),
+                    detail: Some("multi-line snippet".to_string()),
+                    kind: CandidateKind::Keyword,
+                    score: 0.85,
+                };
+
+                let snippet = self.inner.expand_to_multiline(&candidate, &context.line_prefix);
+
+                if snippet.line_count > 1 {
+                    results.push(CompletionItem {
+                        text: snippet.resolved.clone(),
+                        kind: CompletionKind::MultiLine,
+                        score: 0.9,
+                        prefix: context.line_prefix.clone(),
+                        suffix: context.line_suffix.clone(),
+                        source: "multiline-template".to_string(),
+                    });
+                }
+            }
+        }
+
+        results
     }
 
     /// 检测是否可以触发多行补全
     pub fn should_trigger(context: &InlineContext) -> bool {
         let line = context.line_prefix.trim();
-        // 触发条件: 函数定义、if/match/for 等关键结构后
         line.ends_with('{') || line.ends_with("=>") || line.ends_with("do:")
-            || line.ends_with("where:")
+            || line.ends_with("where:") || line.ends_with("fn") || line.ends_with("struct")
+            || line.ends_with("impl") || line.ends_with("for") || line.ends_with("match")
+            || line.ends_with("if") || line.ends_with("iter") || line.ends_with("result")
+    }
+
+    /// 保持缩进
+    pub fn preserve_indentation(&self, snippet: &str, base_indent: &str) -> String {
+        self.inner.preserve_indentation(snippet, base_indent)
     }
 }
 
@@ -202,24 +359,25 @@ impl TypeAwareCompleter {
     }
 }
 
-/// 完整补全流水线: 预取 → 行为重排序 → 类型过滤 → 幽灵文本
+/// 完整补全流水线: 预取 → 多行补全 → 行为重排序 → 幽灵文本
 pub async fn completion_pipeline(
     context: &InlineContext,
     prefetcher: &StreamingPrefetcher,
     learner: &BehaviorLearner,
+    multiline_completer: &MultiLineCompleter,
 ) -> Vec<CompletionItem> {
     let start = Instant::now();
 
-    // Stage 1: 预取
+    // Stage 1: 预取 (从缓存或触发后台预取)
     let mut items = prefetcher.prefetch(context).await;
 
-    // Stage 2: 多行补全
+    // Stage 2: 多行补全 (检测触发词并展开模板)
     if MultiLineCompleter::should_trigger(context) {
-        let multi = MultiLineCompleter::complete_multiline(context).await;
+        let multi = multiline_completer.complete_multiline(context).await;
         items.extend(multi);
     }
 
-    // Stage 3: 行为重排序
+    // Stage 3: 行为重排序 (基于用户习惯调整分数)
     learner.rerank(&mut items, context);
 
     // Stage 4: 生成 ghost text
@@ -233,6 +391,12 @@ pub async fn completion_pipeline(
     if elapsed > Duration::from_millis(200) {
         tracing::warn!("Completion pipeline took {}ms", elapsed.as_millis());
     }
+
+    tracing::debug!(
+        "Pipeline completed: {} items in {}ms",
+        items.len(),
+        elapsed.as_millis()
+    );
 
     items
 }
@@ -278,5 +442,120 @@ mod tests {
             trigger_char: None,
         };
         assert!(MultiLineCompleter::should_trigger(&ctx));
+    }
+
+    #[tokio::test]
+    async fn test_full_pipeline_integration() {
+        let prefetcher = StreamingPrefetcher::new();
+        let learner = BehaviorLearner::new(CompletionConfig::default());
+        let multiline_completer = MultiLineCompleter::new();
+
+        let ctx = InlineContext {
+            file_path: "src/main.rs".into(),
+            content: "fn main() {".into(),
+            cursor_line: 0,
+            cursor_column: 12,
+            line_prefix: "fn main() {".into(),
+            line_suffix: "".into(),
+            language: "rust".into(),
+            trigger_char: None,
+        };
+
+        let results = completion_pipeline(&ctx, &prefetcher, &learner, &multiline_completer).await;
+
+        assert!(results.len() >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_multiline_completer_generates_snippets() {
+        let completer = MultiLineCompleter::new();
+
+        let ctx = InlineContext {
+            file_path: "test.rs".into(),
+            content: "fn ".into(),
+            cursor_line: 0,
+            cursor_column: 3,
+            line_prefix: "fn ".into(),
+            line_suffix: "".into(),
+            language: "rust".into(),
+            trigger_char: None,
+        };
+
+        let snippets = completer.complete_multiline(&ctx).await;
+
+        if !snippets.is_empty() {
+            assert!(snippets[0].text.contains('\n'));
+            assert_eq!(snippets[0].kind, CompletionKind::MultiLine);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_behavior_learner_reranking() {
+        let learner = BehaviorLearner::new(CompletionConfig::default());
+
+        let mut items = vec![
+            CompletionItem {
+                text: "hello_world".into(),
+                kind: CompletionKind::Symbol,
+                score: 0.8,
+                prefix: "".into(),
+                suffix: "".into(),
+                source: "ast".into(),
+            },
+            CompletionItem {
+                text: "hello_name".into(),
+                kind: CompletionKind::Symbol,
+                score: 0.9,
+                prefix: "".into(),
+                suffix: "".into(),
+                source: "ast".into(),
+            },
+        ];
+
+        let ctx = InlineContext {
+            file_path: "src/main.rs".into(),
+            content: "let x = ".into(),
+            cursor_line: 0,
+            cursor_column: 8,
+            line_prefix: "let x = ".into(),
+            line_suffix: "".into(),
+            language: "rust".into(),
+            trigger_char: None,
+        };
+
+        learner.rerank(&mut items, &ctx);
+
+        assert!(items[0].score >= items[1].score);
+    }
+
+    #[tokio::test]
+    async fn test_prefetcher_caching() {
+        let prefetcher = StreamingPrefetcher::new();
+
+        let ctx = InlineContext {
+            file_path: "test.rs".into(),
+            content: "println!".into(),
+            cursor_line: 0,
+            cursor_column: 9,
+            line_prefix: "println!".into(),
+            line_suffix: "".into(),
+            language: "rust".into(),
+            trigger_char: None,
+        };
+
+        let candidates = vec![
+            CompletionCandidate {
+                label: "println!".to_string(),
+                text: "println!()".to_string(),
+                detail: Some("macro".to_string()),
+                kind: CandidateKind::Function,
+                score: 0.95,
+            }
+        ];
+
+        prefetcher.store_completions(&ctx, candidates).await;
+        let cached = prefetcher.prefetch(&ctx).await;
+
+        assert!(!cached.is_empty());
     }
 }

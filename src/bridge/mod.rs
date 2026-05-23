@@ -43,6 +43,7 @@ pub use session_manager::{
 };
 
 use std::sync::Arc;
+use chrono::Utc;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -77,22 +78,36 @@ impl BridgeRuntime {
     /// 启动 Bridge 服务
     pub async fn start(&self) -> Result<(), anyhow::Error> {
         info!("[Bridge] Starting WebSocket Bridge runtime...");
-        
+
+        let _ = self.event_tx.send(BridgeEvent {
+            event_type: BridgeEventType::RuntimeStarted,
+            timestamp: Utc::now(),
+            connection_id: None,
+            data: serde_json::json!({"config": self.config.clone()}),
+        });
+
         self.server.start().await?;
         self.message_router.start().await?;
-        
+
         info!("[Bridge] Bridge runtime started successfully");
         Ok(())
     }
 
     /// 停止 Bridge 服务
     pub async fn stop(&self) -> Result<(), anyhow::Error> {
-        info!("[Bridge] Stopping WebSocket Bridge...");
-        
+        info!("[Bridge] Stopping Bridge...");
+
+        let _ = self.event_tx.send(BridgeEvent {
+            event_type: BridgeEventType::RuntimeStopped,
+            timestamp: Utc::now(),
+            connection_id: None,
+            data: serde_json::json!({}),
+        });
+
         self.server.stop().await?;
         self.message_router.stop().await?;
         self.session_mgr.shutdown_all().await?;
-        
+
         info!("[Bridge] Bridge stopped");
         Ok(())
     }

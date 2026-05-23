@@ -9,7 +9,7 @@
 //! - 离线编辑支持
 //! - 向量时钟版本控制
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};

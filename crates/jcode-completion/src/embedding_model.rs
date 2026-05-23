@@ -32,6 +32,8 @@ pub struct EmbeddingModelConfig {
 
 impl Default for EmbeddingModelConfig {
     fn default() -> Self {
+        let default_path = PathBuf::from("auto");
+        debug!("Using default embedding model config with path: {:?}", default_path);
         Self {
             model_path: "auto".to_string(),
             max_length: 512,
@@ -68,6 +70,14 @@ pub struct CandleEmbeddingModel {
 impl CandleEmbeddingModel {
     pub async fn new(config: EmbeddingModelConfig) -> Result<Self> {
         info!("Initializing Candle embedding model: {:?}", config);
+
+        // Validate model path exists
+        let model_path = PathBuf::from(&config.model_path);
+        if config.model_path != "auto" && !model_path.exists() {
+            debug!("Model path does not exist: {}, will attempt download", config.model_path);
+        } else {
+            debug!("Using model path: {:?}", model_path);
+        }
 
         // In production implementation:
         // 1. Load tokenizer from model path

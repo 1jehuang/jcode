@@ -956,7 +956,6 @@ dependencies = [
  "matchit 0.8.4",
  "memchr",
  "mime",
- "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -1471,6 +1470,7 @@ dependencies = [
 name = "carpai"
 version = "0.12.0"
 dependencies = [
+ "aes-gcm",
  "agentgrep",
  "aho-corasick 1.1.4",
  "anyhow",
@@ -1488,10 +1488,12 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "bytes",
+ "carpai-sdk",
  "chrono",
  "clap",
  "cron",
  "crossterm",
+ "dashmap 6.2.1",
  "dirs 5.0.1",
  "flate2",
  "futures",
@@ -1505,6 +1507,7 @@ dependencies = [
  "image",
  "jcode-agent-runtime",
  "jcode-ambient-types",
+ "jcode-auth",
  "jcode-auth-types",
  "jcode-azure-auth",
  "jcode-background-types",
@@ -1515,10 +1518,12 @@ dependencies = [
  "jcode-completion",
  "jcode-config-types",
  "jcode-core",
+ "jcode-cpu-inference",
  "jcode-cross-file-repair",
  "jcode-embedding",
  "jcode-gateway-types",
  "jcode-import-core",
+ "jcode-llm",
  "jcode-lock-manager",
  "jcode-lsp",
  "jcode-mcp-advanced",
@@ -1565,15 +1570,18 @@ dependencies = [
  "libc",
  "lru 0.12.5",
  "lsp-types 0.95.1",
+ "mdns-sd",
  "num_cpus",
  "open",
  "parking_lot",
  "proctitle",
+ "prometheus",
  "prometheus-client",
  "prost 0.12.6",
  "prost-types 0.12.6",
  "qrcode",
  "rand 0.9.4",
+ "rand_distr 0.5.1",
  "ratatui",
  "regex",
  "reqwest 0.12.28",
@@ -1583,6 +1591,8 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "similar",
+ "sqlx",
+ "sys-info",
  "sysinfo",
  "tar",
  "tempfile",
@@ -1596,6 +1606,7 @@ dependencies = [
  "toml",
  "tonic 0.11.0",
  "tonic-build 0.11.0",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -5031,50 +5042,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jcode-enterprise-server"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "base64 0.22.1",
- "bytes",
- "carpai-codebase",
- "chrono",
- "dashmap 6.2.1",
- "futures",
- "hex",
- "hmac 0.12.1",
- "hyper 1.9.0",
- "indexmap 2.14.0",
- "jcode-cpu-inference",
- "jcode-llm",
- "jcode-unified-scheduler",
- "mdns-sd",
- "num_cpus",
- "parking_lot",
- "prometheus",
- "rand 0.9.4",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "sqlx",
- "sys-info",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "toml",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "jcode-gateway-types"
 version = "0.1.0"
 dependencies = [
@@ -6581,23 +6548,6 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "multer"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
-dependencies = [
- "bytes",
- "encoding_rs",
- "futures-util",
- "http 1.4.0",
- "httparse",
- "memchr",
- "mime",
- "spin",
- "version_check",
 ]
 
 [[package]]
@@ -10943,7 +10893,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
  "async-compression",
- "base64 0.22.1",
  "bitflags 2.11.1",
  "bytes",
  "futures-core",
@@ -10951,7 +10900,6 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "mime",
  "pin-project-lite",
  "tokio",
  "tokio-util",

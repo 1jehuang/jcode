@@ -6,7 +6,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 
 // Include generated protobuf code
 pub mod proto {

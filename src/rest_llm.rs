@@ -6,7 +6,6 @@
 //!   3. POST /v1/completions (FIM) → Fill-in-the-Middle 补全
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::auto_fallback::{AutoFallbackRouter, InferenceTarget};
 

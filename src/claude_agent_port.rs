@@ -9,11 +9,8 @@
 //! 4. 结构化错误注入 + Memory Hint (messages.ts:176-221)
 //! 5. Auto-Retry via Hook (toolExecution.ts:1073-1101)
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 // ========================================================================
@@ -447,7 +444,7 @@ impl RetryHook {
     }
 
     /// 执行自动重试 (带延迟)
-    pub async fn auto_retry<F, T>(&self, attempt: u32, f: F) -> Result<T, String>
+    pub async fn auto_retry<F, T>(&self, _attempt: u32, f: F) -> Result<T, String>
     where
         F: Fn() -> futures::future::BoxFuture<'static, Result<T, String>>,
     {

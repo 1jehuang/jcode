@@ -7,7 +7,7 @@
 //! - Code Pattern Recognition: 代码模式识别 (识别常见模式: CRUD, Builder, Factory)
 
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;

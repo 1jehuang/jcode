@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 
 /// 版本向量

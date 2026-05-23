@@ -12,7 +12,6 @@
 //!   - jcode-provider-core/failover.rs (降级策略)
 //!   - jcode-agent-advanced/model_fallback.rs (降级链)
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;

@@ -3,11 +3,10 @@
 //! 将 TokenCacheOptimizer 集成到提供的 Anthropic API 调用流程中。
 //! 挂载点: src/provider/anthropic.rs 的 complete_split() 和 stream_response()
 
-use crate::cache_optimizer::{TokenCacheOptimizer, CacheOptimizerConfig, CacheStats};
+use crate::cache_optimizer::{TokenCacheOptimizer, CacheOptimizerConfig};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::RwLock;
 
 /// 全局缓存优化器实例
 static CACHE_OPTIMIZER: std::sync::OnceLock<Arc<TokenCacheOptimizer>> = std::sync::OnceLock::new();

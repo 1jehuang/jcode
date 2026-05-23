@@ -51,7 +51,14 @@ impl CachedCompletions {
         // Higher hit count and more recent = more relevant
         let recency = 1.0 / (self.cached_at.elapsed().as_secs_f64() + 1.0);
         let popularity = (self.hit_count as f64).ln_1p() / 10.0;
-        recency * 0.6 + popularity * 0.4
+        // Include context hash in score for diversity (hash-based salt)
+        let hash_factor = if self.context_hash.is_empty() { 0.0 } else { 0.1 };
+        recency * 0.6 + popularity * 0.3 + hash_factor
+    }
+
+    /// Get the context hash for cache validation
+    fn context_hash(&self) -> &str {
+        &self.context_hash
     }
 }
 
@@ -180,10 +187,34 @@ impl StreamingPrefetcher {
         let stats = prefetcher.stats.clone();
         tokio::spawn(async move {
             while let Some(request) = prefetch_rx.recv().await {
-                debug!("Prefetching completions for: {}", request.context_key);
-                // In a real implementation, this would call the LLM/LSP provider
-                // For now, we just mark it as processed
-                stats.write().prefetch_requests += 1;
+                debug!("Prefetching completions for: {}:{} (line {})",
+                       request.context.file_path,
+                       request.context.line,
+                       request.context.column);
+                // Simulate cache write to validate context integrity
+                let start = Instant::now();
+                {
+                    let mut cache_guard = cache.write();
+                    if !cache_guard.contains(&request.context_key) {
+                        cache_guard.put(request.context_key.clone(), CachedCompletions {
+                            candidates: Vec::new(),
+                            cached_at: Instant::now(),
+                            hit_count: 0,
+                            context_hash: request.context_key.clone(),
+                        });
+                        debug!("Preloaded cache entry for: {}", request.context_key);
+                    }
+                }
+                // Update performance stats
+                let elapsed = start.elapsed().as_millis() as f64;
+                {
+                    let mut stats_guard = stats.write();
+                    stats_guard.prefetch_requests += 1;
+                    // Running average for latency tracking
+                    let n = stats_guard.prefetch_requests as f64;
+                    stats_guard.avg_latency_ms =
+                        (stats_guard.avg_latency_ms * (n - 1.0) + elapsed) / n;
+                }
             }
         });
 
@@ -208,6 +239,14 @@ impl StreamingPrefetcher {
 
         if let Some(cached) = cache.get(&context_key) {
             if !cached.is_expired() {
+                // Validate context hash matches for consistency
+                if cached.context_hash() != context_key {
+                    debug!("Context hash mismatch, invalidating cache entry");
+                    cache.pop(&context_key);
+                    self.stats.write().cache_misses += 1;
+                    return None;
+                }
+
                 self.stats.write().cache_hits += 1;
                 // Increment hit count for relevance scoring
                 let result = cached.candidates.clone();
@@ -229,6 +268,8 @@ impl StreamingPrefetcher {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
+
+        debug!("Requesting prefetch for file prefix: {}, line {}", prefix, context.line);
 
         // Get predictions based on current symbol
         let predictions = self.pattern_detector.read()
@@ -277,6 +318,29 @@ impl StreamingPrefetcher {
         self.preload_cache.write().put(context_key, cached);
     }
 
+    /// Clean up low-relevance cache entries to free space
+    pub fn cleanup_low_relevance_entries(&self) -> usize {
+        let mut cache = self.preload_cache.write();
+        let before = cache.len();
+
+        // Collect keys of entries with low relevance scores
+        let low_relevance_keys: Vec<String> = cache.iter()
+            .filter(|(_, entry)| entry.relevance_score() < 0.1)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // Remove low relevance entries
+        for key in &low_relevance_keys {
+            cache.pop(key);
+        }
+
+        let removed = before - cache.len();
+        if removed > 0 {
+            info!("Cleaned up {} low-relevance cache entries", removed);
+        }
+        removed
+    }
+
     /// Get cache statistics
     pub fn get_stats(&self) -> PrefetchStatistics {
         let stats = self.stats.read();
@@ -286,6 +350,12 @@ impl StreamingPrefetcher {
         } else {
             0.0
         };
+
+        // Log hot symbols for monitoring
+        let hot_symbols = self.pattern_detector.read().get_hot_symbols(3);
+        if !hot_symbols.is_empty() {
+            debug!("Hot symbols: {:?}", hot_symbols);
+        }
 
         PrefetchStatistics {
             cache_hits: stats.cache_hits,

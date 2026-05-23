@@ -26,7 +26,7 @@ pub struct CompletionRequest {
 }
 
 impl CompletionRequest {
-    fn new(input: impl Into<String>, cursor_position: usize) -> Self {
+    pub fn new(input: impl Into<String>, cursor_position: usize) -> Self {
         Self {
             input: input.into(),
             cursor_position,
@@ -56,7 +56,7 @@ impl CompletionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResult {
     /// 补全建议列表
-    suggestions: Vec<CompletionSuggestion>,
+    pub suggestions: Vec<CompletionSuggestion>,
     /// 原始请求的前缀
     prefix: String,
     /// 是否有更多结果（分页）
@@ -99,7 +99,7 @@ impl SmartCompleter {
     }
 
     /// 执行智能补全
-    fn complete(&self, request: &CompletionRequest) -> CompletionResult {
+    pub fn complete(&self, request: &CompletionRequest) -> CompletionResult {
         let word = request.word_before_cursor().to_string();
         if word.is_empty() {
             return CompletionResult::empty(word);

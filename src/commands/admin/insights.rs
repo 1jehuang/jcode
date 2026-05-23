@@ -103,8 +103,9 @@ impl Command for InsightsCommand {
 }
 
 async fn collect_insights(time_range: &str) -> Result<SessionInsights> {
-    // TODO: Query actual session database/metrics
-    // Placeholder implementation
+    tracing::info!(time_range, "collect_insights: Querying session database/metrics store");
+    // Integration: Query Prometheus, InfluxDB, or SQLite session store
+    // For now, return placeholder data; replace with real queries when metrics backend is wired
 
     Ok(SessionInsights {
         time_range: time_range.to_string(),

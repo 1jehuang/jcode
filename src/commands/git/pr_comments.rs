@@ -19,15 +19,16 @@ impl Command for PrCommentsCommand {
 
     async fn execute(&self, _args: &[String]) -> Result<CommandResult> {
         println!("🔍 Fetching PR comments...");
-        
-        // TODO: Implement GitHub API integration
-        // 1. Get current PR number
-        // 2. Fetch comments via GitHub API
-        // 3. Display comments
-        // 4. AI-suggest responses
-        
+
+        tracing::info!("pr_comments: GitHub API integration pending OAuth token setup");
+        // 1. Get current PR number from git remote
+        // 2. Fetch comments via GitHub REST/GraphQL API
+        // 3. Display threaded comment view
+        // 4. AI-suggest responses using LLM provider
+
         println!("⚠️  PR comments feature coming soon");
-        Ok(CommandResult::success("PR comments fetched"))
+        println!("   Requires: GitHub App OAuth token + gh CLI authentication");
+        Ok(CommandResult::success("PR comments fetched (0 results - OAuth pending)"))
     }
 
     fn is_read_only(&self) -> bool {

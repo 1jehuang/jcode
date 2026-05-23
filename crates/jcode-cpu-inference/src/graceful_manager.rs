@@ -202,7 +202,7 @@ impl SnapshotManager {
                 if path.extension().and_then(|s| s.to_str()) == Some("bin") {
                     let json_path = path.with_extension("json");
                     if json_path.exists() {
-                        let content = std::fs::read_to_string(json_path).ok();
+                        let content = std::fs::read_to_string(&json_path).ok();
                         if let Some(content) = content {
                             if let Ok(metadata) = serde_json::from_str::<SnapshotMetadata>(&content) {
                                 if metadata.timestamp < cutoff {
@@ -267,19 +267,19 @@ impl SnapshotManager {
 
         match client.get(&api_url).timeout(Duration::from_secs(10)).send().await {
             Ok(response) if response.status().is_success() => {
-                // Save binary data
+                let seq_len_header = response.headers().get("x-sequence-length").cloned();
+                let layers_header = response.headers().get("x-layer-count").cloned();
                 let bytes = response.bytes().await?;
                 size_bytes = bytes.len();
                 std::fs::write(&bin_path, &bytes)?;
                 info!("Saved KV Cache binary data: {} bytes", size_bytes);
 
-                // Extract metadata from response headers if available
-                if let Some(seq_len) = response.headers().get("x-sequence-length") {
+                if let Some(seq_len) = seq_len_header {
                     if let Ok(len) = seq_len.to_str() {
                         sequence_length = len.parse().unwrap_or(0);
                     }
                 }
-                if let Some(layers) = response.headers().get("x-layer-count") {
+                if let Some(layers) = layers_header {
                     if let Ok(count) = layers.to_str() {
                         layer_count = count.parse().unwrap_or(0);
                     }
@@ -710,7 +710,7 @@ impl GracefulManager {
             instances
                 .entry(model_name.to_string())
                 .or_insert_with(Vec::new)
-                .push(new_arc);
+                .push(new_arc.clone());
         }
 
         // Step 2: Wait for new instance to be ready

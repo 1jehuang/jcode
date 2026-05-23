@@ -10,10 +10,8 @@
 //! 4. **Recovery Protocols**: Automatic re-sync, state merge, consistency repair
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
+use std::time::Duration;
+use tracing::{info, warn, error};
 use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
 

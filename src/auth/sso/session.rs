@@ -1,6 +1,6 @@
 //! SSO 会话管理模块
 
-use super::{SsoSession, SsoUserInfo};
+use super::SsoSession;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;

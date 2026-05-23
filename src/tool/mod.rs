@@ -7,6 +7,11 @@ mod batch_edit;
 mod code_intel;
 pub mod debug_evaluate;
 mod bg;
+
+// Claude Code 借鉴模块：工具生命周期、提示词、diff编辑
+pub mod lifecycle;
+pub mod prompts;
+pub mod diff_edit;
 mod browser;
 mod codesearch;
 mod communicate;
@@ -419,6 +424,24 @@ impl Registry {
 
         // Drop the lock before executing
         drop(tools);
+
+        // ===== 工具输入预验证（借鉴 Claude Code 的 validateInput）=====
+        // 使用 ToolLifecycle trait 进行输入验证，捕获参数错误
+        #[cfg(feature = "claude-code-validate")]
+        {
+            use crate::tool::lifecycle::{ToolLifecycle, ValidationResult};
+            // 尝试将 Arc<dyn Tool> 转为 &dyn ToolLifecycle
+            let tool_ref: &dyn ToolLifecycle = &*tool;
+            match tool_ref.validate_input(&input).await {
+                ValidationResult::Error(msg) => {
+                    return Err(anyhow::anyhow!("工具 '{}' 输入验证失败: {}", resolved_name, msg));
+                }
+                ValidationResult::Warning(msg) => {
+                    tracing::warn!("工具 '{}' 输入验证警告: {}", resolved_name, msg);
+                }
+                ValidationResult::Valid => {}
+            }
+        }
 
         let started_at = std::time::Instant::now();
         let result = tool.execute(input.clone(), ctx).await;

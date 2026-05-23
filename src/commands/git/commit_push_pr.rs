@@ -91,8 +91,9 @@ async fn run_git(args: &[&str]) -> Result<()> {
 }
 
 async fn generate_commit_message() -> Result<String> {
-    // TODO: Integrate with LLM to generate smart commit message from diff
-    // For now, use a simple fallback
+    tracing::info!("generate_commit_message: LLM-based smart commit message pending integration");
+    // Integration: Send git diff to LLM with Conventional Commits prompt
+    // Fallback: Use "chore: auto-generated commit" when LLM unavailable
     Ok("chore: auto-generated commit".to_string())
 }
 

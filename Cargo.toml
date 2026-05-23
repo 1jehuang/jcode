@@ -296,6 +296,7 @@ jcode-import-core = { path = "crates/jcode-import-core" }
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.9.3"
+rand_distr = "0.5"
 hex = "0.4"
 url = "2"
 open = "5"               # Open URLs in browser
@@ -394,12 +395,12 @@ tracing-subscriber = "0.3"
 parking_lot = "0.12"
 xmlparser = "0.13"
 
-# Enterprise features (optional — toggle via --features enterprise)
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid"], optional = true }
+# Enterprise features
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid"] }
 sys-info = "0.9"
-mdns-sd = { version = "0.13", optional = true }
-prometheus = { version = "0.13", optional = true }
-jcode-cpu-inference = { path = "crates/jcode-cpu-inference", optional = true }
+mdns-sd = { version = "0.13" }
+prometheus = { version = "0.13" }
+jcode-cpu-inference = { path = "crates/jcode-cpu-inference" }
 
 # REST dependencies
 axum = { version = "0.8", features = ["ws"] }
@@ -408,6 +409,14 @@ futures-util = "0.3"
 
 # Prometheus metrics
 prometheus-client = "0.22"
+
+# Enterprise dependencies (optional, gated behind "enterprise" feature)
+jcode-auth = { path = "crates/jcode-auth", optional = true }
+jcode-llm = { path = "crates/jcode-llm", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+dashmap = { version = "6", optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
+carpai-sdk = { path = "crates/carpai-sdk", optional = true }
 
 [features]
 # Keep the heavyweight local ONNX/tokenizer embedding stack opt-in. It remains
@@ -434,15 +443,17 @@ audit = []
 redis = []
 gpu-discovery = []
 
-# Enterprise Server 特性 — 启用多租户/分布式推理/合规/管理后台
+# Claude Code 借鉴功能 — 工具提示词注入/输入验证/增强错误恢复
+claude-code-enhanced = []
+# Enterprise features (requires jcode-auth, jcode-llm, aes-gcm, etc.)
 enterprise = [
-    "dep:sqlx",
-    "dep:mdns-sd",
-    "dep:prometheus",
-    "dep:jcode-cpu-inference",
+    "dep:jcode-auth",
+    "dep:jcode-llm",
+    "dep:aes-gcm",
+    "dep:dashmap",
+    "dep:tower-http",
+    "dep:carpai-sdk",
 ]
-enterprise-sqlite = ["enterprise", "sqlx/sqlite"]
-enterprise-postgres = ["enterprise", "sqlx/postgres"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

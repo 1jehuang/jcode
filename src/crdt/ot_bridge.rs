@@ -3,9 +3,8 @@
 //! 提供 OT (Operational Transform) 和 CRDT 之间的转换和互操作能力。
 //! 允许在现有 OT 系统上添加 CRDT 功能，或者在 CRDT 上使用 OT 算法。
 
-use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
-use super::{CrdtNodeId, LogicalClock, CrdtOperation, SelectionRange};
+use super::{CrdtNodeId, LogicalClock, CrdtOperation};
 
 /// Position 类型 - 用于 OT 操作
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

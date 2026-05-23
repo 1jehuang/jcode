@@ -4,10 +4,10 @@
 //! Provides automatic type-checking and self-correction for multi-file edits.
 
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tracing::info;
 
 use jcode_cross_file_repair::{
-    CrossFileRepairEngine, TreeSitterAstAdapter, TypeChecker, EditBridge,
+    CrossFileRepairEngine, TreeSitterAstAdapter, TypeChecker,
     AstEdit, AstEditOp, LanguageKind,
 };
 

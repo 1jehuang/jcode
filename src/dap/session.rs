@@ -3,7 +3,7 @@
 //! 管理调试会话的生命周期、线程状态、栈帧信息等
 
 use super::protocol::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

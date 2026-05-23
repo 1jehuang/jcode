@@ -301,6 +301,7 @@ impl App {
             // Initialize Inline Completion Engine
             completion_engine: None,
             completion_prefetch_state: None,
+            shell_completer: Some(crate::completion::bash::completer::SmartCompleter::default()),
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
@@ -666,6 +667,7 @@ impl App {
             // Initialize Inline Completion Engine
             completion_engine: None,
             completion_prefetch_state: None,
+            shell_completer: Some(crate::completion::bash::completer::SmartCompleter::default()),
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
@@ -847,7 +849,7 @@ impl App {
 
     /// Initialize the Inline Completion Engine
     pub fn init_completion_engine(&mut self) {
-        use jcode_completion::{CompletionEngine, ProviderCandidateGenerator};
+        use jcode_completion::CompletionEngine;
         
         // Create a provider for completion (reuse existing provider if possible)
         // Note: self.provider is Arc<dyn Provider>, needs adapter to jcode_completion::CompletionProvider

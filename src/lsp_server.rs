@@ -9,7 +9,6 @@
 //!
 //! 底层复用 jcode-llm 的 Provider 链完成推理
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -168,7 +167,7 @@ impl LspServer {
     }
 
     async fn handle_code_action(&self, id: Option<&serde_json::Value>, _params: Option<&serde_json::Value>) -> String {
-        use crate::lsp_code_actions::{CodeActionProvider, CodeActionParams, LspPosition, LspRange, TextDocumentIdentifier, CodeActionContext, CodeActionDiagnostic};
+        use crate::lsp_code_actions::{CodeActionProvider, CodeActionParams, LspPosition, LspRange, TextDocumentIdentifier, CodeActionContext};
         let provider = CodeActionProvider::new();
         let params = CodeActionParams {
             text_document: TextDocumentIdentifier { uri: "file:///unknown".to_string() },

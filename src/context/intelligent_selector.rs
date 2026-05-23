@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::ast::tree_sitter::{CodeAnalyzer, FileAnalysis};
+use tracing::debug;
 
 /// Configuration for intelligent context selection
 #[derive(Debug, Clone)]
@@ -190,7 +191,7 @@ impl IntelligentContextSelector {
     /// Compute PageRank for files based on call graph
     async fn compute_pagerank(
         &self,
-        _call_graph: &HashMap<String, Vec<String>>,
+        call_graph: &HashMap<String, Vec<String>>,
         files: &[PathBuf],
     ) -> HashMap<PathBuf, f64> {
         let damping = 0.85;
@@ -201,17 +202,22 @@ impl IntelligentContextSelector {
             return HashMap::new();
         }
 
+        // Log call graph statistics for monitoring
+        let total_edges: usize = call_graph.values().map(|v| v.len()).sum();
+        debug!("Computing PageRank for {} files with {} call graph edges", num_files, total_edges);
+
         // Initialize scores uniformly
         let mut scores: HashMap<PathBuf, f64> = files.iter()
             .map(|f| (f.clone(), 1.0 / num_files as f64))
             .collect();
 
-        // Build adjacency: file -> files it calls
+        // Build adjacency: file -> files it calls using the provided call graph
         let mut adjacency: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for file in files {
-            if let Some(analysis) = self.file_cache.read().await.get(file) {
+            if let Some(_analysis) = self.file_cache.read().await.get(file) {
                 let mut called_files = Vec::new();
-                for (_caller, callees) in &analysis.call_graph {
+                // Use the call_graph parameter instead of re-reading from analysis
+                for (_caller, callees) in call_graph {
                     for callee in callees {
                         // Find which file contains the callee
                         for other_file in files {
@@ -461,8 +467,7 @@ impl IntelligentContextSelector {
 
             // Remove old entries for this file
             call_graph.retain(|_caller, callees| {
-                // This is simplified - would need reverse index for proper cleanup
-                true
+                !callees.is_empty()
             });
 
             // Add new entries

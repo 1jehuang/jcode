@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 use std::fs;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 /// Cgroups v2 controller paths
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";

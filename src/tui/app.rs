@@ -681,6 +681,7 @@ pub struct App {
     completion_engine: Option<Arc<jcode_completion::CompletionEngine>>,
     // Completion prefetch state for debouncing and caching
     completion_prefetch_state: Option<Arc<crate::tui::completion_helper::CompletionPrefetchState>>,
+    shell_completer: Option<crate::completion::bash::completer::SmartCompleter>,
     // Remote provider info (set when running in remote mode)
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,

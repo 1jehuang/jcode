@@ -6,7 +6,7 @@
 use bitflags::bitflags;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, RbacError>;
 
 /// Permission categories for CarpAI operations
 bitflags! {
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone)]
     pub struct PermissionFlags: u64 {
         // File operations
         const FILE_READ = 1 << 0;
@@ -65,6 +65,20 @@ bitflags! {
 
         // All permissions (admin)
         const ALL = u64::MAX;
+    }
+}
+
+// Manual Serialize/Deserialize for bitflags (crate's type alias conflicts with serde)
+impl serde::Serialize for PermissionFlags {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.bits())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PermissionFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let bits = u64::deserialize(deserializer)?;
+        Ok(PermissionFlags::from_bits_truncate(bits))
     }
 }
 
@@ -256,7 +270,7 @@ impl RbacEngine {
 
     /// Remove role from user
     pub fn remove_role(&self, user_id: &str, role_id: &str) -> Result<()> {
-        if let mut roles = self.user_roles.get_mut(user_id) {
+        if let Some(ref mut roles) = self.user_roles.get_mut(user_id) {
             roles.retain(|ur| ur.role_id != role_id);
             Ok(())
         } else {
@@ -311,7 +325,7 @@ impl RbacEngine {
             return Err(RbacError::NotAuthorized);
         }
 
-        let has_permission = roles.iter().any(|role| role.has_permission(required_permission));
+        let has_permission = roles.iter().any(|role| role.has_permission(required_permission.clone()));
         Ok(has_permission)
     }
 
@@ -343,7 +357,7 @@ impl RbacEngine {
         let mut combined = PermissionFlags::empty();
 
         for role in roles {
-            combined |= role.permissions;
+            combined |= role.permissions.clone();
         }
 
         combined

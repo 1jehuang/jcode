@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
-use super::{CrdtNodeId, CrdtOperation, LogicalClock, Element};
+use super::{CrdtNodeId, LogicalClock};
 
 /// 序列 CRDT 状态
 #[derive(Debug, Clone, Serialize, Deserialize)]

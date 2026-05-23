@@ -79,31 +79,66 @@ impl Agent {
                 &messages_with_memory
             };
             self.last_status_detail = None;
-            let mut stream = match self
-                .provider
-                .complete_split(
-                    send_messages,
-                    &tools,
-                    &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
-                    self.provider_session_id.as_deref(),
-                )
-                .await
-            {
-                Ok(stream) => stream,
-                Err(e) => {
-                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
-                        context_limit_retries += 1;
-                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                            logging::warn("Context-limit compaction retry limit reached; giving up");
-                            return Err(anyhow::anyhow!(
-                                "Context limit exceeded after {} compaction retries",
-                                Self::MAX_CONTEXT_LIMIT_RETRIES
-                            ));
+            // ===== 智能错误恢复：分类错误 + 指数退避重试 =====
+            // 借鉴 Claude Code 的错误分类与恢复策略
+            use crate::error_recovery::ErrorClassifier;
+
+            let mut stream = loop {
+                match self
+                    .provider
+                    .complete_split(
+                        send_messages,
+                        &tools,
+                        &split_prompt.static_part,
+                        &split_prompt.dynamic_part,
+                        self.provider_session_id.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(stream) => break stream,
+                    Err(e) => {
+                        let error_str = e.to_string();
+
+                        // 原有：上下文压缩重试
+                        if self.try_auto_compact_after_context_limit(&error_str) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
+                            }
+                            continue;
                         }
-                        continue;
+
+                        // 新增：智能错误分类 + 选择性重试
+                        let classified = ErrorClassifier::classify(&error_str);
+                        match classified.severity {
+                            crate::error_recovery::ErrorSeverity::Transient
+                            | crate::error_recovery::ErrorSeverity::Retryable
+                            | crate::error_recovery::ErrorSeverity::Degradable => {
+                                // 对可恢复错误执行指数退避重试
+                                // 已在上下文的 retry 循环中，这里只做 1 次额外重试
+                                logging::warn(&format!(
+                                    "LLM 调用错误 ({}): {} — 尝试重试",
+                                    error_str,
+                                    classified.degradation.unwrap_or_else(|| "无降级方案".to_string())
+                                ));
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                // 重新进入外层 loop 重试
+                                continue;
+                            }
+                            crate::error_recovery::ErrorSeverity::Fatal => {
+                                let msg = if let Some(d) = classified.degradation {
+                                    format!("{} — {}", error_str, d)
+                                } else {
+                                    error_str
+                                };
+                                return Err(anyhow::anyhow!(msg));
+                            }
+                        }
                     }
-                    return Err(e);
                 }
             };
 
@@ -688,13 +723,18 @@ impl Agent {
                 logging::info("Provider handles tools internally - executing native tools locally");
             }
 
-            // Execute tools and add results
+            // 执行工具并收集结果 — 三段式: 验证收集 → 并发执行 → 结果处理
             let mut tool_results_dirty = false;
+
+            // — Phase 1: 验证 + SDK检查 + 收集本地工具 —
+            let mut phase2_tools: Vec<PendingNativeTool> = Vec::new();
+
             for tc in tool_calls {
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
+                // 验证错误 → 立即返回结果，不进入 Phase 2
                 if let Some(error_msg) = tc.validation_error() {
                     logging::warn(&error_msg);
                     Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -705,240 +745,197 @@ impl Agent {
                         status: ToolStatus::Error,
                         title: None,
                     }));
-                    if print_output {
-                        println!("\n  -> {}", error_msg);
-                    }
-                    self.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id,
-                            content: error_msg,
-                            is_error: Some(true),
-                        }],
-                    );
+                    if print_output { println!("\n  -> {}", error_msg); }
+                    self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                        tool_use_id: tc.id, content: error_msg, is_error: Some(true),
+                    }]);
                     tool_results_dirty = true;
                     continue;
                 }
 
                 self.validate_tool_allowed(&tc.name)?;
+                let is_native = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
 
-                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
-
-                // Check if SDK already executed this tool
+                // SDK 已执行 → 直接使用结果，不进入 Phase 2
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    // For native tools, ignore SDK errors and execute locally
-                    if is_native_tool && sdk_is_error {
-                        if trace {
-                            eprintln!(
-                                "[trace] sdk_error_for_native_tool name={} id={}, executing locally",
-                                tc.name, tc.id
-                            );
-                        }
-                        // Fall through to local execution below
+                    if is_native && sdk_is_error {
+                        // 原生工具 SDK 报错 → 本地重试，放入 Phase 2
+                        if trace { eprintln!("[trace] sdk_error_for_native tool={} id={}, fallback to local", tc.name, tc.id); }
                     } else {
-                        if trace {
-                            eprintln!(
-                                "[trace] using_sdk_result name={} id={} is_error={}",
-                                tc.name, tc.id, sdk_is_error
-                            );
-                        }
+                        if trace { eprintln!("[trace] using_sdk_result tool={} id={} err={}", tc.name, tc.id, sdk_is_error); }
                         if print_output {
-                            print!("\n  -> ");
                             let preview = if sdk_content.len() > 200 {
                                 format!("{}...", crate::util::truncate_str(&sdk_content, 200))
-                            } else {
-                                sdk_content.clone()
-                            };
+                            } else { sdk_content.clone() };
                             println!("{}", preview.lines().next().unwrap_or("(done via SDK)"));
                         }
-
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
-                            message_id: message_id.clone(),
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            status: if sdk_is_error {
-                                ToolStatus::Error
-                            } else {
-                                ToolStatus::Completed
-                            },
-                            title: None,
+                            session_id: self.session.id.clone(), message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(), tool_name: tc.name.clone(),
+                            status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed }, title: None,
                         }));
-
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
-                                content: sdk_content,
-                                is_error: if sdk_is_error { Some(true) } else { None },
-                            }],
-                        );
+                        self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id, content: sdk_content, is_error: if sdk_is_error { Some(true) } else { None },
+                        }]);
                         tool_results_dirty = true;
                         continue;
                     }
                 }
 
-                // SDK didn't execute this tool, run it locally
-                if print_output {
-                    print!("\n  -> ");
-                    io::stdout().flush()?;
-                }
-
-                let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                    working_dir: self.working_dir().map(PathBuf::from),
-                    stdin_request_tx: self.stdin_request_tx.clone(),
-                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
-                    execution_mode: ToolExecutionMode::AgentTurn,
-                };
-
-                if trace {
-                    eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
-                }
-                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                    tool_name: tc.name.clone(),
-                    status: ToolStatus::Running,
-                    title: None,
-                }));
-
-                logging::info(&format!("Tool starting: {}", tc.name));
-                let tool_start = Instant::now();
-
-                // Publish status for TUI to show during Task execution
-                Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
-                    session_id: self.session.id.clone(),
-                    status: format!("running {}", tc.name),
-                    model: Some(self.provider.model()),
-                }));
-
-                // [一致性保证] 在编辑工具执行前保存快照
+                // 收集到 Phase 2 — 记录执行前快照
                 if tc.name == "edit" || tc.name == "multiedit" || tc.name == "batch_edit" || tc.name == "write" {
                     if let Some(file_path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
                         self.snapshot_file(std::path::Path::new(file_path)).await;
                     }
-                    // batch_edit 可能有 files 字段
                     if tc.name == "batch_edit" {
                         if let Some(files) = tc.input.get("files").and_then(|v| v.as_array()) {
                             for f in files {
-                                if let Some(path) = f.as_str() {
-                                    self.snapshot_file(std::path::Path::new(path)).await;
-                                }
+                                if let Some(path) = f.as_str() { self.snapshot_file(std::path::Path::new(path)).await; }
                             }
                         }
                     }
                 }
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                crate::telemetry::record_tool_call();
-                self.unlock_tools_if_needed(&tc.name);
-                let tool_elapsed = tool_start.elapsed();
-                logging::info(&format!(
-                    "Tool finished: {} in {:.2}s",
-                    tc.name,
-                    tool_elapsed.as_secs_f64()
-                ));
+                if print_output { print!("\n  -> "); io::stdout().flush()?; }
+                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                    session_id: self.session.id.clone(), message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(), tool_name: tc.name.clone(),
+                    status: ToolStatus::Running, title: None,
+                }));
 
-                match result {
+                phase2_tools.push(PendingNativeTool {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                    message_id: message_id.clone(),
+                    ctx: ToolContext {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        working_dir: self.working_dir().map(PathBuf::from),
+                        stdin_request_tx: self.stdin_request_tx.clone(),
+                        graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                        execution_mode: ToolExecutionMode::AgentTurn,
+                    },
+                });
+            }
+
+            // — Phase 2: 并发执行所有本地工具 —
+            let phase3_results: Vec<NativeToolOutcome> = if !phase2_tools.is_empty() && true {
+                // 通知
+                for t in &phase2_tools {
+                    logging::info(&format!("Concurrent tool starting: {}", t.name));
+                    Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                        session_id: self.session.id.clone(),
+                        status: format!("running {}", t.name),
+                        model: Some(self.provider.model()),
+                    }));
+                }
+                // 并发执行
+                let registry = self.registry.clone();
+                let tools: Vec<_> = phase2_tools.iter().map(|t| {
+                    (t.id.clone(), t.name.clone(), t.input.clone(), t.ctx.clone())
+                }).collect();
+                let mut outcomes = Vec::new();
+                let handles: Vec<_> = tools.into_iter().map(|(id, name, input, ctx)| {
+                    let reg = registry.clone();
+                    tokio::spawn(async move {
+                        let start = Instant::now();
+                        let result = reg.execute(&name, input, ctx).await;
+                        (id, name, start.elapsed(), result)
+                    })
+                }).collect();
+                for handle in handles {
+                    if let Ok((id, name, elapsed, result)) = handle.await {
+                        crate::telemetry::record_tool_call();
+                        outcomes.push(NativeToolOutcome { id, name, elapsed, result });
+                    }
+                }
+                outcomes
+            } else {
+                // 回退: 顺序执行（向后兼容）
+                let mut outcomes = Vec::new();
+                for t in &phase2_tools {
+                    logging::info(&format!("Tool starting: {}", t.name));
+                    Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                        session_id: self.session.id.clone(),
+                        status: format!("running {}", t.name),
+                        model: Some(self.provider.model()),
+                    }));
+                    let start = Instant::now();
+                    let result = self.registry.execute(&t.name, t.input.clone(), t.ctx.clone()).await;
+                    crate::telemetry::record_tool_call();
+                    outcomes.push(NativeToolOutcome {
+                        id: t.id.clone(), name: t.name.clone(), elapsed: start.elapsed(), result,
+                    });
+                }
+                outcomes
+            };
+
+            // — Phase 3: 处理所有执行结果 —
+            for outcome in phase3_results {
+                let tc_id = &outcome.id;
+                let tc_name = &outcome.name;
+                let tool_elapsed = outcome.elapsed;
+                let message_id = phase2_tools.iter()
+                    .find(|t| t.id == *tc_id)
+                    .map(|t| t.message_id.clone())
+                    .unwrap_or_else(|| self.session.id.clone());
+
+                self.unlock_tools_if_needed(tc_name);
+                logging::info(&format!("Tool finished: {} in {:.2}s", tc_name, tool_elapsed.as_secs_f64()));
+
+                match outcome.result {
                     Ok(output) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
-                            message_id: message_id.clone(),
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            status: ToolStatus::Completed,
-                            title: output.title.clone(),
+                            session_id: self.session.id.clone(), message_id: message_id.clone(),
+                            tool_call_id: tc_id.clone(), tool_name: tc_name.clone(),
+                            status: ToolStatus::Completed, title: output.title.clone(),
                         }));
-
-                        if trace {
-                            eprintln!(
-                                "[trace] tool_exec_done name={} id={}\n{}",
-                                tc.name, tc.id, output.output
-                            );
-                        }
+                        if trace { eprintln!("[trace] tool_exec_done name={} id={}\n{}", tc_name, tc_id, output.output); }
                         if print_output {
                             let preview = if output.output.len() > 200 {
                                 format!("{}...", crate::util::truncate_str(&output.output, 200))
-                            } else {
-                                output.output.clone()
-                            };
+                            } else { output.output.clone() };
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
-
-                        let blocks = tool_output_to_content_blocks(tc.id, output);
-                        self.add_message_with_duration(
-                            Role::User,
-                            blocks,
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
+                        let blocks = tool_output_to_content_blocks(tc_id.clone(), output);
+                        self.add_message_with_duration(Role::User, blocks, Some(tool_elapsed.as_millis() as u64));
                         tool_results_dirty = true;
                     }
                     Err(e) => {
                         crate::telemetry::record_tool_failure();
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
-                            message_id: message_id.clone(),
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            status: ToolStatus::Error,
-                            title: None,
+                            session_id: self.session.id.clone(), message_id: message_id.clone(),
+                            tool_call_id: tc_id.clone(), tool_name: tc_name.clone(),
+                            status: ToolStatus::Error, title: None,
                         }));
-
                         let error_msg = format!("Error: {}", e);
-                        if trace {
-                            eprintln!(
-                                "[trace] tool_exec_error name={} id={} {}",
-                                tc.name, tc.id, error_msg
-                            );
-                        }
-                        if print_output {
-                            println!("{}", error_msg);
-                        }
-                        self.add_message_with_duration(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
-                                content: error_msg,
-                                is_error: Some(true),
-                            }],
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
+                        if trace { eprintln!("[trace] tool_exec_error name={} id={} {}", tc_name, tc_id, error_msg); }
+                        if print_output { println!("{}", error_msg); }
+                        self.add_message_with_duration(Role::User, vec![ContentBlock::ToolResult {
+                            tool_use_id: tc_id.clone(), content: error_msg, is_error: Some(true),
+                        }], Some(tool_elapsed.as_millis() as u64));
                         tool_results_dirty = true;
                     }
                 }
 
-                // ===== [I-01] MCP工具调用检测 =====
-                // 记录MCP工具调用名称，用于后续注入到工具列表
-                if tc.name.starts_with("mcp__") {
-                    let parts: Vec<&str> = tc.name.split("__").collect();
-                    if parts.len() >= 3 {
-                        let server_name = parts[1];
-                        if !self.mcp_tool_names.contains(&server_name.to_string()) {
-                            self.mcp_tool_names.push(server_name.to_string());
-                        }
+                // MCP 工具调用检测
+                if tc_name.starts_with("mcp__") {
+                    let parts: Vec<&str> = tc_name.split("__").collect();
+                    if parts.len() >= 3 && !self.mcp_tool_names.contains(&parts[1].to_string()) {
+                        self.mcp_tool_names.push(parts[1].to_string());
                     }
                 }
-
-                // ===== [I-02] 编辑工具触发跨文件修复 =====
-                if tc.name == "edit" || tc.name == "multiedit" || tc.name == "batch_edit" {
-                    if let Some(file_path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
+                // 编辑工具 → 跨文件修复队列
+                if tc_name == "edit" || tc_name == "multiedit" || tc_name == "batch_edit" {
+                    if let Some(file_path) = phase2_tools.iter()
+                        .find(|t| t.id == *tc_id)
+                        .and_then(|t| t.input.get("file_path"))
+                        .and_then(|v| v.as_str())
+                    {
                         if !self.recent_edit_files.contains(&file_path.to_string()) {
                             self.recent_edit_files.push(file_path.to_string());
-                        }
-                    }
-                    if tc.name == "batch_edit" {
-                        if let Some(files) = tc.input.get("files").and_then(|v| v.as_array()) {
-                            for f in files {
-                                if let Some(path) = f.as_str() {
-                                    if !self.recent_edit_files.contains(&path.to_string()) {
-                                        self.recent_edit_files.push(path.to_string());
-                                    }
-                                }
-                            }
                         }
                     }
                 }

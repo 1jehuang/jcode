@@ -9,12 +9,10 @@
 //! 4. max_output_tokens 恢复 (3次重试)
 //! 5. 兄弟取消 (sibling cancellation)
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tokio::time::sleep;
 
 // ========================================================================
 // [1] 编译执行器 — 运行 cargo check 并解析错误

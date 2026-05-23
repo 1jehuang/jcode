@@ -553,6 +553,47 @@ impl ToolOutputText for crate::tool::ToolOutput {
     }
 }
 
+/// 并发执行一批工具调用的便捷函数
+/// 供 turn_loops.rs / turn_streaming_broadcast.rs 替换顺序 for 循环使用
+/// 使用 futures::future::join_all 实现只读工具的并行执行
+pub async fn execute_tool_calls_concurrent(
+    registry: Arc<crate::tool::Registry>,
+    tool_calls: &[crate::message::ToolCall],
+    session_id: &str,
+    working_dir: Option<std::path::PathBuf>,
+) -> Vec<ToolResult> {
+    use futures::future::join_all;
+
+    let mut handles = Vec::new();
+    for tc in tool_calls {
+        let reg = registry.clone();
+        let name = tc.name.clone();
+        let input = tc.input.clone();
+        let sid = session_id.to_string();
+        let wd = working_dir.clone();
+        let tid = tc.id.clone();
+
+        handles.push(tokio::spawn(async move {
+            let ctx = crate::tool::ToolContext {
+                session_id: sid,
+                message_id: String::new(),
+                tool_call_id: tid,
+                working_dir: wd,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+            };
+            match reg.execute(&name, input, ctx).await {
+                Ok(output) => ToolResult { name, success: true, output: output.content },
+                Err(e) => ToolResult { name, success: false, output: format!("Tool error: {}", e) },
+            }
+        }));
+    }
+
+    let results: Vec<_> = join_all(handles).await;
+    results.into_iter().filter_map(|r| r.ok()).collect()
+}
+
 // ========================================================================
 // [5] 语义理解 — FileEditTool 降级链
 // 移植自: tools/FileEditTool/utils.ts

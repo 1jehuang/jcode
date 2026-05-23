@@ -5,7 +5,7 @@ use crate::spawn_on;
 impl Server {
     /// Initialize GPU scheduler with auto-detection
     fn initialize_gpu_scheduler() -> Option<Arc<jcode_unified_scheduler::UnifiedScheduler>> {
-        use tracing::{info, warn};
+        use tracing::info;
 
         // Try to detect GPUs using NVML (if feature enabled)
         #[cfg(feature = "gpu-discovery")]

@@ -7,7 +7,6 @@
 //! 3. 预取预热 (common_prefix + 上下文预测)
 //! 4. 智能过期 (LRU + TTL + 频率)
 
-use anyhow::Result;
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

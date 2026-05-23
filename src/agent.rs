@@ -23,7 +23,7 @@ use self::streaming::{
     send_stream_keepalive_broadcast, send_stream_keepalive_mpsc, stream_keepalive_ticker,
 };
 use crate::token_budget::TokenBudgetTracker;
-use self::tools::{print_tool_summary, tool_output_to_content_blocks};
+use self::tools::{print_tool_summary, tool_output_to_content_blocks, PendingNativeTool, NativeToolOutcome};
 use self::utils::trace_enabled;
 use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
@@ -124,6 +124,8 @@ pub struct Agent {
     recent_edit_files: Vec<String>,
     /// [一致性保证] 文件编辑快照 (path, old_content) 用于回滚
     file_snapshots: Vec<(std::path::PathBuf, String)>,
+    /// 启用并发工具执行 (三段式: 验证→并发→结果处理)
+    pub tool_concurrent_enabled: bool,
 }
 
 impl Agent {
@@ -205,6 +207,7 @@ impl Agent {
             mcp_tool_names: Vec::new(),
             recent_edit_files: Vec::new(),
             file_snapshots: Vec::new(),
+            tool_concurrent_enabled: false,
         }
     }
 
@@ -239,6 +242,7 @@ impl Agent {
             agent.session.parent_id.clone(),
             false,
         );
+        agent.tool_concurrent_enabled = true;
         agent
     }
 
@@ -277,6 +281,7 @@ impl Agent {
             agent.session.parent_id.clone(),
             false,
         );
+        agent.tool_concurrent_enabled = true;
         agent
     }
 

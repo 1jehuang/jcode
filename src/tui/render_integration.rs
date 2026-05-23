@@ -16,7 +16,6 @@ use crate::render_optimizer::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 /// 全局渲染优化器
 static RENDERER: std::sync::OnceLock<Arc<IncrementalRenderer>> = std::sync::OnceLock::new();

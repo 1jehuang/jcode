@@ -6,7 +6,7 @@ impl Agent {
         event_tx: broadcast::Sender<ServerEvent>,
     ) -> Result<()> {
         self.set_log_context();
-        let trace = trace_enabled();
+        let _trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
 
@@ -679,182 +679,163 @@ impl Agent {
             // Execute tools and add results
             let tool_count = tool_calls.len();
             let mut tool_results_dirty = false;
-            for tool_index in 0..tool_count {
-                // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
-                if tool_index > 0 && self.has_urgent_interrupt() {
-                    // Add tool_results for all remaining skipped tools to maintain valid history
-                    for skipped_tc in &tool_calls[tool_index..] {
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: skipped_tc.id.clone(),
-                                content: "[Skipped: user interrupted]".to_string(),
-                                is_error: Some(true),
-                            }],
-                        );
+            // ===== 三段式工具执行 (Phase 1→2→3) =====
+            // Phase 1 处理所有工具，单次通过，不按 index 逐个中断
+            if tool_count > 0 {
+                // 检查紧急中断（在工具执行前统一检查）
+                if self.has_urgent_interrupt() {
+                    for skipped_tc in tool_calls {
+                        self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                            tool_use_id: skipped_tc.id.clone(),
+                            content: "[Skipped: user interrupted]".to_string(),
+                            is_error: Some(true),
+                        }]);
                     }
-                    let tools_remaining = tool_count - tool_index;
                     let injected = self.inject_soft_interrupts();
                     if !injected.is_empty() {
-                        for event in
-                            Self::build_soft_interrupt_events(injected, "C", Some(tools_remaining))
-                        {
+                        for event in Self::build_soft_interrupt_events(injected, "C", Some(tool_count)) {
                             let _ = event_tx.send(event);
                         }
-                        // Add note about skipped tools for the AI
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::Text {
-                                text: format!(
-                                    "[User interrupted: {} remaining tool(s) skipped]",
-                                    tools_remaining
-                                ),
-                                cache_control: None,
-                            }],
-                        );
+                        self.add_message(Role::User, vec![ContentBlock::Text {
+                            text: format!("[User interrupted: {} tool(s) skipped]", tool_count),
+                            cache_control: None,
+                        }]);
                     }
                     self.persist_session_best_effort("streamed tool output");
-                    break; // Skip remaining tools
+                    continue; // Skip tool execution for this turn
                 }
-                let tc = &tool_calls[tool_index];
+                // == 三段式: Phase 1 - 验证 + SDK检查 + 收集本地工具 ==
+                let mut phase2_tools: Vec<super::PendingNativeTool> = Vec::new();
 
-                let message_id = assistant_message_id
-                    .clone()
-                    .unwrap_or_else(|| self.session.id.clone());
+                for tc in tool_calls {
+                    let message_id = assistant_message_id
+                        .clone().unwrap_or_else(|| self.session.id.clone());
 
-                if let Some(error_msg) = tc.validation_error() {
-                    logging::warn(&error_msg);
-                    let _ = event_tx.send(ServerEvent::ToolDone {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        output: error_msg.clone(),
-                        error: Some(error_msg.clone()),
-                    });
-                    self.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id.clone(),
-                            content: error_msg,
-                            is_error: Some(true),
-                        }],
-                    );
-                    tool_results_dirty = true;
-                    continue;
-                }
-
-                self.validate_tool_allowed(&tc.name)?;
-
-                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
-
-                // Check if SDK already executed this tool
-                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    // For native tools, ignore SDK errors and execute locally
-                    if !(is_native_tool && sdk_is_error) {
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id.clone(),
-                                content: sdk_content,
-                                is_error: if sdk_is_error { Some(true) } else { None },
-                            }],
-                        );
+                    if let Some(error_msg) = tc.validation_error() {
+                        logging::warn(&error_msg);
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(), name: tc.name.clone(),
+                            output: error_msg.clone(), error: Some(error_msg.clone()),
+                        });
+                        self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(), content: error_msg, is_error: Some(true),
+                        }]);
                         tool_results_dirty = true;
-
-                        // NOTE: No injection here - wait for Point D after all tools
-
                         continue;
                     }
-                    // Fall through to local execution for native tools with SDK errors
-                }
 
-                // SDK didn't execute this tool (or native tool with SDK error), run it locally
-                let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                    working_dir: self.working_dir().map(PathBuf::from),
-                    stdin_request_tx: self.stdin_request_tx.clone(),
-                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
-                    execution_mode: ToolExecutionMode::AgentTurn,
-                };
+                    self.validate_tool_allowed(&tc.name)?;
+                    let is_native = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
 
-                if trace {
-                    eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
-                }
+                    if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                        if !(is_native && sdk_is_error) {
+                            self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id.clone(), content: sdk_content,
+                                is_error: if sdk_is_error { Some(true) } else { None },
+                            }]);
+                            tool_results_dirty = true;
+                            continue;
+                        }
+                    }
 
-                logging::info(&format!("Tool starting: {}", tc.name));
-                let tool_start = Instant::now();
-
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                crate::telemetry::record_tool_call();
-                self.unlock_tools_if_needed(&tc.name);
-                let tool_elapsed = tool_start.elapsed();
-                logging::info(&format!(
-                    "Tool finished: {} in {:.2}s",
-                    tc.name,
-                    tool_elapsed.as_secs_f64()
-                ));
-
-                // AI learning: record tool outcome for adaptive learning
-                {
-                    let name = tc.name.clone();
-                    let success = result.is_ok();
-                    let dur = tool_elapsed;
-                    tokio::spawn(async move {
-                        crate::ai_enhanced::record_tool_outcome(
-                            &name,
-                            success,
-                            dur,
-                            0.1, // default error rate
-                            0.5, // default complexity
-                        )
-                        .await;
+                    phase2_tools.push(super::PendingNativeTool {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        input: tc.input.clone(),
+                        message_id: message_id.clone(),
+                        ctx: ToolContext {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            working_dir: self.working_dir().map(PathBuf::from),
+                            stdin_request_tx: self.stdin_request_tx.clone(),
+                            graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                            execution_mode: ToolExecutionMode::AgentTurn,
+                        },
                     });
                 }
 
-                match result {
-                    Ok(output) => {
-                        let _ = event_tx.send(ServerEvent::ToolDone {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            output: output.output.clone(),
-                            error: None,
-                        });
+                // == Phase 2 - 执行所有本地工具 ==
+                let phase3_results: Vec<super::NativeToolOutcome> =
+                    if !phase2_tools.is_empty() && self.tool_concurrent_enabled {
+                        let registry = self.registry.clone();
+                        let tools: Vec<_> = phase2_tools.iter().map(|t| {
+                            (t.id.clone(), t.name.clone(), t.input.clone(), t.ctx.clone())
+                        }).collect();
+                        let mut outcomes = Vec::new();
+                        let handles: Vec<_> = tools.into_iter().map(|(id, name, input, ctx)| {
+                            let reg = registry.clone();
+                            tokio::spawn(async move {
+                                let start = Instant::now();
+                                let result = reg.execute(&name, input, ctx).await;
+                                (id, name, start.elapsed(), result)
+                            })
+                        }).collect();
+                        for handle in handles {
+                            if let Ok((id, name, elapsed, result)) = handle.await {
+                                crate::telemetry::record_tool_call();
+                                outcomes.push(super::NativeToolOutcome { id, name, elapsed, result });
+                            }
+                        }
+                        outcomes
+                    } else {
+                        let mut outcomes = Vec::new();
+                        for t in &phase2_tools {
+                            let start = Instant::now();
+                            let result = self.registry.execute(&t.name, t.input.clone(), t.ctx.clone()).await;
+                            crate::telemetry::record_tool_call();
+                            outcomes.push(super::NativeToolOutcome {
+                                id: t.id.clone(), name: t.name.clone(), elapsed: start.elapsed(), result,
+                            });
+                        }
+                        outcomes
+                    };
 
-                        let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
-                        self.add_message_with_duration(
-                            Role::User,
-                            blocks,
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
-                        tool_results_dirty = true;
+                // == Phase 3 - 处理所有执行结果 ==
+                for outcome in phase3_results {
+                    self.unlock_tools_if_needed(&outcome.name);
+                    logging::info(&format!("Tool finished: {} in {:.2}s", outcome.name, outcome.elapsed.as_secs_f64()));
+
+                    // AI learning
+                    {
+                        let name = outcome.name.clone();
+                        let success = outcome.result.is_ok();
+                        let dur = outcome.elapsed;
+                        tokio::spawn(async move {
+                            crate::ai_enhanced::record_tool_outcome(&name, success, dur, 0.1, 0.5).await;
+                        });
                     }
-                    Err(e) => {
-                        let error_msg = format!("Error: {}", e);
-                        let _ = event_tx.send(ServerEvent::ToolDone {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            output: error_msg.clone(),
-                            error: Some(error_msg.clone()),
-                        });
 
-                        self.add_message_with_duration(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id.clone(),
-                                content: error_msg,
-                                is_error: Some(true),
-                            }],
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
-                        tool_results_dirty = true;
+                    match outcome.result {
+                        Ok(output) => {
+                            let _ = event_tx.send(ServerEvent::ToolDone {
+                                id: outcome.id.clone(), name: outcome.name.clone(),
+                                output: output.output.clone(), error: None,
+                            });
+                            let blocks = tool_output_to_content_blocks(outcome.id.clone(), output);
+                            self.add_message_with_duration(Role::User, blocks, Some(outcome.elapsed.as_millis() as u64));
+                            tool_results_dirty = true;
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Error: {}", e);
+                            let _ = event_tx.send(ServerEvent::ToolDone {
+                                id: outcome.id.clone(), name: outcome.name.clone(),
+                                output: error_msg.clone(), error: Some(error_msg.clone()),
+                            });
+                            self.add_message_with_duration(Role::User, vec![ContentBlock::ToolResult {
+                                tool_use_id: outcome.id.clone(), content: error_msg, is_error: Some(true),
+                            }], Some(outcome.elapsed.as_millis() as u64));
+                            tool_results_dirty = true;
+                        }
                     }
                 }
 
+                // 重置 tool_index 以跳过已处理的工具（Phase 1 中已递增）
                 // NOTE: We do NOT inject between tools (non-urgent) because that would
                 // place user text between tool_results, which may violate API constraints.
                 // All non-urgent injection happens at Point D after all tools are done.
-            }
+                break; // tools processed, exit inner loop
+            } // end if tool_count > 0
 
             if tool_results_dirty {
                 self.session.save()?;

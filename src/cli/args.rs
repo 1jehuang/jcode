@@ -1199,6 +1199,88 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// CarpAI Server management commands
+    #[cfg(feature = "enterprise")]
+    #[command(subcommand)]
+    Enterprise(EnterpriseCommand),
+}
+
+/// Server management sub-commands
+#[cfg(feature = "enterprise")]
+#[derive(Subcommand, Debug)]
+pub(crate) enum EnterpriseCommand {
+    /// Initialize enterprise database and create admin user
+    Init {
+        /// Admin email
+        #[arg(long)]
+        email: String,
+        /// Admin password
+        #[arg(long)]
+        password: String,
+        /// Organization name
+        #[arg(long)]
+        org: String,
+    },
+    /// Organization management
+    #[command(subcommand)]
+    Org(OrgCommand),
+    /// User management
+    #[command(subcommand)]
+    User(UserCommand),
+    /// Node management
+    #[command(subcommand)]
+    Node(NodeCommand),
+    /// API Key management
+    #[command(subcommand)]
+    ApiKey(ApiKeyCommand),
+    /// Usage statistics
+    Usage {
+        /// Number of days to query
+        #[arg(long, default_value = "30")]
+        days: u32,
+    },
+    /// Show system metrics
+    Metrics,
+    /// Audit log
+    Audit {
+        /// Number of days to query
+        #[arg(long, default_value = "7")]
+        days: u32,
+    },
+}
+
+#[cfg(feature = "enterprise")]
+#[derive(Subcommand, Debug)]
+pub(crate) enum OrgCommand {
+    List,
+    Create { name: String, plan: Option<String> },
+    Delete { org_id: String },
+}
+
+#[cfg(feature = "enterprise")]
+#[derive(Subcommand, Debug)]
+pub(crate) enum UserCommand {
+    List,
+    Create { email: String, role: Option<String> },
+    Delete { user_id: String },
+    Roles { user_id: String },
+}
+
+#[cfg(feature = "enterprise")]
+#[derive(Subcommand, Debug)]
+pub(crate) enum NodeCommand {
+    List,
+    Inspect { node_id: String },
+    Drain { node_id: String },
+}
+
+#[cfg(feature = "enterprise")]
+#[derive(Subcommand, Debug)]
+pub(crate) enum ApiKeyCommand {
+    Generate,
+    Revoke { key_id: String },
+    List,
 }
 
 #[derive(Subcommand, Debug)]

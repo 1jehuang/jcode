@@ -246,9 +246,21 @@ impl MultilineCompleter {
         // Find matching template
         let templates = self.templates.get(trigger)?;
 
-        // For now, just use the first template
-        // In a real implementation, use context to choose the best one
-        templates.first().map(|t| self.parse_snippet(t.clone()))
+        // Use context to select the best template variant
+        // For example, if context contains "async", prefer async variants
+        let selected_template = if context.contains("async") {
+            templates.iter().find(|t| t.contains("async"))
+                .cloned()
+                .unwrap_or_else(|| templates.first().cloned().unwrap_or_default())
+        } else if context.contains("Result") {
+            templates.iter().find(|t| t.contains("Result"))
+                .cloned()
+                .unwrap_or_else(|| templates.first().cloned().unwrap_or_default())
+        } else {
+            templates.first().cloned().unwrap_or_default()
+        };
+
+        Some(self.parse_snippet(selected_template))
     }
 
     /// Preserve indentation when inserting multi-line text

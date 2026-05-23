@@ -4,7 +4,7 @@ use anyhow::Result;
 use tantivy::{
     collector::TopDocs,
     query::QueryParser,
-    schema::{Schema, TEXT, STORED, INDEXED},
+    schema::{Schema, TEXT, STORED, INDEXED, Value},
     TantivyDocument, Index, IndexWriter, ReloadPolicy,
 };
 use std::path::PathBuf;
@@ -55,7 +55,7 @@ impl SemanticIndexer {
     }
 
     /// 添加文档到索引
-    pub async fn add_document(&self, file_path: &str, symbols: &[Symbol], full_content: &str) -> Result<()> {
+    pub async fn add_document(&self, file_path: &str, symbols: &[Symbol], _full_content: &str) -> Result<()> {
         let mut writer = self.writer.lock().await;
         
         for symbol in symbols {
@@ -96,15 +96,15 @@ impl SemanticIndexer {
         for (score, doc_address) in top_docs {
             let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
             let file_path = retrieved_doc.get_first(schema.get_field("file_path").unwrap())
-                .and_then(|v| v.as_text())
+                .and_then(|v| v.as_str())
                 .unwrap_or("").to_string();
-            
+
             let symbol_name = retrieved_doc.get_first(schema.get_field("symbol_name").unwrap())
-                .and_then(|v| v.as_text())
+                .and_then(|v| v.as_str())
                 .unwrap_or("").to_string();
 
             let content = retrieved_doc.get_first(schema.get_field("content").unwrap())
-                .and_then(|v| v.as_text())
+                .and_then(|v| v.as_str())
                 .unwrap_or("").to_string();
 
             results.push(SearchResult {

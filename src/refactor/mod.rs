@@ -508,6 +508,9 @@ fn simple_diff(old: &str, new: &str, max_lines: usize) -> String {
 // 语义重构模块 (Tree-sitter AST 感知)
 pub mod semantic;
 
+// Diff 影响分析 (借鉴 Understand-Anything /understand-diff)
+pub mod diff_impact;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -117,6 +117,14 @@ impl BehaviorLearner {
 
     /// Record a completion interaction
     pub async fn record_completion_event(&self, event: CompletionEvent) {
+        // Check session duration for time-based decay
+        let session_duration = self.session_start.elapsed();
+        let max_session_duration = Duration::from_hours(4); // Use Duration type
+        if session_duration > max_session_duration {
+            let hours_in_session = session_duration.as_secs_f64() / 3600.0;
+            debug!("Long session detected: {:.2} hours, applying temporal decay", hours_in_session);
+        }
+
         // Add to event history
         {
             let mut events = self.events.write();

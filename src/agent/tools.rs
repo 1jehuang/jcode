@@ -1,5 +1,5 @@
 use crate::message::{ContentBlock, ToolCall};
-use crate::tool::ToolOutput;
+use crate::tool::{ToolContext, ToolOutput};
 
 pub(super) fn tool_output_to_content_blocks(
     tool_use_id: String,
@@ -60,4 +60,22 @@ pub(super) fn print_tool_summary(tool: &ToolCall) {
         }
         _ => {}
     }
+}
+
+/// 待执行的本地工具（Phase 1 收集 → Phase 2 执行）
+#[derive(Clone)]
+pub struct PendingNativeTool {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    pub message_id: String,
+    pub ctx: ToolContext,
+}
+
+/// 本地工具执行结果（Phase 2 → Phase 3）
+pub struct NativeToolOutcome {
+    pub id: String,
+    pub name: String,
+    pub elapsed: std::time::Duration,
+    pub result: anyhow::Result<ToolOutput>,
 }

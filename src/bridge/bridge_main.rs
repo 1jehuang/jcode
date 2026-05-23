@@ -171,6 +171,8 @@ pub enum BridgeEventType {
     SessionClosed,
     ServerStarted,
     ServerStopped,
+    RuntimeStarted,
+    RuntimeStopped,
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -311,9 +313,16 @@ impl BridgeServer {
 
     /// 发送消息到指定客户端
     pub async fn send_to(&self, connection_id: &str, message: Message) -> Result<(), anyhow::Error> {
-        let conns = self.connections.read().await;
+        let mut conns = self.connections.write().await;
         
-        if let Some(conn) = conns.get(connection_id) {
+        if let Some(conn) = conns.get_mut(connection_id) {
+            let msg_size = match &message {
+                Message::Text(text) => text.len() as u64,
+                Message::Binary(data) => data.len() as u64,
+                _ => 0,
+            };
+            conn.message_count += 1;
+            conn.bytes_sent += msg_size;
             conn.tx.send(message).await?;
             Ok(())
         } else {
@@ -323,13 +332,20 @@ impl BridgeServer {
 
     /// 广播消息到所有客户端
     pub async fn broadcast(&self, message: Message) -> Result<usize, anyhow::Error> {
-        let conns = self.connections.read().await;
+        let mut conns = self.connections.write().await;
         let mut sent_count = 0;
-        
-        for (id, conn) in conns.iter() {
+        let msg_size = match &message {
+            Message::Text(text) => text.len() as u64,
+            Message::Binary(data) => data.len() as u64,
+            _ => 0,
+        };
+
+        for (id, conn) in conns.iter_mut() {
             if let Err(e) = conn.tx.send(message.clone()).await {
                 warn!("[BridgeServer] Broadcast failed to {}: {:?}", id, e);
             } else {
+                conn.message_count += 1;
+                conn.bytes_sent += msg_size;
                 sent_count += 1;
             }
         }
@@ -434,6 +450,7 @@ async fn handle_new_connection(
     info!("[BridgeConn] {} connected from {}", conn_id, addr);
     
     let conn_clone = connections.clone();
+    let connections_clone = connections.clone();
     let event_tx_clone = event_tx.clone();
     let stats_clone = stats.clone();
     let conn_id_clone = conn_id.clone();
@@ -442,6 +459,14 @@ async fn handle_new_connection(
         while let Some(msg_result) = ws_receiver.next().await {
             match msg_result {
                 Ok(msg) => {
+                    let msg_size = match &msg {
+                        Message::Text(text) => text.len() as u64,
+                        Message::Binary(data) => data.len() as u64,
+                        _ => 0,
+                    };
+                    if let Some(conn) = connections_clone.write().await.get_mut(&conn_id) {
+                        conn.bytes_received += msg_size;
+                    }
                     if let Err(e) = handle_incoming_message(
                         msg,
                         &conn_id,

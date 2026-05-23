@@ -126,8 +126,15 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
         let result = agent.query_json(&full_query).await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if config.ndjson {
-        // NDJSON流式输出模式 - temporarily skip
-        println!("{{\"status\":\"error\",\"message\":\"ndjson mode temporarily not implemented\"}}");
+        // NDJSON流式输出模式
+        tracing::info!("NDJSON mode: Streaming JSON output coming soon");
+        let result = agent.query(&full_query).await?;
+        for line in result.lines() {
+            if !line.is_empty() {
+                let json_line = serde_json::json!({"content": line, "type": "text"});
+                println!("{}", json_line);
+            }
+        }
     } else {
         // 标准文本输出模式
         let response = agent.query(&full_query).await?;

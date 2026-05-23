@@ -22,9 +22,8 @@
 //!     4 threads     8 threads    2 threads
 //! ```
 
-use std::sync::Arc;
 use tokio::runtime::{Runtime, Builder};
-use tracing::{info, error};
+use tracing::info;
 
 /// Runtime configuration for a specific service
 #[derive(Debug, Clone)]

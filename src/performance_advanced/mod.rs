@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
+use tracing::debug;
 
 pub use cache_optimizer::{CacheHitOptimizer, CacheOptimizationConfig, CacheHitLevel};
 
@@ -228,9 +229,17 @@ impl LlmResponseCache {
 
     /// 清理过期条目
     pub async fn evict_expired(&self) {
-        let _now = SystemTime::now();
+        let now = SystemTime::now();
+        let before_count = self.l2_disk.read().await.len();
         let mut l2 = self.l2_disk.write().await;
         l2.retain(|_, e| e.created_at.elapsed().map(|d| d < e.ttl).unwrap_or(false));
+        let after_count = l2.len();
+        let removed = before_count.saturating_sub(after_count);
+
+        if removed > 0 {
+            let elapsed = now.elapsed().unwrap_or_default().as_millis();
+            debug!("Evicted {} expired cache entries in {}ms", removed, elapsed);
+        }
     }
 }
 

@@ -407,6 +407,19 @@ impl App {
     pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim_start();
 
+        if let Some(shell_input) = input.strip_prefix('!') {
+            if let Some(ref completer) = self.shell_completer {
+                let request = crate::completion::bash::completer::CompletionRequest::new(
+                    shell_input,
+                    shell_input.len()
+                );
+                let result = completer.complete(&request);
+                return result.suggestions.into_iter().map(|s| {
+                    (s.text, &*Box::leak(s.description.into_boxed_str()))
+                }).collect();
+            }
+        }
+
         // Only show suggestions when input starts with /
         if !input.starts_with('/') {
             return vec![];

@@ -115,8 +115,10 @@ async fn get_diff_against(ref_spec: &str) -> Result<String> {
 }
 
 async fn analyze_with_ai(diff: &str, security_mode: bool) -> Result<Vec<ReviewIssue>> {
-    // TODO: Integrate with LLM provider for AI analysis
-    // For now, return placeholder issues
+    tracing::info!("analyze_with_ai: LLM provider integration pending; using pattern-based fallback");
+    // Integration point: Call configured LLM provider (Claude, GPT-4, etc.)
+    // Prompt engineering: Send diff + security_mode flag for targeted analysis
+    // For now, use pattern-based heuristic analysis as fallback
 
     let mut issues = Vec::new();
 

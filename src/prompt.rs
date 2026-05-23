@@ -263,6 +263,9 @@ pub fn build_system_prompt_full(
 
 /// Build system prompt split into static (cacheable) and dynamic parts
 /// This improves cache hit rate by keeping frequently-changing content separate
+///
+/// 增强：注入工具提示词（借鉴 Claude Code 的每工具独立 prompt.ts）
+/// 通过 `tool_prompt_names` 参数指定要注入的工具提示词列表
 pub fn build_system_prompt_split(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -276,6 +279,32 @@ pub fn build_system_prompt_split(
         system_prompt_chars: DEFAULT_SYSTEM_PROMPT.len(),
         ..Default::default()
     };
+
+    // ===== 注入工具提示词 — 借鉴 Claude Code =====
+    // 使用 crate::tool::prompts::PromptBuilder 生成标准化工具描述
+    // 这些提示词包含每个工具的使用方式、参数说明、注意事项和示例
+    //（仅当 claude-code-enhanced feature 启用时注入）
+    #[cfg(feature = "claude-code-enhanced")]
+    {
+        use crate::tool::prompts::PromptBuilder;
+        let mut builder = PromptBuilder::new();
+        // 注册所有核心工具的提示词
+        builder.register(crate::tool::prompts::edit_tool_prompt());
+        builder.register(crate::tool::prompts::read_tool_prompt());
+        builder.register(crate::tool::prompts::bash_tool_prompt());
+        builder.register(crate::tool::prompts::glob_tool_prompt());
+        builder.register(crate::tool::prompts::grep_tool_prompt());
+        builder.register(crate::tool::prompts::write_tool_prompt());
+        builder.register(crate::tool::prompts::webfetch_tool_prompt());
+        builder.register(crate::tool::prompts::websearch_tool_prompt());
+
+        let tool_names = ["edit", "read", "bash", "glob", "grep", "write", "webfetch", "websearch"];
+        let tool_prompts_section = builder.build_tool_prompts(&tool_names);
+        if !tool_prompts_section.is_empty() {
+            info!("注入 {} 个工具提示词（{:.1}KB）", tool_names.len(), tool_prompts_section.len() as f64 / 1024.0);
+            static_parts.push(tool_prompts_section);
+        }
+    }
 
     // === STATIC CONTENT (cacheable) ===
 

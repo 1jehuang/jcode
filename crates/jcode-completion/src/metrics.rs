@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Completion engine metrics collector
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CompletionMetrics {
     // Counter metrics
     /// Total completion requests
@@ -40,11 +40,30 @@ pub struct CompletionMetrics {
     pub cache_size: AtomicU64,
     /// Active learning patterns count
     pub learned_patterns: AtomicU64,
+
+    // Timing metrics
+    /// Session start time for uptime tracking
+    session_start: Instant,
 }
 
 impl CompletionMetrics {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            total_requests: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            completions_accepted: AtomicU64::new(0),
+            completions_rejected: AtomicU64::new(0),
+            prefetch_requests: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            latency_sum_ms: AtomicU64::new(0),
+            latency_count: AtomicU64::new(0),
+            p95_latency_sum_ms: AtomicU64::new(0),
+            p95_latency_count: AtomicU64::new(0),
+            cache_size: AtomicU64::new(0),
+            learned_patterns: AtomicU64::new(0),
+            session_start: Instant::now(),
+        }
     }
 
     /// Record a completion request
@@ -221,6 +240,13 @@ impl CompletionMetrics {
         output.push_str(&format!(
             "# HELP jcode_completion_acceptance_rate Acceptance rate\n# TYPE jcode_completion_acceptance_rate gauge\njcode_completion_acceptance_rate {:.4}\n",
             self.get_acceptance_rate()
+        ));
+
+        // Uptime metric
+        let uptime_secs = self.session_start.elapsed().as_secs();
+        output.push_str(&format!(
+            "# HELP jcode_completion_uptime_seconds Session uptime in seconds\n# TYPE jcode_completion_uptime_seconds gauge\njcode_completion_uptime_seconds {}\n",
+            uptime_secs
         ));
 
         output

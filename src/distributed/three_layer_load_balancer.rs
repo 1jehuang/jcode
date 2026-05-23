@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 /// 三层负载均衡配置
 #[derive(Debug, Clone, Serialize, Deserialize)]

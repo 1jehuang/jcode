@@ -160,7 +160,17 @@ impl BackpressureController {
         }
 
         // Try to acquire concurrency permit (with timeout)
-        let _effective_concurrent = self.current_max_concurrent.load(Ordering::Relaxed);
+        let effective_concurrent = self.current_max_concurrent.load(Ordering::Relaxed);
+
+        // Log current utilization for monitoring
+        let available_permits = self.concurrency_limiter.available_permits();
+        let utilization = if effective_concurrent > 0 {
+            ((effective_concurrent - available_permits) as f64 / effective_concurrent as f64) * 100.0
+        } else {
+            0.0
+        };
+        debug!("Concurrency utilization: {:.1}% ({}/{})", utilization, effective_concurrent - available_permits, effective_concurrent);
+
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             self.concurrency_limiter.acquire(),

@@ -8,7 +8,7 @@ use crate::concurrency_optimizer::{
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// 全局并发优化器
 static CONCURRENCY_OPT: std::sync::OnceLock<Arc<ConcurrencyOptimizer>> = std::sync::OnceLock::new();
