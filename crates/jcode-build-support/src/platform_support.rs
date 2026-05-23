@@ -19,7 +19,8 @@ pub fn set_permissions_executable(path: &Path) -> std::io::Result<()> {
 /// Atomically swap a symlink by creating a temp symlink and renaming.
 ///
 /// On Unix: creates temp symlink, then renames over target (atomic).
-/// On Windows: removes target, copies source (not atomic, but best effort).
+/// On Windows: tries a file symlink first, then copies source as a fallback
+/// when symlink privileges are unavailable (not atomic, but best effort).
 pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -31,7 +32,11 @@ pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Resu
     {
         let _ = std::fs::remove_file(temp);
         let _ = std::fs::remove_file(dst);
-        std::fs::copy(src, dst).map(|_| ())?;
+        if std::os::windows::fs::symlink_file(src, temp).is_ok() {
+            std::fs::rename(temp, dst)?;
+        } else {
+            std::fs::copy(src, dst).map(|_| ())?;
+        }
     }
     Ok(())
 }
