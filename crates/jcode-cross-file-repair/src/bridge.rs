@@ -149,6 +149,29 @@ impl EditBridge {
                         });
                     }
                 }
+
+                AstEditOp::Insert { content, line, column } => {
+                    ops.push(FileEditOp::Insert {
+                        line: *line + column / 1000,
+                        content: content.clone(),
+                    });
+                }
+
+                AstEditOp::Delete { start_line, end_line } => {
+                    ops.push(FileEditOp::Delete {
+                        start_line: *start_line,
+                        end_line: *end_line,
+                    });
+                }
+
+                AstEditOp::Replace { start_line, end_line, content } => {
+                    ops.push(FileEditOp::Replace {
+                        start_line: *start_line,
+                        end_line: *end_line,
+                        new_content: content.clone(),
+                    });
+                }
+            }
             }
         }
 

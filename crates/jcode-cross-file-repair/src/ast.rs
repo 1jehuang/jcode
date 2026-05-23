@@ -42,11 +42,22 @@ pub struct AstEdit {
 /// A single AST-level edit operation.
 #[derive(Debug, Clone)]
 pub enum AstEditOp {
+    /// Replace a function's body
     ReplaceFunction { name: String, new_body: String },
+    /// Add an import statement
     AddImport { import: String },
+    /// Remove an import statement
     RemoveImport { import: String },
+    /// Change a type annotation
     ChangeType { symbol: String, old_type: String, new_type: String },
+    /// Rename a symbol across scope
     RenameSymbol { old_name: String, new_name: String, scope: String },
+    /// Insert raw text at a position
+    Insert { content: String, line: usize, column: usize },
+    /// Delete a range of lines
+    Delete { start_line: usize, end_line: usize },
+    /// Replace a range of lines with new content
+    Replace { start_line: usize, end_line: usize, content: String },
 }
 
 /// AST adapter trait — one implementation per language.
@@ -596,10 +607,49 @@ impl AstAdapter for TreeSitterAstAdapter {
                 Ok(code.to_string())
             }
             AstEditOp::ChangeType { symbol, old_type, new_type, .. } => {
-                // Replace type annotation
                 let pattern = format!("{}: {}", symbol, old_type);
                 let replacement = format!("{}: {}", symbol, new_type);
                 Ok(code.replace(&pattern, &replacement))
+            }
+
+            AstEditOp::Insert { content, line, .. } => {
+                let mut result = code.to_string();
+                if *line > 0 && *line <= code.lines().count() {
+                    result.insert_str(
+                        code.lines().take(*line).map(|l| l.len()).sum::<usize>() + *line,
+                        content,
+                    );
+                }
+                Ok(result)
+            }
+
+            AstEditOp::Delete { start_line, end_line } => {
+                let lines: Vec<&str> = code.lines().collect();
+                let mut result = String::new();
+                for (i, line) in lines.iter().enumerate() {
+                    let line_num = i + 1;
+                    if line_num < *start_line || line_num > *end_line {
+                        result.push_str(line);
+                        result.push('\n');
+                    }
+                }
+                Ok(result)
+            }
+
+            AstEditOp::Replace { start_line, end_line, content } => {
+                let lines: Vec<&str> = code.lines().collect();
+                let mut result = String::new();
+                for (i, line) in lines.iter().enumerate() {
+                    let line_num = i + 1;
+                    if line_num == *start_line {
+                        result.push_str(content);
+                        result.push('\n');
+                    } else if line_num < *start_line || line_num > *end_line {
+                        result.push_str(line);
+                        result.push('\n');
+                    }
+                }
+                Ok(result)
             }
         }
     }
