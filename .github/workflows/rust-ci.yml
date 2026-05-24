@@ -1,0 +1,63 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - codex/fix-desktop-windows-build
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check workspace
+        run: cargo check --workspace --all-targets
+
+  debate-tests:
+    name: Debate crates tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test debate core
+        run: cargo test -p jcode-debate-core
+
+      - name: Test debate orchestrator
+        run: cargo test -p jcode-debate-orchestrator
+
+  desktop-tests:
+    name: Desktop crate tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test desktop crate
+        run: cargo test -p jcode-desktop
