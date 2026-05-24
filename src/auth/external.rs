@@ -415,6 +415,7 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "PERPLEXITY_API_KEY" => &["perplexity"],
         "BAILIAN_CODING_PLAN_API_KEY" => &["alibaba-coding-plan", "bailian"],
         "GITLAB_TOKEN" => &["gitlab-duo", "gitlab"],
+        "GOOGLE_CLOUD_ACCESS_TOKEN" | "VERTEX_API_KEY" => &["vertex-ai", "vertex"],
         _ => &[],
     }
 }
