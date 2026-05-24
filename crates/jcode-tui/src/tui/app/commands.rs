@@ -1894,6 +1894,45 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/history input" || trimmed == "/history" {
+        if app.input_history.is_empty() {
+            app.push_display_message(DisplayMessage::system(
+                "No input history yet.".to_string(),
+            ));
+            return true;
+        }
+        let mut listing = String::from("**Input history:**\n\n");
+        for (i, entry) in app.input_history.iter().enumerate() {
+            let preview = crate::util::truncate_str(entry, 80);
+            listing.push_str(&format!("  `{}` {}\n", i + 1, preview));
+        }
+        listing.push_str(
+            "\nUse `/history input N` to load entry N into the input box.",
+        );
+        app.push_display_message(DisplayMessage::system(listing));
+        return true;
+    }
+
+    if let Some(num_str) = trimmed.strip_prefix("/history input ") {
+        let num_str = num_str.trim();
+        match num_str.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= app.input_history.len() => {
+                let entry = app.input_history[n - 1].clone();
+                app.input = entry.clone();
+                app.cursor_pos = app.input.len();
+                app.reset_input_history_browse();
+                app.set_status_notice(format!("📋 Loaded input #{}", n));
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Invalid index. Use `/history input N` where N is 1..{}.",
+                    app.input_history.len()
+                )));
+            }
+        }
+        return true;
+    }
+
     if trimmed == "/rewind" {
         let visible_messages = app.session.visible_conversation_messages();
         if visible_messages.is_empty() {

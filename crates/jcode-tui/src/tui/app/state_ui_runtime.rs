@@ -386,4 +386,62 @@ impl App {
             self.set_status_notice("📋 Input stashed");
         }
     }
+
+    /// Maximum number of entries kept in input history.
+    const INPUT_HISTORY_MAX: usize = 100;
+
+    /// Push a submitted input into history (called from `submit_input`).
+    pub(super) fn push_input_history(&mut self, text: String) {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        // Avoid consecutive duplicates
+        if self.input_history.last() == Some(&trimmed) {
+            return;
+        }
+        self.input_history.push(trimmed);
+        if self.input_history.len() > Self::INPUT_HISTORY_MAX {
+            self.input_history.remove(0);
+        }
+    }
+
+    /// Navigate up (older) in input history. Returns `true` if the input was modified.
+    pub(super) fn input_history_up(&mut self) -> bool {
+        if self.input_history.is_empty() {
+            return false;
+        }
+        let new_idx = match self.input_history_index {
+            Some(idx) => idx.saturating_sub(1),
+            None => self.input_history.len() - 1,
+        };
+        self.input_history_index = Some(new_idx);
+        self.input = self.input_history[new_idx].clone();
+        self.cursor_pos = self.input.len();
+        true
+    }
+
+    /// Navigate down (newer) in input history. Returns `true` if the input was modified.
+    pub(super) fn input_history_down(&mut self) -> bool {
+        let Some(idx) = self.input_history_index else {
+            return false;
+        };
+        let next = idx + 1;
+        if next < self.input_history.len() {
+            self.input_history_index = Some(next);
+            self.input = self.input_history[next].clone();
+            self.cursor_pos = self.input.len();
+        } else {
+            // Past the end: clear input and exit history browsing
+            self.input_history_index = None;
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
+        true
+    }
+
+    /// Reset history browsing state (call when the user manually edits input).
+    pub(super) fn reset_input_history_browse(&mut self) {
+        self.input_history_index = None;
+    }
 }
