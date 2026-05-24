@@ -1,0 +1,63 @@
+name: One-shot fix CI compile errors
+
+on:
+  push:
+    branches:
+      - codex/fix-desktop-windows-build
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/fix-desktop-windows-build
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply compile fixes and remove one-shot workflow
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          dispatch = Path('src/cli/dispatch.rs')
+          text = dispatch.read_text()
+          marker = '\n}\n\n#[cfg(test)]\n#[path = "dispatch_tests.rs"]\nmod dispatch_tests;'
+          if 'pub(crate) async fn spawn_server' in text and 'startup_profile::mark("server_ready");\n    }\n\n    Ok(())\n}\n\n#[cfg(test)]' not in text:
+              idx = text.rfind(marker)
+              if idx == -1:
+                  raise SystemExit('dispatch.rs end marker not found')
+              text = text[:idx] + '\n\n    Ok(())' + text[idx:]
+              dispatch.write_text(text)
+
+          bash = Path('src/tool/bash.rs')
+          text = bash.read_text()
+          if 'fn parse_progress_marker(line: &str) -> Option<BackgroundTaskProgress>' not in text:
+              target = 'fn parse_checkpoint_marker(line: &str) -> Option<BackgroundTaskProgress> {'
+              replacement = '''fn parse_progress_marker(line: &str) -> Option<BackgroundTaskProgress> {
+    parse_progress_marker_with_checkpoint(line).map(|(progress, _)| progress)
+}
+
+fn parse_checkpoint_marker(line: &str) -> Option<BackgroundTaskProgress> {'''
+              if target not in text:
+                  raise SystemExit('bash.rs parse_checkpoint_marker target not found')
+              text = text.replace(target, replacement, 1)
+              bash.write_text(text)
+          PY
+          rm -f .github/workflows/fix-ci-compile-errors.yml
+
+      - name: Commit fixes
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/cli/dispatch.rs src/tool/bash.rs .github/workflows/fix-ci-compile-errors.yml
+          git commit -m "Fix CI compile errors in dispatch and bash progress tests"
+          git push origin HEAD:codex/fix-desktop-windows-build
