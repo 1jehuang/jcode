@@ -1,3 +1,4 @@
+# Triggered to apply pending compile fixes
 name: One-shot fix CI compile errors
 
 on:
