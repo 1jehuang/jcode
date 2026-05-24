@@ -1958,6 +1958,12 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if let Some(num_str) = trimmed.strip_prefix("/history delete ") {
         let num_str = num_str.trim();
+        if app.input_history.is_empty() {
+            app.push_display_message(DisplayMessage::system(
+                "No input history to delete.".to_string(),
+            ));
+            return true;
+        }
         match num_str.parse::<usize>() {
             Ok(n) if n >= 1 && n <= app.input_history.len() => {
                 let entry = app.input_history[n - 1].clone();
@@ -1980,18 +1986,36 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         match num_str.parse::<usize>() {
             Ok(n) if n >= 1 && n <= app.input_history.len() => {
                 let entry = app.input_history[n - 1].clone();
-                app.input = entry.clone();
+                if !app.input.is_empty() {
+                    app.remember_input_undo_state();
+                }
+                app.input = entry;
                 app.cursor_pos = app.input.len();
+                app.reset_tab_completion();
                 app.reset_input_history_browse();
+                app.sync_model_picker_preview_from_input();
                 app.set_status_notice(format!("📋 Loaded input #{}", n));
             }
             _ => {
-                app.push_display_message(DisplayMessage::system(format!(
-                    "Invalid index. Use `/history input N` where N is 1..{}.",
-                    app.input_history.len()
-                )));
+                if app.input_history.is_empty() {
+                    app.push_display_message(DisplayMessage::system(
+                        "No input history yet.".to_string(),
+                    ));
+                } else {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Invalid index. Use `/history input N` where N is 1..{}.",
+                        app.input_history.len()
+                    )));
+                }
             }
         }
+        return true;
+    }
+
+    if trimmed.starts_with("/history ") {
+        app.push_display_message(DisplayMessage::system(
+            "Unknown /history subcommand. Use: input N, search <term>, delete N, clear".to_string(),
+        ));
         return true;
     }
 

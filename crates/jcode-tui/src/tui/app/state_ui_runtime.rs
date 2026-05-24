@@ -452,16 +452,6 @@ impl App {
         self.input_history_index = None;
     }
 
-    /// Returns `Some((current, total))` if the user is browsing input history.
-    pub(super) fn input_history_browse_status(&self) -> Option<(usize, usize)> {
-        let idx = self.input_history_index?;
-        let total = self.input_history.len();
-        if total == 0 {
-            return None;
-        }
-        Some((idx + 1, total))
-    }
-
     /// Clear all input history entries.
     pub(super) fn clear_input_history(&mut self) {
         self.input_history.clear();
@@ -496,10 +486,12 @@ impl App {
 
     /// Save input history to disk (global, not session-specific).
     pub(super) fn save_input_history(&self) {
-        if self.input_history.is_empty() {
-            return;
-        }
         if let Some(path) = Self::input_history_path() {
+            if self.input_history.is_empty() {
+                // Remove the file so cleared history doesn't reappear on restart.
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
             let data = serde_json::json!({
                 "history": self.input_history,
                 "version": 1,

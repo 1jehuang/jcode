@@ -1393,7 +1393,7 @@ fn test_input_history_browse_status_none_when_not_browsing() {
     app.input_history.push("test".to_string());
     app.input_history_index = None;
 
-    assert!(app.input_history_browse_status().is_none());
+    assert!(crate::tui::TuiState::input_history_browse_status(&app).is_none());
 }
 
 #[test]
@@ -1404,7 +1404,7 @@ fn test_input_history_browse_status_some_when_browsing() {
     app.input_history.push("second".to_string());
     app.input_history_index = Some(1);
 
-    let (current, total) = app.input_history_browse_status().unwrap();
+    let (current, total) = crate::tui::TuiState::input_history_browse_status(&app).unwrap();
     assert_eq!(current, 2); // 1-based
     assert_eq!(total, 2);
 }
