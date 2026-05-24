@@ -187,6 +187,88 @@ pub(super) fn active_dollar_token(input: &str) -> Option<&str> {
     None
 }
 
+/// Issue #11: detect an active `@<path>` token at the END of the input.
+///
+/// Returns the substring beginning at the most recent `@` that:
+///   - starts the input, OR
+///   - is preceded by whitespace
+///
+/// and that has not yet been terminated by whitespace.
+///
+/// ```text
+/// active_at_token("@src/main.rs")           // Some("@src/main.rs")
+/// active_at_token("look at @docs/READ")     // Some("@docs/READ")
+/// active_at_token("look at @docs/RM done")  // None
+/// active_at_token("email@example.com")      // None — middle of token
+/// ```
+pub(super) fn active_at_token(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        let prev = bytes[i - 1];
+        if prev == b'@' {
+            if i == 1 || (bytes[i - 2] as char).is_whitespace() {
+                return Some(&input[i - 1..]);
+            }
+            return None;
+        }
+        if (prev as char).is_whitespace() {
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// Suggest filesystem entries matching a partial `@<query>` token.
+///
+/// Walks the working directory shallowly, returning entries whose
+/// path (relative to `cwd`) starts with `query`. Limits to `limit`
+/// results.
+///
+/// Implementation note: this is intentionally cheap — it only walks
+/// the directory containing the partial path, not the full tree.
+/// `@s` looks at `cwd`. `@src/m` looks inside `cwd/src/`.
+pub(super) fn suggest_at_path(cwd: &std::path::Path, query: &str, limit: usize) -> Vec<String> {
+    let q = query.trim_start_matches('@');
+    let (parent_rel, prefix) = match q.rfind('/') {
+        Some(idx) => (&q[..idx + 1], &q[idx + 1..]),
+        None => ("", q),
+    };
+
+    let parent_abs = if parent_rel.is_empty() {
+        cwd.to_path_buf()
+    } else {
+        cwd.join(parent_rel)
+    };
+
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&parent_abs) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        // Skip hidden entries unless user explicitly types `.`
+        if name.starts_with('.') && !prefix.starts_with('.') {
+            continue;
+        }
+        let mut full = format!("@{parent_rel}{name}");
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            full.push('/');
+        }
+        out.push(full);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out.sort();
+    out
+}
+
 impl App {
     /// Find word boundary going backward (for Ctrl+W, Alt+B)
     pub(super) fn find_word_boundary_back(&self) -> usize {
@@ -1400,6 +1482,7 @@ impl App {
 #[cfg(test)]
 mod dollar_token_tests {
     use super::active_dollar_token;
+    use super::{active_at_token, suggest_at_path};
 
     #[test]
     fn detects_dollar_at_start_of_input() {
@@ -1464,5 +1547,116 @@ mod dollar_token_tests {
         assert_eq!(token, "$");
         let prefix_len = input.len() - token.len();
         assert_eq!(&input[..prefix_len], "xxxx ");
+    }
+
+    // ---- Issue #11: @<path> token detection + suggestion ----
+
+    #[test]
+    fn at_token_at_start_returns_full() {
+        assert_eq!(active_at_token("@src/main.rs"), Some("@src/main.rs"));
+    }
+
+    #[test]
+    fn at_token_after_whitespace_returns_token() {
+        assert_eq!(active_at_token("look at @docs/READ"), Some("@docs/READ"));
+    }
+
+    #[test]
+    fn at_token_terminated_by_whitespace_returns_none() {
+        assert_eq!(active_at_token("look at @docs done"), None);
+    }
+
+    #[test]
+    fn at_token_in_middle_of_word_is_email_like_returns_none() {
+        // Likely an email address — shouldn't trigger autocomplete.
+        assert_eq!(active_at_token("email@example.com"), None);
+    }
+
+    #[test]
+    fn at_token_empty_after_at_still_matches() {
+        assert_eq!(active_at_token("@"), Some("@"));
+        assert_eq!(active_at_token("hi @"), Some("@"));
+    }
+
+    #[test]
+    fn at_token_no_at_returns_none() {
+        assert_eq!(active_at_token("hello world"), None);
+        assert_eq!(active_at_token(""), None);
+    }
+
+    #[test]
+    fn suggest_at_path_finds_top_level_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "").unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "").unwrap();
+
+        let mut suggestions = suggest_at_path(temp.path(), "@", 10);
+        suggestions.sort();
+        assert!(
+            suggestions.contains(&"@main.rs".to_string()),
+            "got: {:?}",
+            suggestions
+        );
+        assert!(
+            suggestions.contains(&"@src/".to_string()),
+            "directories should have trailing slash: {:?}",
+            suggestions
+        );
+        assert!(suggestions.contains(&"@Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn suggest_at_path_filters_by_prefix() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "").unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(temp.path().join("README.md"), "").unwrap();
+
+        let suggestions = suggest_at_path(temp.path(), "@m", 10);
+        assert_eq!(suggestions, vec!["@main.rs"]);
+
+        let suggestions = suggest_at_path(temp.path(), "@C", 10);
+        assert_eq!(suggestions, vec!["@Cargo.toml"]);
+    }
+
+    #[test]
+    fn suggest_at_path_descends_into_subdirectory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "").unwrap();
+
+        let mut suggestions = suggest_at_path(temp.path(), "@src/", 10);
+        suggestions.sort();
+        assert_eq!(suggestions, vec!["@src/lib.rs", "@src/main.rs"]);
+
+        let suggestions = suggest_at_path(temp.path(), "@src/m", 10);
+        assert_eq!(suggestions, vec!["@src/main.rs"]);
+    }
+
+    #[test]
+    fn suggest_at_path_skips_hidden_unless_dot_typed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join(".env"), "").unwrap();
+        std::fs::write(temp.path().join("public.txt"), "").unwrap();
+
+        // Default: don't suggest dotfiles.
+        let suggestions = suggest_at_path(temp.path(), "@", 10);
+        assert_eq!(suggestions, vec!["@public.txt"]);
+
+        // User explicitly typed '.': suggest dotfiles.
+        let suggestions = suggest_at_path(temp.path(), "@.", 10);
+        assert_eq!(suggestions, vec!["@.env"]);
+    }
+
+    #[test]
+    fn suggest_at_path_respects_limit() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for i in 0..20 {
+            std::fs::write(temp.path().join(format!("f{i:02}.txt")), "").unwrap();
+        }
+        let suggestions = suggest_at_path(temp.path(), "@f", 5);
+        assert_eq!(suggestions.len(), 5);
     }
 }
