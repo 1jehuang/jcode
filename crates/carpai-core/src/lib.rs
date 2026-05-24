@@ -53,6 +53,27 @@ pub mod completion;
 // --- Tool System (Phase 1D) ---
 pub mod tools;
 
+// --- Refactoring Engine (Phase 1E) ---
+pub mod refactoring;
+
+// --- Code Analysis & AST (Phase 1E) ---
+pub mod analysis;
+
+// --- Git Integration (Phase 1E) ---
+pub mod git;
+
+// --- Error Handling (Phase 1E) ---
+pub mod error;
+
+// --- Performance Layer ---
+pub mod performance;
+
+// --- REST LLM Stub (for refactoring integration) ---
+pub mod rest_llm;
+
+// --- Mock Implementations (Wk6-8) ---
+pub mod mock;
+
 // ========================================================================
 // Re-exports from carpai-internal (convenience layer)
 // ========================================================================
@@ -250,3 +271,22 @@ pub use tools::mcp::{
 pub use tools::slash_command::{
     SlashCommandRegistry, SlashCommand, SlashCommandExecution,
 };
+
+// --- Refactoring Engine Re-exports (Phase 1E) ---
+pub use refactoring::RefactorEngine;
+pub use refactoring::{EditOperation, EditResult, MatchStrategy, IndentStyle};
+pub use refactoring::{AtomicEditCoordinator, TransactionStatus};
+
+// --- Analysis Re-exports (Phase 1E) ---
+pub use analysis::CodeClassifier;
+pub use analysis::ContextPruner;
+pub use analysis::ProactiveContextGatherer;
+pub use analysis::IncrementalIndex;
+
+// --- Git Re-exports (Phase 1E) ---
+pub use git::GitWorkflow;
+pub use git::VersionManager;
+
+// --- Error Handling Re-exports (Phase 1E) ---
+pub use error::CarpaiError;
+pub use error::AllowlistManager;
