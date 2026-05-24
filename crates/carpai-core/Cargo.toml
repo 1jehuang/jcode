@@ -1,0 +1,53 @@
+[package]
+name = "carpai-core"
+version = "0.1.0"
+edition = "2024"
+description = "CarpAI Business Logic Layer - concrete implementations of carpai-internal traits"
+
+[dependencies]
+carpai-internal = { path = "../carpai-internal" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Async streams
+futures = "0.3"
+tokio-stream = "0.1"
+
+# Hashing
+sha2 = "0.10"
+
+# Regex for content search
+regex = "1"
+
+# Filesystem paths
+dirs = "5"
+
+# HTTP client (for inference backend)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Byte utilities (for streaming responses)
+bytes = "1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
