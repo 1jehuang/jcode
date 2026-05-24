@@ -352,6 +352,21 @@ pub const NVIDIA_NIM_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
+pub const GITLAB_DUO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "gitlab-duo",
+    display_name: "GitLab Duo",
+    // GitLab Duo's chat API is exposed through the AI Gateway under
+    // /api/v4/chat/agent. Authentication is via Personal Access Token
+    // with the `ai_features` scope. Self-hosted GitLab Enterprise users
+    // can override the base URL via the standard provider profile config.
+    api_base: "https://gitlab.com/api/v4/chat/agent",
+    api_key_env: "GITLAB_TOKEN",
+    env_file: "gitlab-duo.env",
+    setup_url: "https://docs.gitlab.com/ee/user/gitlab_duo/",
+    default_model: Some("claude-sonnet-4"),
+    requires_api_key: true,
+};
+
 pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "xiaomi-mimo",
     display_name: "Xiaomi MiMo",
@@ -374,7 +389,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 33] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 34] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -404,6 +419,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 33] = [
     MINIMAX_PROFILE,
     XAI_PROFILE,
     NVIDIA_NIM_PROFILE,
+    GITLAB_DUO_PROFILE,
     XIAOMI_MIMO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -551,7 +567,15 @@ pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     auth_kind: LoginProviderAuthKind::ApiKey,
     auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
     auth_status_method: "API key",
-    aliases: &["z.ai", "z-ai", "zai-coding", "zhipu", "bigmodel", "glm", "zhipu-bigmodel"],
+    aliases: &[
+        "z.ai",
+        "z-ai",
+        "zai-coding",
+        "zhipu",
+        "bigmodel",
+        "glm",
+        "zhipu-bigmodel",
+    ],
     menu_detail: "API key",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
@@ -903,6 +927,19 @@ pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(34), Some(34), Some(34), Some(34), Some(34)),
 };
 
+pub const GITLAB_DUO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "gitlab-duo",
+    display_name: "GitLab Duo",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "Personal Access Token (ai_features scope)",
+    aliases: &["gitlab", "duo", "gitlab-pro"],
+    menu_detail: "GitLab Duo (PAT with ai_features scope)",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(GITLAB_DUO_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(35), Some(35), Some(35), Some(35), Some(35)),
+};
+
 pub const LMSTUDIO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "lmstudio",
     display_name: "LM Studio",
@@ -1020,7 +1057,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 46] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 47] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
@@ -1058,6 +1095,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 46] = [
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
+    GITLAB_DUO_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
