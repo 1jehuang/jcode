@@ -6,9 +6,13 @@ on:
       - codex/fix-desktop-windows-build
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: powershell
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  CI_TRIGGER_NOTE: self-hosted-runner
+  CI_TRIGGER_NOTE: self-hosted-windows-powershell
 
 jobs:
   check:
@@ -19,11 +23,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Show Rust toolchain
+        run: |
+          cargo --version
+          rustc --version
 
       - name: Cargo check workspace
         run: cargo check --workspace --all-targets
@@ -36,11 +39,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Show Rust toolchain
+        run: |
+          cargo --version
+          rustc --version
 
       - name: Test debate core
         run: cargo test -p jcode-debate-core
@@ -56,11 +58,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Show Rust toolchain
+        run: |
+          cargo --version
+          rustc --version
 
       - name: Test desktop crate
         run: cargo test -p jcode-desktop
