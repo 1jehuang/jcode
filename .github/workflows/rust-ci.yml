@@ -8,6 +8,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CI_TRIGGER_NOTE: self-hosted-runner
 
 jobs:
   check:
