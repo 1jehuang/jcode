@@ -367,6 +367,24 @@ pub const GITLAB_DUO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
+pub const VERTEX_AI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "vertex-ai",
+    display_name: "Vertex AI",
+    // Google Cloud Vertex AI exposes Anthropic Claude (and other models)
+    // through an OpenAI-compatible endpoint. The api_base shown here is
+    // the public US-Central1 region; users with a different region or
+    // project should override via:
+    //   provider-vertex-ai.env:
+    //     JCODE_OPENAI_COMPAT_API_BASE=https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi
+    // Auth uses a Google Cloud access token (gcloud auth print-access-token).
+    api_base: "https://us-central1-aiplatform.googleapis.com/v1/openapi",
+    api_key_env: "GOOGLE_CLOUD_ACCESS_TOKEN",
+    env_file: "vertex-ai.env",
+    setup_url: "https://cloud.google.com/vertex-ai/docs/start/quickstarts",
+    default_model: Some("claude-sonnet-4@20250101"),
+    requires_api_key: true,
+};
+
 pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "xiaomi-mimo",
     display_name: "Xiaomi MiMo",
@@ -389,7 +407,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 34] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 35] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -420,6 +438,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 34] = [
     XAI_PROFILE,
     NVIDIA_NIM_PROFILE,
     GITLAB_DUO_PROFILE,
+    VERTEX_AI_PROFILE,
     XIAOMI_MIMO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -940,6 +959,19 @@ pub const GITLAB_DUO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(35), Some(35), Some(35), Some(35), Some(35)),
 };
 
+pub const VERTEX_AI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "vertex-ai",
+    display_name: "Vertex AI (Google Cloud)",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "Google Cloud access token (gcloud auth print-access-token)",
+    aliases: &["vertex", "gcp", "google-vertex"],
+    menu_detail: "Vertex AI: Anthropic Claude via Google Cloud (gcloud access token)",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(VERTEX_AI_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(36), Some(36), Some(36), Some(36), Some(36)),
+};
+
 pub const LMSTUDIO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "lmstudio",
     display_name: "LM Studio",
@@ -1057,7 +1089,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 47] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
@@ -1096,6 +1128,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 47] = [
     XAI_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     GITLAB_DUO_LOGIN_PROVIDER,
+    VERTEX_AI_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
