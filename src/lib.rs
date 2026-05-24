@@ -59,6 +59,7 @@ pub mod overnight;
 pub mod perf;
 pub mod plan;
 pub mod platform;
+pub mod prefix_cache_stable;
 pub mod process_memory;
 pub mod process_title;
 pub mod prompt;
