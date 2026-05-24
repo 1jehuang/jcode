@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SchedulerPriority {
     Critical = 0,
     High = 1,

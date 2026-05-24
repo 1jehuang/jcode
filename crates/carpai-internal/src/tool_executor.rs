@@ -113,7 +113,7 @@ fn new_request_id() -> String {
 }
 
 /// Execution context — who, where, how
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolContext {
     /// User/tenant ID (for permission check + audit)
     pub user_id: String,
@@ -135,20 +135,6 @@ pub struct ToolContext {
 
     /// Arbitrary metadata forwarded to the tool
     pub metadata: HashMap<String, String>,
-}
-
-impl Default for ToolContext {
-    fn default() -> Self {
-        Self {
-            user_id: String::new(),
-            session_id: String::new(),
-            working_dir: None,
-            env_vars: HashMap::new(),
-            timeout: None,
-            require_confirmation: false,
-            metadata: HashMap::new(),
-        }
-    }
 }
 
 /// Tool execution response
@@ -247,10 +233,6 @@ pub enum ExecutionMode {
     Remote { endpoint: String },
     /// Dry-run — validate only, don't execute
     DryRun,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self { Self::Local }
 }
 
 // ========================================================================

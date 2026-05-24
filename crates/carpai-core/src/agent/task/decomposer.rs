@@ -8,7 +8,7 @@
 //! - Load balancing: Distribute tasks among workers based on estimated complexity
 //! - Failure propagation: Automatically cancel downstream tasks when dependencies fail
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;

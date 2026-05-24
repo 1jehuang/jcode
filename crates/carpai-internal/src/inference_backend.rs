@@ -164,17 +164,14 @@ pub struct FunctionDefinition {
 }
 
 /// Tool choice policy
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolChoice {
     None,
+    #[default]
     Auto,
     Required,
     Specific(String),
-}
-
-impl Default for ToolChoice {
-    fn default() -> Self { Self::Auto }
 }
 
 // ========================================================================

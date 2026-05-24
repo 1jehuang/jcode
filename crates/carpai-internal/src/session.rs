@@ -45,9 +45,10 @@ impl From<&str> for SessionId {
 }
 
 /// Session lifecycle states
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SessionState {
     /// Active session — accepting messages
+    #[default]
     Active,
     /// Paused — preserved but not accepting input
     Paused,
@@ -55,10 +56,6 @@ pub enum SessionState {
     Archived,
     /// Deleted — soft-deleted, pending purge
     Deleted,
-}
-
-impl Default for SessionState {
-    fn default() -> Self { Self::Active }
 }
 
 impl std::fmt::Display for SessionState {

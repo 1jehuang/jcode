@@ -229,6 +229,7 @@ impl AgentContext {
     /// Create a new AgentContext with all required services
     ///
     /// This is typically called once at startup and then cloned per-request.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AppConfig,
         sessions: Arc<dyn SessionStore>,

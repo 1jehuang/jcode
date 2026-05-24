@@ -79,13 +79,13 @@ fn default_confidence() -> f32 { 1.0 }
 fn default_active() -> bool { true }
 
 /// Scope of a memory — who can see it
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum MemoryScope {
+    #[default]
     Project,
     Global,
     All,
 }
-impl Default for MemoryScope { fn default() -> Self { Self::Project } }
 impl MemoryScope {
     pub fn includes_project(self) -> bool { matches!(self, Self::Project | Self::All) }
     pub fn includes_global(self) -> bool { matches!(self, Self::Global | Self::All) }
