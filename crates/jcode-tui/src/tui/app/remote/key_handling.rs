@@ -2345,7 +2345,10 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Up | KeyCode::PageUp => {
-            if code == KeyCode::Up && (app.input.is_empty() || app.input_history_index.is_some()) && app.input_history_up() {
+            if code == KeyCode::Up
+                && (app.input.is_empty() || app.input_history_index.is_some())
+                && app.input_history_up()
+            {
                 // Input restored from history
             } else {
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
@@ -2353,7 +2356,10 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Down | KeyCode::PageDown => {
-            if code == KeyCode::Down && app.input_history_index.is_some() && app.input_history_down() {
+            if code == KeyCode::Down
+                && app.input_history_index.is_some()
+                && app.input_history_down()
+            {
                 // Navigated down in history
             } else {
                 let dec = if code == KeyCode::PageDown { 10 } else { 1 };

@@ -1829,7 +1829,10 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Up | KeyCode::PageUp => {
-            if code == KeyCode::Up && (app.input.is_empty() || app.input_history_index.is_some()) && app.input_history_up() {
+            if code == KeyCode::Up
+                && (app.input.is_empty() || app.input_history_index.is_some())
+                && app.input_history_up()
+            {
                 return true;
             }
             let inc = if code == KeyCode::PageUp { 10 } else { 1 };
@@ -1837,7 +1840,10 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Down | KeyCode::PageDown => {
-            if code == KeyCode::Down && app.input_history_index.is_some() && app.input_history_down() {
+            if code == KeyCode::Down
+                && app.input_history_index.is_some()
+                && app.input_history_down()
+            {
                 return true;
             }
             let dec = if code == KeyCode::PageDown { 10 } else { 1 };

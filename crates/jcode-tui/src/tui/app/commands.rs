@@ -1896,9 +1896,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/history input" || trimmed == "/history" {
         if app.input_history.is_empty() {
-            app.push_display_message(DisplayMessage::system(
-                "No input history yet.".to_string(),
-            ));
+            app.push_display_message(DisplayMessage::system("No input history yet.".to_string()));
             return true;
         }
         let mut listing = String::from("**Input history:**\n\n");
@@ -1906,9 +1904,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             let preview = crate::util::truncate_str(entry, 80);
             listing.push_str(&format!("  `{}` {}\n", i + 1, preview));
         }
-        listing.push_str(
-            "\nUse `/history input N` to load entry N into the input box.",
-        );
+        listing.push_str("\nUse `/history input N` to load entry N into the input box.");
         app.push_display_message(DisplayMessage::system(listing));
         return true;
     }
