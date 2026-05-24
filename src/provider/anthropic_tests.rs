@@ -868,3 +868,76 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         }
     }
 }
+
+#[cfg(test)]
+mod base_url_override_tests {
+    use super::super::anthropic_base_url_override;
+
+    fn save_keys(keys: &[&'static str]) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        keys.iter().map(|k| (*k, std::env::var_os(k))).collect()
+    }
+    fn restore(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (k, v) in saved {
+            unsafe {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn returns_none_when_unset() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(&["ANTHROPIC_BASE_URL", "JCODE_ANTHROPIC_BASE_URL"]);
+        crate::env::remove_var("ANTHROPIC_BASE_URL");
+        crate::env::remove_var("JCODE_ANTHROPIC_BASE_URL");
+
+        assert_eq!(anthropic_base_url_override(), None);
+
+        restore(saved);
+    }
+
+    #[test]
+    fn returns_value_from_jcode_prefix_first() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(&["ANTHROPIC_BASE_URL", "JCODE_ANTHROPIC_BASE_URL"]);
+        crate::env::set_var("JCODE_ANTHROPIC_BASE_URL", "https://jcode-proxy.example/");
+        crate::env::set_var("ANTHROPIC_BASE_URL", "https://other-proxy.example/");
+
+        assert_eq!(
+            anthropic_base_url_override().as_deref(),
+            Some("https://jcode-proxy.example/")
+        );
+
+        restore(saved);
+    }
+
+    #[test]
+    fn falls_back_to_anthropic_base_url() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(&["ANTHROPIC_BASE_URL", "JCODE_ANTHROPIC_BASE_URL"]);
+        crate::env::remove_var("JCODE_ANTHROPIC_BASE_URL");
+        crate::env::set_var("ANTHROPIC_BASE_URL", "https://corp-proxy.example");
+
+        assert_eq!(
+            anthropic_base_url_override().as_deref(),
+            Some("https://corp-proxy.example")
+        );
+
+        restore(saved);
+    }
+
+    #[test]
+    fn empty_value_treated_as_unset() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(&["ANTHROPIC_BASE_URL", "JCODE_ANTHROPIC_BASE_URL"]);
+        crate::env::set_var("ANTHROPIC_BASE_URL", "   ");
+        crate::env::set_var("JCODE_ANTHROPIC_BASE_URL", "");
+
+        assert_eq!(anthropic_base_url_override(), None);
+
+        restore(saved);
+    }
+}

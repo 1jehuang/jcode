@@ -44,6 +44,26 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
+/// Issue #83: Anthropic-compatible third-party endpoint override.
+///
+/// Returns the base URL (no `/v1/messages` suffix) when the user has
+/// set either `ANTHROPIC_BASE_URL` or `JCODE_ANTHROPIC_BASE_URL`.
+/// Empty values are treated as unset.
+///
+/// Used only for direct API-key auth — OAuth flows are still pinned
+/// to api.anthropic.com to prevent token leakage to a proxy.
+pub(crate) fn anthropic_base_url_override() -> Option<String> {
+    for key in ["JCODE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"] {
+        if let Ok(v) = std::env::var(key) {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
 pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
 
@@ -1578,8 +1598,22 @@ async fn stream_response(
         .await;
 
     let connect_start = std::time::Instant::now();
-    // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    // Build request with appropriate auth headers.
+    //
+    // Issue #83: support Anthropic-compatible third-party endpoints
+    // (Bedrock proxies, self-hosted gateways, etc.) by allowing
+    // ANTHROPIC_BASE_URL or JCODE_ANTHROPIC_BASE_URL to override the
+    // default api.anthropic.com host. The override is applied only
+    // for direct API-key auth — OAuth flows still hit Anthropic
+    // (would otherwise leak Anthropic-issued tokens).
+    let url = if is_oauth {
+        API_URL_OAUTH.to_string()
+    } else if let Some(base) = anthropic_base_url_override() {
+        format!("{}/v1/messages", base.trim_end_matches('/'))
+    } else {
+        API_URL.to_string()
+    };
+    let url = url.as_str();
 
     let mut req = client
         .post(url)
