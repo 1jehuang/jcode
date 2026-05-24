@@ -36,6 +36,19 @@ pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const BIGMODEL_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "bigmodel",
+    display_name: "Zhipu BigModel",
+    // Mainland China endpoint (api.z.ai is the international/Code-Plan
+    // mirror, open.bigmodel.cn is the consumer-facing API gateway).
+    api_base: "https://open.bigmodel.cn/api/paas/v4",
+    api_key_env: "ZHIPU_API_KEY",
+    env_file: "bigmodel.env",
+    setup_url: "https://bigmodel.cn/dev/howuse/model",
+    default_model: Some("glm-5.1"),
+    requires_api_key: true,
+};
+
 pub const KIMI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "kimi",
     display_name: "Kimi Code",
@@ -411,6 +424,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 35] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
+    BIGMODEL_PROFILE,
     KIMI_PROFILE,
     CHUTES_PROFILE,
     CEREBRAS_PROFILE,
@@ -599,6 +613,22 @@ pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(7), Some(6), Some(7), Some(6), Some(6)),
+};
+
+pub const BIGMODEL_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "bigmodel",
+    display_name: "Zhipu BigModel",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    // Distinct aliases from ZAI: bigmodel-cn / zhipu-cn / glm-cn
+    // explicitly target the mainland China endpoint. Bare 'bigmodel'
+    // and 'zhipu' continue to resolve to Z.AI for backward compat.
+    aliases: &["bigmodel-cn", "zhipu-cn", "glm-cn"],
+    menu_detail: "API key, mainland China endpoint",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(BIGMODEL_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(8), Some(7), Some(8), Some(7), Some(7)),
 };
 
 pub const KIMI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1101,6 +1131,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
     OPENCODE_LOGIN_PROVIDER,
     OPENCODE_GO_LOGIN_PROVIDER,
     ZAI_LOGIN_PROVIDER,
+    BIGMODEL_LOGIN_PROVIDER,
     KIMI_LOGIN_PROVIDER,
     CHUTES_LOGIN_PROVIDER,
     CEREBRAS_LOGIN_PROVIDER,
