@@ -95,6 +95,12 @@ impl MultiProvider {
         }
 
         let has_claude_creds = auth::claude::load_credentials().is_ok();
+        // Issue #83 follow-up: a bare `ANTHROPIC_API_KEY` (typically paired
+        // with `ANTHROPIC_BASE_URL` pointing at a third-party Anthropic-
+        // compatible gateway) is enough to drive the direct-API-key code
+        // path. Treat it as a configured credential source so the
+        // Anthropic provider gets instantiated.
+        let has_anthropic_api_key = anthropic::anthropic_api_key_env_configured();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_copilot_api = provider_state.auth_status().copilot_has_api_token;
         let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();
@@ -124,7 +130,7 @@ impl MultiProvider {
             None
         };
 
-        let anthropic = if has_claude_creds && !use_claude_cli {
+        let anthropic = if (has_claude_creds || has_anthropic_api_key) && !use_claude_cli {
             Some(Arc::new(anthropic::AnthropicProvider::new()))
         } else {
             None

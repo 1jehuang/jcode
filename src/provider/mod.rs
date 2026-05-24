@@ -618,7 +618,8 @@ impl MultiProvider {
                     Some(Arc::new(claude::ClaudeProvider::new()));
             }
         } else if self.anthropic_provider().is_none()
-            && crate::auth::claude::load_credentials().is_ok()
+            && (crate::auth::claude::load_credentials().is_ok()
+                || anthropic::anthropic_api_key_env_configured())
         {
             crate::logging::info("Hot-initialized Anthropic provider after auth change");
             *self

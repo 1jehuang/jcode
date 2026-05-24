@@ -1057,3 +1057,49 @@ mod base_url_override_tests {
         restore(saved);
     }
 }
+
+#[cfg(test)]
+mod api_key_env_configured_tests {
+    use super::super::anthropic_api_key_env_configured;
+
+    fn save_key() -> Option<std::ffi::OsString> {
+        std::env::var_os("ANTHROPIC_API_KEY")
+    }
+    fn restore(prev: Option<std::ffi::OsString>) {
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+                None => std::env::remove_var("ANTHROPIC_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn returns_false_when_unset() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = save_key();
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(!anthropic_api_key_env_configured());
+        restore(prev);
+    }
+
+    #[test]
+    fn returns_true_when_set() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = save_key();
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-test-123");
+        assert!(anthropic_api_key_env_configured());
+        restore(prev);
+    }
+
+    #[test]
+    fn whitespace_or_empty_is_treated_as_unset() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = save_key();
+        crate::env::set_var("ANTHROPIC_API_KEY", "   ");
+        assert!(!anthropic_api_key_env_configured());
+        crate::env::set_var("ANTHROPIC_API_KEY", "");
+        assert!(!anthropic_api_key_env_configured());
+        restore(prev);
+    }
+}

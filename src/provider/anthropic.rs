@@ -64,6 +64,20 @@ pub(crate) fn anthropic_base_url_override() -> Option<String> {
     None
 }
 
+/// Issue #83 follow-up: report whether a direct API key is configured
+/// via the environment, independent of any OAuth credentials on disk.
+///
+/// Used by provider startup / failover to decide whether to instantiate
+/// the Anthropic provider runtime when only an API key (e.g. for a
+/// third-party Anthropic-compatible endpoint via `ANTHROPIC_BASE_URL`)
+/// is available. Empty values are treated as unset.
+pub fn anthropic_api_key_env_configured() -> bool {
+    matches!(
+        std::env::var("ANTHROPIC_API_KEY"),
+        Ok(v) if !v.trim().is_empty()
+    )
+}
+
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
 pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
 
