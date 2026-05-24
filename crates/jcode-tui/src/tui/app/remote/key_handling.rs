@@ -307,6 +307,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // Ctrl+R reverse incremental search mode: intercept all keys
+    if app.input_history_search.is_some() {
+        return crate::tui::app::input::handle_history_search_key(app, code, modifiers);
+    }
+
     if input::handle_visible_copy_shortcut(app, code, modifiers) {
         return Ok(());
     }
@@ -523,7 +528,7 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('r') => {
-                app.recover_session_without_tools();
+                app.start_input_history_search();
                 return Ok(());
             }
             KeyCode::Char('l') => {

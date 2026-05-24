@@ -1441,6 +1441,18 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
         ));
     }
 
+    if let Some((query, match_index, total)) = app.input_history_search_status() {
+        push_sep(&mut spans);
+        let match_info = match match_index {
+            Some(idx) => format!("{}/{}", idx + 1, total),
+            None => "no match".to_string(),
+        };
+        spans.push(Span::styled(
+            format!("(reverse-i-search)'{}': {}", query, match_info),
+            Style::default().fg(rgb(255, 180, 100)),
+        ));
+    }
+
     spans
 }
 
@@ -1498,7 +1510,16 @@ pub(super) fn draw_input(
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
     let mut suggestion_lines: Vec<Line> = Vec::new();
-    if has_suggestions {
+    if app.input_history_search_status().is_some() {
+        hint_shown = true;
+        let hint =
+            "  (reverse-i-search) Type to search, Ctrl+R next, Enter to accept, Esc to cancel";
+        hint_line = Some(hint.trim().to_string());
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(rgb(255, 180, 100)),
+        )));
+    } else if has_suggestions {
         suggestion_lines = command_suggestion_lines(app, &suggestions);
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
         hint_shown = true;

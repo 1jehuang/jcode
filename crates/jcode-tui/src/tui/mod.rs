@@ -222,6 +222,10 @@ pub trait TuiState {
     fn input_history_browse_status(&self) -> Option<(usize, usize)> {
         None
     }
+    /// Returns `Some((query, match_index, total))` if the user is in reverse-i-search mode.
+    fn input_history_search_status(&self) -> Option<(&str, Option<usize>, usize)> {
+        None
+    }
     /// Context info (what's loaded in context window - static + dynamic)
     fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Authoritative, freshness-tagged context snapshot used by widgets.

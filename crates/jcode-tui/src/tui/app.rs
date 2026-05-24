@@ -538,6 +538,19 @@ struct CommandCandidatesCache {
     candidates: Vec<(String, &'static str)>,
 }
 
+/// State for Ctrl+R reverse incremental input history search.
+pub(super) struct HistorySearchState {
+    /// The search query typed by the user.
+    pub(super) query: String,
+    /// Index into `input_history` of the current match (searching backwards from end).
+    /// `None` means no match found.
+    pub(super) match_index: Option<usize>,
+    /// The original input before the search started (restored on Esc).
+    pub(super) saved_input: String,
+    /// The original cursor position before the search started.
+    pub(super) saved_cursor: usize,
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
 pub struct App {
@@ -948,6 +961,8 @@ pub struct App {
     input_history: Vec<String>,
     // Index into `input_history` while browsing; None when not browsing
     input_history_index: Option<usize>,
+    // Ctrl+R reverse incremental search state; None when not searching
+    input_history_search: Option<HistorySearchState>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)

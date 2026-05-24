@@ -1408,3 +1408,237 @@ fn test_input_history_browse_status_some_when_browsing() {
     assert_eq!(current, 2); // 1-based
     assert_eq!(total, 2);
 }
+
+#[test]
+fn test_ctrl_r_search_starts_and_shows_status() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello world".to_string());
+    app.input_history.push("goodbye".to_string());
+
+    app.start_input_history_search();
+
+    assert!(app.input_history_search.is_some());
+    let status = crate::tui::TuiState::input_history_search_status(&app);
+    assert!(status.is_some());
+    let (query, match_idx, total) = status.unwrap();
+    assert_eq!(query, "");
+    assert_eq!(match_idx, None);
+    assert_eq!(total, 2);
+}
+
+#[test]
+fn test_ctrl_r_search_char_finds_match() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello world".to_string());
+    app.input_history.push("goodbye".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('g');
+
+    assert_eq!(app.input, "goodbye");
+    assert_eq!(app.cursor_pos, 7);
+    let status = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(status.0, "g");
+    assert_eq!(status.1, Some(1)); // index 1
+}
+
+#[test]
+fn test_ctrl_r_search_case_insensitive() {
+    let mut app = create_test_app();
+
+    app.input_history.push("Hello".to_string());
+    app.input_history.push("world".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('h');
+    app.input_history_search_char('e');
+
+    assert_eq!(app.input, "Hello");
+    let status = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(status.0, "he");
+    assert_eq!(status.1, Some(0));
+}
+
+#[test]
+fn test_ctrl_r_search_backspace() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+    app.input_history.push("world".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('w');
+    assert_eq!(app.input, "world");
+
+    app.input_history_search_backspace();
+    // Query is now empty, should restore original input
+    assert_eq!(app.input, "");
+    assert_eq!(app.cursor_pos, 0);
+}
+
+#[test]
+fn test_ctrl_r_search_next_cycles() {
+    let mut app = create_test_app();
+
+    app.input_history.push("foo".to_string());
+    app.input_history.push("foobar".to_string());
+    app.input_history.push("foo".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('f');
+    app.input_history_search_char('o');
+
+    // First match should be the most recent "foo" at index 2
+    assert_eq!(app.input, "foo");
+    let (_, match_idx, _) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(match_idx, Some(2));
+
+    // Cycle to next
+    app.input_history_search_next();
+    assert_eq!(app.input, "foobar");
+    let (_, match_idx, _) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(match_idx, Some(1));
+
+    // Cycle to next
+    app.input_history_search_next();
+    assert_eq!(app.input, "foo");
+    let (_, match_idx, _) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(match_idx, Some(0));
+}
+
+#[test]
+fn test_ctrl_r_search_no_match_clears_input() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+    app.input_history.push("world".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('z');
+
+    assert_eq!(app.input, "");
+    let status = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(status.0, "z");
+    assert_eq!(status.1, None);
+}
+
+#[test]
+fn test_ctrl_r_accept_sets_input_and_index() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('s');
+    app.input_history_search_char('e');
+
+    assert_eq!(app.input, "second");
+
+    app.accept_input_history_search();
+
+    assert!(app.input_history_search.is_none());
+    assert_eq!(app.input, "second");
+    assert_eq!(app.cursor_pos, 6);
+    assert_eq!(app.input_history_index, Some(1));
+}
+
+#[test]
+fn test_ctrl_r_cancel_restores_input_when_no_match() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+
+    app.input = "original text".to_string();
+    app.cursor_pos = 14;
+
+    app.start_input_history_search();
+    app.input_history_search_char('z');
+
+    // No match found
+    assert_eq!(app.input, "");
+    app.cancel_input_history_search();
+
+    // Should restore original input
+    assert!(app.input_history_search.is_none());
+    assert_eq!(app.input, "original text");
+    assert_eq!(app.cursor_pos, 14);
+}
+
+#[test]
+fn test_ctrl_r_cancel_accepts_match() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+    app.input_history.push("world".to_string());
+
+    app.input = "original".to_string();
+    app.cursor_pos = 8;
+
+    app.start_input_history_search();
+    app.input_history_search_char('w');
+    app.input_history_search_char('o');
+
+    assert_eq!(app.input, "world");
+    app.cancel_input_history_search();
+
+    // Cancel with match found should accept the match
+    assert!(app.input_history_search.is_none());
+    assert_eq!(app.input_history_index, Some(1));
+}
+
+#[test]
+fn test_ctrl_r_search_status_none_when_not_searching() {
+    let mut app = create_test_app();
+
+    app.input_history.push("test".to_string());
+    app.input_history_index = None;
+
+    assert!(crate::tui::TuiState::input_history_search_status(&app).is_none());
+}
+
+#[test]
+fn test_ctrl_r_search_empty_history_shows_notice() {
+    let mut app = create_test_app();
+
+    assert!(app.input_history.is_empty());
+    app.start_input_history_search();
+
+    // Should not start search, no history
+    assert!(app.input_history_search.is_none());
+    assert!(crate::tui::TuiState::input_history_search_status(&app).is_none());
+}
+
+#[test]
+fn test_ctrl_r_search_browse_conflict_resolved() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+    app.input_history.push("world".to_string());
+
+    // Start browsing first
+    app.input_history_up();
+    assert_eq!(app.input, "world");
+
+    // Now start search - should clear browse index
+    app.start_input_history_search();
+    assert!(app.input_history_index.is_none());
+    assert!(app.input_history_search.is_some());
+}
+
+#[test]
+fn test_ctrl_r_search_accept_no_match_keeps_input() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+
+    app.start_input_history_search();
+    app.input_history_search_char('z');
+    app.accept_input_history_search();
+
+    // No match found, accept should leave input as-is (empty)
+    assert!(app.input_history_search.is_none());
+    assert_eq!(app.input, "");
+}

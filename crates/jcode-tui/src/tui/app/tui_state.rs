@@ -722,6 +722,11 @@ impl crate::tui::TuiState for App {
         Some((idx + 1, total))
     }
 
+    fn input_history_search_status(&self) -> Option<(&str, Option<usize>, usize)> {
+        let search = self.input_history_search.as_ref()?;
+        Some((&search.query, search.match_index, self.input_history.len()))
+    }
+
     fn context_snapshot(&self) -> crate::tui::ContextSnapshot {
         use crate::message::{ContentBlock, Role};
         use std::time::Instant;

@@ -450,6 +450,127 @@ impl App {
     /// Reset history browsing state (call when the user manually edits input).
     pub(super) fn reset_input_history_browse(&mut self) {
         self.input_history_index = None;
+        self.input_history_search = None;
+    }
+
+    /// Start a Ctrl+R reverse incremental search.
+    pub(super) fn start_input_history_search(&mut self) {
+        if self.input_history.is_empty() {
+            self.set_status_notice("No input history to search");
+            return;
+        }
+        self.input_history_index = None;
+        self.input_history_search = Some(super::HistorySearchState {
+            query: String::new(),
+            match_index: None,
+            saved_input: self.input.clone(),
+            saved_cursor: self.cursor_pos,
+        });
+    }
+
+    /// Append a character to the search query.
+    pub(super) fn input_history_search_char(&mut self, c: char) {
+        let Some(ref mut search) = self.input_history_search else {
+            return;
+        };
+        search.query.push(c);
+        self.input_history_search_find_match();
+    }
+
+    /// Delete the last character from the search query.
+    pub(super) fn input_history_search_backspace(&mut self) {
+        let Some(ref mut search) = self.input_history_search else {
+            return;
+        };
+        search.query.pop();
+        self.input_history_search_find_match();
+    }
+
+    /// Cycle to the next older match (Ctrl+R again while searching).
+    pub(super) fn input_history_search_next(&mut self) {
+        let Some(ref mut search) = self.input_history_search else {
+            return;
+        };
+        if search.query.is_empty() {
+            return;
+        }
+        let query_lower = search.query.to_lowercase();
+        // Start searching from one before the current match
+        let start = match search.match_index {
+            Some(idx) => idx.saturating_sub(1),
+            None => self.input_history.len().saturating_sub(1),
+        };
+        for i in (0..=start).rev() {
+            if self.input_history[i].to_lowercase().contains(&query_lower) {
+                search.match_index = Some(i);
+                self.input = self.input_history[i].clone();
+                self.cursor_pos = self.input.len();
+                return;
+            }
+        }
+        // No older match found; keep current match
+    }
+
+    /// Accept the current search result (Enter or Esc).
+    pub(super) fn accept_input_history_search(&mut self) {
+        let Some(search) = self.input_history_search.take() else {
+            return;
+        };
+        if let Some(idx) = search.match_index {
+            self.input = self.input_history[idx].clone();
+            self.cursor_pos = self.input.len();
+            self.input_history_index = Some(idx);
+        }
+        // If no match, leave input as-is (could be the saved original or whatever the user typed)
+    }
+
+    /// Cancel the search and restore original input (Esc with no match).
+    pub(super) fn cancel_input_history_search(&mut self) {
+        if let Some(search) = self.input_history_search.take() {
+            if search.match_index.is_none() {
+                self.input = search.saved_input;
+                self.cursor_pos = search.saved_cursor;
+            } else {
+                // Accept the match
+                self.input_history_index = search.match_index;
+            }
+        }
+    }
+
+    /// Internal: find the most recent match for the current query.
+    fn input_history_search_find_match(&mut self) {
+        let Some(ref mut search) = self.input_history_search else {
+            return;
+        };
+        if search.query.is_empty() {
+            search.match_index = None;
+            self.input = search.saved_input.clone();
+            self.cursor_pos = search.saved_cursor;
+            return;
+        }
+        let query_lower = search.query.to_lowercase();
+        // Search backwards from end (or from current match position to avoid jumping)
+        let start = match search.match_index {
+            Some(idx)
+                if self.input_history[idx]
+                    .to_lowercase()
+                    .contains(&query_lower) =>
+            {
+                idx
+            }
+            _ => self.input_history.len().saturating_sub(1),
+        };
+        for i in (0..=start).rev() {
+            if self.input_history[i].to_lowercase().contains(&query_lower) {
+                search.match_index = Some(i);
+                self.input = self.input_history[i].clone();
+                self.cursor_pos = self.input.len();
+                return;
+            }
+        }
+        search.match_index = None;
+        self.input.clear();
+        self.cursor_pos = 0;
     }
 
     /// Clear all input history entries.

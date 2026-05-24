@@ -307,6 +307,9 @@ impl crate::tui::TuiState for TestState {
     fn input_history_browse_status(&self) -> Option<(usize, usize)> {
         None
     }
+    fn input_history_search_status(&self) -> Option<(&str, Option<usize>, usize)> {
+        None
+    }
     fn context_info(&self) -> crate::prompt::ContextInfo {
         Default::default()
     }

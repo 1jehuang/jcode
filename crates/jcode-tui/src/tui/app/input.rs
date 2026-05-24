@@ -1748,7 +1748,7 @@ pub(super) fn handle_global_control_shortcuts(
             true
         }
         KeyCode::Char('r') => {
-            app.recover_session_without_tools();
+            app.start_input_history_search();
             true
         }
         KeyCode::Char('a') if app.input.is_empty() => {
@@ -1994,6 +1994,11 @@ impl App {
 
         if handle_modal_key(self, code, modifiers)? {
             return Ok(());
+        }
+
+        // Ctrl+R reverse incremental search mode: intercept all keys
+        if self.input_history_search.is_some() {
+            return handle_history_search_key(self, code, modifiers);
         }
 
         if self.handle_onboarding_continue_prompt_key(code) {
@@ -2723,4 +2728,52 @@ impl App {
             }
         }
     }
+}
+
+/// Handle key events while Ctrl+R reverse incremental search is active.
+pub(super) fn handle_history_search_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Result<()> {
+    match code {
+        // Ctrl+R again: cycle to next older match
+        KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input_history_search_next();
+            return Ok(());
+        }
+        // Enter: accept match and exit search
+        KeyCode::Enter => {
+            app.accept_input_history_search();
+            return Ok(());
+        }
+        // Esc: cancel search, restore original input
+        KeyCode::Esc => {
+            app.cancel_input_history_search();
+            return Ok(());
+        }
+        // Ctrl+C / Ctrl+D: cancel search
+        KeyCode::Char('c') | KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cancel_input_history_search();
+            return Ok(());
+        }
+        // Backspace: remove last char from query
+        KeyCode::Backspace | KeyCode::Char('\u{8}') => {
+            app.input_history_search_backspace();
+            return Ok(());
+        }
+        // Delete: same as backspace for search
+        KeyCode::Delete => {
+            app.input_history_search_backspace();
+            return Ok(());
+        }
+        // Printable character: append to search query
+        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input_history_search_char(c);
+            return Ok(());
+        }
+        // All other keys: ignore (no-op while searching)
+        _ => {}
+    }
+    Ok(())
 }
