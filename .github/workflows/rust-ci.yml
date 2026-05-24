@@ -8,11 +8,11 @@ on:
 
 defaults:
   run:
-    shell: powershell
+    shell: cmd
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  CI_TRIGGER_NOTE: self-hosted-windows-powershell
+  CI_TRIGGER_NOTE: self-hosted-windows-cmd
 
 jobs:
   check:
