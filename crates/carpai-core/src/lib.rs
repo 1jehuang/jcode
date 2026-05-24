@@ -41,6 +41,18 @@ pub mod agent_loop;
 // --- Agent System (Phase 1B) ---
 pub mod agent;
 
+// --- Memory System (Phase 1C - Partial) ---
+pub mod memory;
+
+// --- Session System (Phase 1C - Partial) ---
+pub mod session;
+
+// --- Completion System (Phase 1D) ---
+pub mod completion;
+
+// --- Tool System (Phase 1D) ---
+pub mod tools;
+
 // ========================================================================
 // Re-exports from carpai-internal (convenience layer)
 // ========================================================================
@@ -198,3 +210,43 @@ pub use agent::sub_agents::{
 pub use agent::plan_mode::{Plan, PlanStep, StepStatus, PLAN_MODE_SYSTEM_PROMPT};
 pub use agent::skill_system::SkillRegistry;
 pub use agent::task::planner::TaskPlanner;
+
+// --- Memory System Re-exports (Phase 1C) ---
+pub use memory::core_types::{
+    MemoryEntry, MemoryQuery, MemoryType,
+};
+
+// --- Session System Re-exports (Phase 1C) ---
+pub use session::core_types::{
+    SessionExport, SessionImport, SessionCostTracker, ImportResult,
+    GcConfig, GcResult, CostSummary,
+};
+
+// --- Completion System Re-exports (Phase 1D) ---
+pub use completion::CompletionEngine;
+pub use completion::CompletionProvider;
+pub use completion::CompletionOutput;
+pub use completion::LocalCompletionProvider;
+pub use completion::FimCompletionRequest;
+pub use completion::FimCompletionResponse;
+pub use completion::FimCandidate;
+pub use completion::FimCompleter;
+pub use completion::ContextBuilder;
+pub use completion::AcceptanceTracker;
+pub use completion::SmartCompleter;
+pub use completion::AutoFallbackRouter;
+pub use completion::InferenceTarget;
+
+// --- Tool System Re-exports (Phase 1D) ---
+pub use tools::ToolRegistry;
+pub use tools::mcp::{
+    McpServer, McpClient, McpManager, McpBridge, SharedMcpPool,
+    McpServerConfig, McpClientConfig, McpBridgeConfig,
+    JsonRpcRequest, JsonRpcResponse, JsonRpcError,
+    InitializeRequest, InitializeResult,
+    McpToolDefinition, ListToolsResult, CallToolRequest, CallToolResult,
+    ToolCallContent, AuditLogger, AuditLogEntry, AuditLogFilter, AuditLogStats,
+};
+pub use tools::slash_command::{
+    SlashCommandRegistry, SlashCommand, SlashCommandExecution,
+};
