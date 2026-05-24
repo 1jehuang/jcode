@@ -161,3 +161,26 @@ fn ensure_browser_session_fails_fast_when_session_process_exits_immediately() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[test]
+fn host_asset_name_candidates_includes_canonical_and_fallbacks() {
+    let cands = super::host_asset_name_candidates("host-windows-x64.exe");
+    assert!(cands.iter().any(|c| c == "host-windows-x64.exe"));
+    assert!(
+        cands
+            .iter()
+            .any(|c| c == "firefox-agent-bridge-host-windows-x64.exe")
+    );
+    // Platform-specific generic fallback should be present:
+    if cfg!(target_os = "windows") {
+        assert!(cands.iter().any(|c| c == "firefox-agent-bridge-host.exe"));
+    } else {
+        assert!(cands.iter().any(|c| c == "firefox-agent-bridge-host"));
+    }
+}
+
+#[test]
+fn host_asset_name_candidates_starts_with_canonical() {
+    let cands = super::host_asset_name_candidates("host-linux-x64");
+    assert_eq!(cands[0], "host-linux-x64");
+}

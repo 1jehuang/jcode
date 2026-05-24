@@ -405,11 +405,38 @@ async fn download_browser_binary() -> Result<()> {
         .as_str()
         .context("No XPI download URL")?;
 
-    // Find the host binary
+    // Find the host binary.
+    //
+    // Issue #111: the upstream firefox-agent-bridge release sometimes
+    // publishes host binaries under different naming conventions
+    // (e.g. `host-windows-x64.exe`, `firefox-agent-bridge-host-windows-x64.exe`,
+    //  `firefox-agent-bridge-host.exe`). Try the canonical name first,
+    // then fall back to known variants and finally to a substring
+    // match — so this stops being a build-time guess.
     let host_asset_name = get_host_asset_name();
+    let host_asset_candidates = host_asset_name_candidates(&host_asset_name);
     let host_asset = assets
         .iter()
-        .find(|a| a["name"].as_str() == Some(&host_asset_name))
+        .find(|a| {
+            a["name"]
+                .as_str()
+                .map(|n| host_asset_candidates.iter().any(|c| c == n))
+                .unwrap_or(false)
+        })
+        .or_else(|| {
+            // Final fallback: any asset whose name contains
+            // `firefox-agent-bridge-host` or just `host` and matches
+            // the platform suffix.
+            let platform_suffix = host_asset_name
+                .strip_prefix("host-")
+                .unwrap_or(&host_asset_name);
+            assets.iter().find(|a| {
+                a["name"]
+                    .as_str()
+                    .map(|n| n.contains("host") && n.contains(platform_suffix))
+                    .unwrap_or(false)
+            })
+        })
         .with_context(|| {
             let available = assets
                 .iter()
@@ -417,10 +444,10 @@ async fn download_browser_binary() -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "No native host asset found for platform: {}. Expected release asset '{}' alongside '{}'. Available assets: {}",
+                "No native host asset found for platform: {}. \
+                 Tried: {}. Available assets: {}",
                 std::env::consts::OS,
-                host_asset_name,
-                asset_name,
+                host_asset_candidates.join(", "),
                 available
             )
         })?;
@@ -536,6 +563,32 @@ fn get_platform_asset_name() -> String {
 fn get_host_asset_name() -> String {
     let base = get_platform_asset_name();
     base.replace("browser-", "host-")
+}
+
+/// Return the list of asset names to try when looking up the native
+/// messaging host binary, in priority order.
+///
+/// Different forks of firefox-agent-bridge (and different release
+/// scripts) publish the host binary under different conventions.
+/// Issue #111 was caused by the Windows release publishing the host
+/// as `firefox-agent-bridge-host.exe` while the lookup expected
+/// `host-windows-x64.exe`.
+fn host_asset_name_candidates(canonical: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(4);
+    out.push(canonical.to_string());
+
+    // `host-windows-x64.exe` → `firefox-agent-bridge-host-windows-x64.exe`
+    out.push(format!("firefox-agent-bridge-{canonical}"));
+
+    // Generic platform-less variant (some builds ship a single host
+    // binary that includes the platform inside the file but uses a
+    // simpler name): `firefox-agent-bridge-host.exe`/`firefox-agent-bridge-host`.
+    #[cfg(target_os = "windows")]
+    out.push("firefox-agent-bridge-host.exe".to_string());
+    #[cfg(not(target_os = "windows"))]
+    out.push("firefox-agent-bridge-host".to_string());
+
+    out
 }
 
 fn install_native_host_manifest() -> Result<bool> {
