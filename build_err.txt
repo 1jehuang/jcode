@@ -1,0 +1,58 @@
+    Blocking waiting for file lock on build directory
+    Checking jcode-llm v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-llm)
+   Compiling sqlx-macros v0.8.6
+    Checking jcode-unified-scheduler v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-unified-scheduler)
+    Checking carpai-codebase v0.1.0 (D:\studying\Codecargo\CarpAI\crates\carpai-codebase)
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+  --> crates\carpai-codebase\src\indexer.rs:99:33
+   |
+99 |                 .and_then(|v| v.as_text())
+   |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+   --> crates\carpai-codebase\src\indexer.rs:103:33
+    |
+103 |                 .and_then(|v| v.as_text())
+    |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+   --> crates\carpai-codebase\src\indexer.rs:107:33
+    |
+107 |                 .and_then(|v| v.as_text())
+    |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+warning: unused variable: `full_content`
+  --> crates\carpai-codebase\src\indexer.rs:58:75
+   |
+58 |     pub async fn add_document(&self, file_path: &str, symbols: &[Symbol], full_content: &str) -> Result<()> {
+   |                                                                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_full_content`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `carpai-codebase` (lib) generated 1 warning
+error: could not compile `carpai-codebase` (lib) due to 3 previous errors; 1 warning emitted
+warning: build failed, waiting for other jobs to finish...
+warning: field `config` is never read
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:185:9
+    |
+182 | struct BatchOperation {
+    |        -------------- field in this struct
+...
+185 |     pub config: BatchOperationConfig,
+    |         ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `max_parallel_probes` is never used
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:191:12
+    |
+189 | impl BatchOperation {
+    | ------------------- method in this implementation
+190 |     /// Maximum number of nodes to probe in parallel for this batch
+191 |     pub fn max_parallel_probes(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: error finalizing incremental compilation session directory `\\?\D:\studying\Codecargo\CarpAI\target\debug\incremental\jcode_unified_scheduler-1zkamde2tbn5q\s-hiskff76xi-1qinke0-working`: 拒绝访问。 (os error 5)
+
+warning: `jcode-unified-scheduler` (lib) generated 3 warnings

@@ -1,1 +1,2 @@
-﻿error: could not compile `carpai` (lib) due to 153 previous errors; 156 warnings emitted
+﻿error: could not compile `carpai` (lib) due to 59 previous errors; 55 warnings emit
+ted

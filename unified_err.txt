@@ -1,0 +1,24 @@
+    Blocking waiting for file lock on build directory
+    Checking jcode-unified-scheduler v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-unified-scheduler)
+warning: field `config` is never read
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:185:9
+    |
+182 | struct BatchOperation {
+    |        -------------- field in this struct
+...
+185 |     pub config: BatchOperationConfig,
+    |         ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `max_parallel_probes` is never used
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:191:12
+    |
+189 | impl BatchOperation {
+    | ------------------- method in this implementation
+190 |     /// Maximum number of nodes to probe in parallel for this batch
+191 |     pub fn max_parallel_probes(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: `jcode-unified-scheduler` (lib) generated 2 warnings
+    Finished `dev` profile [unoptimized] target(s) in 42.12s

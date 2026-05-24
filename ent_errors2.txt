@@ -1,0 +1,586 @@
+    Blocking waiting for file lock on build directory
+warning: unused import: `HashSet`
+ --> crates\jcode-rag\src\indexing_layer.rs:3:33
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Path`
+ --> crates\jcode-rag\src\indexing_layer.rs:4:17
+  |
+4 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `DateTime`
+ --> crates\jcode-rag\src\indexing_layer.rs:9:14
+  |
+9 | use chrono::{DateTime, Utc};
+  |              ^^^^^^^^
+
+warning: unused imports: `debug`, `error`, and `warn`
+  --> crates\jcode-rag\src\indexing_layer.rs:10:15
+   |
+10 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^        ^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+ --> crates\jcode-rag\src\retrieval_layer.rs:3:24
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^  ^^^^^^^
+
+warning: unused import: `Path`
+ --> crates\jcode-rag\src\retrieval_layer.rs:4:17
+  |
+4 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `parking_lot::RwLock`
+ --> crates\jcode-rag\src\retrieval_layer.rs:6:5
+  |
+6 | use parking_lot::RwLock;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DateTime` and `Utc`
+ --> crates\jcode-rag\src\retrieval_layer.rs:9:14
+  |
+9 | use chrono::{DateTime, Utc};
+  |              ^^^^^^^^  ^^^
+
+warning: unused imports: `debug` and `error`
+  --> crates\jcode-rag\src\retrieval_layer.rs:10:15
+   |
+10 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^
+
+warning: unused import: `HashSet`
+ --> crates\jcode-rag\src\editing_layer.rs:3:33
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+
+warning: unused import: `Path`
+ --> crates\jcode-rag\src\editing_layer.rs:4:17
+  |
+4 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused import: `DiffStats`
+  --> crates\jcode-rag\src\editing_layer.rs:15:43
+   |
+15 |     TextDiff as TextDiffStruct, DiffType, DiffStats,
+   |                                           ^^^^^^^^^
+
+warning: unused imports: `HashMap` and `HashSet`
+ --> crates\jcode-rag\src\validation_layer.rs:3:24
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                        ^^^^^^^  ^^^^^^^
+
+warning: unused import: `Path`
+ --> crates\jcode-rag\src\validation_layer.rs:4:17
+  |
+4 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused imports: `DateTime` and `Utc`
+ --> crates\jcode-rag\src\validation_layer.rs:9:14
+  |
+9 | use chrono::{DateTime, Utc};
+  |              ^^^^^^^^  ^^^
+
+warning: unused imports: `debug`, `error`, and `warn`
+  --> crates\jcode-rag\src\validation_layer.rs:10:15
+   |
+10 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^        ^^^^
+
+warning: unused imports: `ErrorSeverity` and `ParsedError`
+  --> crates\jcode-rag\src\validation_layer.rs:15:36
+   |
+15 |     CompilationResult, TestResult, ParsedError, ErrorSeverity,
+   |                                    ^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused import: `HashSet`
+ --> crates\jcode-rag\src\debugging_layer.rs:3:33
+  |
+3 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+
+warning: unused import: `Path`
+ --> crates\jcode-rag\src\debugging_layer.rs:4:17
+  |
+4 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+
+warning: unused imports: `debug`, `error`, and `warn`
+  --> crates\jcode-rag\src\debugging_layer.rs:10:15
+   |
+10 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^        ^^^^
+
+warning: unused imports: `ExecutionStep`, `PathLocation`, and `StepType`
+  --> crates\jcode-rag\src\debugging_layer.rs:17:21
+   |
+17 |     ExecutionTrace, ExecutionStep, StepType, PathLocation, TraceConfig,
+   |                     ^^^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused imports: `debug` and `error`
+  --> crates\jcode-rag\src\lib.rs:88:15
+   |
+88 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^
+
+warning: unused import: `std::time::Instant`
+   --> crates\jcode-rag\src\lib.rs:999:5
+    |
+999 | use std::time::Instant;
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: value assigned to `final_state` is never read
+   --> crates\jcode-rag\src\lib.rs:801:31
+    |
+801 |           let mut final_state = FinalState::Failed {
+    |  _______________________________^
+802 | |             error: "Procedure not started".to_string(),
+803 | |             partial_changes: Vec::new(),
+804 | |         };
+    | |_________^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `all_warnings`
+   --> crates\jcode-rag\src\lib.rs:911:13
+    |
+911 |         let all_warnings: Vec<&String> = phases.iter()
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_all_warnings`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `all_errors`
+   --> crates\jcode-rag\src\lib.rs:915:13
+    |
+915 |         let all_errors: Vec<&String> = phases.iter()
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_all_errors`
+
+warning: field `config` is never read
+   --> crates\jcode-rag\src\lib.rs:707:5
+    |
+705 | pub struct RagToolchainOrchestrator {
+    |            ------------------------ field in this struct
+706 |     /// 配置
+707 |     config: OrchestratorConfig,
+    |     ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `ctags_index` is never read
+  --> crates\jcode-rag\src\indexing_layer.rs:59:5
+   |
+56 | pub struct GlobalSymbolIndexer {
+   |            ------------------- field in this struct
+...
+59 |     ctags_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
+   |     ^^^^^^^^^^^
+
+warning: field `config` is never read
+  --> crates\jcode-rag\src\editing_layer.rs:50:5
+   |
+49 | pub struct SafeEditor {
+   |            ---------- field in this struct
+50 |     config: EditingConfig,
+   |     ^^^^^^
+
+warning: field `config` is never read
+  --> crates\jcode-rag\src\validation_layer.rs:37:5
+   |
+36 | pub struct MultiLanguageValidator {
+   |            ---------------------- field in this struct
+37 |     config: ValidationConfig,
+   |     ^^^^^^
+
+warning: `jcode-rag` (lib) generated 30 warnings (run `cargo fix --lib -p jcode-rag` to apply 25 suggestions)
+    Checking jcode-auth v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-auth)
+warning: unused import: `StreamToolCall`
+  --> crates\jcode-grpc\src\server.rs:23:18
+   |
+23 |     StreamDelta, StreamToolCall,
+   |                  ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ErrorMetadata` and `LlmErrorCode`
+  --> crates\jcode-grpc\src\server.rs:35:29
+   |
+35 | use crate::error_handling::{LlmErrorCode, ErrorMetadata, errors};
+   |                             ^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates\jcode-grpc\src\error_handling.rs:193:13
+    |
+193 |         let mut status = Status::new(
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:185:9
+    |
+182 | struct BatchOperation {
+    |        -------------- field in this struct
+...
+185 |     pub config: BatchOperationConfig,
+    |         ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `max_parallel_probes` is never used
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:191:12
+    |
+189 | impl BatchOperation {
+    | ------------------- method in this implementation
+190 |     /// Maximum number of nodes to probe in parallel for this batch
+191 |     pub fn max_parallel_probes(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+    Checking carpai-codebase v0.1.0 (D:\studying\Codecargo\CarpAI\crates\carpai-codebase)
+warning: `jcode-grpc` (lib) generated 3 warnings (run `cargo fix --lib -p jcode-grpc` to apply 3 suggestions)
+warning: `jcode-unified-scheduler` (lib) generated 2 warnings
+    Checking jcode-cpu-inference v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-cpu-inference)
+warning: unused doc comment
+  --> crates\jcode-auth\src\rbac.rs:30:1
+   |
+30 | /// Permission categories for CarpAI operations
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `HashSet`
+ --> crates\jcode-auth\src\rbac.rs:9:33
+  |
+9 | use std::collections::{HashMap, HashSet};
+  |                                 ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `InternalBitFlags: serde::Serialize` is not satisfied
+   --> crates\jcode-auth\src\rbac.rs:32:28
+    |
+ 31 | / bitflags! {
+ 32 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
+    | |                            ^^^^^^^^^ unsatisfied trait bound
+ 33 | |     pub struct PermissionFlags: u64 {
+...   |
+ 69 | | }
+    | |_- required by a bound introduced by this call
+    |
+help: the trait `Serialize` is not implemented for `InternalBitFlags`
+   --> crates\jcode-auth\src\rbac.rs:31:1
+    |
+ 31 | / bitflags! {
+ 32 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
+ 33 | |     pub struct PermissionFlags: u64 {
+...   |
+ 69 | | }
+    | |_^
+    = note: for local types consider adding `#[derive(serde::Serialize)]` to your `InternalBitFlags` type
+    = note: for types from other crates check whether the crate offers a `serde` feature flag
+    = help: the following other types implement trait `Serialize`:
+              &'a T
+              &'a mut T
+              ()
+              (T,)
+              (T0, T1)
+              (T0, T1, T2)
+              (T0, T1, T2, T3)
+              (T0, T1, T2, T3, T4)
+            and 204 others
+note: required by a bound in `serialize_newtype_struct`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\ser\mod.rs:922:21
+    |
+916 |     fn serialize_newtype_struct<T>(
+    |        ------------------------ required by a bound in this associated function
+...
+922 |         T: ?Sized + Serialize;
+    |                     ^^^^^^^^^ required by this bound in `Serializer::serialize_newtype_struct`
+    = note: this error originates in the derive macro `Serialize` which comes from the expansion of the macro `bitflags` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `InternalBitFlags: serde::Deserialize<'de>` is not satisfied
+  --> crates\jcode-auth\src\rbac.rs:31:1
+   |
+31 | / bitflags! {
+32 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
+33 | |     pub struct PermissionFlags: u64 {
+...  |
+69 | | }
+   | |_^ unsatisfied trait bound
+   |
+help: the trait `Deserialize<'_>` is not implemented for `InternalBitFlags`
+  --> crates\jcode-auth\src\rbac.rs:31:1
+   |
+31 | / bitflags! {
+32 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
+33 | |     pub struct PermissionFlags: u64 {
+...  |
+69 | | }
+   | |_^
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `InternalBitFlags` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Deserialize<'de>`:
+             `&'a Path` implements `Deserialize<'de>`
+             `&'a [u8]` implements `Deserialize<'de>`
+             `&'a serde_json::value::RawValue` implements `Deserialize<'de>`
+             `&'a str` implements `Deserialize<'de>`
+             `()` implements `Deserialize<'de>`
+             `(T,)` implements `Deserialize<'de>`
+             `(T0, T1)` implements `Deserialize<'de>`
+             `(T0, T1, T2)` implements `Deserialize<'de>`
+           and 222 others
+   = note: this error originates in the macro `$crate::__declare_public_bitflags` which comes from the expansion of the macro `bitflags` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `InternalBitFlags: serde::Deserialize<'de>` is not satisfied
+    --> crates\jcode-auth\src\rbac.rs:31:1
+     |
+  31 | / bitflags! {
+  32 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
+  33 | |     pub struct PermissionFlags: u64 {
+...    |
+  69 | | }
+     | |_^ unsatisfied trait bound
+     |
+help: the trait `Deserialize<'_>` is not implemented for `InternalBitFlags`
+    --> crates\jcode-auth\src\rbac.rs:31:1
+     |
+  31 | / bitflags! {
+  32 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
+  33 | |     pub struct PermissionFlags: u64 {
+...    |
+  69 | | }
+     | |_^
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `InternalBitFlags` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+     = help: the following other types implement trait `Deserialize<'de>`:
+               `&'a Path` implements `Deserialize<'de>`
+               `&'a [u8]` implements `Deserialize<'de>`
+               `&'a serde_json::value::RawValue` implements `Deserialize<'de>`
+               `&'a str` implements `Deserialize<'de>`
+               `()` implements `Deserialize<'de>`
+               `(T,)` implements `Deserialize<'de>`
+               `(T0, T1)` implements `Deserialize<'de>`
+               `(T0, T1, T2)` implements `Deserialize<'de>`
+             and 222 others
+note: required by a bound in `next_element`
+    --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_core-1.0.228\src\de\mod.rs:1771:12
+     |
+1769 |     fn next_element<T>(&mut self) -> Result<Option<T>, Self::Error>
+     |        ------------ required by a bound in this associated function
+1770 |     where
+1771 |         T: Deserialize<'de>,
+     |            ^^^^^^^^^^^^^^^^ required by this bound in `SeqAccess::next_element`
+     = note: this error originates in the macro `$crate::__declare_public_bitflags` which comes from the expansion of the macro `bitflags` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+  --> crates\carpai-codebase\src\indexer.rs:99:33
+   |
+99 |                 .and_then(|v| v.as_text())
+   |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+warning: unused import: `error`
+  --> crates\jcode-cpu-inference\src\graceful_manager.rs:17:27
+   |
+17 | use tracing::{info, warn, error, debug};
+   |                           ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `error`
+  --> crates\jcode-cpu-inference\src\model_lifecycle_manager.rs:17:27
+   |
+17 | use tracing::{info, warn, error, debug};
+   |                           ^^^^^
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+   --> crates\carpai-codebase\src\indexer.rs:103:33
+    |
+103 |                 .and_then(|v| v.as_text())
+    |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+   --> crates\carpai-codebase\src\indexer.rs:107:33
+    |
+107 |                 .and_then(|v| v.as_text())
+    |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+error[E0599]: no method named `retain` found for enum `std::option::Option<T>` in the current scope
+    --> crates\jcode-auth\src\rbac.rs:260:19
+     |
+ 260 |             roles.retain(|ur| ur.role_id != role_id);
+     |                   ^^^^^^ method not found in `std::option::Option<dashmap::mapref::one::RefMut<'_, std::string::String, Vec<UserRole>>>`
+     |
+note: the method `retain` exists on the type `dashmap::mapref::one::RefMut<'_, std::string::String, Vec<UserRole>>`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\vec\mod.rs:2364:5
+     |
+2364 | /     pub fn retain<F>(&mut self, mut f: F)
+2365 | |     where
+2366 | |         F: FnMut(&T) -> bool,
+     | |_____________________________^
+help: consider using `Option::expect` to unwrap the `dashmap::mapref::one::RefMut<'_, std::string::String, Vec<UserRole>>` value, panicking if the value is an `Option::None`
+     |
+ 260 |             roles.expect("REASON").retain(|ur| ur.role_id != role_id);
+     |                  +++++++++++++++++
+
+warning: unused variable: `full_content`
+  --> crates\carpai-codebase\src\indexer.rs:58:75
+   |
+58 |     pub async fn add_document(&self, file_path: &str, symbols: &[Symbol], full_content: &str) -> Result<()> {
+   |                                                                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_full_content`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0507]: cannot move out of `required_permission`, a captured variable in an `FnMut` closure
+    --> crates\jcode-auth\src\rbac.rs:314:74
+     |
+ 307 |     pub fn check_permission(&self, user_id: &str, required_permission: PermissionFlags) -> Result<bool> {
+     |                                                   -------------------  --------------- move occurs because `required_permission` has type `rbac::PermissionFlags`, which does not implement the `Copy` trait
+     |                                                   |
+     |                                                   captured outer variable
+...
+ 314 |         let has_permission = roles.iter().any(|role| role.has_permission(required_permission));
+     |                                               ------                     ^^^^^^^^^^^^^^^^^^^ `required_permission` is moved here
+     |                                               |
+     |                                               captured by this `FnMut` closure
+     |
+help: `Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures may consume them only once
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\traits\iterator.rs:2825:12
+     |
+2825 |         F: FnMut(Self::Item) -> bool,
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider cloning the value if the performance cost is acceptable
+     |
+ 314 |         let has_permission = roles.iter().any(|role| role.has_permission(required_permission.clone()));
+     |                                                                                             ++++++++
+
+error[E0507]: cannot move out of an `Arc`
+   --> crates\jcode-auth\src\rbac.rs:346:25
+    |
+346 |             combined |= role.permissions;
+    |                         ^^^^^^^^^^^^^^^^ move occurs because value has type `rbac::PermissionFlags`, which does not implement the `Copy` trait
+    |
+help: consider cloning the value if the performance cost is acceptable
+    |
+346 |             combined |= role.permissions.clone();
+    |                                         ++++++++
+
+Some errors have detailed explanations: E0277, E0507, E0599.
+For more information about an error, try `rustc --explain E0277`.
+warning: `jcode-auth` (lib) generated 2 warnings
+error: could not compile `jcode-auth` (lib) due to 6 previous errors; 2 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+For more information about this error, try `rustc --explain E0599`.
+warning: `carpai-codebase` (lib) generated 1 warning
+error: could not compile `carpai-codebase` (lib) due to 3 previous errors; 1 warning emitted
+error[E0382]: borrow of moved value: `response`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:277:40
+    |
+269 |             Ok(response) if response.status().is_success() => {
+    |                -------- move occurs because `response` has type `Response`, which does not implement the `Copy` trait
+270 |                 // Save binary data
+271 |                 let bytes = response.bytes().await?;
+    |                                      ------- `response` moved due to this method call
+...
+277 |                 if let Some(seq_len) = response.headers().get("x-sequence-length") {
+    |                                        ^^^^^^^^ value borrowed here after move
+    |
+note: `Response::bytes` takes ownership of the receiver `self`, which moves `response`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\reqwest-0.12.28\src\async_impl\response.rs:290:24
+    |
+290 |     pub async fn bytes(self) -> crate::Result<Bytes> {
+    |                        ^^^^
+
+error[E0382]: borrow of moved value: `new_arc`
+    --> crates\jcode-cpu-inference\src\graceful_manager.rs:726:28
+     |
+ 705 |         let new_arc = Arc::new(RwLock::new(new_instance.clone()));
+     |             ------- move occurs because `new_arc` has type `Arc<tokio::sync::RwLock<TrackedInstance>>`, which does not implement the `Copy` trait
+...
+ 713 |                 .push(new_arc);
+     |                       ------- value moved here
+...
+ 726 |                 let inst = new_arc.read().await;
+     |                            ^^^^^^^ value borrowed here after move
+     |
+     = note: borrow occurs due to deref coercion to `tokio::sync::RwLock<TrackedInstance>`
+note: deref defined here
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\sync.rs:2418:5
+     |
+2418 |     type Target = T;
+     |     ^^^^^^^^^^^
+help: clone the value to increment its reference count
+     |
+ 713 |                 .push(new_arc.clone());
+     |                              ++++++++
+
+error[E0382]: use of moved value: `json_path`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:210:58
+    |
+203 |                     let json_path = path.with_extension("json");
+    |                         --------- move occurs because `json_path` has type `PathBuf`, which does not implement the `Copy` trait
+204 |                     if json_path.exists() {
+205 |                         let content = std::fs::read_to_string(json_path).ok();
+    |                                                               --------- value moved here
+...
+210 |                                     std::fs::remove_file(json_path)?;
+    |                                                          ^^^^^^^^^ value used here after move
+    |
+help: consider borrowing `json_path`
+    |
+205 |                         let content = std::fs::read_to_string(&json_path).ok();
+    |                                                               +
+
+warning: unused variable: `stem`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:197:21
+    |
+197 |                 let stem = path.file_stem()
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_stem`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `json_path`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:257:13
+    |
+257 |         let json_path = format!("{}/{}.json", self.snapshot_dir, snapshot_name);
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_json_path`
+
+warning: unused variable: `metadata`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:342:13
+    |
+342 |         let metadata = if std::path::Path::new(&json_path).exists() {
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_metadata`
+
+warning: unused variable: `child`
+  --> crates\jcode-cpu-inference\src\lib.rs:81:13
+   |
+81 |         let child = cmd.spawn()
+   |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_child`
+
+warning: unused variable: `new_instance`
+   --> crates\jcode-cpu-inference\src\model_lifecycle_manager.rs:206:13
+    |
+206 |         let new_instance = self.start_model(new_model, new_model_path, ctx_size, threads).await?;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_instance`
+
+warning: unused variable: `timeout_secs`
+   --> crates\jcode-cpu-inference\src\model_lifecycle_manager.rs:291:41
+    |
+291 |             Some(ModelState::Draining { timeout_secs, .. }) => {
+    |                                         ^^^^^^^^^^^^ help: try ignoring the field: `timeout_secs: _`
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `jcode-cpu-inference` (lib) generated 8 warnings
+error: could not compile `jcode-cpu-inference` (lib) due to 3 previous errors; 8 warnings emitted

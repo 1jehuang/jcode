@@ -1,0 +1,170 @@
+    Blocking waiting for file lock on build directory
+warning: field `config` is never read
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:185:9
+    |
+182 | struct BatchOperation {
+    |        -------------- field in this struct
+...
+185 |     pub config: BatchOperationConfig,
+    |         ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `max_parallel_probes` is never used
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:191:12
+    |
+189 | impl BatchOperation {
+    | ------------------- method in this implementation
+190 |     /// Maximum number of nodes to probe in parallel for this batch
+191 |     pub fn max_parallel_probes(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: error finalizing incremental compilation session directory `\\?\D:\studying\Codecargo\CarpAI\target\debug\incremental\jcode_unified_scheduler-1zkamde2tbn5q\s-hiskff76xi-1qinke0-working`: 拒绝访问。 (os error 5)
+
+    Checking carpai-codebase v0.1.0 (D:\studying\Codecargo\CarpAI\crates\carpai-codebase)
+warning: `jcode-unified-scheduler` (lib) generated 3 warnings
+    Checking sqlx v0.8.6
+    Checking jcode-cpu-inference v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-cpu-inference)
+warning: unused import: `error`
+  --> crates\jcode-cpu-inference\src\graceful_manager.rs:17:27
+   |
+17 | use tracing::{info, warn, error, debug};
+   |                           ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `error`
+  --> crates\jcode-cpu-inference\src\model_lifecycle_manager.rs:17:27
+   |
+17 | use tracing::{info, warn, error, debug};
+   |                           ^^^^^
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+  --> crates\carpai-codebase\src\indexer.rs:99:33
+   |
+99 |                 .and_then(|v| v.as_text())
+   |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+   --> crates\carpai-codebase\src\indexer.rs:103:33
+    |
+103 |                 .and_then(|v| v.as_text())
+    |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+error[E0599]: no method named `as_text` found for reference `&OwnedValue` in the current scope
+   --> crates\carpai-codebase\src\indexer.rs:107:33
+    |
+107 |                 .and_then(|v| v.as_text())
+    |                                 ^^^^^^^ method not found in `&OwnedValue`
+
+warning: unused variable: `full_content`
+  --> crates\carpai-codebase\src\indexer.rs:58:75
+   |
+58 |     pub async fn add_document(&self, file_path: &str, symbols: &[Symbol], full_content: &str) -> Result<()> {
+   |                                                                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_full_content`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: borrow of moved value: `response`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:277:40
+    |
+269 |             Ok(response) if response.status().is_success() => {
+    |                -------- move occurs because `response` has type `Response`, which does not implement the `Copy` trait
+270 |                 // Save binary data
+271 |                 let bytes = response.bytes().await?;
+    |                                      ------- `response` moved due to this method call
+...
+277 |                 if let Some(seq_len) = response.headers().get("x-sequence-length") {
+    |                                        ^^^^^^^^ value borrowed here after move
+    |
+note: `Response::bytes` takes ownership of the receiver `self`, which moves `response`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\reqwest-0.12.28\src\async_impl\response.rs:290:24
+    |
+290 |     pub async fn bytes(self) -> crate::Result<Bytes> {
+    |                        ^^^^
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `carpai-codebase` (lib) generated 1 warning
+error: could not compile `carpai-codebase` (lib) due to 3 previous errors; 1 warning emitted
+warning: build failed, waiting for other jobs to finish...
+error[E0382]: borrow of moved value: `new_arc`
+    --> crates\jcode-cpu-inference\src\graceful_manager.rs:726:28
+     |
+ 705 |         let new_arc = Arc::new(RwLock::new(new_instance.clone()));
+     |             ------- move occurs because `new_arc` has type `Arc<tokio::sync::RwLock<TrackedInstance>>`, which does not implement the `Copy` trait
+...
+ 713 |                 .push(new_arc);
+     |                       ------- value moved here
+...
+ 726 |                 let inst = new_arc.read().await;
+     |                            ^^^^^^^ value borrowed here after move
+     |
+     = note: borrow occurs due to deref coercion to `tokio::sync::RwLock<TrackedInstance>`
+note: deref defined here
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\sync.rs:2418:5
+     |
+2418 |     type Target = T;
+     |     ^^^^^^^^^^^
+help: clone the value to increment its reference count
+     |
+ 713 |                 .push(new_arc.clone());
+     |                              ++++++++
+
+error[E0382]: use of moved value: `json_path`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:210:58
+    |
+203 |                     let json_path = path.with_extension("json");
+    |                         --------- move occurs because `json_path` has type `PathBuf`, which does not implement the `Copy` trait
+204 |                     if json_path.exists() {
+205 |                         let content = std::fs::read_to_string(json_path).ok();
+    |                                                               --------- value moved here
+...
+210 |                                     std::fs::remove_file(json_path)?;
+    |                                                          ^^^^^^^^^ value used here after move
+    |
+help: consider borrowing `json_path`
+    |
+205 |                         let content = std::fs::read_to_string(&json_path).ok();
+    |                                                               +
+
+warning: unused variable: `stem`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:197:21
+    |
+197 |                 let stem = path.file_stem()
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_stem`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `json_path`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:257:13
+    |
+257 |         let json_path = format!("{}/{}.json", self.snapshot_dir, snapshot_name);
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_json_path`
+
+warning: unused variable: `metadata`
+   --> crates\jcode-cpu-inference\src\graceful_manager.rs:342:13
+    |
+342 |         let metadata = if std::path::Path::new(&json_path).exists() {
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_metadata`
+
+warning: unused variable: `child`
+  --> crates\jcode-cpu-inference\src\lib.rs:81:13
+   |
+81 |         let child = cmd.spawn()
+   |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_child`
+
+warning: unused variable: `new_instance`
+   --> crates\jcode-cpu-inference\src\model_lifecycle_manager.rs:206:13
+    |
+206 |         let new_instance = self.start_model(new_model, new_model_path, ctx_size, threads).await?;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_instance`
+
+warning: unused variable: `timeout_secs`
+   --> crates\jcode-cpu-inference\src\model_lifecycle_manager.rs:291:41
+    |
+291 |             Some(ModelState::Draining { timeout_secs, .. }) => {
+    |                                         ^^^^^^^^^^^^ help: try ignoring the field: `timeout_secs: _`
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `jcode-cpu-inference` (lib) generated 8 warnings
+error: could not compile `jcode-cpu-inference` (lib) due to 3 previous errors; 8 warnings emitted
