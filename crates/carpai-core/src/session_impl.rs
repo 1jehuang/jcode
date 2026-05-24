@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use async_trait::async_trait;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::AsyncWriteExt;
 use carpai_internal::*;
 use tracing::{info, debug};
 

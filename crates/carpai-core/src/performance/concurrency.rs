@@ -129,7 +129,7 @@ impl ConcurrencyController {
     }
 
     /// 自适应获取许可
-    async fn acquire(&self) -> Result<tokio::sync::SemaphorePermit> {
+    async fn acquire(&self) -> Result<tokio::sync::SemaphorePermit<'_>> {
         let p99 = self.estimated_p99().await;
 
         // 如果 P99 超过目标，动态缩小并发

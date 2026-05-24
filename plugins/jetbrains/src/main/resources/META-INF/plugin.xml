@@ -1,0 +1,67 @@
+<idea-plugin>
+    <id>com.carpai.ide</id>
+    <name>CarpAI</name>
+    <vendor url="https://github.com/codecargo/carpai">CarpAI Team</vendor>
+    <version>1.1.0</version>
+    
+    <description><![CDATA[
+        Enterprise AI Programming Assistant for JetBrains IDEs.
+        
+        Features:
+        - Chat with AI assistant in a tool window
+        - Explain selected code
+        - Refactor with AI suggestions
+        - Fix bugs automatically
+        - Generate tests
+        
+        Requires CarpAI Server running locally or remotely.
+    ]]></description>
+    
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+    
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Tool Window -->
+        <toolWindow 
+            id="CarpAI Chat" 
+            anchor="right" 
+            factoryClass="com.carpai.ide.ui.ChatToolWindowFactory"
+            icon="/icons/carpai.svg"/>
+        
+        <!-- Settings -->
+        <applicationConfigurable 
+            parentId="tools" 
+            instance="com.carpai.ide.config.CarpAiSettingsConfigurable"
+            id="com.carpai.ide.settings"
+            displayName="CarpAI"/>
+    </extensions>
+    
+    <actions>
+        <!-- Main toolbar action -->
+        <action 
+            id="CarpAI.OpenChat" 
+            class="com.carpai.ide.actions.OpenChatAction"
+            text="Open CarpAI Chat" 
+            description="Open CarpAI chat panel"
+            icon="/icons/carpai.svg">
+            <add-to-group group-id="MainToolBar" anchor="last"/>
+        </action>
+        
+        <!-- Editor context menu -->
+        <group id="CarpAI.EditorActions" text="CarpAI" popup="true">
+            <action id="CarpAI.Explain" 
+                    class="com.carpai.ide.actions.ExplainCodeAction"
+                    text="Explain Code"
+                    description="Explain the selected code"/>
+            <action id="CarpAI.Refactor" 
+                    class="com.carpai.ide.actions.RefactorAction"
+                    text="Refactor Selection"
+                    description="Refactor the selected code"/>
+            <action id="CarpAI.Fix" 
+                    class="com.carpai.ide.actions.FixBugAction"
+                    text="Fix Bug"
+                    description="Fix bugs in the selected code"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+        </group>
+    </actions>
+</idea-plugin>

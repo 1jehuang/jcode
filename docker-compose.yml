@@ -1,553 +1,95 @@
-# ============================================================
-# JCode — Docker Compose 部署
-#
-# 启动: docker compose up -d
-# 停止: docker compose down
-# 日志: docker compose logs -f jcode-server
-# ============================================================
+version: "3.8"
 
 services:
-  # ── PostgreSQL + pgvector (业务数据 + 向量检索) ──
-  postgres:
-    image: pgvector/pgvector:pg15  # 官方 pgvector 镜像，兼容 PostgreSQL 15
-    container_name: carpai-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: carpai
-      POSTGRES_USER: carpai
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-carpai_dev_password}
-      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
-      # pgvector 配置优化
-      POSTGRES_SHARED_PRELOAD_LIBRARIES: "vector"
+  # CarpAI Server
+  carpai-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "5432:5432"
+      - "8080:8080"   # REST API
+      - "50051:50051" # gRPC
+    environment:
+      - CARPAI_SERVER__PORT=8080
+      - CARPAI_SERVER__LISTEN_ADDR=0.0.0.0
+      - CARPAI_SERVER__JWT_SECRET=${CARPAI_JWT_SECRET:-change-me-in-production}
+      - CARPAI_SERVER__DATABASE_URL=postgres://carpai:${DB_PASSWORD}@db:5432/carpai
+      - RUST_LOG=info
+    volumes:
+      - carpai-data:/var/lib/carpai/data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=carpai
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-secret}
+      - POSTGRES_DB=carpai
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U carpai -d carpai && psql -U carpai -d carpai -c 'SELECT extname FROM pg_extension WHERE extname = vector;'"]
+      test: ["CMD-SHELL", "pg_isready -U carpai"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
-    networks:
-      - carpai-net
-    profiles:
-      - dev
-      - enterprise
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          cpus: '1'
-          memory: 2G
-
-  # ── Redis Cluster (会话共享、速率限制、KV Cache) ──
-  # 6节点Redis Cluster: 3 master + 3 replica
-  redis-node-1:
-    image: redis:7-alpine
-    container_name: carpai-redis-node-1
     restart: unless-stopped
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1 300 10 60 10000
-    ports:
-      - "6379:6379"
-      - "16379:16379"
-    volumes:
-      - redis-node-1-data:/data
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    profiles:
-      - dev
-      - enterprise
-      - cluster
 
-  redis-node-2:
-    image: redis:7-alpine
-    container_name: carpai-redis-node-2
-    restart: unless-stopped
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1 300 10 60 10000
-    ports:
-      - "6380:6379"
-      - "16380:16379"
-    volumes:
-      - redis-node-2-data:/data
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    profiles:
-      - dev
-      - enterprise
-      - cluster
-
-  redis-node-3:
-    image: redis:7-alpine
-    container_name: carpai-redis-node-3
-    restart: unless-stopped
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1 300 10 60 10000
-    ports:
-      - "6381:6379"
-      - "16381:16379"
-    volumes:
-      - redis-node-3-data:/data
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    profiles:
-      - dev
-      - enterprise
-      - cluster
-
-  redis-node-4:
-    image: redis:7-alpine
-    container_name: carpai-redis-node-4
-    restart: unless-stopped
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1 300 10 60 10000
-    ports:
-      - "6382:6379"
-      - "16382:16379"
-    volumes:
-      - redis-node-4-data:/data
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    profiles:
-      - dev
-      - enterprise
-      - cluster
-
-  redis-node-5:
-    image: redis:7-alpine
-    container_name: carpai-redis-node-5
-    restart: unless-stopped
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1 300 10 60 10000
-    ports:
-      - "6383:6379"
-      - "16383:16379"
-    volumes:
-      - redis-node-5-data:/data
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    profiles:
-      - dev
-      - enterprise
-      - cluster
-
-  redis-node-6:
-    image: redis:7-alpine
-    container_name: carpai-redis-node-6
-    restart: unless-stopped
-    command: >
-      redis-server
-      --port 6379
-      --cluster-enabled yes
-      --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1 300 10 60 10000
-    ports:
-      - "6384:6379"
-      - "16384:16379"
-    volumes:
-      - redis-node-6-data:/data
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-    profiles:
-      - dev
-      - enterprise
-      - cluster
-
-  # Redis Cluster初始化服务
-  redis-cluster-init:
-    image: redis:7-alpine
-    container_name: carpai-redis-cluster-init
-    depends_on:
-      - redis-node-1
-      - redis-node-2
-      - redis-node-3
-      - redis-node-4
-      - redis-node-5
-      - redis-node-6
-    command: >
-      sh -c "
-        sleep 5 &&
-        redis-cli --cluster create
-        redis-node-1:6379 redis-node-2:6379 redis-node-3:6379
-        redis-node-4:6379 redis-node-5:6379 redis-node-6:6379
-        --cluster-replicas 1 --cluster-yes
-      "
-    networks:
-      - carpai-net
-    profiles:
-      - dev
-      - enterprise
-      - cluster
-
-  # 保留单节点Redis用于开发环境
+  # Redis (for caching and rate limiting)
   redis:
     image: redis:7-alpine
-    container_name: carpai-redis
-    restart: unless-stopped
-    command: >
-      redis-server
-      --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
-      --appendonly yes
-    ports:
-      - "6379:6379"
+    command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - carpai-net
-    profiles:
-      - dev-only
-
-  jcode-server:
-    image: jcode:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: jcode-server
     restart: unless-stopped
-    ports:
-      - "50051:50051"   # gRPC
-      - "8080:8080"     # WebSocket
-      - "8081:8081"     # REST
-    environment:
-      - JCODE_GRPC_PORT=50051
-      - JCODE_WS_PORT=8080
-      - JCODE_REST_PORT=8081
-      - JCODE_BIND_ADDR=0.0.0.0
-      - RUST_LOG=jcode=info
-      # Database - PostgreSQL + pgvector
-      - DATABASE_URL=postgresql://carpai:carpai_dev_password@postgres:5432/carpai
-      - VECTOR_STORE_TYPE=pgvector  # pgvector or milvus
-      - MILVUS_URI=milvus://milvus-standalone:19530
-      # Redis Cluster
-      - REDIS_MODE=cluster  # standalone or cluster
-      - REDIS_URL=redis://redis-node-1:6379,redis://redis-node-2:6379,redis://redis-node-3:6379,redis://redis-node-4:6379,redis://redis-node-5:6379,redis://redis-node-6:6379
-      # KV Cache外存配置 (XSKY AI Mesh或类似方案)
-      - KV_CACHE_STORAGE_TYPE=nvme  # memory, nvme, xsky_ai_mesh
-      - KV_CACHE_STORAGE_PATH=/data/kv_cache
-      - KV_CACHE_TTL_SECS=3600
-      # Load Balancing三层配置
-      - LOAD_BALANCER_STRATEGY=three_layer  # round_robin, least_conn, three_layer
-      - TENANT_ISOLATION_ENABLED=true
-      - MODEL_ROUTING_ENABLED=true
-      - SESSION_STICKY_ENABLED=true
-      - SESSION_STICKY_TTL_SECS=3600  # 必须与Redis TTL对齐
-      # Higress网关集成
-      - HIGRESS_ADMIN_URL=http://higress:8080
-      # JWT
-      - JWT_SECRET=${JWT_SECRET:-change_this_to_a_secure_random_string_at_least_32_chars}
-      - JWT_EXPIRATION_HOURS=24
-      # OAuth2
-      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
-      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
-      - OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI:-http://localhost:8080/oauth/callback}
-      # Audit
-      - AUDIT_RETENTION_DAYS=90
-      - AUDIT_MAX_EVENTS=100000
-      - AUDIT_LOG_PII=false
-      # OTLP Metrics (可选, 需要 OTEL Collector)
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
-      - OTEL_SERVICE_NAME=jcode-server
-    volumes:
-      - jcode-data:/home/jcode/.jcode
-      - ./config.toml:/home/jcode/.jcode/config.toml:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "jcode", "--version"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks:
-      - carpai-net
-    deploy:
-      resources:
-        limits:
-          cpus: '8'
-          memory: 16G
-        reservations:
-          cpus: '2'
-          memory: 4G
-    profiles:
-      - default
-      - enterprise
 
-  # ── 可选: OTel Collector (Metrics/Traces 收集) ──
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    container_name: otel-collector
-    profiles:
-      - monitoring
-    command:
-      - "--config=/etc/otel-collector-config.yaml"
-    volumes:
-      - ./deploy/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-    ports:
-      - "4318:4318"     # OTLP HTTP
-      - "4317:4317"     # OTLP gRPC
-    networks:
-      - jcode-net
-
-  # ── 可选: Prometheus (指标存储) ──
+  # Prometheus (optional - for metrics collection)
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
     profiles:
       - monitoring
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
     volumes:
-      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"
-    networks:
-      - jcode-net
-
-  # ── Milvus (超大规模向量检索, >10M向量) ──
-  # Milvus Standalone for production use
-  milvus-etcd:
-    image: quay.io/coreos/etcd:v3.5.9
-    container_name: carpai-milvus-etcd
-    environment:
-      - ETCD_AUTO_COMPACTION_MODE=revision
-      - ETCD_AUTO_COMPACTION_RETENTION=1000
-      - ETCD_QUOTA_BACKEND_BYTES=4294967296
-      - ETCD_SNAPSHOT_COUNT=50000
-    volumes:
-      - milvus-etcd-data:/etcd
-    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
-    networks:
-      - carpai-net
-    profiles:
-      - enterprise
-      - milvus
-
-  milvus-minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
-    container_name: carpai-milvus-minio
-    environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-    volumes:
-      - milvus-minio-data:/minio_data
-    command: minio server /minio_data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
-    networks:
-      - carpai-net
-    profiles:
-      - enterprise
-      - milvus
-
-  milvus-standalone:
-    image: milvusdb/milvus:v2.3.5
-    container_name: carpai-milvus
-    command: ["milvus", "run", "standalone"]
-    environment:
-      ETCD_ENDPOINTS: milvus-etcd:2379
-      MINIO_ADDRESS: milvus-minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-    volumes:
-      - milvus-data:/var/lib/milvus
-    ports:
-      - "19530:19530"  # gRPC port
-      - "9091:9091"    # metrics port
-    depends_on:
-      - milvus-etcd
-      - milvus-minio
-    networks:
-      - carpai-net
-    profiles:
-      - enterprise
-      - milvus
-    deploy:
-      resources:
-        limits:
-          cpus: '8'
-          memory: 16G
-        reservations:
-          cpus: '2'
-          memory: 4G
-
-  # ── Higress (智能网关 + 负载均衡) ──
-  higress:
-    image: higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/higress:v1.3.3
-    container_name: carpai-higress
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "8080:8080"  # Admin API
-    volumes:
-      - ./config/higress-config.yaml:/etc/higress/config.yaml:ro
-      - higress-data:/data
-    environment:
-      - PILOT_TRACE_SAMPLING=100
-    networks:
-      - carpai-net
-    profiles:
-      - enterprise
-      - higress
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-        reservations:
-          cpus: '0.5'
-          memory: 1G
 
-  # ── 可选: Grafana (指标可视化) ──
+  # Grafana (optional - for dashboards)
   grafana:
     image: grafana/grafana:latest
-    container_name: grafana
     profiles:
       - monitoring
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=jcode
-      - GF_INSTALL_PLUGINS=
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
-      - ./deploy/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/jcode.json:ro
-      - ./deploy/grafana-datasource.yaml:/etc/grafana/provisioning/datasources/prometheus.yaml:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
-    networks:
-      - jcode-net
     depends_on:
       - prometheus
+    restart: unless-stopped
 
 volumes:
-  jcode-data:
+  carpai-data:
   postgres-data:
   redis-data:
-  redis-node-1-data:
-  redis-node-2-data:
-  redis-node-3-data:
-  redis-node-4-data:
-  redis-node-5-data:
-  redis-node-6-data:
-  milvus-data:
-  milvus-etcd-data:
-  milvus-minio-data:
-  higress-data:
   prometheus-data:
   grafana-data:
-
-networks:
-  carpai-net:
-    driver: bridge
-  jcode-net:
-    driver: bridge

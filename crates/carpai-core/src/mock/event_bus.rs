@@ -2,7 +2,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 use carpai_internal::*;
-use std::pin::Pin;
 
 pub struct MockEventBus {
     events: Arc<RwLock<Vec<BusEventEnvelope>>>,

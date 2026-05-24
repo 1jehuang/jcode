@@ -1,9 +1,19 @@
 [package]
 name = "carpai"
-version = "0.12.0"
-description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
+version = "1.0.0"
+description = "CarpAI — Enterprise-grade AI Programming Server (Cursor Enterprise / Claude Code Server replacement)"
 edition = "2024"
 autobins = false
+
+# ═══════════════════════════════════════════════════════════════
+#  CarpAI Product Configuration:
+#    - server: Headless enterprise AI programming server (gRPC + REST + WS)
+#    - cli:    Terminal TUI client (local + remote mode)
+#    - sdk:    IDE plugin SDK (VSCode / JetBrains / Neovim)
+#
+#  Default: both server + cli (monorepo mode, backward compatible)
+#  Production: use --no-default-features --features server for pure server
+# ═══════════════════════════════════════════════════════════════
 
 [workspace]
 members = [
@@ -98,6 +108,14 @@ members = [
     "crates/jcode-rag",
     # LLM Provider 集成 (Deepseek + vLLM + llama.cpp)
     "crates/jcode-llm",
+    # Internal API Layer (trait definitions for decoupling)
+    "crates/carpai-internal",
+    # Core Business Logic Layer (local implementations + agent runtime + config)
+    "crates/carpai-core",
+    # CLI Client (TUI + Agent Bridge + Commands)
+    "crates/carpai-cli",
+    # Enterprise Server (gRPC + REST + WebSocket)
+    "crates/carpai-server",
     # gRPC Server (LlmService implementation)
     "crates/jcode-grpc",
     # CarpAI Unified Client SDK
@@ -276,8 +294,12 @@ tree-sitter-cpp = "0.23"  # C++语言支持
 urlencoding = "2"        # URL encoding for web search
 tracing = "0.1"          # Structured logging
 
-lsp-types = { workspace = true }
+# Security
+argon2 = "0.5"           # Password hashing (Argon2id)
+tower_governor = "0.4"   # Rate limiting middleware
 uuid = { version = "1", features = ["v4", "v5"] }
+
+lsp-types = { workspace = true }
 lazy_static = "1.4"
 proctitle = "0.1"
 which = "6"
@@ -314,30 +336,30 @@ jcode-multi-file-edit = { path = "crates/jcode-multi-file-edit" }
 jcode-skills = { path = "crates/jcode-skills" }
 jcode-mcp-advanced = { path = "crates/jcode-mcp-advanced" }
 jcode-provider-gemini = { path = "crates/jcode-provider-gemini" }
-jcode-tui-markdown = { path = "crates/jcode-tui-markdown" }
-jcode-tui-messages = { path = "crates/jcode-tui-messages" }
-jcode-tui-core = { path = "crates/jcode-tui-core" }
-jcode-tui-mermaid = { path = "crates/jcode-tui-mermaid" }
-jcode-tui-account-picker = { path = "crates/jcode-tui-account-picker" }
-jcode-tui-render = { path = "crates/jcode-tui-render" }
-jcode-tui-session-picker = { path = "crates/jcode-tui-session-picker" }
-jcode-tui-style = { path = "crates/jcode-tui-style" }
-jcode-tui-tool-display = { path = "crates/jcode-tui-tool-display" }
-jcode-tui-usage-overlay = { path = "crates/jcode-tui-usage-overlay" }
-jcode-update-core = { path = "crates/jcode-update-core" }
-jcode-terminal-launch = { path = "crates/jcode-terminal-launch" }
-jcode-tui-workspace = { path = "crates/jcode-tui-workspace" }
-jcode-usage-types = { path = "crates/jcode-usage-types" }
+jcode-tui-markdown = { path = "crates/jcode-tui-markdown", optional = true }
+jcode-tui-messages = { path = "crates/jcode-tui-messages", optional = true }
+jcode-tui-core = { path = "crates/jcode-tui-core", optional = true }
+jcode-tui-mermaid = { path = "crates/jcode-tui-mermaid", optional = true }
+jcode-tui-account-picker = { path = "crates/jcode-tui-account-picker", optional = true }
+jcode-tui-render = { path = "crates/jcode-tui-render", optional = true }
+jcode-tui-session-picker = { path = "crates/jcode-tui-session-picker", optional = true }
+jcode-tui-style = { path = "crates/jcode-tui-style", optional = true }
+jcode-tui-tool-display = { path = "crates/jcode-tui-tool-display", optional = true }
+jcode-tui-usage-overlay = { path = "crates/jcode-tui-usage-overlay", optional = true }
+jcode-update-core = { path = "crates/jcode-update-core", optional = true }
+jcode-terminal-launch = { path = "crates/jcode-terminal-launch", optional = true }
+jcode-tui-workspace = { path = "crates/jcode-tui-workspace", optional = true }
+jcode-usage-types = { path = "crates/jcode-usage-types", optional = true }
 
 # Streaming
 tokio-stream = "0.1"
 bytes = "1"
 
-# TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-arboard = "3"              # Clipboard support
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
+# TUI (cli feature only — terminal UI not needed for headless server)
+ratatui = { version = "0.30", optional = true }
+crossterm = { version = "0.29", features = ["event-stream"], optional = true }
+arboard = { version = "3", optional = true }              # Clipboard support (cli only)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }  # CLI only
 
 # Markdown & syntax highlighting
 unicode-width = "0.2"   # Unicode character display width
@@ -399,7 +421,7 @@ xmlparser = "0.13"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid"] }
 sys-info = "0.9"
 mdns-sd = { version = "0.13" }
-prometheus = { version = "0.13" }
+prometheus = { version = "0.13", default-features = false }
 jcode-cpu-inference = { path = "crates/jcode-cpu-inference" }
 
 # REST dependencies
@@ -410,6 +432,14 @@ futures-util = "0.3"
 # Prometheus metrics
 prometheus-client = "0.22"
 
+# OpenTelemetry unified observability
+opentelemetry = { version = "0.27", features = ["trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "tls"] }
+opentelemetry-prometheus = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.28"
+opentelemetry-semantic-conventions = "0.27"
+
 # Enterprise dependencies (optional, gated behind "enterprise" feature)
 jcode-auth = { path = "crates/jcode-auth", optional = true }
 jcode-llm = { path = "crates/jcode-llm", optional = true }
@@ -419,11 +449,49 @@ tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 carpai-sdk = { path = "crates/carpai-sdk", optional = true }
 
 [features]
-# Keep the heavyweight local ONNX/tokenizer embedding stack opt-in. It remains
-# available via `--features embeddings` or `JCODE_DEV_FEATURE_PROFILE=full`, but
-# ordinary check/build loops should not compile the tract/tokenizers subtree.
-default = ["pdf"]
+# ═══════════════════════════════════════════════════════════════
+#  PRODUCT FEATURE GATES
+# ═══════════════════════════════════════════════════════════════
+
+# --- server: Headless enterprise AI programming server ---
+# Includes: gRPC, REST, WebSocket, auth, observability, distributed
+# Excludes: TUI, terminal, clipboard, desktop UI
+server = []
+
+# --- cli: Terminal UI client (local + remote mode) ---
+# Includes: ratatui TUI, sidecar LLM, local tool execution, git integration
+cli = [
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:arboard",
+    "dep:image",
+    "dep:jcode-tui-markdown",
+    "dep:jcode-tui-messages",
+    "dep:jcode-tui-core",
+    "dep:jcode-tui-mermaid",
+    "dep:jcode-tui-account-picker",
+    "dep:jcode-tui-render",
+    "dep:jcode-tui-session-picker",
+    "dep:jcode-tui-style",
+    "dep:jcode-tui-tool-display",
+    "dep:jcode-tui-usage-overlay",
+    "dep:jcode-update-core",
+    "dep:jcode-terminal-launch",
+    "dep:jcode-tui-workspace",
+    "dep:jcode-usage-types",
+]
+
+# Default: full monorepo (backward compatible with existing builds)
+default = ["server", "cli", "pdf"]
+
+# ═══════════════════════════════════════════════════════════════
+#  OPTIONAL FEATURE FLAGS
+# ═══════════════════════════════════════════════════════════════
+
+# Developer/test binaries
 dev-bins = []
+
+# Memory allocator (jemalloc for production server throughput)
 jemalloc = [
     "dep:tikv-jemallocator",
     "dep:tikv-jemalloc-ctl",
@@ -436,16 +504,20 @@ jemalloc-prof = [
     "tikv-jemallocator/profiling",
     "tikv-jemalloc-ctl/profiling",
 ]
+
+# Embeddings (heavyweight ONNX/tokenizer stack — opt-in only)
 embeddings = ["dep:jcode-embedding"]
 pdf = ["dep:jcode-pdf"]
-# Optional audit trail for auto-mode decisions (see src/auto_mode/engine.rs).
-audit = []
-redis = []
-gpu-discovery = []
 
-# Claude Code 借鉴功能 — 工具提示词注入/输入验证/增强错误恢复
+# Optional subsystems
+audit = []           # Auto-mode decision audit trail
+redis = []            # Redis backend for session/memory
+gpu-discovery = []     # GPU discovery for distributed inference
+
+# Claude Code compatibility enhancements
 claude-code-enhanced = []
-# Enterprise features (requires jcode-auth, jcode-llm, aes-gcm, etc.)
+
+# Enterprise features (multi-tenant, distributed inference, RBAC)
 enterprise = [
     "dep:jcode-auth",
     "dep:jcode-llm",

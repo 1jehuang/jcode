@@ -9,6 +9,8 @@
 //! - Response caching with LRU
 //! - Retry logic with exponential backoff
 //! - Config management
+//! - OpenAI-compatible Chat Completions API
+//! - Session CRUD operations
 
 pub mod client;
 pub mod cache;
@@ -19,6 +21,11 @@ pub mod mcp;
 pub mod streaming;
 pub mod ide;
 pub mod protocol;
+pub mod session_api;
+
+// WASM bindings (optional, for browser/VSCode webview)
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 // Re-export most commonly used items
 pub use cache::ResponseCache;
@@ -37,3 +44,15 @@ pub use mcp::{
     HttpMcpClient,
 };
 pub use types::*;
+
+// Re-export Session API types
+pub use session_api::{
+    SessionCreateRequest,
+    SessionResponse,
+    SessionListRequest,
+    SessionListResponse,
+    MessageAppendRequest,
+    GetMessagesRequest,
+    GetMessagesResponse,
+    DeleteSessionResponse,
+};

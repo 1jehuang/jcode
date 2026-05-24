@@ -13,6 +13,7 @@ pub mod ambient_scheduler;
 // Authentication & Security
 pub mod auth;
 pub mod security;
+pub mod security_scanner;
 pub mod safety;
 
 // CLI Interface
@@ -92,7 +93,6 @@ pub mod token_budget;
 pub mod denial_tracking;
 pub mod session_cost_tracker;
 pub mod allowlist;
-pub mod rule_reviewer;
 pub mod circuit_breaker;
 pub mod classifier;
 pub mod metrics;

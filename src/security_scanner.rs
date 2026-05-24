@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn test_sql_injection_detection() {
         let scanner = SecurityScanner::new();
-        let code = "let query = format!(\"SELECT * FROM users WHERE id = '{}'\", user_input);";
+        let code = "let query = format!(\"SELECT * FROM users WHERE id = '{}', user_input);";
         let vulnerabilities = scanner.scan("test.rs", code);
         
         assert!(vulnerabilities.len() > 0);

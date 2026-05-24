@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use tokio::fs;
 use carpai_internal::*;
-use tracing::{info, debug};
+use tracing::{debug};
 
 pub struct LocalMemoryBackend {
     base_path: PathBuf,
@@ -322,7 +322,7 @@ impl MemoryBackend for LocalMemoryBackend {
         self.ensure_dir()?;
 
         let mut pruned_count = 0usize;
-        let mut superseded_count = 0usize;
+        let superseded_count = 0usize;
         let mut freed_bytes = 0u64;
         let mut errors = Vec::new();
 

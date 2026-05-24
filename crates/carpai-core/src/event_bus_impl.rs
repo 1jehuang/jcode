@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use tokio::sync::{broadcast, RwLock};
 use carpai_internal::*;
-use tracing::{debug, info};
+use tracing::{debug};
 
 pub struct InProcessEventBus {
     sender: broadcast::Sender<BusEventEnvelope>,

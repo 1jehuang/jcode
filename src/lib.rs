@@ -1,247 +1,327 @@
 #![allow(unknown_lints)]
 
+// ════════════════════════════════════════════════════════════════
+//  CarpAI — Enterprise-grade AI Programming Server
+//
+//  Feature Gates:
+//    - "server" : Headless server (gRPC + REST + WS) [default: ON]
+//    - "cli"    : Terminal TUI client (local + remote) [default: ON]
+//    - "enterprise": Multi-tenant, distributed, RBAC [opt-in]
+//
+//  All modules below are conditionally compiled based on features.
+//  This allows building a pure server binary without TUI/terminal deps.
+// ════════════════════════════════════════════════════════════════
+
+// ===== Core Foundation (always included) =====
+pub mod core;
+
+// ===== Agent System (always included — core abstraction) =====
 pub mod agent;
-pub mod ambient;
-pub mod ambient_runner;
-pub mod ambient_scheduler;
-pub mod ast;
+pub mod agent_runtime;
+pub mod sub_agents;
+pub mod skill_system;
+pub mod plan_mode;
+pub mod task_planner;
+pub mod task_manager;
+pub mod task_cli;
+pub mod task_decomposer;
+pub mod task_scheduler;
+pub mod plan_verifier;
+pub mod ultraplan;
+
+// ===== API Layer (server feature) =====
+#[cfg(feature = "server")]
+pub mod api;
+#[cfg(feature = "server")]
+pub mod grpc;
+#[cfg(feature = "server")]
+pub mod rest;
+#[cfg(feature = "server")]
+pub mod ws;
+#[cfg(any(feature = "server", feature = "cli"))]
+pub mod transport;
+#[cfg(feature = "server")]
+pub mod protocol;
+#[cfg(feature = "server")]
+pub mod bridge;
+
+// ===== Authentication & Authorization =====
+#[cfg(feature = "server")]
 pub mod auth;
-pub mod background;
-pub mod browser;
-pub mod build;
-pub mod bus;
-pub mod cache_tracker;
-pub mod catchup;
-pub mod channel;
-pub mod ci;
-pub mod cli;
-pub mod compaction;
-pub mod config;
-pub mod copilot_usage;
-pub mod crdt;
-pub mod dictation;
-#[cfg(feature = "embeddings")]
-pub mod embedding;
-#[cfg(not(feature = "embeddings"))]
-pub mod embedding_stub;
-#[cfg(not(feature = "embeddings"))]
-pub use embedding_stub as embedding;
-pub mod env;
-pub mod gateway;
-pub mod gmail;
-pub mod goal;
-pub mod id;
-pub mod import;
-pub mod incremental_index;
-pub mod proactive_context;
-pub mod audit_log;
-pub mod logging;
-pub mod login_qr;
-pub mod mcp;
+#[cfg(feature = "server")]
+pub mod security;
+#[cfg(feature = "server")]
+pub mod security_scanner;
+#[cfg(feature = "server")]
+pub mod permission_rules;
+
+// ===== Code Completion =====
+pub mod completion;
+pub mod completion_engine;
+pub mod completion_quality;
+pub mod auto_fallback;
+
+// ===== Memory System =====
 pub mod memory;
 pub mod memory_agent;
 pub mod memory_graph;
 pub mod memory_log;
 pub mod memory_types;
-pub mod message;
-pub mod network_retry;
-pub mod notifications;
-pub mod overnight;
-pub mod perf;
-pub mod plan;
-pub mod platform;
-pub mod process_memory;
-pub mod process_title;
-pub mod prompt;
-pub mod protocol;
-pub mod provider;
-pub mod provider_catalog;
-pub mod registry;
-pub mod replay;
-pub mod restart_snapshot;
-pub mod runtime_memory_log;
-pub mod safety;
-pub mod server;
-pub mod session;
-pub mod setup_hints;
-pub mod side_panel;
-pub mod sidecar;
-pub mod skill;
-pub mod skills;
-pub mod soft_interrupt_store;
-pub mod startup_profile;
-pub mod stdin_detect;
-pub mod storage;
-pub mod subscription_catalog;
-pub mod telegram;
-pub mod telemetry;
-pub mod terminal_launch;
-pub mod todo;
+pub mod memory_prompt;
+pub mod memory_advanced;
+pub mod semantic_memory;
+pub mod hierarchical_memory;
+pub mod knowledge_graph;
+pub mod knowledge;
+pub mod knowledge_agents;
+
+// ===== Tools & MCP =====
 pub mod tool;
-pub mod transport;
-pub mod tui;
-pub mod undo_manager;
-pub mod update;
-pub mod usage;
-pub mod util;
-pub mod video_export;
-pub mod grpc;
-pub mod scheduler;
-pub mod external;
-pub mod ws;
-pub mod rest;
-pub mod auto_mode;
-pub mod security;
-pub mod dap;
-pub mod debugger;
+pub mod mcp;
+pub mod tools;
+pub mod slash_command;
+
+// ===== Enterprise Features (enterprise feature gate) =====
+#[cfg(feature = "enterprise")]
+pub mod enterprise;
+
+// ===== Observability (server feature) =====
+#[cfg(feature = "server")]
+pub mod observability;
+#[cfg(feature = "server")]
+pub mod telemetry;
+#[cfg(feature = "server")]
 pub mod metrics;
+#[cfg(feature = "server")]
 pub mod prometheus;
-pub mod compression;
-pub mod classifier;
-pub mod circuit_breaker;
-pub mod backpressure;
+#[cfg(feature = "server")]
+pub mod logging;
+#[cfg(feature = "server")]
+pub mod audit_log;
+#[cfg(feature = "server")]
 pub mod deny_log;
-pub mod task_scheduler;
-pub mod rule_reviewer;
-pub mod token_budget;
-pub mod denial_tracking;
+
+// ===== Configuration =====
+pub mod config;
+
+// ===== Infrastructure =====
+pub mod infrastructure;
+
+// ===== Session Management =====
+pub mod session;
+pub mod session_export;
 pub mod session_cost_tracker;
 pub mod session_gc;
 pub mod runtime_manager;
 pub mod cgroup_isolation;
-pub mod cache_break_detector;
-pub mod allowlist;
-pub mod workspace_manager;
-pub mod build_module;
-pub mod sandbox;
-pub mod slash_command;
-pub mod browser_bridge;
-pub mod ide_integration;
-pub mod checkpoint;
-pub mod refactor_engine;
-pub mod sub_agents;
-pub mod hooks_system;
-pub mod lsp_client;
-pub mod lsp_code_actions;
-pub mod lsp_server;
-pub mod auto_fallback;
-pub mod rest_llm;
-pub mod claude_agent_port;
-pub mod completion_quality;
-pub mod diff_integration;
-pub mod compilation_engine;
-pub mod agent_runtime;
-pub mod diff_engine;
+
+// ===== File Operations =====
+pub mod storage;
 pub mod file_refs;
-pub mod bridge;
-pub mod error_types;
-// Error recovery system (Claude Code-inspired)
-pub mod error_recovery;
-pub mod completion;
-pub mod auto_test_loop;
-pub mod git_workflow;
-pub mod task_decomposer;
-pub mod semantic_memory;
-pub mod semantic;
-pub mod precise_edit;
-pub mod permission_rules;
-pub mod context_pruner;
-pub mod atomic_edit_coordinator;
-pub mod skill_system;
-pub mod plan_verifier;
-pub mod verify;
-pub mod cache_optimizer;
-pub mod cache_integration;
-pub mod concurrency_optimizer;
-pub mod inference_optimizer;
-pub mod inference_integration;
-pub mod render_optimizer;
-pub mod streaming_diff_preview;
-pub mod workflow;
-pub mod codereview;
-pub mod ai_enhanced;
-pub mod git;
-pub mod task_planner;
-pub mod team_sync;
-pub mod plugins;
-pub mod ssh;
-pub mod task_manager;
-pub mod task_cli;
-pub mod plan_mode;
-pub mod session_export;
-pub mod version_manager;
-pub mod undo_redo;
-pub mod api;
-pub mod utils;
-
-// Mid-term enhancements
-pub mod dashboard;
-pub mod marketplace;
-pub mod debug_panel;
-pub mod plugin_market;
-pub mod i18n;
-
-// Long-term vision
-pub mod distributed;
-pub mod ai_optimization;
-pub mod ab_testing;
-
-// CarpAI Server 基础设施模块（多租户/分布式推理/节点发现/管理API等）
-pub mod enterprise;
-
-// Reasoning & Context (Claude Code 级别)
-pub mod context;
-pub mod reasoning;
-
-// 深度借鉴 Claude Code 的功能模块
-pub mod ultraplan;
-pub mod voice;
-pub mod vim;
-pub mod buddy;
-pub mod memdir;
-
-// 代码知识图谱 (借鉴 Understand-Anything)
-pub mod knowledge_graph;
-
-// 分层记忆系统 (借鉴 TencentDB-Agent-Memory)
-pub mod hierarchical_memory;
-
-// BM25 + RRF 混合检索 (借鉴 TencentDB-Agent-Memory)
-pub mod retrieval;
-
-// MAB 多臂老虎机决策引擎 (借鉴 Fidelity MABWiser)
-pub mod mab;
-
-// NLP & Prototype (Claude Code 深度借鉴)
-pub mod nlp;
-pub mod prototype;
-
-// Orphaned source files — 已存在的独立模块
-pub mod completion_engine;
-pub mod protocol_memory;
-pub mod memory_prompt;
-pub mod message_notifications;
-
-// Knowledge Base (Rust最佳实践)
-pub mod knowledge;
-pub mod knowledge_agents;
-
-// Enhanced Refactoring System (跨语言迁移 & 现代化)
-pub mod refactor;
-pub mod transaction;
 pub mod file_state_cache;
 pub mod file_history;
-pub mod diagnostics;
+pub mod checkpoint;
+pub mod undo_redo;
+pub mod undo_manager;
+
+// ===== Git Integration =====
+pub mod git;
+pub mod git_workflow;
+pub mod version_manager;
+
+// ===== Refactoring Engine =====
+pub mod refactor;
+pub mod refactor_engine;
 pub mod orchestrator;
-pub mod memory_advanced;
-pub mod tdd;
-pub mod performance_advanced;
-pub mod engine;
+pub mod precise_edit;
+pub mod atomic_edit_coordinator;
+pub mod diff_engine;
+pub mod diff_integration;
+pub mod streaming_diff_preview;
+pub mod compilation_engine;
+pub mod diagnostics;
+pub mod transaction;
 pub mod refactor_verify_pipeline;
 pub mod delivery_pipeline;
 
-// P2 Integration - 将P2功能模块接入主流程
+// ===== AST & Code Analysis =====
+pub mod ast;
+pub mod classifier;
+pub mod semantic;
+pub mod context_pruner;
+pub mod incremental_index;
+pub mod proactive_context;
+pub mod context;
+pub mod reasoning;
+
+// ===== LSP Integration =====
+pub mod lsp_client;
+pub mod lsp_code_actions;
+pub mod lsp_server;
+pub mod ide_integration;
+
+// ===== CLI & TUI (cli feature only) =====
+#[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(feature = "cli")]
+pub mod tui;
+#[cfg(feature = "cli")]
+pub mod terminal_launch;
+#[cfg(feature = "cli")]
+pub mod stdin_detect;
+#[cfg(feature = "cli")]
+pub mod input;
+#[cfg(feature = "cli")]
+pub mod setup_hints;
+
+// ===== Provider & LLM Integration =====
+pub mod provider;
+pub mod provider_catalog;
+pub mod gateway;
+pub mod rest_llm;
+pub mod inference_optimizer;
+pub mod inference_integration;
+pub mod auto_mode;
+
+// ===== Background Tasks =====
+pub mod background;
+pub mod ambient;
+#[cfg(feature = "cli")]
+pub mod ambient_runner;
+pub mod ambient_scheduler;
+pub mod overnight;
+pub mod catchup;
+pub mod replay;
+
+// ===== Notifications & Communication =====
+pub mod notifications;
+pub mod message_notifications;
+#[cfg(feature = "cli")]
+pub mod telegram;
+#[cfg(feature = "cli")]
+pub mod gmail;
+#[cfg(feature = "cli")]
+pub mod browser;
+#[cfg(feature = "cli")]
+pub mod browser_bridge;
+pub mod copilot_usage;
+
+// ===== Build & CI/CD =====
+pub mod build;
+pub mod build_module;
+pub mod ci;
+pub mod micro_ci;
+pub mod sandbox;
+pub mod hooks_system;
+
+// ===== Performance & Optimization =====
+pub mod perf;
+pub mod cache_tracker;
+pub mod cache_optimizer;
+pub mod cache_integration;
+pub mod cache_break_detector;
+pub mod concurrency_optimizer;
+#[cfg(feature = "cli")]
+pub mod render_optimizer;
+pub mod compression;
+pub mod circuit_breaker;
+pub mod backpressure;
+pub mod token_budget;
+pub mod denial_tracking;
+
+// ===== Error Handling =====
+pub mod error_recovery;
+pub mod error_types;
+pub mod network_retry;
+pub mod allowlist;
+
+// ===== Plugins & Extensions =====
+pub mod plugins;
+pub mod plugin_market;
+pub mod marketplace;
+#[cfg(feature = "cli")]
+pub mod dashboard;
+#[cfg(feature = "cli")]
+pub mod debug_panel;
+#[cfg(feature = "cli")]
+pub mod side_panel;
+pub mod i18n;
+
+// ===== Advanced Features =====
+#[cfg(feature = "server")]
+pub mod distributed;
+pub mod ai_optimization;
+pub mod ab_testing;
+pub mod ai_enhanced;
+pub mod codereview;
+pub mod workflow;
+#[cfg(feature = "cli")]
+pub mod buddy;
+#[cfg(feature = "cli")]
+pub mod voice;
+#[cfg(feature = "cli")]
+pub mod vim;
+pub mod memdir;
+pub mod nlp;
+pub mod prototype;
+pub mod retrieval;
+pub mod mab;
+pub mod tdd;
+pub mod performance_advanced;
+
+// ===== SSH & Remote =====
+pub mod ssh;
+
+// ===== Registry & Skills =====
+pub mod registry;
+pub mod skill;
+pub mod skills;
+
+// ===== Message & Channel =====
+pub mod message;
+pub mod channel;
+pub mod bus;
+
+// ===== Legacy/Deprecated Modules =====
+pub mod crdt;
+#[cfg(feature = "cli")]
+pub mod dictation;
+pub mod env;
+pub mod goal;
+pub mod import;
+#[cfg(feature = "cli")]
+pub mod login_qr;
+pub mod process_memory;
+pub mod process_title;
+pub mod prompt;
+pub mod restart_snapshot;
+pub mod runtime_memory_log;
+pub mod safety;
+#[cfg(feature = "server")]
+pub mod server;
+pub mod sidecar;
+pub mod soft_interrupt_store;
+#[cfg(feature = "cli")]
+pub mod startup_profile;
+pub mod subscription_catalog;
+#[cfg(feature = "cli")]
+pub mod todo;
+#[cfg(feature = "cli")]
+pub mod update;
+pub mod usage;
+pub mod scheduler;
+pub mod external;
+pub mod dap;
+pub mod workspace_manager;
+pub mod compaction;
+pub mod plan;
+pub mod message;
+
+// ===== P2 Integration =====
 pub mod p2_integration;
+
+// ===== Protocol Memory (Legacy) =====
+pub mod protocol_memory;
 
 use anyhow::Result;
 use std::sync::Mutex;
@@ -258,6 +338,19 @@ pub fn get_current_session() -> Option<String> {
     CURRENT_SESSION_ID.lock().ok()?.clone()
 }
 
+/// Main entry point — dispatches to CLI or server based on active features.
+///
+/// - With `cli` feature: launches TUI interactive client (`cli::startup::run`)
+/// - With `server` only (no cli): launches headless server
+/// - Default (both): runs CLI (backward compatible)
+#[cfg(feature = "cli")]
 pub async fn run() -> Result<()> {
     cli::startup::run().await
+}
+
+#[cfg(all(not(feature = "cli"), feature = "server"))]
+pub async fn run() -> Result<()> {
+    // Pure server mode — no TUI, no terminal interaction
+    // Starts gRPC + REST + WebSocket servers
+    server::startup::run().await
 }

@@ -115,7 +115,7 @@ impl CoreConfig {
         if let Ok(v) = std::env::var("CARPAI_DEFAULT_MODEL") {
             config.base.default_model = v;
         }
-        if let Ok(v) = std::env::var("CARPAI_LOG_LEVEL") {
+        if let Ok(_v) = std::env::var("CARPAI_LOG_LEVEL") {
             // log_level is not in AppConfig yet, skip or extend
         }
         if let Ok(v) = std::env::var("CARPAI_CORE__MAX_CONCURRENT_TOOLS") {

@@ -1,0 +1,28 @@
+{
+  "name": "paw-brave-refactor",
+  "leadAgentId": "59f0d7ecc8db413f9c233e3999bc1cc4",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-24T09:18:46.097Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@paw-brave-refactor",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "cli-explorer@paw-brave-refactor",
+      "name": "cli-explorer",
+      "role": "探索当前CLI相关代码结构"
+    },
+    {
+      "memberId": "cli-builder@paw-brave-refactor",
+      "name": "cli-builder",
+      "role": "创建carpai-cli基础结构"
+    }
+  ],
+  "isAutoTeam": false
+}

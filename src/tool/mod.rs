@@ -48,6 +48,35 @@ use crate::compaction::CompactionManager;
 use crate::provider::Provider;
 use crate::skill::SkillRegistry;
 use anyhow::Result;
+use std::sync::Arc;
+use tracing::info;
+
+/// Audit log helper for tool executions
+pub async fn record_tool_audit(
+    audit_logger: &Option<Arc<crate::mcp::AuditLogger>>,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    tool_name: String,
+    params: Option<serde_json::Value>,
+    success: bool,
+    error_message: Option<String>,
+    duration_ms: u64,
+) {
+    if let Some(ref logger) = audit_logger {
+        if let Err(e) = logger.record_invocation(
+            user_id,
+            session_id,
+            tool_name,
+            params,
+            None, // result will be recorded separately
+            success,
+            error_message,
+            duration_ms,
+        ).await {
+            tracing::warn!("Failed to record tool audit: {}", e);
+        }
+    }
+}
 use jcode_lock_manager::Shared;
 use jcode_message_types::ToolDefinition;
 use serde_json::Value;

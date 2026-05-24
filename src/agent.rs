@@ -126,6 +126,13 @@ pub struct Agent {
     file_snapshots: Vec<(std::path::PathBuf, String)>,
     /// 启用并发工具执行 (三段式: 验证→并发→结果处理)
     pub tool_concurrent_enabled: bool,
+    // ===== Phase 3 新增功能 =====
+    /// MCP工具发现引擎 (自动推荐相关工具)
+    mcp_discovery_engine: Option<Arc<crate::mcp::ToolDiscoveryEngine>>,
+    /// MCP工作流编排器 (串联多个工具执行)
+    mcp_orchestrator: Option<Arc<crate::mcp::WorkflowOrchestrator>>,
+    /// MCP审计日志记录器 (记录所有工具调用)
+    mcp_audit_logger: Option<Arc<crate::mcp::AuditLogger>>,
 }
 
 impl Agent {
@@ -208,6 +215,10 @@ impl Agent {
             recent_edit_files: Vec::new(),
             file_snapshots: Vec::new(),
             tool_concurrent_enabled: false,
+            // Phase 3 features (initialized as None, can be set later)
+            mcp_discovery_engine: None,
+            mcp_orchestrator: None,
+            mcp_audit_logger: None,
         }
     }
 
@@ -244,6 +255,105 @@ impl Agent {
         );
         agent.tool_concurrent_enabled = true;
         agent
+    }
+
+    // ===== Phase 3: MCP Enhanced Features =====
+
+    /// Enable MCP tool discovery engine
+    pub fn enable_mcp_discovery(
+        &mut self,
+        registry: Arc<crate::mcp::DynamicToolRegistry>,
+        config: crate::mcp::DiscoveryConfig,
+    ) {
+        let engine = Arc::new(crate::mcp::ToolDiscoveryEngine::new(config, registry));
+        self.mcp_discovery_engine = Some(engine);
+    }
+
+    /// Enable MCP workflow orchestrator
+    pub fn enable_mcp_orchestrator(
+        &mut self,
+        registry: Arc<crate::mcp::DynamicToolRegistry>,
+    ) {
+        let orchestrator = Arc::new(crate::mcp::WorkflowOrchestrator::new(registry));
+        self.mcp_orchestrator = Some(orchestrator);
+    }
+
+    /// Enable MCP audit logging
+    pub fn enable_mcp_audit_logging(&mut self) {
+        let logger = Arc::new(crate::mcp::AuditLogger::new());
+        self.mcp_audit_logger = Some(logger);
+    }
+
+    /// Discover relevant MCP tools for a query
+    pub async fn discover_mcp_tools(&self, query: &str) -> Option<crate::mcp::DiscoveryResult> {
+        if let Some(ref engine) = self.mcp_discovery_engine {
+            match engine.discover(query).await {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    tracing::warn!("MCP tool discovery failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Execute an MCP workflow
+    pub async fn execute_mcp_workflow(
+        &self,
+        workflow: &crate::mcp::Workflow,
+        inputs: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<crate::mcp::WorkflowResult> {
+        if let Some(ref orchestrator) = self.mcp_orchestrator {
+            match orchestrator.execute(workflow, inputs).await {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    tracing::error!("MCP workflow execution failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Record MCP tool invocation in audit log
+    pub async fn record_mcp_audit(
+        &self,
+        tool_name: String,
+        params: Option<serde_json::Value>,
+        result: Option<serde_json::Value>,
+        success: bool,
+        error_message: Option<String>,
+        duration_ms: u64,
+    ) {
+        if let Some(ref logger) = self.mcp_audit_logger {
+            let user_id = self.session.user_id.clone();
+            let session_id = Some(self.session.id.clone());
+            
+            if let Err(e) = logger.record_invocation(
+                user_id,
+                session_id,
+                tool_name,
+                params,
+                result,
+                success,
+                error_message,
+                duration_ms,
+            ).await {
+                tracing::warn!("Failed to record MCP audit log: {}", e);
+            }
+        }
+    }
+
+    /// Get MCP audit statistics
+    pub async fn get_mcp_audit_stats(&self) -> Option<crate::mcp::AuditLogStats> {
+        if let Some(ref logger) = self.mcp_audit_logger {
+            Some(logger.get_stats().await)
+        } else {
+            None
+        }
     }
 
     pub fn new_with_session(

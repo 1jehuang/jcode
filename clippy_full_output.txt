@@ -1,0 +1,2 @@
+﻿error: could not compile `carpai` (lib) due to 5 previous errors; 953 warning
+s emitted

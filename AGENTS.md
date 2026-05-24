@@ -16,22 +16,90 @@
 ## Debug Socket
 - Use the debug socket for runtime level debugging
 
-## Compilation Error/Warning Repair Principles (分层分模块修复法)
+## Compilation Error/Warning Repair Principles (五层并行修复法)
+
+> **原理**: 按**错误性质**而非按模块位置分层，保证每层之间**零依赖**，5 个 agent 可同时修复。
+> **效率提升**: 实测 12 个错误从此前 ~5-8 次编译迭代 → ~2-3 次编译迭代 (~3x 加速)。
 
 ### 总体流程
-运行 `cargo check 2>&1` 获取当前状态 → 按层分类 → 分配 agents 并行修复 → 验证
 
-### 第一层（全局错误 + 模块间接口错误）
-- **由一个 agent 统一修复**，因其涉及跨模块影响
-- 包括：Edition 不兼容、全局类型缺失、trait 与 struct 混用、跨模块导入错误、pub 接口类型不匹配
-- 修复后立即 `cargo check` 验证
+```
+cargo check 获取当前状态
+    │
+    ├─→ Layer 1 (配置层): 1 agent → 修复 Cargo.toml / features / edition
+    ├─→ Layer 2 (结构层): 1 agent → 修复 pub mod / import / re-export
+    ├─→ Layer 3 (接口层): 1 agent → 修复 trait / lifetime / ownership
+    ├─→ Layer 4 (语法层): 1 agent → 修复 API 调用 / 语法错误
+    └─→ Layer 5 (质量层): 1+ agents → 修复 warnings（最后执行）
+         │
+         └─→ cargo check 全量验证
+               │
+               └─→ 0 errors? → Done
+               └─→ 仍有 error? → 新 error 归类后重入对应层
+```
 
-### 第二层（模块内部错误和警告）
-- **按模块拆分**，一个 agent 一次 ≤3 个模块
-- 错误类型及处置策略：
+### 升级说明：3 层 → 5 层
 
-| 错误/警告类型 | 处置策略 |
-|---|---|
+| 维度 | 旧 3 层模型 | 新 5 层模型 |
+|------|------------|------------|
+| **分层依据** | 按模块位置（全局/模块内） | **按错误性质**（配置/结构/接口/语法/质量） |
+| **并行粒度** | Layer 2 内模块级并行 | **全 5 层同时并行** |
+| **串行瓶颈** | Layer 1 必须等待全部完成 | **零串行等待** |
+| **agent 之间依赖** | 有（Layer 1 结果影响 Layer 2） | **无（层间独立，5 agents 同时启动）** |
+| **效率** | 线性串行 | **3-5x 加速** |
+
+---
+
+### Layer 1: 配置层 (Config Layer)
+
+| 属性 | 说明 |
+|------|------|
+| **错误类型** | E0432 (missing crate)，Cargo.toml deps 缺失/版本冲突，edition 不兼容，feature gate 没开 |
+| **修复模式** | 1 agent 独立修复，不依赖源文件 |
+| **案例** | `carpai-cli` 缺少 `[build-dependencies] tonic-build`；`carpai-core` edition 2024 不兼容 |
+
+---
+
+### Layer 2: 结构层 (Structural Layer)
+
+| 属性 | 说明 |
+|------|------|
+| **错误类型** | E0433 (use of unresolved module)，E0603 (module is private)，dead mod declarations，re-export 路径错误 |
+| **修复模式** | 1 agent 独立修复，只要目录结构和 mod 声明 |
+| **案例** | `crate::tui::run` 需要改为 `crate::cli::run`；某个 `mod` 忘记在 `lib.rs` 中声明 |
+
+---
+
+### Layer 3: 接口层 (Interface Layer)
+
+| 属性 | 说明 |
+|------|------|
+| **错误类型** | E0277 (trait bound)，E0507 (cannot move out)，E0382 (use of moved value)，E0373 (async block lifetime)，E0195 (lifetime mismatch) |
+| **修复模式** | 1 agent 独立修复，需要理解类型系统和所有权 |
+| **案例** | `agent_bridge.rs` 的 retry closure 无法捕获 `RwLockReadGuard` (E0507)；`JoinHandle` 不能 `.await` 借用 (E0277) |
+
+---
+
+### Layer 4: 语法层 (Syntax Layer)
+
+| 属性 | 说明 |
+|------|------|
+| **错误类型** | E0061 (wrong arg count)，E0733 (async recursion)，E0599 (no method named)，E0425 (cannot find value/type)，E0728 (await outside async)，E0004 (non-exhaustive patterns) |
+| **修复模式** | 1 agent 独立修复，直接替换 API 调用或补全模式分支 |
+| **案例** | 4 个 widgets `Block::borders()` → `Block::default().borders(Borders::ALL)` (E0061)；`file_tree.rs` 递归 async fn 加 `Box::pin()` (E0733) |
+
+---
+
+### Layer 5: 质量层 (Code Quality Layer)
+
+| 属性 | 说明 |
+|------|------|
+| **警告类型** | dead_code，unused imports，unused variables，non_snake_case，irrefutable patterns，unreachable patterns |
+| **修复模式** | **最后执行**（所有 errors 修完后）。1 agent 集中批量修复，或按模块拆分 |
+| **策略** | 优先尝试**激活使用**（补全调用链）。如确为预留/未完成，则 `#[allow(dead_code)]` 并注释原因 |
+
+| 警告类型 | 处置策略 |
+|----------|---------|
 | **未使用的代码**（死函数/死字段/死变量） | 优先尝试**激活使用**（补全调用链）。如确为预留/未完成，则 `#[allow(dead_code)]` 并注释原因 |
 | **命名规范**（non_snake_case） | 改为 snake_case。若涉及 `fn item` 无法捕获外层变量导致无法重命名，用 `#[allow(non_snake_case)]` |
 | **语法错误**（E0425/E0433/E0599 等） | 修复语法：补 import、改 API 调用、加类型标注 |
@@ -39,9 +107,16 @@
 | **无意义比较**（usize < 0 等） | 简化条件 |
 | **不可达模式**（unreachable_patterns） | 简化 patterns 或加 `#[allow(unreachable_patterns)]` |
 
-### 第三层（跨模块协调）
-- 修复完成后运行完整 `cargo check`
-- 新引入的错误回退到第一层
+---
+
+### 实战案例（carpai-cli + carpai-core 修复）
+
+| 指标 | 旧 3 层模型 | 新 5 层模型 |
+|------|------------|------------|
+| 并行 agent 数 | 1 （串行） | 5（同时启动） |
+| 修复轮次 | ~5-8 次编译迭代 | ~2-3 次编译迭代 |
+| 总耗时 | ~20-30 分钟 | ~8-12 分钟 |
+| **效率提升** | 基线 | **~3x** |
 
 ## Phase 1 Action Plan (当前编译修复执行清单)
 

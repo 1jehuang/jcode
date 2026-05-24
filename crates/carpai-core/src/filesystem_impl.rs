@@ -4,7 +4,7 @@ use std::future::Future;
 use async_trait::async_trait;
 use tokio::fs;
 use carpai_internal::*;
-use tracing::{debug, warn};
+use tracing::{debug};
 use sha2::{Sha256, Digest};
 
 pub struct LocalFileSystem {

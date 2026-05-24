@@ -47,6 +47,7 @@ use tracing::{info, warn, debug, error};
 use uuid::Uuid;
 use once_cell::sync::OnceCell;
 
+#[allow(unused_imports)]
 use crate::config::CoreConfig;
 use carpai_internal::{
     ToolDefinition,

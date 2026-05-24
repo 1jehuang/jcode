@@ -14,6 +14,7 @@ pub struct SidecarInferenceBackend {
     endpoint: String,
     model: String,
     api_key: Option<String>,
+    #[allow(dead_code)]
     timeout: Duration,
 }
 

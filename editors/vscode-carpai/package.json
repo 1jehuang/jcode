@@ -269,7 +269,9 @@
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node ./out/test/runTest.js",
     "package": "vsce package",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "build:webview": "cd webview-ui && npm run build",
+    "build:all": "npm run build:webview && npm run compile"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

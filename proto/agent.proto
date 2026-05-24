@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package carpai.agent;
+
+option java_package = "com.carpai.ide.grpc";
+option java_multiple_files = true;
+
+// Agent service for chat completions
+service AgentService {
+  rpc ChatCompletion (ChatCompletionRequest) returns (ChatCompletionResponse);
+  rpc CreateSession (CreateSessionRequest) returns (SessionResponse);
+  rpc AppendMessage (AppendMessageRequest) returns (AppendMessageResponse);
+  rpc GetMessages (GetMessagesRequest) returns (GetMessagesResponse);
+}
+
+// Chat message
+message ChatMessage {
+  string role = 1;    // user, assistant, system
+  string content = 2;
+}
+
+// Chat completion request
+message ChatCompletionRequest {
+  repeated ChatMessage messages = 1;
+  string model = 2;
+  bool stream = 3;
+}
+
+// Chat completion response
+message ChatCompletionResponse {
+  ChatMessage message = 1;
+  string request_id = 2;
+  string model = 3;
+  TokenUsage usage = 4;
+  double latency_ms = 5;
+}
+
+// Token usage
+message TokenUsage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}
+
+// Session creation request
+message CreateSessionRequest {
+  optional string title = 1;
+  optional string working_dir = 2;
+  optional string model = 3;
+}
+
+// Session response
+message SessionResponse {
+  string id = 1;
+  optional string title = 2;
+  string state = 3;
+  optional string model = 4;
+  int32 message_count = 5;
+  string created_at = 6;
+}
+
+// Append message request
+message AppendMessageRequest {
+  string session_id = 1;
+  ChatMessage message = 2;
+}
+
+// Append message response
+message AppendMessageResponse {
+  bool success = 1;
+}
+
+// Get messages request
+message GetMessagesRequest {
+  string session_id = 1;
+  optional int32 limit = 2;
+}
+
+// Get messages response
+message GetMessagesResponse {
+  string session_id = 1;
+  repeated ChatMessage messages = 2;
+  int32 total_count = 3;
+}

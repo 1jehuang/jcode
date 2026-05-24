@@ -1,0 +1,114 @@
+{
+  "name": "carpai",
+  "displayName": "CarpAI",
+  "description": "Enterprise AI Programming Assistant - Chat, Explain, Refactor, Fix",
+  "version": "1.1.0-dev",
+  "publisher": "carpai-team",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Chat", "Programming Languages"],
+  "keywords": ["ai", "chat", "copilot", "refactor", "explain"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "carpai.chat",
+        "title": "CarpAI: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "carpai.explain",
+        "title": "CarpAI: Explain Code",
+        "icon": "$(info)"
+      },
+      {
+        "command": "carpai.refactor",
+        "title": "CarpAI: Refactor Selection",
+        "icon": "$(wand)"
+      },
+      {
+        "command": "carpai.fix",
+        "title": "CarpAI: Fix Bug",
+        "icon": "$(bug)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "carpai-sidebar",
+          "title": "CarpAI",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "carpai-sidebar": [
+        {
+          "type": "webview",
+          "id": "carpai.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "carpai.explain",
+          "group": "carpai@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "carpai.refactor",
+          "group": "carpai@2",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "carpai.fix",
+          "group": "carpai@3",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CarpAI",
+      "properties": {
+        "carpai.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "CarpAI Server URL"
+        },
+        "carpai.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key for authentication"
+        },
+        "carpai.model": {
+          "type": "string",
+          "default": "claude-sonnet-4",
+          "description": "Default model to use"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run compile -- --sourcemap --watch",
+    "webview:dev": "cd webview && npm run dev",
+    "webview:build": "cd webview && npm run build",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "esbuild": "^0.19.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "@carpai/sdk": "workspace:*"
+  }
+}

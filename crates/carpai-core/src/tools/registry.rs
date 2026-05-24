@@ -32,7 +32,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
-use tracing::{info, warn, debug, error};
+use tracing::{info, warn};
 
 use carpai_internal::{
     tools::ToolDefinition as InternalToolDef,

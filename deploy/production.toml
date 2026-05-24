@@ -1,0 +1,56 @@
+# CarpAI Server - Production Configuration
+# Copy to /etc/carpai/server.toml
+
+# === Base Configuration ===
+mode = "server"
+working_dir = "/var/lib/carpai"
+default_model = "claude-sonnet-4-20250514"
+max_context_tokens = 200000
+log_level = "warn"
+
+# === Core Settings ===
+[core]
+data_dir = "/var/lib/carpai/data"
+session_subdir = "sessions"
+memory_subdir = "memory"
+max_concurrent_tools = 20
+max_agent_iterations = 100
+cache_size_mb = 1024
+disk_cache_enabled = true
+
+[core.completion_provider]
+provider_type = "openai"
+endpoint = "https://api.anthropic.com"
+timeout_secs = 120
+
+# === Network Settings ===
+listen_addr = "0.0.0.0"
+port = 8080
+
+# === TLS (optional - use reverse proxy in production) ===
+# [tls]
+# cert_path = "/etc/ssl/certs/carpai.crt"
+# key_path = "/etc/ssl/private/carpai.key"
+
+# === Database ===
+[database]
+url = "postgres://carpai:secret@localhost:5432/carpai"
+max_connections = 20
+
+# === Redis (optional) ===
+# [redis]
+# url = "redis://localhost:6379"
+# pool_size = 10
+
+# === Authentication ===
+jwt_secret = "<generate-with: openssl rand -hex 32>"
+jwt_expiry_hours = 24
+
+# === Multi-tenant ===
+multi_tenant = true
+default_tenant_id = "org-default"
+
+# === Enterprise Features ===
+audit_log_enabled = true
+rate_limit_enabled = true
+rate_limit_rpm = 60

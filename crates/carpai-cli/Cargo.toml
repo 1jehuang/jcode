@@ -1,0 +1,66 @@
+[package]
+name = "carpai-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CarpAI CLI Client — TUI-based standalone AI programming assistant"
+
+[dependencies]
+# Core business logic layer
+carpai-core = { path = "../carpai-core" }
+carpai-internal = { path = "../carpai-internal" }
+
+# TUI framework
+ratatui = { version = "0.29", features = ["all-widgets"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full", "sync", "io-util", "fs", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Configuration
+clap = { version = "4", features = ["derive"] }
+
+# gRPC client (for remote mode)
+tonic = "0.12"
+prost = "0.13"
+
+# HTTP client (for notification & remote mode)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Random number generation (for retry jitter)
+fastrand = "2"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+
+[features]
+default = []
+remote = []
+
+[[bin]]
+name = "carpai"
+path = "src/main.rs"

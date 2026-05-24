@@ -1,0 +1,38 @@
+{
+  "name": "paw-brave-qfix",
+  "leadAgentId": "59f0d7ecc8db413f9c233e3999bc1cc4",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-24T10:42:49.802Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@paw-brave-qfix",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "grpc-explorer@paw-brave-qfix",
+      "name": "grpc-explorer",
+      "role": "检查gRPC proto和server服务定义"
+    },
+    {
+      "memberId": "webview-builder@paw-brave-qfix",
+      "name": "webview-builder",
+      "role": "重建VSCode webview React app"
+    },
+    {
+      "memberId": "grpc-client-creator@paw-brave-qfix",
+      "name": "grpc-client-creator",
+      "role": "创建gRPC客户端模块"
+    },
+    {
+      "memberId": "react-app-creator@paw-brave-qfix",
+      "name": "react-app-creator",
+      "role": "创建VSCode webview React应用"
+    }
+  ],
+  "isAutoTeam": false
+}

@@ -1,33 +1,15 @@
-//! # CarpAI 公共API - Auto Mode & 智能补全
+//! # CarpAI API Layer
 //!
-//! 本模块提供CarpAI核心功能的统一访问接口：
-//!
-//! ## 快速开始
-//!
-//! ```rust,no_run
-//! use carpai::auto_mode::{AutoModeEngine, AutoModeConfig, ActionType, ToolContext};
-//! use carpai::completion::bash::{BashParser, CommandRegistry};
-//!
-//! // 1. 初始化Auto Mode引擎
-//! let config = AutoModeConfig {
-//!     enabled: true,
-//!     approval_threshold: 0.85,
-//!     ..Default::default()
-//! };
-//! let engine = AutoModeEngine::new(config);
-//!
-//! // 2. 智能决策示例
-//! let ctx = ToolContext::new(ActionType::GitCommit, "commit new feature");
-//! match engine.should_auto_approve(&ActionType::GitCommit, "feat: add auth", &ctx).await {
-//!     AutoApprovalDecision::AutoApprove(reason) => {
-//!         println!("✅ 自动批准: {}", reason);
-//!         // 执行操作...
-//!     }
-//!     AutoApprovalDecision::RequiresConfirmation(msg) => {
-//!         println!("⚠️ 需要确认: {}", msg);
-//!         // 请求用户确认...
-//!     }
-//!     _ => { /* 其他处理 */ }
+//! Unified API layer providing gRPC, REST, and WebSocket endpoints.
+
+pub mod middleware;
+pub mod rest_api;
+
+// Re-export auto_mode and completion for backward compatibility
+pub use crate::auto_mode;
+pub use crate::completion;
+
+pub use middleware::{TenantContext, tenant_middleware, get_tenant_context};
 //! }
 //!
 //! // 3. Bash智能补全

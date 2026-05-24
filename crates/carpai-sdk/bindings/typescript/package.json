@@ -1,0 +1,17 @@
+{
+  "name": "@carpai/sdk",
+  "version": "1.1.0-dev.0",
+  "description": "CarpAI Client SDK for browser and Node.js",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir ../pkg && tsc",
+    "publish:alpha": "npm publish --tag alpha"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "wasm-pack": "^0.12.0"
+  }
+}

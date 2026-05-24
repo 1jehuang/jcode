@@ -7,7 +7,7 @@ use crate::{
     LocalFileSessionStore, LocalToolExecutor, SidecarInferenceBackend,
     LocalFileSystem, InProcessEventBus, LocalMemoryBackend,
 };
-use tracing::{info, debug, error, warn};
+use tracing::{info, warn};
 
 /// Information about a tool call made during agent execution
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -137,7 +137,7 @@ pub async fn execute_agent_turn(
     })?;
 
     // Extract tool calls from the response choices
-    let mut tool_calls_info = vec![];
+    let tool_calls_info = vec![];
     let mut response_text = String::new();
 
     if let Some(choice) = response.choices.first() {
@@ -158,7 +158,6 @@ pub async fn execute_agent_turn(
     }
 
     // Step 5-6: Handle tool calls (if any)
-    let tools = &ctx.tools;
 
     // For now, skip tool execution as the current architecture doesn't have
     // direct tool_calls in the response. This needs to be implemented

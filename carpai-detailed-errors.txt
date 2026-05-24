@@ -1,0 +1,1 @@
+﻿error: could not compile `carpai-core` (lib) due to 1 previous error

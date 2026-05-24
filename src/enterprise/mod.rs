@@ -11,6 +11,7 @@ pub mod quota;
 pub mod metrics;
 pub mod audit;
 pub mod compliance;
+pub mod review;
 pub mod gdpr;
 pub mod cross_region;
 pub mod model_quant;

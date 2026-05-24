@@ -1,0 +1,62 @@
+# =============================================================================
+# CarpAI CLI 配置文件示例
+# =============================================================================
+# 保存位置: ~/.carpai/config.toml
+# 优先级: 硬编码默认值 < TOML 文件 < 环境变量覆盖
+# =============================================================================
+
+# --- Layer 0: 运行模式 (AppConfig) ---
+mode = "cli"                     # "cli" | "server" | "client"
+working_dir = "/home/user/projects/myapp"
+default_model = "claude-sonnet-4-20250514"
+max_context_tokens = 200000
+log_level = "info"               # trace | debug | info | warn | error
+
+# --- Layer 1: 核心配置 (CoreConfig) ---
+[core]
+# 存储路径
+data_dir = "~/.carpai"
+
+# 并发控制
+max_concurrent_tools = 5
+max_agent_iterations = 100
+
+# 推理提供者
+[core.completion_provider]
+provider_type = "local"          # "local" | "openai" | "anthropic" | "qwen"
+endpoint = "http://localhost:11434"
+model = "qwen2.5-coder:7b"
+timeout_secs = 30
+
+# 缓存
+cache_size_mb = 512
+disk_cache_enabled = true
+
+# --- Layer 2b: CLI 特定配置 (CliConfig) ---
+
+# UI 主题
+[theme]
+syntax_theme = "base16-dark"
+ui_color = "blue"
+enable_bold = true
+
+# 快捷键
+[keybinds]
+send_message = "Enter"
+interrupt = "Escape"
+toggle_help = "?"
+toggle_file_tree = "Ctrl-f"
+
+# 剪贴板
+[clipboard]
+auto_copy_response = false
+external_editor = "nvim"
+
+# 启动
+[startup]
+show_banner = true
+model_load_timeout_secs = 30
+
+# 远程模式
+remote_server_url = "https://carpai.example.com:8080"
+remote_timeout_secs = 30

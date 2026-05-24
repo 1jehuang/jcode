@@ -1,0 +1,359 @@
+﻿cargo :     Blocking waiting for file lock on build directory
+所在位置 行:1 字符: 197
++ ...  d:\studying\Codecargo\CarpAI; cargo check -p carpai-cli 2>&1 | Out-F ...
++                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused import: `MemoryScope`
+ --> crates\carpai-core\src\memory\agent.rs:5:75
+  |
+5 | use crate::memory::core_types::{EnhancedMemoryEntry, EnhancedMemoryQuery, MemoryScope, TrustLevel};
+  |                                                                           ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::config::CoreConfig`
+  --> crates\carpai-core\src\tools\mcp.rs:50:5
+   |
+50 | use crate::config::CoreConfig;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ToolContext`, `ToolDefinition`, `ToolExecError`, and `ToolRequest`
+  --> crates\carpai-core\src\tools\mcp.rs:52:5
+   |
+52 |     ToolDefinition,
+   |     ^^^^^^^^^^^^^^
+53 |     ToolCategory,
+54 |     ToolRequest,
+   |     ^^^^^^^^^^^
+55 |     ToolResponse,
+56 |     ToolContext,
+   |     ^^^^^^^^^^^
+57 |     ToolSchema,
+58 |     ToolExecError,
+   |     ^^^^^^^^^^^^^
+
+warning: unused imports: `debug` and `error`
+  --> crates\carpai-core\src\tools\registry.rs:35:27
+   |
+35 | use tracing::{info, warn, debug, error};
+   |                           ^^^^^  ^^^^^
+
+warning: unused imports: `tool_executor::ToolRequest`, `tools::ToolDefinition as InternalToolDef`, and `tools::ToolResu
+lt`
+  --> crates\carpai-core\src\tools\registry.rs:38:5
+   |
+38 |     tools::ToolDefinition as InternalToolDef,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+39 |     tools::ToolResult,
+   |     ^^^^^^^^^^^^^^^^^
+...
+42 |     tool_executor::ToolRequest,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ExecutionMode` and `ToolSchema`
+  --> crates\carpai-core\src\tools\slash_command.rs:43:5
+   |
+43 |     ToolSchema,
+   |     ^^^^^^^^^^
+44 |     ExecutionMode,
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> crates\carpai-core\src\refactoring\diff_integration.rs:9:5
+  |
+9 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Deserialize` and `Serialize`
+ --> crates\carpai-core\src\rest_llm.rs:1:13
+  |
+1 | use serde::{Deserialize, Serialize};
+  |             ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `std::pin::Pin`
+ --> crates\carpai-core\src\mock\event_bus.rs:5:5
+  |
+5 | use std::pin::Pin;
+  |     ^^^^^^^^^^^^^
+
+warning: irrefutable `if let` pattern
+  --> crates\carpai-core\src\performance\cache_tracker.rs:48:12
+   |
+48 |         if let ContentBlock::Text { text, .. } = block {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this pattern will always match, so the `if let` is useless
+   = help: consider replacing the `if let` with a `let`
+   = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: field `timeout` is never read
+  --> crates\carpai-core\src\inference_impl.rs:17:5
+   |
+12 | pub struct SidecarInferenceBackend {
+   |            ----------------------- field in this struct
+...
+17 |     timeout: Duration,
+   |     ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `workspace` is never read
+  --> crates\carpai-core\src\agent\runtime.rs:42:5
+   |
+40 | pub struct AutonomousAgent {
+   |            --------------- field in this struct
+41 |     /// Workspace root directory
+42 |     workspace: PathBuf,
+   |     ^^^^^^^^^
+
+warning: field `workspace` is never read
+   --> crates\carpai-core\src\agent\runtime.rs:205:5
+    |
+203 | pub struct CrossFileAgent {
+    |            -------------- field in this struct
+204 |     agent: AutonomousAgent,
+205 |     workspace: PathBuf,
+    |     ^^^^^^^^^
+
+warning: field `progress_rx` is never read
+   --> crates\carpai-core\src\agent\sub_agents.rs:161:5
+    |
+156 | pub struct ParallelTaskScheduler {
+    |            --------------------- field in this struct
+...
+161 |     progress_rx: tokio::sync::Mutex<mpsc::Receiver<(String, SubAgentProgress)>>,
+    |     ^^^^^^^^^^^
+
+warning: field `timeout` is never read
+   --> crates\carpai-core\src\completion\engine.rs:132:5
+    |
+128 | pub struct LocalCompletionProvider {
+    |            ----------------------- field in this struct
+...
+132 |     timeout: Duration,
+    |     ^^^^^^^
+
+warning: field `health_check_interval` is never read
+  --> crates\carpai-core\src\completion\fallback.rs:43:5
+   |
+39 | pub struct AutoFallbackRouter {
+   |            ------------------ field in this struct
+...
+43 |     health_check_interval: Duration,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `session_id` is never read
+    --> crates\carpai-core\src\tools\mcp.rs:1114:5
+     |
+1110 | pub struct McpManager {
+     |            ---------- field in this struct
+...
+1114 |     session_id: String,
+     |     ^^^^^^^^^^
+
+warning: field `workspace` is never read
+  --> crates\carpai-core\src\refactoring\verify_pipeline.rs:53:5
+   |
+52 | struct AstRenamer {
+   |        ---------- field in this struct
+53 |     workspace: PathBuf,
+   |     ^^^^^^^^^
+
+warning: field `cache_ttl_seconds` is never read
+  --> crates\carpai-core\src\analysis\classifier.rs:65:5
+   |
+60 | pub struct LlmClassifier {
+   |            ------------- field in this struct
+...
+65 |     cache_ttl_seconds: u64,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `LlmClassifier` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code
+ analysis
+
+warning: method `complete` is never used
+   --> crates\carpai-core\src\performance\concurrency.rs:103:14
+    |
+ 85 | impl RequestMerger {
+    | ------------------ method in this implementation
+...
+103 |     async fn complete(&mut self, key: u64, result: String) {
+    |              ^^^^^^^^
+
+warning: fields `models` and `fallback` are never read
+ --> crates\carpai-core\src\rest_llm.rs:4:5
+  |
+3 | pub struct InferenceRouter {
+  |            --------------- fields in this struct
+4 |     models: Vec<String>,
+  |     ^^^^^^
+5 |     fallback: String,
+  |     ^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates\carpai-core\src\performance\concurrency.rs:132:22
+    |
+132 |     async fn acquire(&self) -> Result<tokio::sync::SemaphorePermit> {
+    |                      ^^^^^            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                      |
+    |                      the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+132 |     async fn acquire(&self) -> Result<tokio::sync::SemaphorePermit<'_>> {
+    |                                                                   ++++
+
+warning: `carpai-core` (lib) generated 22 warnings (run `cargo fix --lib -p carpai-core` to apply 10 suggestions)
+    Checking carpai-cli v0.1.0 (D:\studying\Codecargo\CarpAI\crates\carpai-cli)
+warning: unused imports: `error` and `warn`
+ --> crates\carpai-cli\src\ambient\scheduler.rs:8:21
+  |
+8 | use tracing::{info, warn, error};
+  |                     ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `warn`
+  --> crates\carpai-cli\src\grpc_client.rs:19:21
+   |
+19 | use tracing::{info, warn};
+   |                     ^^^^
+
+error[E0507]: cannot move out of `ctx`, a captured variable in an `Fn` closure
+   --> crates\carpai-cli\src\agent_bridge.rs:104:29
+    |
+ 92 |                 let ctx = self.local_ctx.as_ref()
+    |                     --- captured outer variable
+...
+102 |                         || {
+    |                         -- captured by this `Fn` closure
+103 |                             let msg = msg_owned.clone();
+104 |                             async move {
+    |                             ^^^^^^^^^^ `ctx` is moved here
+105 |                                 let output = carpai_core::agent_loop::execute_agent_turn(
+106 |                                     &*ctx,
+    |                                       ---
+    |                                       |
+    |                                       variable moved due to use in coroutine
+    |                                       move occurs because `ctx` has type `tokio::sync::RwLockReadGuard<'_, AgentC
+ontext>`, which does not implement the `Copy` trait
+    |
+help: `Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures
+ may consume them only once
+   --> crates\carpai-cli\src\retry.rs:46:12
+    |
+ 46 |         F: Fn() -> Fut,
+    |            ^^^^^^^^^^^
+
+error[E0277]: `&tokio::task::JoinHandle<()>` is not a future
+   --> crates\carpai-cli\src\ambient\runner.rs:75:33
+    |
+ 75 |             let result = handle.await;
+    |                                 ^^^^^ `&tokio::task::JoinHandle<()>` is not a future
+    |
+    = help: the trait `Future` is not implemented for `&tokio::task::JoinHandle<()>`
+    = note: &tokio::task::JoinHandle<()> must be a future or must implement `IntoFuture` to be awaited
+help: the trait `Future` is implemented for `tokio::task::JoinHandle<T>`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.52.3\src\runtime\task\join.rs:324:1
+    |
+324 | impl<T> Future for JoinHandle<T> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `Future` is implemented for `&mut tokio::task::JoinHandle<()>`, but not for `&tokio::task::JoinHandle<()>`
+    = note: required for `&tokio::task::JoinHandle<()>` to implement `IntoFuture`
+help: remove the `.await`
+    |
+ 75 -             let result = handle.await;
+ 75 +             let result = handle;
+    |
+
+error[E0733]: recursion in an async fn requires boxing
+   --> crates\carpai-cli\src\tui\widgets\file_tree.rs:88:1
+    |
+ 88 | / async fn build_tree_async_nonrecursive(
+ 89 | |     dir: &PathBuf,
+ 90 | |     all_files: &mut Vec<PathBuf>,
+ 91 | | ) -> std::io::Result<TreeNode> {
+    | |______________________________^
+...
+129 |                   let subtree = build_tree_async_nonrecursive(&path, all_files).await?;
+    |                                 ----------------------------------------------------- recursive call here
+    |
+    = note: a recursive `async fn` call must introduce indirection such as `Box::pin` to avoid an infinitely sized futu
+re
+
+error: future cannot be sent between threads safely
+   --> crates\carpai-cli\src\ambient\runner.rs:52:30
+    |
+ 52 |                   let handle = tokio::spawn(async move {
+    |  ______________________________^
+ 53 | |                     info!(task = %name, "Background task started");
+ 54 | |                     Box::new(task).run(cancel).await;
+ 55 | |                     info!(task = %name, "Background task finished");
+ 56 | |                     drop(p);
+ 57 | |                 });
+    | |__________________^ future created by async block is not `Send`
+    |
+    = help: within `{async block@crates\carpai-cli\src\ambient\runner.rs:52:43: 52:53}`, the trait `Send` is not implem
+ented for `impl Future<Output = ()>`
+note: future is not `Send` as it awaits another future which is not `Send`
+   --> crates\carpai-cli\src\ambient\runner.rs:54:21
+    |
+ 54 |                     Box::new(task).run(cancel).await;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ await occurs here on type `impl Future<Output = ()>`, which is not
+ `Send`
+note: required by a bound in `tokio::spawn`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.52.3\src\task\spawn.rs:176:21
+    |
+174 |     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    |            ----- required by a bound in this function
+175 |     where
+176 |         F: Future + Send + 'static,
+    |                     ^^^^ required by this bound in `spawn`
+help: `Send` can be made part of the associated future's guarantees for all implementations of `BackgroundTask::run`
+    |
+ 20 -     async fn run(self: Box<Self>, cancel: tokio_util::sync::CancellationToken);
+ 20 +     fn run(self: Box<Self>, cancel: tokio_util::sync::CancellationToken) -> impl std::future::Future<Output = ()>
+ + Send;
+    |
+
+error: future cannot be sent between threads safely
+   --> crates\carpai-cli\src\ambient\scheduler.rs:42:9
+    |
+ 42 | /         tokio::spawn(async move {
+ 43 | |             let mut timer = interval(interval_dur);
+ 44 | |             // Skip the first immediate tick
+ 45 | |             timer.tick().await;
+...   |
+ 59 | |         });
+    | |__________^ future created by async block is not `Send`
+    |
+    = help: within `{async block@crates\carpai-cli\src\ambient\scheduler.rs:42:22: 42:32}`, the trait `Send` is not imp
+lemented for `impl Future<Output = ()>`
+note: future is not `Send` as it awaits another future which is not `Send`
+   --> crates\carpai-cli\src\ambient\scheduler.rs:51:25
+    |
+ 51 |                         task.execute().await;
+    |                         ^^^^^^^^^^^^^^ await occurs here on type `impl Future<Output = ()>`, which is not `Send`
+note: required by a bound in `tokio::spawn`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.52.3\src\task\spawn.rs:176:21
+    |
+174 |     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    |            ----- required by a bound in this function
+175 |     where
+176 |         F: Future + Send + 'static,
+    |                     ^^^^ required by this bound in `spawn`
+help: `Send` can be made part of the associated future's guarantees for all implementations of `ambient::scheduler::Sch
+eduledTask::execute`
+    |
+ 19 -     async fn execute(&self);
+ 19 +     fn execute(&self) -> impl std::future::Future<Output = ()> + Send;
+    |
+
+Some errors have detailed explanations: E0277, E0507, E0733.
+For more information about an error, try `rustc --explain E0277`.
+warning: `carpai-cli` (lib) generated 2 warnings
+error: could not compile `carpai-cli` (lib) due to 5 previous errors; 2 warnings emitted

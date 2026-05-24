@@ -1,0 +1,43 @@
+[Unit]
+Description=CarpAI Enterprise Server
+Documentation=https://github.com/codecargo/carpai
+After=network-online.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=carpai
+Group=carpai
+
+# Binary path
+ExecStart=/usr/local/bin/carpai-server
+
+# Working directory
+WorkingDirectory=/var/lib/carpai
+
+# Environment
+Environment=RUST_LOG=info
+EnvironmentFile=/etc/carpai/server.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/carpai/data /var/log/carpai
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=carpai-server
+
+[Install]
+WantedBy=multi-user.target
