@@ -1265,3 +1265,50 @@ fn test_input_history_up_empty_history() {
     assert!(!app.input_history_up());
     assert!(app.input.is_empty());
 }
+
+#[test]
+fn test_input_history_up_continues_while_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history.push("third".to_string());
+
+    // Start browsing with empty input
+    app.input.clear();
+    app.cursor_pos = 0;
+
+    // First Up: loads "third" (most recent), index = Some(2)
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "third");
+    assert_eq!(app.input_history_index, Some(2));
+
+    // Second Up: loads "second", index = Some(1)
+    // This should work even though input is now non-empty (we're browsing).
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "second");
+    assert_eq!(app.input_history_index, Some(1));
+
+    // Third Up: loads "first", index = Some(0)
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "first");
+    assert_eq!(app.input_history_index, Some(0));
+
+    // Fourth Up: already at oldest, stays at "first"
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "first");
+    assert_eq!(app.input_history_index, Some(0));
+}
+
+#[test]
+fn test_input_history_down_returns_false_when_not_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input = "typed text".to_string();
+    app.input_history_index = None;
+
+    // Down should not engage history when not browsing
+    assert!(!app.input_history_down());
+    assert_eq!(app.input, "typed text");
+}

@@ -681,6 +681,7 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
     app.reset_tab_completion();
+    app.reset_input_history_browse();
     app.sync_model_picker_preview_from_input();
 }
 
@@ -717,7 +718,6 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     }
 
     insert_input_text(app, text);
-    app.reset_input_history_browse();
     true
 }
 
@@ -1790,7 +1790,6 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 app.input.drain(prev..app.cursor_pos);
                 app.cursor_pos = prev;
                 app.reset_tab_completion();
-                app.reset_input_history_browse();
                 app.sync_model_picker_preview_from_input();
             }
             true
@@ -1830,7 +1829,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Up | KeyCode::PageUp => {
-            if code == KeyCode::Up && app.input.is_empty() && app.input_history_up() {
+            if code == KeyCode::Up && (app.input.is_empty() || app.input_history_index.is_some()) && app.input_history_up() {
                 return true;
             }
             let inc = if code == KeyCode::PageUp { 10 } else { 1 };
@@ -2393,7 +2392,6 @@ impl App {
         self.cursor_pos = 0;
         self.clear_input_undo_history();
         self.reset_input_history_browse();
-        self.push_input_history(input.clone());
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         // If the previous assistant turn still has visible streamed text that has not yet been
@@ -2416,6 +2414,9 @@ impl App {
             commands::handle_pending_ssh_remote_target(self, name, input);
             return;
         }
+
+        // Record in history only for chat messages and commands (not login keys, SSH targets, etc.)
+        self.push_input_history(input.clone());
 
         let trimmed = input.trim();
         let handled = commands::handle_help_command(self, trimmed)

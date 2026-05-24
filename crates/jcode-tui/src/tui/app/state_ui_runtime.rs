@@ -370,6 +370,7 @@ impl App {
     }
 
     pub(super) fn toggle_input_stash(&mut self) {
+        self.reset_input_history_browse(); // Prevent stash from interacting with history browsing
         if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
             let current_input = std::mem::replace(&mut self.input, stashed);
             let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
