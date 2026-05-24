@@ -1688,6 +1688,7 @@ pub fn run_skills_list(json: bool) -> Result<()> {
     let registry = crate::skill::SkillRegistry::load_for_working_dir(working_dir.as_deref())
         .context("load skill registry")?;
     let skills = registry.list();
+    let disabled = crate::skill_disable::load().unwrap_or_default();
 
     if json {
         let entries: Vec<_> = skills
@@ -1697,6 +1698,7 @@ pub fn run_skills_list(json: bool) -> Result<()> {
                     "name": s.name,
                     "description": s.description,
                     "path": s.path.display().to_string(),
+                    "disabled": disabled.contains(&s.name),
                 })
             })
             .collect();
@@ -1714,9 +1716,28 @@ pub fn run_skills_list(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{} skill(s) discovered:", skills.len());
+    let active_count = skills
+        .iter()
+        .filter(|s| !disabled.contains(&s.name))
+        .count();
+    let disabled_count = skills.len() - active_count;
+    if disabled_count > 0 {
+        println!(
+            "{} skill(s) discovered ({} active, {} disabled):",
+            skills.len(),
+            active_count,
+            disabled_count
+        );
+    } else {
+        println!("{} skill(s) discovered:", skills.len());
+    }
     for skill in &skills {
-        println!("  ${:<28} {}", skill.name, skill.description);
+        let marker = if disabled.contains(&skill.name) {
+            "  [disabled] "
+        } else {
+            "             "
+        };
+        println!("{}${:<24} {}", marker, skill.name, skill.description);
     }
     println!();
     println!("Activate via `$<name>` in TUI or use `jcode skills show <name>` to read full body.");
@@ -1735,6 +1756,42 @@ pub fn run_skills_show(name: &str) -> Result<()> {
     eprintln!("# {}", skill.description);
     eprintln!();
     println!("{}", skill.content.trim_end());
+    Ok(())
+}
+
+/// `jcode skills disable <name>` — add to the persistent disable list
+/// at `<JCODE_HOME>/disabled_skills.toml`. Subsequent activation
+/// (slash command, embedding hit) will skip this skill.
+pub fn run_skills_disable(name: &str) -> Result<()> {
+    // Confirm the skill exists before disabling, so users don't end
+    // up with disabled entries pointing at typos.
+    let working_dir = std::env::current_dir().ok();
+    let registry = crate::skill::SkillRegistry::load_for_working_dir(working_dir.as_deref())
+        .context("load skill registry")?;
+    if registry.get(name).is_none() {
+        eprintln!(
+            "warning: skill '{name}' not found in registry. Disabling anyway — run \
+             `jcode skills list` to see available names."
+        );
+    }
+    let changed = crate::skill_disable::disable(name).context("persist disable_skills.toml")?;
+    if changed {
+        println!("Disabled skill '{name}'.");
+    } else {
+        println!("Skill '{name}' was already disabled.");
+    }
+    Ok(())
+}
+
+/// `jcode skills enable <name>` — remove from the persistent disable
+/// list. No-op when the name wasn't disabled.
+pub fn run_skills_enable(name: &str) -> Result<()> {
+    let changed = crate::skill_disable::enable(name).context("persist disable_skills.toml")?;
+    if changed {
+        println!("Re-enabled skill '{name}'.");
+    } else {
+        println!("Skill '{name}' was not disabled (nothing to do).");
+    }
     Ok(())
 }
 

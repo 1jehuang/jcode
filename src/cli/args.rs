@@ -681,6 +681,19 @@ pub(crate) enum SkillsCommand {
         /// Skill name. Use `jcode skills list` to discover names.
         name: String,
     },
+
+    /// Disable a skill: remove it from the activation pool. Persists
+    /// across sessions in `<JCODE_HOME>/disabled_skills.toml`.
+    Disable {
+        /// Skill name to disable.
+        name: String,
+    },
+
+    /// Re-enable a previously-disabled skill.
+    Enable {
+        /// Skill name to re-enable.
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

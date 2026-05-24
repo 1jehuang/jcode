@@ -267,6 +267,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Skills(subcmd)) => match subcmd {
             SkillsCommand::List { json } => commands::run_skills_list(json)?,
             SkillsCommand::Show { name } => commands::run_skills_show(&name)?,
+            SkillsCommand::Disable { name } => commands::run_skills_disable(&name)?,
+            SkillsCommand::Enable { name } => commands::run_skills_enable(&name)?,
         },
         Some(Command::Mcp(subcmd)) => match subcmd {
             McpCommand::Trust { path } => commands::run_mcp_trust_command(&path)?,

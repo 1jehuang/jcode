@@ -774,3 +774,79 @@ fn skills_show_finds_user_level_skill() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+// ---- #122 follow-up: jcode skills disable/enable CLI ----
+
+#[test]
+fn skills_disable_then_enable_round_trip() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(temp.path()).unwrap();
+
+    super::run_skills_disable("any-skill").expect("disable");
+    assert!(crate::skill_disable::is_disabled("any-skill"));
+
+    super::run_skills_enable("any-skill").expect("enable");
+    assert!(!crate::skill_disable::is_disabled("any-skill"));
+
+    if let Some(c) = prev_cwd {
+        std::env::set_current_dir(c).ok();
+    }
+    if let Some(p) = prev {
+        crate::env::set_var("JCODE_HOME", p);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn skills_disable_idempotent() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(temp.path()).unwrap();
+
+    // Two calls — second should be a no-op (already disabled).
+    super::run_skills_disable("idempotent-skill").expect("first");
+    super::run_skills_disable("idempotent-skill").expect("second");
+    assert!(crate::skill_disable::is_disabled("idempotent-skill"));
+
+    if let Some(c) = prev_cwd {
+        std::env::set_current_dir(c).ok();
+    }
+    if let Some(p) = prev {
+        crate::env::set_var("JCODE_HOME", p);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn skills_enable_when_not_disabled_is_no_op() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(temp.path()).unwrap();
+
+    super::run_skills_enable("never-disabled").expect("enable no-op");
+    assert!(!crate::skill_disable::is_disabled("never-disabled"));
+
+    if let Some(c) = prev_cwd {
+        std::env::set_current_dir(c).ok();
+    }
+    if let Some(p) = prev {
+        crate::env::set_var("JCODE_HOME", p);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
