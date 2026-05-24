@@ -1669,6 +1669,40 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/fork" || trimmed.starts_with("/fork ") {
+        // Issue #2: fork the current session into a new branch.
+        //
+        //   /fork              → fork with same title
+        //   /fork <title...>   → fork with custom title
+        //
+        // The fork is saved as a new session. The original session
+        // continues unchanged. To switch into the fork, use
+        // /resume <id>.
+        let rest = trimmed.strip_prefix("/fork").unwrap_or_default().trim();
+        let title = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
+        let mut fork = app.session.fork(title);
+        match fork.save() {
+            Ok(_) => {
+                let label = format!(
+                    "🌿 Forked into new session `{}`. Original `{}` is unchanged. Run `/resume {}` to switch.",
+                    fork.id, app.session.id, fork.id
+                );
+                app.push_display_message(DisplayMessage::system(label));
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Fork failed to save: {e}"
+                )));
+            }
+        }
+        return true;
+    }
+
+
     if trimmed == "/share" || trimmed.starts_with("/share ") {
         // Issue #25: upload the session as a private GitHub gist via the
         // installed `gh` CLI, copy the URL to clipboard, print it in chat.
