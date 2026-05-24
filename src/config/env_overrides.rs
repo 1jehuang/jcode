@@ -513,6 +513,11 @@ impl Config {
                 crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
             }
         }
+
+        // Terminal
+        if let Ok(v) = std::env::var("JCODE_SHELL") {
+            self.terminal.shell = Some(v);
+        }
     }
 }
 

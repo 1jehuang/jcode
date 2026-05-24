@@ -428,7 +428,10 @@ async fn handle_background_output_line(
     file.flush().await.ok();
 }
 
-fn build_shell_command(cmd_str: &str) -> TokioCommand {
+fn build_shell_command(shell: Option<&str>, cmd_str: &str) -> TokioCommand {
+    if let Some(shell_name) = shell {
+        return TokioCommand::new(shell_name);
+    }
     #[cfg(windows)]
     {
         let mut cmd = TokioCommand::new("cmd.exe");
@@ -488,7 +491,7 @@ mod utf8_truncation_tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn build_shell_command_uses_cmd_and_executes_command() {
-        let output = build_shell_command("echo hello-from-cmd")
+        let output = build_shell_command(None, "echo hello-from-cmd")
             .output()
             .await
             .expect("run cmd command");
@@ -627,7 +630,10 @@ impl BashTool {
 
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
-        let mut command = build_shell_command(&params.command);
+        let mut command = build_shell_command(
+            crate::config::config().terminal.shell.as_deref(),
+            &params.command,
+        );
         command
             .kill_on_drop(true)
             .stdout(Stdio::piped())
@@ -899,8 +905,9 @@ impl BashTool {
                 &ctx.session_id,
                 notify,
                 wake,
-				move |output_path| async move {
-					let mut cmd = build_shell_command(&command);
+			move |output_path| async move {
+				let shell = crate::config::config().terminal.shell.clone();
+				let mut cmd = build_shell_command(shell.as_deref(), &command);
 					#[cfg(unix)]
 					unsafe {
 						cmd.pre_exec(|| {

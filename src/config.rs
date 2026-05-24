@@ -9,7 +9,8 @@ pub use jcode_config_types::{
     DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, KeybindingsConfig,
     MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
     NamedProviderType, NativeScrollbarConfig, ProviderConfig, SafetyConfig,
-    SessionPickerResumeAction, SwarmSpawnMode, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig, UpdateChannel, WebSearchConfig,
+    WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -104,6 +105,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SCROLL_PROMPT_UP_KEY",
     "JCODE_SCROLL_UP_FALLBACK_KEY",
     "JCODE_SCROLL_UP_KEY",
+    "JCODE_SHELL",
     "JCODE_SHOW_DIFFS",
     "JCODE_SHOW_THINKING",
     "JCODE_SIDE_PANEL_NATIVE_SCROLLBAR",
@@ -383,6 +385,9 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+
+    /// Terminal / shell execution configuration
+    pub terminal: TerminalConfig,
 }
 
 /// Agent Client Protocol adapter configuration.

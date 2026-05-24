@@ -865,3 +865,13 @@ impl Default for GatewayConfig {
         }
     }
 }
+
+/// Terminal / shell execution configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Custom shell to use for executing commands (e.g. "nu", "zsh", "fish").
+    /// Overridden by the JCODE_SHELL environment variable.
+    /// On Unix, defaults to "bash". On Windows, defaults to "cmd.exe".
+    pub shell: Option<String>,
+}
