@@ -14,6 +14,18 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// Issue #94: MAS (Multi-Agent Skill) — model the skill targets.
+    /// When `Some`, jcode will route activation of this skill to the
+    /// matching sub-agent / model. When `None`, the active model is
+    /// used (current behavior).
+    pub model: Option<String>,
+    /// Issue #94: MAS — sub-agent role identifier. Used by the future
+    /// MAS dispatcher to find the right side-agent. `None` means
+    /// the skill runs in the main agent.
+    pub agent: Option<String>,
+    /// Issue #94: MAS — semantic activation tags. Used in addition to
+    /// the embedding-based activation for keyword fallback.
+    pub tags: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     search_text: String,
@@ -25,6 +37,41 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<String>,
+    /// MAS: target model id (#94)
+    #[serde(default)]
+    model: Option<String>,
+    /// MAS: sub-agent role (#94)
+    #[serde(default)]
+    agent: Option<String>,
+    /// MAS: keyword tags (#94). Accepts either a YAML sequence or a
+    /// comma-separated string.
+    #[serde(default, deserialize_with = "deserialize_tags")]
+    tags: Vec<String>,
+}
+
+fn deserialize_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Tags {
+        List(Vec<String>),
+        CommaSeparated(String),
+    }
+    Ok(match Tags::deserialize(deserializer)? {
+        Tags::List(v) => v
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Tags::CommaSeparated(s) => s
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    })
 }
 
 /// Registry of available skills
@@ -311,6 +358,9 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            model,
+            agent,
+            tags,
         } = frontmatter;
 
         let allowed_tools =
@@ -321,6 +371,9 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            model,
+            agent,
+            tags,
             content: body,
             path: path.to_path_buf(),
             search_text,
@@ -533,6 +586,9 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             allowed_tools: None,
+            model: None,
+            agent: None,
+            tags: Vec::new(),
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             search_text: build_skill_search_text(name, description, content),
@@ -702,5 +758,89 @@ mod invocation_parse_tests {
         assert!(SkillRegistry::parse_invocation("@grill-me").is_none());
         assert!(SkillRegistry::parse_invocation("!grill-me").is_none());
         assert!(SkillRegistry::parse_invocation("grill-me").is_none());
+    }
+
+    // ---- Issue #94: MAS frontmatter fields ----
+
+    fn write_skill_with_frontmatter(
+        dir: &std::path::Path,
+        name: &str,
+        fm: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(&path, format!("---\n{}\n---\n\n{}\n", fm.trim(), body)).unwrap();
+        path
+    }
+
+    #[test]
+    fn mas_frontmatter_defaults_to_none_when_unset() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "basic",
+            "name: basic\ndescription: A basic skill",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.name, "basic");
+        assert_eq!(skill.model, None);
+        assert_eq!(skill.agent, None);
+        assert!(skill.tags.is_empty());
+    }
+
+    #[test]
+    fn mas_frontmatter_parses_model_and_agent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "review",
+            "name: review\ndescription: Code review\nmodel: claude-opus-4\nagent: reviewer",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.model.as_deref(), Some("claude-opus-4"));
+        assert_eq!(skill.agent.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn mas_frontmatter_parses_tags_as_list() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "tagged",
+            "name: tagged\ndescription: Tagged\ntags:\n  - rust\n  - async\n  - perf",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.tags, vec!["rust", "async", "perf"]);
+    }
+
+    #[test]
+    fn mas_frontmatter_parses_tags_as_comma_separated() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "csv",
+            "name: csv\ndescription: CSV tags\ntags: rust, async , perf",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.tags, vec!["rust", "async", "perf"]);
+    }
+
+    #[test]
+    fn mas_frontmatter_filters_blank_tags() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "blank",
+            "name: blank\ndescription: x\ntags:\n  - rust\n  - ''\n  - perf",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.tags, vec!["rust", "perf"]);
     }
 }
