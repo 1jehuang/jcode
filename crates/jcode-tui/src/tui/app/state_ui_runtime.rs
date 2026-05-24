@@ -401,10 +401,16 @@ impl App {
         if self.input_history.last() == Some(&trimmed) {
             return;
         }
+        // Dedup: if the same text already exists, remove it first so the latest
+        // position wins (most-recently-used ordering).
+        if let Some(existing) = self.input_history.iter().position(|e| e == &trimmed) {
+            self.input_history.remove(existing);
+        }
         self.input_history.push(trimmed);
         if self.input_history.len() > Self::INPUT_HISTORY_MAX {
             self.input_history.remove(0);
         }
+        self.save_input_history();
     }
 
     /// Navigate up (older) in input history. Returns `true` if the input was modified.
@@ -444,5 +450,81 @@ impl App {
     /// Reset history browsing state (call when the user manually edits input).
     pub(super) fn reset_input_history_browse(&mut self) {
         self.input_history_index = None;
+    }
+
+    /// Returns `Some((current, total))` if the user is browsing input history.
+    pub(super) fn input_history_browse_status(&self) -> Option<(usize, usize)> {
+        let idx = self.input_history_index?;
+        let total = self.input_history.len();
+        if total == 0 {
+            return None;
+        }
+        Some((idx + 1, total))
+    }
+
+    /// Clear all input history entries.
+    pub(super) fn clear_input_history(&mut self) {
+        self.input_history.clear();
+        self.reset_input_history_browse();
+        self.save_input_history();
+    }
+
+    /// Delete a single input history entry by 0-based index.
+    pub(super) fn delete_input_history_entry(&mut self, idx: usize) -> bool {
+        if idx >= self.input_history.len() {
+            return false;
+        }
+        self.input_history.remove(idx);
+        // Reset browse if we deleted the entry being browsed or one before it
+        if let Some(browse_idx) = self.input_history_index {
+            if browse_idx == idx {
+                self.reset_input_history_browse();
+            } else if browse_idx > idx {
+                self.input_history_index = Some(browse_idx - 1);
+            }
+        }
+        self.save_input_history();
+        true
+    }
+
+    /// Path to the global input-history file.
+    fn input_history_path() -> Option<std::path::PathBuf> {
+        crate::storage::jcode_dir()
+            .ok()
+            .map(|dir| dir.join("input-history.json"))
+    }
+
+    /// Save input history to disk (global, not session-specific).
+    pub(super) fn save_input_history(&self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        if let Some(path) = Self::input_history_path() {
+            let data = serde_json::json!({
+                "history": self.input_history,
+                "version": 1,
+            });
+            let _ = std::fs::write(&path, data.to_string());
+        }
+    }
+
+    /// Load input history from disk. Returns entries if available.
+    pub(super) fn load_input_history() -> Vec<String> {
+        let Some(path) = Self::input_history_path() else {
+            return Vec::new();
+        };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            return Vec::new();
+        };
+        let Some(arr) = value.get("history").and_then(|v| v.as_array()) else {
+            return Vec::new();
+        };
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .take(Self::INPUT_HISTORY_MAX)
+            .collect()
     }
 }

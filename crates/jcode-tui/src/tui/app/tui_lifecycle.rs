@@ -501,7 +501,7 @@ impl App {
             scroll_bookmark: None,
             typing_scroll_lock: false,
             stashed_input: None,
-            input_history: Vec::new(),
+            input_history: App::load_input_history(),
             input_history_index: None,
             input_undo_stack: Vec::new(),
             status_notice: None,
@@ -884,7 +884,7 @@ impl App {
             scroll_bookmark: None,
             typing_scroll_lock: false,
             stashed_input: None,
-            input_history: Vec::new(),
+            input_history: App::load_input_history(),
             input_history_index: None,
             input_undo_stack: Vec::new(),
             status_notice: None,
@@ -959,6 +959,8 @@ impl App {
         app.runtime_mode = AppRuntimeMode::TestHarness;
         app.is_remote = false;
         app.is_replay = false;
+        app.input_history.clear();
+        app.input_history_index = None;
         app
     }
 

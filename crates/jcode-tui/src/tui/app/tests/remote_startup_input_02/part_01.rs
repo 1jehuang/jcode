@@ -1312,3 +1312,99 @@ fn test_input_history_down_returns_false_when_not_browsing() {
     assert!(!app.input_history_down());
     assert_eq!(app.input, "typed text");
 }
+
+#[test]
+fn test_history_clear_removes_all_entries() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history.push("third".to_string());
+
+    app.clear_input_history();
+    assert!(app.input_history.is_empty());
+}
+
+#[test]
+fn test_history_search_finds_matches() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello world".to_string());
+    app.input_history.push("goodbye world".to_string());
+    app.input_history.push("hello there".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history search hello");
+
+    let last = app.display_messages().last().expect("search results");
+    assert!(last.content.contains("hello world"));
+    assert!(last.content.contains("hello there"));
+    assert!(!last.content.contains("goodbye"));
+    assert!(last.content.contains("2 match"));
+}
+
+#[test]
+fn test_history_search_no_results() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello world".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history search xyz");
+
+    let last = app.display_messages().last().expect("no match message");
+    assert!(last.content.contains("No history entries match"));
+}
+
+#[test]
+fn test_history_delete_removes_entry() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history.push("third".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history delete 2");
+
+    assert_eq!(app.input_history.len(), 2);
+    assert_eq!(app.input_history[0], "first");
+    assert_eq!(app.input_history[1], "third");
+}
+
+#[test]
+fn test_history_non_consecutive_dedup() {
+    let mut app = create_test_app();
+
+    app.push_input_history("hello".to_string());
+    app.push_input_history("world".to_string());
+    app.push_input_history("hello".to_string());
+
+    // "hello" should move to the end, not duplicate
+    assert_eq!(app.input_history.len(), 2);
+    assert_eq!(app.input_history[0], "world");
+    assert_eq!(app.input_history[1], "hello");
+}
+
+#[test]
+fn test_input_history_browse_status_none_when_not_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("test".to_string());
+    app.input_history_index = None;
+
+    assert!(app.input_history_browse_status().is_none());
+}
+
+#[test]
+fn test_input_history_browse_status_some_when_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history_index = Some(1);
+
+    let (current, total) = app.input_history_browse_status().unwrap();
+    assert_eq!(current, 2); // 1-based
+    assert_eq!(total, 2);
+}
