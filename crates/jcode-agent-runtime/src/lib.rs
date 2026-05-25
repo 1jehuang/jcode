@@ -26,6 +26,7 @@
 pub mod definition;
 pub mod output;
 pub mod reasoning;
+pub mod registry;
 pub mod signals;
 pub mod tier;
 
@@ -40,4 +41,5 @@ pub use signals::{
 pub use definition::{AgentDefinition, DefinitionError, DEFAULT_AGENT_VERSION};
 pub use output::OutputMode;
 pub use reasoning::ReasoningEffort;
+pub use registry::{AgentRegistry, AgentSource, LoadError, LoadedAgent, SourceKind};
 pub use tier::{resolve_model, resolve_model_with_source, ModelTier, ResolutionSource};
