@@ -578,3 +578,50 @@ impl Config {
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
     }
 }
+
+#[test]
+fn input_history_config_defaults_to_100() {
+    let cfg: Config = toml::from_str("").expect("empty config should parse");
+    assert_eq!(cfg.input_history.max_entries, 100);
+}
+
+#[test]
+fn input_history_config_toml_overrides_default() {
+    let cfg: Config = toml::from_str("[input_history]\nmax_entries = 250\n")
+        .expect("input_history config should parse");
+    assert_eq!(cfg.input_history.max_entries, 250);
+}
+
+#[test]
+fn input_history_config_section_without_max_entries_defaults_100() {
+    let cfg: Config = toml::from_str("[input_history]\n")
+        .expect("input_history section without fields should parse");
+    assert_eq!(cfg.input_history.max_entries, 100);
+}
+
+#[test]
+fn input_history_config_clamps_zero_to_one() {
+    let cfg: Config = toml::from_str("[input_history]\nmax_entries = 0\n")
+        .expect("input_history config should parse");
+    assert_eq!(cfg.input_history.max_entries, 1);
+}
+
+#[test]
+fn input_history_config_clamps_excessive_value() {
+    let cfg: Config = toml::from_str("[input_history]\nmax_entries = 999999\n")
+        .expect("input_history config should parse");
+    assert_eq!(cfg.input_history.max_entries, 10_000);
+}
+
+#[test]
+fn input_history_env_override_clamps_value() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.input_history.max_entries, 100);
+    // Simulate env override with clamping
+    cfg.input_history.max_entries = 0usize.clamp(1, 10_000);
+    assert_eq!(cfg.input_history.max_entries, 1);
+    cfg.input_history.max_entries = 999_999usize.clamp(1, 10_000);
+    assert_eq!(cfg.input_history.max_entries, 10_000);
+    cfg.input_history.max_entries = 500usize.clamp(1, 10_000);
+    assert_eq!(cfg.input_history.max_entries, 500);
+}

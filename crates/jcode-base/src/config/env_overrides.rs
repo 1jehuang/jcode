@@ -567,7 +567,7 @@ impl Config {
         // Input history
         if let Ok(v) = std::env::var("JCODE_INPUT_HISTORY_MAX") {
             if let Ok(n) = v.parse::<usize>() {
-                self.input_history.max_entries = n;
+                self.input_history.max_entries = n.clamp(1, 10_000);
             }
         }
     }

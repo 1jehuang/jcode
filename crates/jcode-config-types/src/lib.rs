@@ -912,7 +912,11 @@ impl Default for GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InputHistoryConfig {
-    /// Maximum number of entries kept in input history (default: 100).
+    /// Maximum number of entries kept in input history (default: 100, clamped to 1..=10000).
+    #[serde(
+        default = "default_max_entries",
+        deserialize_with = "deserialize_clamped_usize"
+    )]
     pub max_entries: usize,
 }
 
@@ -920,4 +924,16 @@ impl Default for InputHistoryConfig {
     fn default() -> Self {
         Self { max_entries: 100 }
     }
+}
+
+fn default_max_entries() -> usize {
+    100
+}
+
+fn deserialize_clamped_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let n = usize::deserialize(deserializer)?;
+    Ok(n.clamp(1, 10_000))
 }
