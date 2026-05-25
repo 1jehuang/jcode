@@ -2767,8 +2767,8 @@ pub(super) fn handle_history_search_key(
             app.input_history_search_backspace();
             return Ok(());
         }
-        // Printable character: append to search query
-        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+        // Printable character: append to search query (exclude Ctrl and Alt combos)
+        KeyCode::Char(c) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.input_history_search_char(c);
             return Ok(());
         }

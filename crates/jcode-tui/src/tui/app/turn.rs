@@ -58,7 +58,7 @@ impl App {
             }
             if let Some(summary) = self.summarize_tool_results_missing() {
                 let message = format!(
-                    "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
+                    "Tool outputs are missing for this turn. {}\n\nRun /fix to recover into a new session with context copied.",
                     summary
                 );
                 self.push_display_message(DisplayMessage::error(message));

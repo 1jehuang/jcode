@@ -429,11 +429,12 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
-    lines.push(key_entry("Ctrl+R", "Recover from missing tool outputs"));
     lines.push(key_entry(
-        "Ctrl+V / Alt+V",
-        "Paste clipboard (text or image)",
+        "Ctrl+R",
+        "Search input history (reverse incremental)",
     ));
+    lines.push(key_entry("Ctrl+V", "Paste clipboard (text or image)"));
+    lines.push(key_entry("Alt+V", "Paste image from clipboard"));
     lines.push(key_entry(
         "Alt+A",
         "Quick-copy visible chat viewport plus nearby context",

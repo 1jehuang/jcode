@@ -459,7 +459,7 @@ impl App {
             self.set_status_notice("No input history to search");
             return;
         }
-        self.input_history_index = None;
+        self.reset_input_history_browse();
         self.input_history_search = Some(super::HistorySearchState {
             query: String::new(),
             match_index: None,
@@ -511,17 +511,30 @@ impl App {
         // No older match found; keep current match
     }
 
-    /// Accept the current search result (Enter or Esc).
+    /// Accept the current search result (Enter).
     pub(super) fn accept_input_history_search(&mut self) {
         let Some(search) = self.input_history_search.take() else {
             return;
         };
         if let Some(idx) = search.match_index {
+            // Save undo state: capture the *original* pre-search input. find_match has
+            // already overwritten self.input, so temporarily restore the original.
+            if search.saved_input != self.input_history[idx] {
+                let matched_input = self.input.clone();
+                let matched_cursor = self.cursor_pos;
+                self.input = search.saved_input;
+                self.cursor_pos = search.saved_cursor;
+                self.remember_input_undo_state();
+                self.input = matched_input;
+                self.cursor_pos = matched_cursor;
+            }
             self.input = self.input_history[idx].clone();
             self.cursor_pos = self.input.len();
             self.input_history_index = Some(idx);
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
         }
-        // If no match, leave input as-is (could be the saved original or whatever the user typed)
+        // If no match, leave input as-is (cleared by find_match during search)
     }
 
     /// Cancel the search and restore original input (Esc with no match).
@@ -530,9 +543,23 @@ impl App {
             if search.match_index.is_none() {
                 self.input = search.saved_input;
                 self.cursor_pos = search.saved_cursor;
-            } else {
-                // Accept the match
-                self.input_history_index = search.match_index;
+                self.reset_tab_completion();
+                self.sync_model_picker_preview_from_input();
+            } else if let Some(idx) = search.match_index {
+                // Esc with match: accept the match (input was already set by find_match)
+                // Save undo state with the original pre-search input
+                if search.saved_input != self.input_history[idx] {
+                    let matched_input = self.input.clone();
+                    let matched_cursor = self.cursor_pos;
+                    self.input = search.saved_input;
+                    self.cursor_pos = search.saved_cursor;
+                    self.remember_input_undo_state();
+                    self.input = matched_input;
+                    self.cursor_pos = matched_cursor;
+                }
+                self.input_history_index = Some(idx);
+                self.reset_tab_completion();
+                self.sync_model_picker_preview_from_input();
             }
         }
     }

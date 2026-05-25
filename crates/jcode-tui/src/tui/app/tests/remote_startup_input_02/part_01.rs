@@ -1642,3 +1642,72 @@ fn test_ctrl_r_search_accept_no_match_keeps_input() {
     assert!(app.input_history_search.is_none());
     assert_eq!(app.input, "");
 }
+
+#[test]
+fn test_ctrl_r_accept_saves_undo_with_original_input() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+    app.input_history.push("world".to_string());
+
+    // User had typed "original" before starting search
+    app.input = "original".to_string();
+    app.cursor_pos = 8;
+
+    app.start_input_history_search();
+    app.input_history_search_char('w');
+    app.input_history_search_char('o');
+
+    assert_eq!(app.input, "world");
+
+    // Accept the match
+    app.accept_input_history_search();
+
+    // Should be able to undo back to "original"
+    assert_eq!(app.input, "world");
+    assert!(
+        !app.input_undo_stack.is_empty(),
+        "undo stack should have the original input"
+    );
+
+    // Undo should restore "original"
+    app.undo_input_change();
+    assert_eq!(
+        app.input, "original",
+        "undo should restore the pre-search input"
+    );
+}
+
+#[test]
+fn test_ctrl_r_cancel_with_match_saves_undo_with_original_input() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello".to_string());
+    app.input_history.push("world".to_string());
+
+    // User had typed "original" before starting search
+    app.input = "original".to_string();
+    app.cursor_pos = 8;
+
+    app.start_input_history_search();
+    app.input_history_search_char('w');
+    app.input_history_search_char('o');
+
+    assert_eq!(app.input, "world");
+
+    // Esc with match found accepts it
+    app.cancel_input_history_search();
+
+    assert_eq!(app.input, "world");
+    assert!(
+        !app.input_undo_stack.is_empty(),
+        "undo stack should have the original input"
+    );
+
+    // Undo should restore "original"
+    app.undo_input_change();
+    assert_eq!(
+        app.input, "original",
+        "undo should restore the pre-search input"
+    );
+}
