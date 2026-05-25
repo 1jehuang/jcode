@@ -558,7 +558,7 @@ pub fn import_session_from_file(path: &Path, session_id: &str) -> Result<Session
             let msg_id = entry
                 .uuid
                 .clone()
-                .unwrap_or_else(|| crate::id::new_id("msg"));
+                .unwrap_or_else(|| crate::id::new_id());
 
             session.append_stored_message(StoredMessage {
                 id: msg_id,
@@ -589,7 +589,7 @@ fn append_text_message(
         return;
     }
     session.append_stored_message(StoredMessage {
-        id: crate::id::new_id("msg"),
+        id: crate::id::new_id(),
         role,
         content: vec![ContentBlock::Text {
             text: text.to_string(),

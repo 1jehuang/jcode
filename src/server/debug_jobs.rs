@@ -269,7 +269,7 @@ async fn create_job(
         let agent = agent.lock().await;
         agent.session_id().to_string()
     };
-    let job_id = id::new_id("job");
+    let job_id = id::new_id();
     {
         let mut jobs = debug_jobs.write().await;
         jobs.insert(

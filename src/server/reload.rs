@@ -127,7 +127,7 @@ pub(super) async fn await_reload_signal(
                 let mut cmd = ProcessCommand::new(&binary);
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
                 prepare_server_exec(&mut cmd, &socket);
-                let err = crate::platform::replace_process(&mut cmd);
+                let err = crate::core::platform::replace_process(&mut cmd);
                 crate::server::write_reload_state(
                     &signal.request_id,
                     &signal.hash,

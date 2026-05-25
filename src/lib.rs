@@ -14,10 +14,14 @@
 
 // ===== Core Foundation (always included) =====
 pub mod core;
+pub mod id;
+pub mod utils;
+pub use utils as util;
 
 // ===== Agent System (always included — core abstraction) =====
 pub mod agent;
 pub mod agent_runtime;
+pub mod claude_agent_port;
 pub mod sub_agents;
 pub mod skill_system;
 pub mod plan_mode;
@@ -78,7 +82,6 @@ pub mod knowledge_agents;
 // ===== Tools & MCP =====
 pub mod tool;
 pub mod mcp;
-pub mod tools;
 pub mod slash_command;
 
 // ===== Enterprise Features (enterprise feature gate) =====
@@ -103,9 +106,6 @@ pub mod deny_log;
 
 // ===== Configuration =====
 pub mod config;
-
-// ===== Infrastructure =====
-pub mod infrastructure;
 
 // ===== Session Management =====
 pub mod session;
@@ -170,8 +170,6 @@ pub mod terminal_launch;
 #[cfg(feature = "cli")]
 pub mod stdin_detect;
 #[cfg(feature = "cli")]
-pub mod input;
-#[cfg(feature = "cli")]
 pub mod setup_hints;
 
 // ===== Provider & LLM Integration =====
@@ -182,6 +180,7 @@ pub mod rest_llm;
 pub mod inference_optimizer;
 pub mod inference_integration;
 pub mod auto_mode;
+pub mod embedding;
 
 // ===== Background Tasks =====
 pub mod background;
@@ -210,7 +209,6 @@ pub mod copilot_usage;
 pub mod build;
 pub mod build_module;
 pub mod ci;
-pub mod micro_ci;
 pub mod sandbox;
 pub mod hooks_system;
 
@@ -283,6 +281,35 @@ pub mod channel;
 pub mod bus;
 
 // ===== Legacy/Deprecated Modules =====
+//
+// DEAD CODE ANALYSIS (2025-05-25):
+// The following modules were flagged as potential dead code but analysis shows
+// they are ACTIVELY USED and cannot be safely removed:
+//
+// ✅ HIGH-ACTIVITY MODULES (keep - heavily referenced):
+//   - process_memory: 19 refs | Core memory profiling with jemalloc support
+//   - plan:          19 refs | Plan types re-exported from jcode-plan crate
+//   - runtime_memory_log: 16 refs | Server-side memory logging & attribution
+//   - safety:        15 refs | Action classification & permission checking
+//
+// 🟡 MEDIUM-ACTIVITY MODULES (keep - moderately referenced):
+//   - goal:          12 refs | Goal display modes, used by task_planner + TUI
+//   - import:        11 refs | Claude Code session import (CLI feature)
+//   - todo:          10 refs | TODO item persistence (CLI feature)
+//   - login_qr:       9 refs | QR code rendering for OAuth login (CLI)
+//   - process_title:  9 refs | Process title management (Unix/Windows)
+//   - prompt:         8 refs | System prompt templates & SplitSystemPrompt
+//
+// 🟢 LOW-ACTIVITY MODULES (keep - lightly referenced but functional):
+//   - usage:          6 refs | Subscription usage tracking (Anthropic/OpenAI)
+//   - workspace_manager: 6 refs | Multi-project workspace management
+//   - restart_snapshot: 5 refs | Session state snapshot for crash recovery
+//   - scheduler:       4 refs | Task scheduling with dependencies
+//
+// ❌ REMOVED MODULES:
+//   - update: DELETED on 2025-05-25 | Was dead code (only 2 refs in lib.rs/lib_minimal.rs)
+//     Functionality covered by build.rs and scripts/install.sh
+//
 pub mod crdt;
 #[cfg(feature = "cli")]
 pub mod dictation;
@@ -306,8 +333,8 @@ pub mod startup_profile;
 pub mod subscription_catalog;
 #[cfg(feature = "cli")]
 pub mod todo;
-#[cfg(feature = "cli")]
-pub mod update;
+// NOTE: update module removed - dead code (only referenced in lib.rs and lib_minimal.rs)
+// Functionality covered by build.rs and scripts/install.sh
 pub mod usage;
 pub mod scheduler;
 pub mod external;
@@ -315,7 +342,6 @@ pub mod dap;
 pub mod workspace_manager;
 pub mod compaction;
 pub mod plan;
-pub mod message;
 
 // ===== P2 Integration =====
 pub mod p2_integration;

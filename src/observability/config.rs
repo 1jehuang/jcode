@@ -69,6 +69,9 @@ pub struct MetricsConfig {
     /// Prometheus scrape endpoint port
     pub prometheus_port: u16,
 
+    /// Whether to export metrics via OTLP
+    pub export_otlp: bool,
+
     /// OTLP endpoint for metrics (alternative to Prometheus)
     pub otlp_endpoint: Option<String>,
 
@@ -81,6 +84,7 @@ impl Default for MetricsConfig {
         Self {
             enabled: true,
             prometheus_port: 9090,
+            export_otlp: false,
             otlp_endpoint: None,
             export_interval_secs: 10,
         }

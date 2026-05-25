@@ -10,15 +10,6 @@ pub use crate::auto_mode;
 pub use crate::completion;
 
 pub use middleware::{TenantContext, tenant_middleware, get_tenant_context};
-//! }
-//!
-//! // 3. Bash智能补全
-//! let parser = BashParser::new();
-//! let suggestions = parser.get_suggestions(&CompletionContext::new("git ", 4));
-//! for s in suggestions {
-//!     println!("{} - {}", s.display_text, s.description);
-//! }
-//! ```
 
 // ══════════════════════════════
 // Auto Mode 公共API

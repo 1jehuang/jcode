@@ -610,7 +610,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
             let session_id = app
                 .remote_session_id
                 .clone()
-                .unwrap_or_else(|| crate::id::new_id("ses"));
+                .unwrap_or_else(|| crate::id::new_id());
             if (has_reload_ctx_for_session || !app.reload_info.is_empty())
                 && let Ok(jcode_dir) = crate::storage::jcode_dir()
             {

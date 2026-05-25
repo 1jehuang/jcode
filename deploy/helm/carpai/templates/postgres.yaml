@@ -1,0 +1,123 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "carpai.fullname" . }}-postgres-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+data:
+  POSTGRES_DB: {{ .Values.postgresql.database }}
+  POSTGRES_USER: {{ .Values.postgresql.user }}
+  POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+  POSTGRES_SHARED_PRELOAD_LIBRARIES: "vector"
+---
+{{- if not .Values.postgresql.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "carpai.fullname" . }}-postgres-secret
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: {{ randAlphaNum 24 | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "carpai.fullname" . }}-postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "carpai.fullname" . }}-postgres
+  replicas: {{ .Values.postgresql.replicas }}
+  selector:
+    matchLabels:
+      {{- include "carpai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "carpai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgresql.image }}
+          ports:
+            - containerPort: {{ .Values.postgresql.port }}
+              name: postgres
+          envFrom:
+            - configMapRef:
+                name: {{ include "carpai.fullname" . }}-postgres-config
+            - secretRef:
+                {{- if .Values.postgresql.existingSecret }}
+                name: {{ .Values.postgresql.existingSecret }}
+                {{- else }}
+                name: {{ include "carpai.fullname" . }}-postgres-secret
+                {{- end }}
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.postgresql.user }}
+                - -d
+                - {{ .Values.postgresql.database }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - psql
+                - -U
+                - {{ .Values.postgresql.user }}
+                - -d
+                - {{ .Values.postgresql.database }}
+                - -c
+                - SELECT extname FROM pg_extension WHERE extname = 'vector';
+            initialDelaySeconds: 15
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+        {{- with .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "carpai.fullname" . }}-postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.postgresql.port }}
+      targetPort: {{ .Values.postgresql.port }}
+      protocol: TCP
+      name: postgres
+  selector:
+    {{- include "carpai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+{{- end }}

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "carpai.fullname" . }}-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service
+spec:
+  type: ClusterIP
+  ports:
+    {{- range .Values.server.ports }}
+    - port: {{ .servicePort | default .containerPort }}
+      targetPort: {{ .containerPort }}
+      protocol: {{ .protocol | default "TCP" }}
+      name: {{ .name }}
+    {{- end }}
+  selector:
+    {{- include "carpai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server

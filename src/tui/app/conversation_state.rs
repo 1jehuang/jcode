@@ -714,7 +714,7 @@ impl App {
         let old_session = self.session.clone();
         let old_messages = old_session.messages.clone();
 
-        let new_session_id = format!("session_recovery_{}", id::new_id("rec"));
+        let new_session_id = format!("session_recovery_{}", id::new_id());
         let mut new_session =
             Session::create_with_id(new_session_id, Some(old_session.id.clone()), None);
         new_session.title = old_session.title.clone();

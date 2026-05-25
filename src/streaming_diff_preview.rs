@@ -94,7 +94,7 @@ impl StreamingDiffPreview {
 
     pub fn create_session(&self) -> StreamingPreviewSession {
         StreamingPreviewSession {
-            id: format!("preview_{}", crate::id::new_id("diff")),
+            id: format!("preview_{}", crate::id::new_id()),
             diffs: Vec::new(),
             config: self.config.clone(),
             created_at: chrono::Utc::now(),

@@ -851,7 +851,7 @@ pub(super) async fn handle_client(
     ));
     let mut client_session_id = new_agent.session_id().to_string();
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
-    let client_connection_id = id::new_id("conn");
+    let client_connection_id = id::new_id();
     let connected_at = Instant::now();
     let (disconnect_tx, mut disconnect_rx) = mpsc::unbounded_channel::<()>();
 
@@ -969,7 +969,7 @@ pub(super) async fn handle_client(
     // Set up client debug command channel
     // This client becomes the "active" debug client that receives client: commands
     let (debug_cmd_tx, mut debug_cmd_rx) = mpsc::unbounded_channel::<(u64, String)>();
-    let client_debug_id = id::new_id("client");
+    let client_debug_id = id::new_id();
     {
         let mut debug_state = client_debug_state.write().await;
         debug_state.register(client_debug_id.clone(), debug_cmd_tx);

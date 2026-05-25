@@ -250,7 +250,7 @@ pub async fn refresh_tokens(tokens: &GeminiTokens) -> Result<GeminiTokens> {
             .context("Failed to refresh Gemini OAuth token")?;
 
         if !resp.status().is_success() {
-            let body = crate::util::http_error_body(resp, "HTTP error").await;
+            let body: String = crate::core::util::http_error_body(resp, "HTTP error").await;
             anyhow::bail!("Gemini token refresh failed: {}", body.trim());
         }
 
@@ -463,7 +463,7 @@ async fn exchange_authorization_code(
         .context("Failed to exchange Gemini authorization code")?;
 
     if !resp.status().is_success() {
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body: String = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("Gemini token exchange failed: {}", body.trim());
     }
 
@@ -497,7 +497,7 @@ pub async fn fetch_email(access_token: &str) -> Result<String> {
         .context("Failed to fetch Gemini Google profile")?;
 
     if !resp.status().is_success() {
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body: String = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("Failed to fetch Gemini Google profile: {}", body.trim());
     }
 

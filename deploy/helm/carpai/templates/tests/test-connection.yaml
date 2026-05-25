@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "carpai.fullname" . }}-test-connection"
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox:1.36
+      command: ['wget']
+      args:
+        - '--timeout=5'
+        - '--tries=3'
+        - '{{ include "carpai.fullname" . }}:{{ (index .Values.server.ports 0).servicePort }}/api/health'
+  restartPolicy: Never

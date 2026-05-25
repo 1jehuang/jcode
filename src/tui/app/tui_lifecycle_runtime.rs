@@ -47,7 +47,7 @@ impl App {
 
         app.suppress_terminal_title_updates = !set_title;
         if set_title && !session_name.is_empty() {
-            let icon = crate::id::session_icon(&session_name);
+            let icon = crate::id::session_icon();
             let _ = crossterm::execute!(
                 std::io::stdout(),
                 crossterm::terminal::SetTitle(format!("{} replay: {}", icon, session_name))
@@ -75,7 +75,7 @@ impl App {
         let session_name = crate::id::extract_session_name(session_id)
             .map(|s| s.to_string())
             .unwrap_or_else(|| session_id.to_string());
-        let session_icon = crate::id::session_icon(&session_name);
+        let session_icon = crate::id::session_icon();
         let session_label = crate::process_title::terminal_session_label(
             &session_name,
             self.session.display_title(),

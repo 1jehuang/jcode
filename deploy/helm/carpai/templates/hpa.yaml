@@ -1,0 +1,41 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "carpai.fullname" . }}-hpa
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "carpai.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- range .Values.autoscaling.metrics }}
+    {{- if eq .type "Resource" }}
+    - type: Resource
+      resource:
+        name: {{ .resource.name }}
+        target:
+          type: {{ .resource.target.type }}
+          {{- if eq .resource.target.type "Utilization" }}
+          averageUtilization: {{ .resource.target.averageUtilization }}
+          {{- end }}
+    {{- else if eq .type "Pods" }}
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .pods.metric.name }}
+        target:
+          type: {{ .pods.target.type }}
+          averageValue: {{ .pods.target.averageValue }}
+    {{- end }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

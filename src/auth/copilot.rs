@@ -609,7 +609,7 @@ pub async fn exchange_github_token(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("Copilot token exchange failed (HTTP {}): {}", status, body);
     }
 
@@ -639,7 +639,7 @@ pub async fn initiate_device_flow(client: &reqwest::Client) -> Result<DeviceCode
         .context("Failed to initiate GitHub device flow")?;
 
     if !resp.status().is_success() {
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("GitHub device flow failed: {}", body);
     }
 
@@ -707,7 +707,7 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
     let config_dir = legacy_copilot_config_dir();
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create {}", config_dir.display()))?;
-    crate::platform::set_directory_permissions_owner_only(&config_dir)
+    crate::core::platform::set_directory_permissions_owner_only(&config_dir)
         .with_context(|| format!("Failed to secure {}", config_dir.display()))?;
 
     let hosts_path = config_dir.join("hosts.json");
@@ -821,7 +821,7 @@ pub async fn fetch_available_models(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("Copilot models fetch failed (HTTP {}): {}", status, body);
     }
 

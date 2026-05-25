@@ -80,7 +80,7 @@ impl Agent {
         }
         *text_content = sanitized;
 
-        let call_id = format!("fallback_text_call_{}", id::new_id("call"));
+        let call_id = format!("fallback_text_call_{}", id::new_id());
         let recovered_total = RECOVERED_TEXT_WRAPPED_TOOL_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;

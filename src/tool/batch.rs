@@ -274,7 +274,7 @@ impl Tool for BatchTool {
                     success_count += 1;
                     let max_per_tool = 50_000 / num_tools.max(1);
                     if out.output.len() > max_per_tool {
-                        output.push_str(crate::util::truncate_str(&out.output, max_per_tool));
+                        output.push_str(&crate::util::truncate_str(&out.output, max_per_tool).to_string());
                         output.push_str("...\n(truncated)");
                     } else {
                         output.push_str(&out.output);

@@ -977,7 +977,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 .clone()
                 .or_else(|| extract_session_name(&stem).map(|s| s.to_string()))
                 .unwrap_or_else(|| stem.clone());
-            let icon = session_icon(&short_name);
+            let icon = session_icon();
 
             let mut user_message_count = 0;
             let mut assistant_message_count = 0;

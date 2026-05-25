@@ -1,0 +1,59 @@
+{{- if or .Values.persistence.plugins.enabled .Values.persistence.sessions.enabled .Values.persistence.data.enabled }}
+{{- if .Values.persistence.plugins.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "carpai.fullname" . }}-plugins
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.persistence.plugins.size }}
+  {{- with .Values.persistence.plugins.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
+{{- if .Values.persistence.sessions.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "carpai.fullname" . }}-sessions
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.persistence.sessions.size }}
+  {{- with .Values.persistence.sessions.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
+{{- if .Values.persistence.data.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "carpai.fullname" . }}-data
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.persistence.data.size }}
+  {{- with .Values.persistence.data.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}

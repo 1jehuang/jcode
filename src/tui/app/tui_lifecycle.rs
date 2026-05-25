@@ -668,7 +668,7 @@ impl App {
             completion_engine: None,
             completion_prefetch_state: None,
             shell_completer: Some(crate::completion::bash::completer::SmartCompleter::default()),
-            remote_client_instance_id: crate::id::new_id("client"),
+            remote_client_instance_id: crate::id::new_id(),
             remote_provider_name: None,
             remote_provider_model: None,
             remote_startup_phase: None,

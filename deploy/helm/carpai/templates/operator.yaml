@@ -1,0 +1,227 @@
+{{- if .Values.operator.enabled }}
+# ─────────────────────────────────────────────────────
+# CarpAICluster CRD
+# ─────────────────────────────────────────────────────
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: carpaiclusters.carpai.io
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  group: carpai.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                image:
+                  type: string
+                  default: "carpai:latest"
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    secretName:
+                      type: string
+                auth:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    jwtSecretRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                    limits:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                autoscaling:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    minReplicas:
+                      type: integer
+                    maxReplicas:
+                      type: integer
+                    targetCPUUtilization:
+                      type: integer
+                      default: 70
+                    targetMemoryUtilization:
+                      type: integer
+                      default: 80
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    prometheusScrape:
+                      type: boolean
+                      default: true
+                    metricsPort:
+                      type: integer
+                      default: 9090
+              required:
+                - replicas
+            status:
+              type: object
+              properties:
+                readyReplicas:
+                  type: integer
+                leaderNode:
+                  type: string
+                clusterStatus:
+                  type: string
+                  enum: ["Initializing", "Running", "Degraded", "Stopped"]
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Leader
+          type: string
+          jsonPath: .status.leaderNode
+        - name: Status
+          type: string
+          jsonPath: .status.clusterStatus
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: carpaiclusters
+    singular: carpaicluster
+    kind: CarpAICluster
+    shortNames:
+      - cc
+
+---
+# ─────────────────────────────────────────────────────
+# Operator ServiceAccount & RBAC
+# ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "carpai.fullname" . }}-operator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "carpai.fullname" . }}-operator-role
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups: ["carpai.io"]
+    resources: ["carpaiclusters", "carpaiclusters/status", "carpaiclusters/finalizers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "statefulsets/scale"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "pods", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "carpai.fullname" . }}-operator-binding
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "carpai.fullname" . }}-operator
+    namespace: {{ .Values.global.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "carpai.fullname" . }}-operator-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ─────────────────────────────────────────────────────
+# Operator Deployment
+# ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "carpai.fullname" . }}-operator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "carpai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "carpai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: {{ include "carpai.fullname" . }}-operator
+      containers:
+        - name: operator
+          image: {{ .Values.operator.image }}
+          command: ["pip", "install", "kopf", "kubernetes", "&&", "kopf", "run", "/opt/operator/controller.py"]
+          args:
+            - --verbose
+          env:
+            - name: KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+{{- end }}

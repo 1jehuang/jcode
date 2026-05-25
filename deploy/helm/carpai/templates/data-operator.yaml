@@ -1,0 +1,300 @@
+{{- if .Values.dataOperator.enabled }}
+# ─────────────────────────────────────────────────────
+# RedisCluster CRD
+# ─────────────────────────────────────────────────────
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: redisclusters.carpai.io
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-operator
+spec:
+  group: carpai.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 3
+                  maximum: 9
+                  default: 6
+                masters:
+                  type: integer
+                  minimum: 1
+                  maximum: 3
+                  default: 3
+                replicasPerMaster:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  default: 1
+                image:
+                  type: string
+                  default: "redis:7-alpine"
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                    limits:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                storage:
+                  type: object
+                  properties:
+                    size:
+                      type: string
+                      default: "10Gi"
+                    storageClass:
+                      type: string
+                      default: "standard"
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    secretName:
+                      type: string
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    prometheusExporter:
+                      type: boolean
+                      default: true
+              required:
+                - replicas
+            status:
+              type: object
+              properties:
+                readyReplicas:
+                  type: integer
+                clusterState:
+                  type: string
+                  enum: ["ok", "fail", "initializing"]
+                masterNodes:
+                  type: array
+                  items:
+                    type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: State
+          type: string
+          jsonPath: .status.clusterState
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: redisclusters
+    singular: rediscluster
+    kind: RedisCluster
+    shortNames:
+      - rc
+
+---
+# ─────────────────────────────────────────────────────
+# MilvusCluster CRD
+# ─────────────────────────────────────────────────────
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: milvusclusters.carpai.io
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-operator
+spec:
+  group: carpai.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: ["standalone", "cluster"]
+                  default: "standalone"
+                image:
+                  type: string
+                  default: "milvusdb/milvus:v2.4.0"
+                components:
+                  type: object
+                  properties:
+                    standalone:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                        resources:
+                          type: object
+                    querynode:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 2
+                    datanode:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                    indexnode:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                    proxy:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                storage:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      enum: ["local", "minio", "s3"]
+                      default: "minio"
+                    size:
+                      type: string
+                      default: "100Gi"
+                dependencies:
+                  type: object
+                  properties:
+                    etcd:
+                      type: object
+                      properties:
+                        managed:
+                          type: boolean
+                          default: true
+                        replicas:
+                          type: integer
+                          default: 3
+                    minio:
+                      type: object
+                      properties:
+                        managed:
+                          type: boolean
+                          default: true
+                        replicas:
+                          type: integer
+                          default: 1
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+              required:
+                - mode
+            status:
+              type: object
+              properties:
+                readyComponents:
+                  type: array
+                  items:
+                    type: string
+                clusterStatus:
+                  type: string
+                  enum: ["Initializing", "Running", "Degraded", "Stopped"]
+      subresources:
+        status: {}
+  scope: Namespaced
+  names:
+    plural: milvusclusters
+    singular: milvuscluster
+    kind: MilvusCluster
+    shortNames:
+      - mc
+
+---
+# ─────────────────────────────────────────────────────
+# Data Operator ServiceAccount & RBAC
+# ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "carpai.fullname" . }}-data-operator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "carpai.fullname" . }}-data-operator
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-operator
+rules:
+  - apiGroups: ["carpai.io"]
+    resources: ["redisclusters", "milvusclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["carpai.io"]
+    resources: ["redisclusters/status", "milvusclusters/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "carpai.fullname" . }}-data-operator
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "carpai.fullname" . }}-data-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "carpai.fullname" . }}-data-operator
+    namespace: {{ .Values.global.namespace }}
+{{- end }}

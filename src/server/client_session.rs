@@ -573,7 +573,7 @@ pub(super) async fn handle_reload(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let request_id = crate::id::new_id("reload");
+    let request_id = crate::id::new_id();
     mark_remote_reload_started(&request_id);
 
     let (triggering_session, prefer_selfdev_binary) = {

@@ -754,7 +754,7 @@ impl Agent {
                     is_error: Some(true),
                 };
                 let stored_message = StoredMessage {
-                    id: id::new_id("message"),
+                    id: id::new_id(),
                     role: Role::User,
                     content: vec![tool_block],
                     display_role: None,

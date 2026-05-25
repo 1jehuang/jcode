@@ -124,9 +124,9 @@ impl BackgroundTaskManager {
             return status;
         };
 
-        let reaped_exit = crate::platform::try_reap_child_process(pid).ok().flatten();
+        let reaped_exit = crate::core::platform::try_reap_child_process(pid).ok().flatten();
 
-        if reaped_exit.is_none() && crate::platform::is_process_running(pid) {
+        if reaped_exit.is_none() && crate::core::platform::is_process_running(pid) {
             return status;
         }
 
@@ -942,15 +942,15 @@ impl BackgroundTaskManager {
 
             #[cfg(unix)]
             {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+                let _ = crate::core::platform::signal_detached_process_group(pid, libc::SIGTERM);
                 tokio::time::sleep(graceful_timeout).await;
-                if crate::platform::is_process_running(pid) {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                if crate::core::platform::is_process_running(pid) {
+                    let _ = crate::core::platform::signal_detached_process_group(pid, libc::SIGKILL);
                 }
             }
             #[cfg(windows)]
             {
-                let _ = crate::platform::signal_detached_process_group(pid, 0);
+                let _ = crate::core::platform::signal_detached_process_group(pid, 0);
             }
 
             let completed_at = Utc::now();
@@ -1125,7 +1125,7 @@ impl BackgroundTaskManager {
                 continue;
             };
 
-            if crate::platform::is_process_running(pid) {
+            if crate::core::platform::is_process_running(pid) {
                 matches.push(status);
             }
         }

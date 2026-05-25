@@ -1,0 +1,135 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "carpai.fullname" . }}-redis-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+data:
+  redis.conf: |
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    appendonly {{ .Values.redis.config.appendonly }}
+    maxmemory {{ .Values.redis.config.maxmemory }}
+    maxmemory-policy {{ .Values.redis.config.maxmemoryPolicy }}
+    save 900 1 300 10 60 10000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "carpai.fullname" . }}-redis-node
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "carpai.fullname" . }}-redis-node
+  replicas: {{ .Values.redis.replicas }}
+  selector:
+    matchLabels:
+      {{- include "carpai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "carpai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          ports:
+            - containerPort: {{ .Values.redis.port }}
+              name: redis
+            - containerPort: {{ .Values.redis.gossipPort }}
+              name: gossip
+          command: ["redis-server"]
+          args: ["/conf/redis.conf"]
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          volumeMounts:
+            - name: redis-config
+              mountPath: /conf
+            - name: redis-data
+              mountPath: /data
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: redis-config
+          configMap:
+            name: {{ include "carpai.fullname" . }}-redis-config
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}
+        {{- with .Values.redis.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "carpai.fullname" . }}-redis-node
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: {{ .Values.redis.port }}
+      targetPort: {{ .Values.redis.port }}
+      name: redis
+    - port: {{ .Values.redis.gossipPort }}
+      targetPort: {{ .Values.redis.gossipPort }}
+      name: gossip
+  selector:
+    {{- include "carpai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "carpai.fullname" . }}-redis-cluster-init
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: {{ .Values.redis.image }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Redis nodes to be ready..."
+              sleep 10
+              echo "Creating Redis Cluster..."
+              redis-cli --cluster create \
+                {{- range $i := until (int $.Values.redis.replicas) }}
+                {{ include "carpai.fullname" $ }}-redis-node-{{ $i }}.{{ include "carpai.fullname" $ }}-redis-node:{{ $.Values.redis.port }} \
+                {{- end }}
+                --cluster-replicas 1 \
+                --cluster-yes
+              echo "Redis Cluster initialized successfully!"
+{{- end }}

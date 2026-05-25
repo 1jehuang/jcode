@@ -580,7 +580,7 @@ pub(super) fn parse_manual_subagent_spec(rest: &str) -> Result<ManualSubagentSpe
 fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
     let description = derive_subagent_description(&spec.prompt);
     let tool_call = crate::message::ToolCall {
-        id: id::new_id("call"),
+        id: id::new_id(),
         name: "subagent".to_string(),
         input: serde_json::json!({
             "description": description,

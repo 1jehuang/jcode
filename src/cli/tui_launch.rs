@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::process::Command as ProcessCommand;
 
 use crate::{
-    id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
+    id, logging, replay, server, session, setup_hints, startup_profile, tui,
 };
 
 use super::hot_exec::{execute_requested_action, has_requested_action};
@@ -45,7 +45,7 @@ fn focus_title_best_effort(title: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let _ = crate::platform::spawn_detached(&mut cmd);
+    let _ = crate::core::platform::spawn_detached(&mut cmd);
 }
 
 #[cfg(any(not(unix), target_os = "macos"))]
@@ -282,7 +282,7 @@ pub async fn run_replay_command(
                 })
                 .collect();
             eprintln!(
-                "🐝 Exporting swarm replay from seed {} ({} panes)",
+                "馃悵 Exporting swarm replay from seed {} ({} panes)",
                 session_id_or_path,
                 panes.len()
             );
@@ -325,7 +325,7 @@ pub async fn run_replay_command(
 
         let pane_count = replayable_panes.len();
         eprintln!(
-            "🐝 Replaying swarm: {} ({} panes, {:.1}x speed)",
+            "馃悵 Replaying swarm: {} ({} panes, {:.1}x speed)",
             session_id_or_path, pane_count, speed
         );
         eprintln!("  Controls: Space=pause  +/-=speed  q=quit\n");
@@ -333,7 +333,7 @@ pub async fn run_replay_command(
         let (terminal, tui_runtime) = init_tui_runtime()?;
         let _ = crossterm::execute!(
             std::io::stdout(),
-            crossterm::terminal::SetTitle(format!("🐝 swarm replay: {}", session_id_or_path))
+            crossterm::terminal::SetTitle(format!("馃悵 swarm replay: {}", session_id_or_path))
         );
 
         let result =
@@ -371,7 +371,7 @@ pub async fn run_replay_command(
     }
 
     let session_name = session.short_name.as_deref().unwrap_or(&session.id);
-    let icon = id::session_icon(session_name);
+    let icon = id::session_icon();
 
     if let Some(output) = video_output {
         let output_path = if output == "auto" {
@@ -599,7 +599,7 @@ pub fn spawn_resume_in_new_terminal(
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-                crate::platform::spawn_detached(&mut cmd)
+                crate::core::platform::spawn_detached(&mut cmd)
             }
             "wt" | "windows-terminal" => {
                 if !wt_available {
@@ -617,7 +617,7 @@ pub fn spawn_resume_in_new_terminal(
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-                crate::platform::spawn_detached(&mut cmd)
+                crate::core::platform::spawn_detached(&mut cmd)
             }
             "alacritty" => {
                 if !alacritty_available {
@@ -632,7 +632,7 @@ pub fn spawn_resume_in_new_terminal(
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
-                crate::platform::spawn_detached(&mut cmd)
+                crate::core::platform::spawn_detached(&mut cmd)
             }
             _ => continue,
         };
@@ -690,7 +690,7 @@ pub fn spawn_selfdev_in_new_terminal(
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-                crate::platform::spawn_detached(&mut cmd)
+                crate::core::platform::spawn_detached(&mut cmd)
             }
             "wt" | "windows-terminal" => {
                 if !wt_available {
@@ -709,7 +709,7 @@ pub fn spawn_selfdev_in_new_terminal(
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-                crate::platform::spawn_detached(&mut cmd)
+                crate::core::platform::spawn_detached(&mut cmd)
             }
             "alacritty" => {
                 if !alacritty_available {
@@ -725,7 +725,7 @@ pub fn spawn_selfdev_in_new_terminal(
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
-                crate::platform::spawn_detached(&mut cmd)
+                crate::core::platform::spawn_detached(&mut cmd)
             }
             _ => continue,
         };
@@ -797,14 +797,14 @@ pub fn list_sessions() -> Result<()> {
                 resumed_window_title(session_id)
             }
             crate::tui::session_picker::ResumeTarget::ClaudeCodeSession { session_id, .. } => {
-                format!("🧵 Claude Code {}", &session_id[..session_id.len().min(8)])
+                format!("馃У Claude Code {}", &session_id[..session_id.len().min(8)])
             }
             crate::tui::session_picker::ResumeTarget::CodexSession { session_id, .. } => {
-                format!("🧠 Codex {}", &session_id[..session_id.len().min(8)])
+                format!("馃 Codex {}", &session_id[..session_id.len().min(8)])
             }
             crate::tui::session_picker::ResumeTarget::PiSession { session_path } => {
                 format!(
-                    "π Pi {}",
+                    "蟺 Pi {}",
                     std::path::Path::new(session_path)
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -812,7 +812,7 @@ pub fn list_sessions() -> Result<()> {
                 )
             }
             crate::tui::session_picker::ResumeTarget::OpenCodeSession { session_id, .. } => {
-                format!("◌ OpenCode {}", &session_id[..session_id.len().min(8)])
+                format!("鈼?OpenCode {}", &session_id[..session_id.len().min(8)])
             }
         };
         let command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
@@ -840,7 +840,7 @@ pub fn list_sessions() -> Result<()> {
                     session_cwd = std::path::PathBuf::from(dir);
                 }
                 let (program, args) = build_resume_target_command(&exe, &resolved_target);
-                let err = crate::platform::replace_process(
+                let err = crate::core::platform::replace_process(
                     ProcessCommand::new(&program)
                         .args(&args)
                         .current_dir(session_cwd),

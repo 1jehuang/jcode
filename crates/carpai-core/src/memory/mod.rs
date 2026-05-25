@@ -21,11 +21,20 @@ pub mod compaction;
 pub mod protocol;
 
 // NOTE: The following modules exist as scaffolding but are NOT yet integrated:
-// - hierarchical:  Multi-level memory organization (orphaned)
-// - knowledge_graph: Extended knowledge graph (orphaned)
+// - hierarchical:  Multi-level memory organization (orphaned) [2025-05-25]
+//   Status: Has #[allow(dead_code)], waiting for Phase 1C alignment with carpai-internal
+// - knowledge_graph: Extended knowledge graph (orphaned) [2025-05-25]
+//   Status: Has #[allow(dead_code)], extends base KnowledgeGraph with find_related()
 // - knowledge:      Centralized knowledge base (orphaned)
-// - knowledge_agents: Knowledge agent automation (orphaned)
+// - knowledge_agents: Knowledge agent automation (orphaned) [2025-05-25]
+//   Status: Has #[allow(dead_code)], provides automated knowledge management
 // - types:          Additional memory type definitions (orphaned)
+//
+// DEAD CODE ANALYSIS RESULT (2025-05-25):
+// ✅ Confirmed: These 4 modules have ZERO references in carpai-core or parent crates
+// ⚠️ Decision: Keep as scaffolding with dead_code allowance until Phase 1C
+// 📅 Next action: Integrate in Phase 1C after type alignment with carpai-internal
+//
 // These will be declared here and unified in Phase 1C.
 
 // Re-export key types

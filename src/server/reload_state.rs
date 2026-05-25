@@ -503,7 +503,7 @@ pub fn send_reload_signal(
     triggering_session: Option<String>,
     prefer_selfdev_binary: bool,
 ) -> String {
-    let request_id = crate::id::new_id("reload");
+    let request_id = crate::id::new_id();
     crate::logging::info(&format!(
         "send_reload_signal: request={} hash={} triggering_session={:?} prefer_selfdev_binary={} current_pid={}",
         request_id,

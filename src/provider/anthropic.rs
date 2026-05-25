@@ -197,7 +197,7 @@ async fn oauth_preflight_get(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("{} returned {}: {}", label, status, body);
     }
 
@@ -221,7 +221,7 @@ async fn oauth_preflight_post_json<T: Serialize + ?Sized>(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("{} returned {}: {}", label, status, body);
     }
 
@@ -1390,7 +1390,7 @@ async fn stream_response(
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = crate::util::http_error_body(response, "HTTP error").await;
+        let error_text = crate::core::util::http_error_body(response, "HTTP error").await;
         anyhow::bail!("Anthropic API error ({}): {}", status, error_text);
     }
 

@@ -62,7 +62,7 @@ impl AtomicEditCoordinator {
     }
 
     pub fn begin_transaction(&mut self, ops: Vec<EditOperation>) -> Result<String> {
-        let tx_id = format!("tx_{}", crate::id::new_id("atomic"));
+        let tx_id = format!("tx_{}", crate::id::new_id());
         let mut snapshots = HashMap::new();
         let op_paths: HashSet<PathBuf> = ops.iter().map(|o| o.file_path.clone()).collect();
 

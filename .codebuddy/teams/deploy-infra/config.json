@@ -1,0 +1,28 @@
+{
+  "name": "deploy-infra",
+  "leadAgentId": "59f0d7ecc8db413f9c233e3999bc1cc4",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-24T23:02:53.880Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@deploy-infra",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "helm-agent@deploy-infra",
+      "name": "helm-agent",
+      "role": "Create CarpAI Helm chart"
+    },
+    {
+      "memberId": "terraform-agent@deploy-infra",
+      "name": "terraform-agent",
+      "role": "Create CarpAI Terraform modules"
+    }
+  ],
+  "isAutoTeam": false
+}

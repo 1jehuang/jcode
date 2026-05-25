@@ -1,0 +1,107 @@
+# =============================================================================
+# CarpAI Terraform - Variable Configuration Example
+# =============================================================================
+# Copy this file to terraform.tfvars and customize for your environment.
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   terraform init
+#   terraform plan
+#   terraform apply
+# =============================================================================
+
+# ─── Required ────────────────────────────────────────────────────────────────
+
+# AWS region to deploy resources
+region = "us-east-1"
+
+# Availability zones (at least 3 for high availability)
+availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+# Project name (used for resource naming and tagging)
+project_name = "carpai"
+
+# Environment name (dev/prod/staging)
+environment = "dev"
+
+# Owner email or team name for resource tagging
+owner = "dev-team@example.com"
+
+# ─── VPC / Networking ───────────────────────────────────────────────────────
+
+# VPC CIDR block - adjust if it conflicts with existing networks
+# vpc_cidr = "10.0.0.0/16"
+
+# ─── EKS (Kubernetes) ───────────────────────────────────────────────────────
+
+# Kubernetes version
+# eks_cluster_version = "1.28"
+
+# EC2 instance types for EKS worker nodes
+# eks_node_instance_types = ["m6i.large"]
+
+# Node group scaling limits
+# eks_min_size     = 2
+# eks_max_size     = 10
+# eks_desired_size = 3
+
+# EBS disk size per node (GB)
+# eks_disk_size = 80
+
+# ─── RDS (PostgreSQL + pgvector) ────────────────────────────────────────────
+
+# DB instance class (see https://aws.amazon.com/rds/instance-types/)
+# rds_instance_class = "db.r6g.large"
+
+# Allocated storage in GB (auto-scales up to max_allocated_storage)
+# rds_allocated_storage     = 50
+# rds_max_allocated_storage = 200
+
+# PostgreSQL version (must be 15+ for pgvector)
+# rds_postgres_version = "15"
+
+# Multi-AZ: true for production, false for dev
+# rds_multi_az = false
+
+# Backup retention period in days
+# rds_backup_retention_days = 7
+
+# Prevent accidental deletion (true for production)
+# rds_deletion_protection = false
+
+# ─── ElastiCache (Redis) ────────────────────────────────────────────────────
+
+# Cache node type
+# redis_node_type = "cache.r6g.large"
+
+# Enable cluster mode (true for production with sharding)
+# redis_cluster_enabled = false
+
+# Number of shards (only used if cluster_enabled = true)
+# redis_num_shards = 1
+
+# Replicas per shard (only used if cluster_enabled = true)
+# redis_replicas_per_shard = 0
+
+# Enable automatic failover
+# redis_automatic_failover = false
+
+# Backup retention period in days
+# redis_backup_retention_days = 7
+
+# ─── Monitoring (Prometheus + Grafana) ──────────────────────────────────────
+
+# Enable ingress for Grafana (requires DNS setup)
+# monitoring_enable_ingress = false
+
+# Prometheus data retention
+# monitoring_prometheus_retention = "15d"
+
+# Prometheus persistent storage size
+# monitoring_prometheus_storage = "50Gi"
+
+# Grafana persistent storage size
+# monitoring_grafana_storage = "10Gi"
+
+# Grafana admin username
+# monitoring_grafana_admin_user = "admin"

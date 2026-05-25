@@ -76,13 +76,13 @@ pub fn render_markdown(
     brief: &CatchupBrief,
 ) -> String {
     let display_name = session.display_name().to_string();
-    let icon = crate::id::session_icon(&display_name);
+    let icon = crate::id::session_icon();
     let status_icon = status_icon(&session.status);
     let status_label = status_label(&session.status);
     let updated_ago = format_time_ago(brief.updated_at);
     let source_label = source_session_id
         .and_then(crate::id::extract_session_name)
-        .unwrap_or("previous session");
+        .unwrap_or_else(|| "previous session".to_string());
 
     let mut out = String::new();
     out.push_str("# Catch Up\n\n");

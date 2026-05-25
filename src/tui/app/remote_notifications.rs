@@ -10,7 +10,7 @@ pub(super) struct SwarmNotificationPresentation {
 
 fn compact_swarm_session_label(session: &str) -> String {
     crate::id::extract_session_name(session)
-        .unwrap_or(session)
+        .unwrap_or_else(|| session.to_string())
         .to_string()
 }
 

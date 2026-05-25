@@ -236,6 +236,21 @@ path = "tests/benchmarks/performance_baseline.rs"
 name = "kv_cache_cost_benchmark"
 path = "tests/benchmarks/kv_cache_cost.rs"
 
+# ═══════════════════════════════════════════════════════════════
+#  E2E Tests for CarpAI Product Lines (THREE_TEAM_REFACTOR_PLAN §7.1)
+#
+#  Four test chains:
+#  1. CLI Local Mode (TUI → type → receive reply)
+#  2. Server Standalone (health check → gRPC → REST)
+#  3. CLI Remote Mode (CLI → gRPC → Server → reply)
+#  4. SDK Basic Flow (client.connect → chat → receive)
+#
+#  Run: cargo test --test carpai_e2e -- --include-ignored
+# ═══════════════════════════════════════════════════════════════
+[[test]]
+name = "carpai_e2e"
+path = "tests/carpai_e2e_main.rs"
+
 [[bin]]
 name = "jcode-grpc"
 path = "src/bin/jcode-grpc.rs"
@@ -413,7 +428,7 @@ tonic = { version = "0.11", features = ["tls", "tls-roots"] }
 prost = "0.12"
 prost-types = "0.12"
 jsonwebtoken = "9.2"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 parking_lot = "0.12"
 xmlparser = "0.13"
 
@@ -447,6 +462,7 @@ aes-gcm = { version = "0.10", optional = true }
 dashmap = { version = "6", optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 carpai-sdk = { path = "crates/carpai-sdk", optional = true }
+carpai-internal = { path = "crates/carpai-internal" }
 
 [features]
 # ═══════════════════════════════════════════════════════════════
@@ -456,7 +472,9 @@ carpai-sdk = { path = "crates/carpai-sdk", optional = true }
 # --- server: Headless enterprise AI programming server ---
 # Includes: gRPC, REST, WebSocket, auth, observability, distributed
 # Excludes: TUI, terminal, clipboard, desktop UI
-server = []
+server = [
+    "dep:tower-http",
+]
 
 # --- cli: Terminal UI client (local + remote mode) ---
 # Includes: ratatui TUI, sidecar LLM, local tool execution, git integration

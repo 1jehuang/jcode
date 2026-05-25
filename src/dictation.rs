@@ -244,7 +244,7 @@ struct ClientCandidate {
 fn inspect_client_process(pid: u32) -> Option<ClientCandidate> {
     if let Some(session_id) = read_resumed_session_id(pid) {
         let short_name = crate::id::extract_session_name(&session_id)
-            .unwrap_or(session_id.as_str())
+            .unwrap_or_else(|| session_id.clone())
             .to_string();
         return Some(ClientCandidate {
             pid,

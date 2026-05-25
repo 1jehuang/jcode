@@ -117,7 +117,7 @@ impl AutonomousAgent {
         let mut turn = 0u32;
 
         // Step 1: 生成 Plan (对标 Claude Code /plan 命令)
-        let plan_slug = self.plan_manager.read().await.generate_slug();
+        let plan_slug: String = self.plan_manager.read().await.generate_slug();
         *self.current_plan_slug.write().await = Some(plan_slug.clone());
         let plan = self.generate_plan(goal, &plan_slug).await?;
         *self.status.write().await = AgentStatus::Thinking;
@@ -564,12 +564,12 @@ impl CrossFileAgent {
         println!("[CrossFile] {} files, order: {:?}", task.affected_files.len(), task.execution_order);
 
         // 2. 记录执行计划到 plan_manager
-        let slug = self.plan_manager.read().await.generate_slug();
+        let slug: String = self.plan_manager.read().await.generate_slug();
         let plan_content = format!(
             "# Cross-File Task Plan\n\n## Goal\n{}\n\n## Affected Files\n{:?}\n\n## Execution Order\n{:?}",
             goal, task.affected_files, task.execution_order
         );
-        self.plan_manager.read().await.save_plan(&slug, &plan_content, None).await.ok();
+        let _ = self.plan_manager.read().await.save_plan(&slug, &plan_content, None).await;
 
         // 3. 用 AutonomousAgent 执行
         let result = self.agent.execute_task(goal).await?;

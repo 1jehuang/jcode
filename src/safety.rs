@@ -494,7 +494,7 @@ fn request_session_id(request: &PermissionRequest) -> Option<String> {
 
 /// Generate a unique permission request id: `req_{timestamp}_{random}`
 pub fn new_request_id() -> String {
-    crate::id::new_id("req")
+    crate::id::new_id()
 }
 
 // ---------------------------------------------------------------------------

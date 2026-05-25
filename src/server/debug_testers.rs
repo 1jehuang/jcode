@@ -58,7 +58,7 @@ fn save_testers(testers: &[serde_json::Value]) -> Result<()> {
 async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
     use std::process::Stdio;
 
-    let id = format!("tester_{}", crate::id::new_id("tui"));
+    let id = format!("tester_{}", crate::id::new_id());
     let cwd = opts.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
     let binary = opts.get("binary").and_then(|v| v.as_str());
 
@@ -101,12 +101,12 @@ async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
     let stdout_file = std::fs::File::create(&stdout_path)?;
     let stderr_file = std::fs::File::create(&stderr_path)?;
 
-    let _ = crate::platform::set_permissions_owner_only(&stdout_path);
-    let _ = crate::platform::set_permissions_owner_only(&stderr_path);
+    let _ = crate::core::platform::set_permissions_owner_only(&stdout_path);
+    let _ = crate::core::platform::set_permissions_owner_only(&stderr_path);
     let _ = std::fs::File::create(&debug_cmd)
-        .and_then(|_| crate::platform::set_permissions_owner_only(&debug_cmd));
+        .and_then(|_| crate::core::platform::set_permissions_owner_only(&debug_cmd));
     let _ = std::fs::File::create(&debug_resp)
-        .and_then(|_| crate::platform::set_permissions_owner_only(&debug_resp));
+        .and_then(|_| crate::core::platform::set_permissions_owner_only(&debug_resp));
 
     let mut cmd = tokio::process::Command::new(&binary_path);
     cmd.current_dir(cwd);

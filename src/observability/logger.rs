@@ -1,6 +1,6 @@
 use opentelemetry::logs::{LogRecord, Logger, LoggerProvider as _, Severity};
-use opentelemetry_sdk::logs::{BatchLogProcessor, LogExporter, LoggerProvider};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::logs::{BatchLogProcessor, LoggerProvider};
+use opentelemetry_otlp::{LogExporter, WithExportConfig};
 use std::time::Duration;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
 
@@ -35,20 +35,24 @@ pub fn init_logger(config: &LoggingConfig) -> Result<(), Box<dyn std::error::Err
     }
 
     // Initialize OTLP log exporter if endpoint is configured
-    if !config.otlp_endpoint.is_empty() {
-        init_otlp_logger(config)?;
+    if let Some(endpoint) = &config.otlp_endpoint {
+        if !endpoint.is_empty() {
+            init_otlp_logger(config)?;
+        }
     }
 
     // Initialize Loki log exporter if endpoint is configured
-    if !config.loki_endpoint.is_empty() {
-        init_loki_logger(config)?;
+    if let Some(endpoint) = &config.loki_endpoint {
+        if !endpoint.is_empty() {
+            init_loki_logger(config)?;
+        }
     }
 
     tracing::info!(
         "Structured logger initialized (json={}, otlp={}, loki={})",
         config.json_format,
-        !config.otlp_endpoint.is_empty(),
-        !config.loki_endpoint.is_empty()
+        config.otlp_endpoint.as_ref().map_or(false, |e| !e.is_empty()),
+        config.loki_endpoint.as_ref().map_or(false, |e| !e.is_empty())
     );
 
     Ok(())
@@ -84,7 +88,7 @@ fn init_loki_logger(config: &LoggingConfig) -> Result<(), Box<dyn std::error::Er
     // Loki uses Push API, not OTLP
     // This is a placeholder for future Loki integration
     // In production, you would use loki-log-appender or custom exporter
-    tracing::info!("Loki endpoint configured but not yet implemented (endpoint={})", config.loki_endpoint);
+    tracing::info!("Loki endpoint configured but not yet implemented (endpoint={:?})", config.loki_endpoint);
     Ok(())
 }
 

@@ -21,7 +21,7 @@ pub async fn run() -> Result<()> {
     logging::cleanup_old_logs();
     startup_profile::mark("log_cleanup");
     logging::info("jcode starting");
-    crate::platform::raise_nofile_limit_best_effort(8_192);
+    crate::core::platform::raise_nofile_limit_best_effort(8_192);
     startup_profile::mark("nofile_limit");
 
     storage::harden_user_config_permissions();
@@ -30,21 +30,21 @@ pub async fn run() -> Result<()> {
     perf::init_background();
     startup_profile::mark("perf_init");
 
-    // ===== [I-10] 初始化 3 个性能优化器 =====
+    // ===== [I-10] 初始�?3 个性能优化�?=====
     crate::cache_integration::init_cache_optimizer();
     crate::agent::concurrency_integration::init_concurrency_optimizer();
     crate::tui::render_integration::init_render_optimizer();
     startup_profile::mark("perf_optimizers_init");
 
-    // ===== [P2] 初始化 P2 功能模块（TDD + 性能优化 + Dashboard）=====
+    // ===== [P2] 初始�?P2 功能模块（TDD + 性能优化 + Dashboard�?====
     if let Err(e) = crate::p2_integration::init_p2_integration().await {
         logging::warn(&format!("P2 integration init failed: {} (continuing without P2 features)", e));
     } else {
-        logging::info("✅ P2 modules integrated successfully (TDD + Performance + Dashboard)");
+        logging::info("�?P2 modules integrated successfully (TDD + Performance + Dashboard)");
     }
     startup_profile::mark("p2_integration_init");
 
-    // ===== [I-10] 启动 3 个后台维护循环 =====
+    // ===== [I-10] 启动 3 个后台维护循�?=====
     let cache_handle = tokio::spawn(async {
         crate::cache_integration::cache_maintenance_loop().await;
     });
@@ -120,12 +120,12 @@ fn spawn_background_update_check(args: &Args) {
                 logging::info(&format!("Update available: {} -> {}", current, latest));
             }
             update::UpdateCheckResult::UpdateInstalled { version, path } => {
-                update::print_centered(&format!("✅ Updated to {}. Restarting...", version));
+                update::print_centered(&format!("�?Updated to {}. Restarting...", version));
                 let args: Vec<String> = std::env::args().skip(1).collect();
                 let exec_path = build::client_update_candidate(false)
                     .map(|(p, _)| p)
                     .unwrap_or(path);
-                let err = crate::platform::replace_process(
+                let err = crate::core::platform::replace_process(
                     ProcessCommand::new(&exec_path)
                         .args(&args)
                         .arg("--no-update"),

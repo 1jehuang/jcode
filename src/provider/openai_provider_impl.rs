@@ -596,7 +596,7 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
+            let body = crate::core::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!("OpenAI compact error {}: {}", status, body);
         }
 

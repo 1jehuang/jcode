@@ -45,7 +45,7 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
         cmd.arg("self-dev");
     }
     cmd.arg("--resume").arg(session_id).current_dir(&cwd);
-    let err = crate::platform::replace_process(&mut cmd);
+    let err = crate::core::platform::replace_process(&mut cmd);
 
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
@@ -59,7 +59,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
         let binary_path = std::path::PathBuf::from(&migrate_binary);
         if binary_path.exists() {
             crate::logging::info("Migrating to stable binary...");
-            let err = crate::platform::replace_process(
+            let err = crate::core::platform::replace_process(
                 ProcessCommand::new(&binary_path)
                     .arg("--resume")
                     .arg(session_id)
@@ -110,7 +110,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
             cmd.arg("self-dev");
         }
         cmd.arg("--resume").arg(session_id).current_dir(&cwd);
-        let err = crate::platform::replace_process(&mut cmd);
+        let err = crate::core::platform::replace_process(&mut cmd);
 
         if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {
             crate::logging::warn(&format!(
@@ -162,7 +162,7 @@ pub fn hot_rebuild(session_id: &str) -> Result<()> {
         anyhow::bail!("Tests failed - staying on current version");
     }
 
-    eprintln!("âœ“ All tests passed");
+    eprintln!("âœ?All tests passed");
 
     if let Err(e) = build::install_local_release(&repo_dir) {
         eprintln!("Warning: install failed: {}", e);
@@ -185,7 +185,7 @@ pub fn hot_rebuild(session_id: &str) -> Result<()> {
         cmd.arg("self-dev");
     }
     cmd.arg("--resume").arg(session_id).current_dir(&cwd);
-    let err = crate::platform::replace_process(&mut cmd);
+    let err = crate::core::platform::replace_process(&mut cmd);
 
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
@@ -259,7 +259,7 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             publish(SessionUpdateStatus::Error {
                 session_id,
                 action,
-                message: "Build failed â€” staying on the current binary.".to_string(),
+                message: "Build failed â€?staying on the current binary.".to_string(),
             });
             return;
         }
@@ -289,7 +289,7 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             publish(SessionUpdateStatus::Error {
                 session_id,
                 action,
-                message: "Tests failed â€” staying on the current binary. Fix the failing tests and try /rebuild again.".to_string(),
+                message: "Tests failed â€?staying on the current binary. Fix the failing tests and try /rebuild again.".to_string(),
             });
             return;
         }
@@ -351,7 +351,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                 ));
             }) {
                 Ok(path) => {
-                    update::print_centered(&format!("âœ“ Installed {}", release.tag_name));
+                    update::print_centered(&format!("âœ?Installed {}", release.tag_name));
 
                     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
                     let exe = build::client_update_candidate(is_selfdev)
@@ -370,11 +370,11 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                         .arg(session_id)
                         .arg("--no-update")
                         .current_dir(&cwd);
-                    let err = crate::platform::replace_process(&mut cmd);
+                    let err = crate::core::platform::replace_process(&mut cmd);
                     return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
                 }
                 Err(e) => {
-                    update::print_centered(&format!("âœ— Download failed: {}", e));
+                    update::print_centered(&format!("âœ?Download failed: {}", e));
                     update::print_centered("Resuming session with current version...");
                 }
             }
@@ -383,7 +383,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
             update::print_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
         }
         Err(e) => {
-            update::print_centered(&format!("âœ— Update check failed: {}", e));
+            update::print_centered(&format!("âœ?Update check failed: {}", e));
             update::print_centered("Resuming session with current version...");
         }
     }
@@ -399,7 +399,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
         .arg(session_id)
         .arg("--no-update")
         .current_dir(&cwd);
-    let err = crate::platform::replace_process(&mut cmd);
+    let err = crate::core::platform::replace_process(&mut cmd);
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
@@ -471,7 +471,7 @@ pub fn run_auto_update() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let err =
-        crate::platform::replace_process(ProcessCommand::new(&exe).args(&args).arg("--no-update"));
+        crate::core::platform::replace_process(ProcessCommand::new(&exe).args(&args).arg("--no-update"));
 
     Err(anyhow::anyhow!(
         "Failed to exec new binary {:?}: {}",
@@ -498,7 +498,7 @@ pub fn run_update() -> Result<()> {
                             update::format_download_progress_bar(progress)
                         ));
                     })?;
-                update::print_centered(&format!("âœ… Updated to {}", release.tag_name));
+                update::print_centered(&format!("âœ?Updated to {}", release.tag_name));
                 update::print_centered("Restart jcode to use the new version.");
             }
             Ok(None) => {

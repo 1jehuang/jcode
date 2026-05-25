@@ -1,0 +1,214 @@
+{{- if .Values.mcp.enabled }}
+# ─────────────────────────────────────────────────────
+# MCP Gateway ConfigMap
+# ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "carpai.fullname" . }}-mcp-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+data:
+  mcp_servers.yaml: |
+    servers:
+      github:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-github:8000"
+        transport: sse
+      jira:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-jira:8000"
+        transport: sse
+      slack:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-slack:8000"
+        transport: sse
+      docker:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-docker:8000"
+        transport: sse
+      postgres:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-postgres:8000"
+        transport: sse
+      redis:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-redis:8000"
+        transport: sse
+      kubernetes:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-kubernetes:8000"
+        transport: sse
+      aws:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-aws:8000"
+        transport: sse
+      sentry:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-sentry:8000"
+        transport: sse
+      datadog:
+        url: "http://{{ include "carpai.fullname" . }}-mcp-datadog:8000"
+        transport: sse
+
+---
+# ─────────────────────────────────────────────────────
+# MCP Gateway Deployment
+# ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "carpai.fullname" . }}-mcp-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  replicas: {{ .Values.mcp.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "carpai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mcp
+  template:
+    metadata:
+      labels:
+        {{- include "carpai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp
+    spec:
+      containers:
+        - name: mcp-gateway
+          image: {{ .Values.mcp.gateway.image }}
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: MCP_CONFIG_PATH
+              value: "/etc/carpai/mcp_servers.yaml"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/carpai
+              readOnly: true
+          resources:
+            {{- toYaml .Values.mcp.gateway.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "carpai.fullname" . }}-mcp-config
+
+---
+# ─────────────────────────────────────────────────────
+# MCP Gateway Service
+# ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "carpai.fullname" . }}-mcp-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    {{- include "carpai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+
+---
+# ─────────────────────────────────────────────────────
+# MCP Gateway HPA
+# ─────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "carpai.fullname" . }}-mcp-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "carpai.fullname" . }}-mcp-gateway
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+# ─────────────────────────────────────────────────────
+# MCP Ingress
+# ─────────────────────────────────────────────────────
+{{- if .Values.mcp.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "carpai.fullname" . }}-mcp-ingress
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_buffering off;
+      proxy_cache off;
+      proxy_set_header Connection '';
+      chunked_transfer_encoding on;
+spec:
+  ingressClassName: nginx
+  rules:
+    {{- range .Values.mcp.ingress.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "carpai.fullname" $ }}-mcp-gateway
+                port:
+                  number: 8000
+          - path: /github(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ include "carpai.fullname" $ }}-mcp-gateway
+                port:
+                  number: 8000
+          - path: /postgres(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ include "carpai.fullname" $ }}-mcp-gateway
+                port:
+                  number: 8000
+          - path: /(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ include "carpai.fullname" $ }}-mcp-gateway
+                port:
+                  number: 8000
+    {{- end }}
+{{- end }}
+{{- end }}

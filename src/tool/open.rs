@@ -445,7 +445,7 @@ async fn spawn_with_grace(mut cmd: Command, backend: &str) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let mut child = crate::platform::spawn_detached(&mut cmd)
+    let mut child: std::process::Child = crate::core::platform::spawn_detached(&mut cmd)
         .with_context(|| format!("Failed to open via {}", backend))?;
 
     tokio::time::sleep(Duration::from_millis(OPEN_GRACE_PERIOD_MS)).await;

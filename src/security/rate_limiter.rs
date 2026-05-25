@@ -5,16 +5,18 @@
 use axum::{
     extract::ConnectInfo,
     http::{Request, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_governor::{
     governor::GovernorConfigBuilder,
     key_extractor::SmartIpKeyExtractor,
-    GovernorLayer, GovernorService,
+    GovernorLayer,
 };
 use tracing::warn;
+
+type IpGovernorLayer = GovernorLayer<SmartIpKeyExtractor, ()>;
 
 /// Rate limit configuration
 #[derive(Debug, Clone)]
@@ -29,14 +31,14 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            rps: 10,      // 10 requests/second
-            burst_size: 20, // Allow burst of 20
+            rps: 10,
+            burst_size: 20,
         }
     }
 }
 
 /// Create rate limiting layer for Axum
-pub fn create_rate_limit_layer(config: RateLimitConfig) -> GovernorLayer {
+pub fn create_rate_limit_layer(config: RateLimitConfig) -> IpGovernorLayer {
     let conf = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(config.rps)
@@ -45,22 +47,22 @@ pub fn create_rate_limit_layer(config: RateLimitConfig) -> GovernorLayer {
             .expect("Failed to build rate limit config"),
     );
 
-    GovernorLayer::new(conf)
+    GovernorLayer::<SmartIpKeyExtractor, ()>::new(conf)
 }
 
 /// Per-endpoint rate limiter with different limits
 pub struct EndpointRateLimiter {
     /// General API endpoints
-    pub general: GovernorLayer,
+    pub general: IpGovernorLayer,
 
     /// Authentication endpoints (stricter)
-    pub auth: GovernorLayer,
+    pub auth: IpGovernorLayer,
 
     /// Completion endpoints (moderate)
-    pub completion: GovernorLayer,
+    pub completion: IpGovernorLayer,
 
     /// Chat endpoints (moderate)
-    pub chat: GovernorLayer,
+    pub chat: IpGovernorLayer,
 }
 
 impl EndpointRateLimiter {
@@ -71,15 +73,15 @@ impl EndpointRateLimiter {
                 burst_size: 20,
             }),
             auth: create_rate_limit_layer(RateLimitConfig {
-                rps: 2,   // Stricter: 2 req/s
+                rps: 2,
                 burst_size: 5,
             }),
             completion: create_rate_limit_layer(RateLimitConfig {
-                rps: 5,   // Moderate: 5 req/s
+                rps: 5,
                 burst_size: 10,
             }),
             chat: create_rate_limit_layer(RateLimitConfig {
-                rps: 3,   // Moderate: 3 req/s
+                rps: 3,
                 burst_size: 8,
             }),
         }
@@ -120,8 +122,6 @@ mod tests {
 
     #[test]
     fn test_endpoint_rate_limiter_creation() {
-        let limiter = EndpointRateLimiter::new();
-        // Just verify it can be created without panic
-        assert!(true);
+        let _limiter = EndpointRateLimiter::new();
     }
 }

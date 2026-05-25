@@ -1,0 +1,104 @@
+{{- if and .Values.postgresql.enabled .Values.postgresql.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "carpai.fullname" . }}-postgres-backup
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.postgresql.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "carpai.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  BACKUP_DIR="/backups"
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="${BACKUP_DIR}/carpai_backup_${TIMESTAMP}.sql.gz"
+                  echo "Starting PostgreSQL backup at $(date)"
+                  echo "Backup file: ${BACKUP_FILE}"
+                  PGPASSWORD=${POSTGRES_PASSWORD} pg_dump \
+                    -h ${POSTGRES_HOST} \
+                    -U ${POSTGRES_USER} \
+                    -d ${POSTGRES_DB} \
+                    --format=custom \
+                    --compress=9 \
+                    --verbose \
+                    > "${BACKUP_FILE}"
+                  if [ -f "${BACKUP_FILE}" ] && [ -s "${BACKUP_FILE}" ]; then
+                    BACKUP_SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+                    echo "Backup completed successfully. Size: ${BACKUP_SIZE}"
+                    find ${BACKUP_DIR} -name "carpai_backup_*.sql.gz" -mtime +7 -delete
+                  else
+                    echo "ERROR: Backup file is missing or empty!"
+                    exit 1
+                  fi
+                  echo "Backup finished at $(date)"
+              env:
+                - name: POSTGRES_HOST
+                  value: {{ include "carpai.fullname" . }}-postgres.{{ .Values.global.namespace }}.svc.cluster.local
+                - name: POSTGRES_PORT
+                  value: {{ .Values.postgresql.port | quote }}
+                - name: POSTGRES_USER
+                  value: {{ .Values.postgresql.user }}
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      {{- if .Values.postgresql.existingSecret }}
+                      name: {{ .Values.postgresql.existingSecret }}
+                      {{- else }}
+                      name: {{ include "carpai.fullname" . }}-postgres-secret
+                      {{- end }}
+                      key: POSTGRES_PASSWORD
+                - name: POSTGRES_DB
+                  value: {{ .Values.postgresql.database }}
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: {{ include "carpai.fullname" . }}-postgres-backup
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "carpai.fullname" . }}-postgres-backup
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.postgresql.backup.persistence.size }}
+  {{- with .Values.postgresql.backup.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

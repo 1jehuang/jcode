@@ -1,5 +1,5 @@
-use opentelemetry::{global, metrics::MeterProvider as _, KeyValue};
-use opentelemetry_sdk::metrics::{MeterProvider, PeriodicReader, SdkMeterProvider};
+use opentelemetry::{global, metrics::MeterProvider as _};
+use opentelemetry_sdk::metrics::{meter_provider::MeterProvider, PeriodicReader};
 use opentelemetry_otlp::WithExportConfig;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -12,18 +12,20 @@ pub async fn init_metrics(config: &MetricsConfig) -> Result<MeterProvider, Box<d
     let mut builder = MeterProvider::builder();
 
     // Add OTLP metrics exporter if endpoint is configured
-    if config.export_otlp && !config.otlp_endpoint.is_empty() {
-        let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.otlp_endpoint)
-            .with_timeout(Duration::from_secs(30))
-            .build()?;
+    if let Some(endpoint) = &config.otlp_endpoint {
+        if config.export_otlp && !endpoint.is_empty() {
+            let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .with_timeout(Duration::from_secs(30))
+                .build()?;
 
-        let reader = PeriodicReader::builder(otlp_exporter, opentelemetry_sdk::runtime::Tokio)
-            .with_interval(Duration::from_secs(config.export_interval_secs))
-            .build();
+            let reader = PeriodicReader::builder(otlp_exporter, opentelemetry_sdk::runtime::Tokio)
+                .with_interval(Duration::from_secs(config.export_interval_secs))
+                .build();
 
-        builder = builder.with_reader(reader);
+            builder = builder.with_reader(reader);
+        }
     }
 
     let provider = builder.build();

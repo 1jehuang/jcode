@@ -468,7 +468,7 @@ impl AntigravityProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
+            let body = crate::core::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!(
                 "Antigravity model catalog request failed ({}): {}",
                 status,
@@ -577,7 +577,7 @@ impl AntigravityProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
+            let body = crate::core::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!(
                 "Antigravity generateContent failed (HTTP {}): {}",
                 status,

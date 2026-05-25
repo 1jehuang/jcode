@@ -69,7 +69,7 @@ pub fn show_crash_resume_hint() {
     }
 
     let (id, name) = &crashed[0];
-    let session_label = id::extract_session_name(id).unwrap_or(name.as_str());
+    let session_label = id::extract_session_name(id).unwrap_or_else(|| name.clone());
 
     if crashed.len() == 1 {
         eprintln!(
@@ -169,7 +169,7 @@ pub fn cleanup_tui_runtime_for_run_result(
 }
 
 pub fn print_session_resume_hint(session_id: &str) {
-    let session_name = id::extract_session_name(session_id).unwrap_or(session_id);
+    let session_name = id::extract_session_name(session_id).unwrap_or_else(|| session_id.to_string());
     eprintln!();
     eprintln!(
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",

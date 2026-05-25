@@ -1,0 +1,11 @@
+[
+  {
+    "id": "msg-1779667159683-et5ocz",
+    "from": "util-agent",
+    "to": "team-lead",
+    "type": "message",
+    "content": "## `src/utils/mod.rs` 补全完成\n\n已向文件中添加以下内容（保留原 `lru_cache`/`rope`/`truncate_str`）：\n\n### 新增函数\n1. **`estimate_tokens(s: &str) -> u64`** — Token 估算（`s.len() * 0.25`）\n2. **`ApproxTokenSeverity`** 枚举 — `Normal` / `Warning` / `Danger`\n3. **`approx_tool_output_token_severity(tokens: u64) -> ApproxTokenSeverity`** — 阈值：>8000 Danger, >2000 Warning\n4. **`format_approx_token_count(tokens: u64) -> String`** — 格式化如 \"1.2K tokens\"\n5. **`format_number(n: usize) -> String`** — 逗号分隔数字如 \"1,234\"\n6. **`ProcessFdDiagnosticSnapshot`** 结构体 + **`process_fd_diagnostic_snapshot()`** 桩函数\n\n### 新增 re-export\n- `pub use crate::core::util::http_error_body;`\n- `pub use crate::core::util::format_error_chain;`\n\n### 检查结果\n- 文件共 73 行，无 lint 错误\n- 未修改其他文件",
+    "timestamp": "2026-05-24T23:59:19.683Z",
+    "read": true
+  }
+]

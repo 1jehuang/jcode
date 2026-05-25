@@ -11,7 +11,7 @@ pub mod api_key_validator;
 pub mod password_hasher;
 pub mod sql_safety;
 
-pub use rate_limiter::RateLimitLayer;
+pub use rate_limiter::{GovernorLayer as RateLimitLayer, EndpointRateLimiter};
 pub use api_key_validator::ApiKeyValidator;
 pub use password_hasher::PasswordHasher;
 pub use sql_safety::ParameterizedQuery;

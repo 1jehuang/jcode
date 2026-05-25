@@ -351,7 +351,7 @@ async fn render_svg_pipeline(
     for (frame_num, &unique_idx) in frame_indices.iter().enumerate() {
         let src = png_dir.join(format!("unique_{:06}.png", unique_idx));
         let dst = seq_dir.join(format!("frame_{:06}.png", frame_num));
-        crate::platform::symlink_or_copy(&src, &dst)?;
+        crate::core::platform::symlink_or_copy(&src, &dst)?;
     }
 
     eprintln!("  Encoding video with ffmpeg...");
@@ -685,9 +685,9 @@ text.emoji {{ font-family: "Noto Color Emoji", "Symbols Nerd Font", "{}", sans-s
             let first_char = sym.chars().next().unwrap_or(' ');
             if is_box_drawing(first_char) {
                 let fg = color_to_hex(cell.fg);
-                if first_char == '-' || first_char == '‚îÅ' {
+                if first_char == '-' || first_char == '‚î? {
                     let start_x = x;
-                    let thick = first_char == '‚îÅ';
+                    let thick = first_char == '‚î?;
                     while x < width && !should_skip_cell(x) {
                         let c = buf[(x, y)].symbol().chars().next().unwrap_or(' ');
                         if c != first_char || color_to_hex(buf[(x, y)].fg) != fg { break; }
@@ -828,75 +828,75 @@ fn box_drawing_to_svg(
     let (left, right_seg, up, down, thick) = match ch {
         '-' => (true, true, false, false, false),
         '|' => (false, false, true, true, false),
-        '‚îå' => (false, true, false, true, false),
-        '‚îê' => (true, false, false, true, false),
-        '‚îî' => (false, true, true, false, false),
-        '‚îò' => (true, false, true, false, false),
-        '‚îú' => (false, true, true, true, false),
-        '‚î§' => (true, false, true, true, false),
-        '‚î¨' => (true, true, false, true, false),
-        '‚î¥' => (true, true, true, false, false),
-        '‚îº' => (true, true, true, true, false),
-        '‚ï≠' => {
+        '‚î? => (false, true, false, true, false),
+        '‚î? => (true, false, false, true, false),
+        '‚î? => (false, true, true, false, false),
+        '‚î? => (true, false, true, false, false),
+        '‚î? => (false, true, true, true, false),
+        '‚î? => (true, false, true, true, false),
+        '‚î? => (true, true, false, true, false),
+        '‚î? => (true, true, true, false, false),
+        '‚î? => (true, true, true, true, false),
+        '‚ï? => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {right},{cy} L {arcx},{cy} A {r},{r} 0 0 0 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 right=right, cy=cy, arcx=cx+r, r=r, cx=cx, arcy=cy+r, b=b, color=color, t=t
             ));
         }
-        '‚ïÆ' => {
+        '‚ï? => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {px},{cy} L {arcx},{cy} A {r},{r} 0 0 1 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 px=px, cy=cy, arcx=cx-r, r=r, cx=cx, arcy=cy+r, b=b, color=color, t=t
             ));
         }
-        '‚ï∞' => {
+        '‚ï? => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 0 {arcx},{cy} L {right},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 cx=cx, py=py, arcy=cy-r, r=r, arcx=cx+r, cy=cy, right=right, color=color, t=t
             ));
         }
-        '‚ïØ' => {
+        '‚ï? => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 1 {arcx},{cy} L {px},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 cx=cx, py=py, arcy=cy-r, r=r, arcx=cx-r, cy=cy, px=px, color=color, t=t
             ));
         }
-        '‚îÅ' => (true, true, false, false, true),
-        '‚îÉ' => (false, false, true, true, true),
-        '‚îè' => (false, true, false, true, true),
-        '‚îì' => (true, false, false, true, true),
-        '‚îó' => (false, true, true, false, true),
-        '‚îõ' => (true, false, true, false, true),
-        '‚î£' => (false, true, true, true, true),
-        '‚î´' => (true, false, true, true, true),
-        '‚î≥' => (true, true, false, true, true),
-        '‚îª' => (true, true, true, false, true),
-        '‚ïã' => (true, true, true, true, true),
-        '‚ïê' => {
+        '‚î? => (true, true, false, false, true),
+        '‚î? => (false, false, true, true, true),
+        '‚î? => (false, true, false, true, true),
+        '‚î? => (true, false, false, true, true),
+        '‚î? => (false, true, true, false, true),
+        '‚î? => (true, false, true, false, true),
+        '‚î? => (false, true, true, true, true),
+        '‚î? => (true, false, true, true, true),
+        '‚î? => (true, true, false, true, true),
+        '‚î? => (true, true, true, false, true),
+        '‚ï? => (true, true, true, true, true),
+        '‚ï? => {
             let g = 1u32;
             return Some(format!(
                 concat!(r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#, r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#),
                 px, cy-g, right, cy-g, color, t, px, cy+g, right, cy+g, color, t
             ));
         }
-        '‚ïë' => {
+        '‚ï? => {
             let g = 1u32;
             return Some(format!(
                 concat!(r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#, r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#),
                 cx-g, py, cx-g, b, color, t, cx+g, py, cx+g, b, color, t
             ));
         }
-        '‚ñà' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw, ch_h, color)),
+        '‚ñ? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw, ch_h, color)),
         '‚ñÄ' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw, ch_h / 2, color)),
-        '‚ñÑ' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py+ch_h/2, cw, ch_h/2, color)),
-        '‚ñå' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw/2, ch_h, color)),
-        '‚ñê' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px+cw/2, py, cw/2, ch_h, color)),
-        '‚ñë' | '‚ñí' | '‚ñì' => {
-            let opacity = match ch { '‚ñë' => 0.25, '‚ñí' => 0.50, '‚ñì' => 0.75, _ => 0.5 };
+        '‚ñ? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py+ch_h/2, cw, ch_h/2, color)),
+        '‚ñ? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw/2, ch_h, color)),
+        '‚ñ? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px+cw/2, py, cw/2, ch_h, color)),
+        '‚ñ? | '‚ñ? | '‚ñ? => {
+            let opacity = match ch { '‚ñ? => 0.25, '‚ñ? => 0.50, '‚ñ? => 0.75, _ => 0.5 };
             return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}" opacity="{}"/>"#, px, py, cw, ch_h, color, opacity));
         }
         _ => return None,

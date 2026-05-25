@@ -1544,6 +1544,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "bytes",
+ "carpai-internal",
  "carpai-sdk",
  "chrono",
  "clap",

@@ -67,7 +67,7 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
             continue;
         }
 
-        let new_id = format!("session_recovery_{}", crate::id::new_id("rec"));
+        let new_id = format!("session_recovery_{}", crate::id::new_id());
         let mut new_session =
             Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
         new_session.custom_title = old.custom_title.clone();
@@ -229,7 +229,9 @@ impl SessionHeader {
         if let Some(ref name) = self.short_name {
             name
         } else if let Some(name) = extract_session_name(&self.id) {
-            name
+            // SAFETY: Leaks memory to return &str matching old API contract
+            // TODO: Refactor to return Cow<str> or String instead
+            Box::leak(name.into_boxed_str())
         } else {
             &self.id
         }
@@ -297,7 +299,7 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
                     continue;
                 }
                 let name = extract_session_name(&session_id)
-                    .unwrap_or(&session_id)
+                    .unwrap_or_else(|| session_id.clone())
                     .to_string();
                 crashed.push((session_id, name, ts));
             }
@@ -433,7 +435,7 @@ fn extract_timestamp_from_filename(filename: &str) -> Option<u64> {
 }
 
 pub(super) fn is_pid_running(pid: u32) -> bool {
-    crate::platform::is_process_running(pid)
+    crate::core::platform::is_process_running(pid)
 }
 
 // ---------------------------------------------------------------------------

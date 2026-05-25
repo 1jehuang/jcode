@@ -1,0 +1,175 @@
+{{- if .Values.monitoring.enabled }}
+# ─────────────────────────────────────────────────────
+# Prometheus Config
+# ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "carpai.fullname" . }}-prometheus-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.monitoring.prometheus.scrapeInterval }}
+      evaluation_interval: {{ .Values.monitoring.prometheus.evaluationInterval }}
+    scrape_configs:
+      - job_name: 'carpai'
+        static_configs:
+          - targets: ['{{ include "carpai.fullname" . }}:9090']
+        metrics_path: /metrics
+        scrape_interval: 5s
+    rule_files:
+      - /etc/prometheus/rules.yml
+  rules.yml: |
+    groups:
+      - name: carpai_alerts
+        rules:
+          - alert: HighErrorRate
+            expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is {{ $value }}"
+          - alert: HighLatency
+            expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High latency detected"
+              description: "P95 latency is {{ $value }}s"
+          - alert: LowSuccessRate
+            expr: rate(carpai_auto_approve_total[1h]) / rate(carpai_decision_total[1h]) < 0.7
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Low auto-approval success rate"
+              description: "Auto-approval success rate is {{ $value }}"
+      - name: backpressure_alerts
+        rules:
+          - alert: BackpressureActive
+            expr: carpai_backpressure_active == 1
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Backpressure is actively rejecting requests"
+              description: "System is overloaded and rejecting connections"
+          - alert: BackpressureNearCapacity
+            expr: carpai_backpressure_load_ratio > 0.8
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "System approaching backpressure capacity"
+              description: "Load ratio is {{ $value }} (threshold: 0.8)"
+          - alert: HighRejectionRate
+            expr: rate(carpai_backpressure_rejected_total[5m]) > 10
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High request rejection rate"
+              description: "Rejecting {{ $value }} requests/sec due to overload"
+          - alert: BackpressureThresholdReduced
+            expr: changes(carpai_backpressure_max_pending[10m]) > 0
+            for: 0m
+            labels:
+              severity: info
+            annotations:
+              summary: "Backpressure thresholds dynamically adjusted"
+              description: "Max pending limit changed to {{ $value }}"
+          - alert: HighCpuUtilization
+            expr: carpai_system_cpu_utilization > 8500
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Sustained high CPU utilization"
+              description: "CPU at {{ $value | humanizePercentage }}"
+          - alert: HighMemoryUtilization
+            expr: carpai_system_memory_utilization > 8500
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High memory utilization"
+              description: "Memory at {{ $value | humanizePercentage }}"
+          - alert: SessionGcLagging
+            expr: carpai_sessions_total > 1000
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "Large number of active sessions"
+              description: "{{ $value }} sessions tracked. GC may need tuning."
+
+---
+# ─────────────────────────────────────────────────────
+# Grafana Dashboard
+# ─────────────────────────────────────────────────────
+{{- if .Values.monitoring.grafana.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "carpai.fullname" . }}-grafana-dashboards
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+data:
+  carpai-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "CarpAI Overview",
+        "panels": [
+          {"id": 1, "title": "Request Rate", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "targets": [{"expr": "rate(http_requests_total[5m])", "legendFormat": "{{ method }} {{ handler }}"}]},
+          {"id": 2, "title": "Response Time (P95)", "type": "gauge", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "targets": [{"expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))"}], "fieldConfig": {"defaults": {"thresholds": [{"value": 0, "color": "green"}, {"value": 0.5, "color": "yellow"}, {"value": 1.0, "color": "red"}]}}},
+          {"id": 3, "title": "Active Tasks", "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}, "targets": [{"expr": "carpai_tasks_active"}]},
+          {"id": 4, "title": "Plugin Status", "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8}, "targets": [{"expr": "carpai_plugins_enabled"}]},
+          {"id": 5, "title": "Backpressure Status", "type": "stat", "gridPos": {"h": 4, "w": 6, "x": 12, "y": 8}, "targets": [{"expr": "carpai_backpressure_active"}], "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "Normal", "color": "green"}, "1": {"text": "OVERLOADED", "color": "red"}}, "type": "value"}]}}},
+          {"id": 6, "title": "Backpressure Load Ratio", "type": "gauge", "gridPos": {"h": 4, "w": 6, "x": 18, "y": 8}, "targets": [{"expr": "carpai_backpressure_load_ratio"}], "fieldConfig": {"defaults": {"min": 0, "max": 1, "thresholds": [{"value": 0, "color": "green"}, {"value": 0.7, "color": "yellow"}, {"value": 0.9, "color": "red"}]}}},
+          {"id": 7, "title": "Pending Requests vs Max", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}, "targets": [{"expr": "carpai_backpressure_pending", "legendFormat": "Pending"}, {"expr": "carpai_backpressure_max_pending", "legendFormat": "Max Limit"}]},
+          {"id": 8, "title": "Rejected Requests Rate", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}, "targets": [{"expr": "rate(carpai_backpressure_rejected_total[1m])", "legendFormat": "Rejections/sec"}]},
+          {"id": 9, "title": "System Resources", "type": "timeseries", "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}, "targets": [{"expr": "carpai_system_cpu_utilization / 100", "legendFormat": "CPU %"}, {"expr": "carpai_system_memory_utilization / 100", "legendFormat": "Memory %"}]},
+          {"id": 10, "title": "Session GC Stats", "type": "stat", "gridPos": {"h": 4, "w": 8, "x": 0, "y": 28}, "targets": [{"expr": "carpai_sessions_total", "legendFormat": "Total Sessions"}]},
+          {"id": 11, "title": "GC Compactions", "type": "stat", "gridPos": {"h": 4, "w": 8, "x": 8, "y": 28}, "targets": [{"expr": "increase(carpai_gc_compacted_total[1h])", "legendFormat": "Last Hour"}]},
+          {"id": 12, "title": "GC Memory Freed", "type": "stat", "gridPos": {"h": 4, "w": 8, "x": 16, "y": 28}, "targets": [{"expr": "increase(carpai_gc_memory_freed_bytes[1h]) / 1024 / 1024", "legendFormat": "MB Freed (1h)"}]}
+        ],
+        "refresh": {{ .Values.monitoring.grafana.dashboard.refresh | quote }},
+        "schemaVersion": 30,
+        "version": 1,
+        "time": {"from": "now-1h", "to": "now"}
+      }
+    }
+{{- end }}
+
+---
+# ─────────────────────────────────────────────────────
+# ServiceMonitor (Prometheus Operator)
+# ─────────────────────────────────────────────────────
+{{- if .Values.monitoring.prometheus.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "carpai.fullname" . }}-monitor
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      {{- include "carpai.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.prometheus.serviceMonitor.interval }}
+{{- end }}
+{{- end }}

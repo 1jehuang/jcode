@@ -530,7 +530,7 @@ async fn refresh_direct_access_token(
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
+            let body = crate::core::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!(
                 "Cursor access token refresh failed ({}): {}",
                 status,
@@ -581,7 +581,7 @@ async fn exchange_api_key_for_tokens(client: &Client, api_key: &str) -> Result<C
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = crate::util::http_error_body(response, "HTTP error").await;
+        let body: String = crate::core::util::http_error_body(response, "HTTP error").await;
         anyhow::bail!(
             "Cursor API key exchange failed ({}): {}",
             status,

@@ -167,7 +167,7 @@ impl WorkflowOrchestrator {
                         step_id: step.id.clone(),
                         tool: step.tool.clone(),
                         success,
-                        output: result.ok(),
+                        output: result.as_ref().ok().cloned(),
                         error: result.as_ref().err().map(|e| e.to_string()),
                         duration_ms: 0, // TODO: Track timing
                     };

@@ -34,7 +34,7 @@ impl Server {
                     // Log GPU details
                     for gpu in &topology.gpus {
                         info!(
-                            "  GPU {}: {} (VRAM: {}MB, Utilization: {}%, Temp: {}°C)",
+                            "  GPU {}: {} (VRAM: {}MB, Utilization: {}%, Temp: {}掳C)",
                             gpu.gpu_id,
                             gpu.model,
                             gpu.total_vram_mb,
@@ -67,7 +67,7 @@ impl Server {
 
         // Generate a memorable server name
         let (id, name) = new_memorable_server_id();
-        let icon = server_icon(&name).to_string();
+        let icon = server_icon().to_string();
         let identity = ServerIdentity {
             id,
             name,
@@ -1404,7 +1404,7 @@ impl Server {
                     // can coordinate before the work diverges further.
                     if !previous_touches.is_empty() {
                         crate::logging::info(&format!(
-                            "[file-activity] {} touched by peers before modification — sending alerts",
+                            "[file-activity] {} touched by peers before modification 鈥?sending alerts",
                             path.display()
                         ));
                         let members = swarm_members.read().await;
@@ -1418,7 +1418,7 @@ impl Server {
                                 let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
                                 let scope = file_activity_scope_label(prev, &touch);
                                 let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} previously {} this file{}",
+                                    "鈿?File activity: {} 鈥?{} 鈥?{} previously {} this file{}",
                                     path.display(),
                                     scope,
                                     prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
@@ -1464,7 +1464,7 @@ impl Server {
                             if let Some(prev_member) = members.get(&prev.session_id) {
                                 let scope = file_activity_scope_label(prev, &touch);
                                 let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}",
+                                    "鈿?File activity: {} 鈥?{} 鈥?{} just {} this file you previously worked with{}",
                                     path.display(),
                                     scope,
                                     current_name
@@ -1575,8 +1575,8 @@ impl Server {
         clear_reload_marker_if_stale_for_pid(std::process::id());
 
         // Restrict socket files to owner-only so other local users cannot connect.
-        let _ = crate::platform::set_permissions_owner_only(&self.socket_path);
-        let _ = crate::platform::set_permissions_owner_only(&self.debug_socket_path);
+        let _ = crate::core::platform::set_permissions_owner_only(&self.socket_path);
+        let _ = crate::core::platform::set_permissions_owner_only(&self.debug_socket_path);
 
         // Set logging context for this server
         crate::logging::set_server(&self.identity.name);

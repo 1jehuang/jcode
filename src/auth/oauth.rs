@@ -965,7 +965,7 @@ async fn fetch_claude_profile_email_at_url(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = crate::util::http_error_body(resp, "HTTP error").await;
+        let body = crate::core::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("Profile fetch failed ({}): {}", status, body);
     }
 

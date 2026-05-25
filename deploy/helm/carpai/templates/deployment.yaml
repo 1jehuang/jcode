@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "carpai.fullname" . }}
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.server.replicas }}
+  selector:
+    matchLabels:
+      {{- include "carpai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "carpai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+        {{- with .Values.server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "carpai.fullname" . }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.server.name }}
+          image: {{ include "carpai.image" . }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          ports:
+            {{- range .Values.server.ports }}
+            - containerPort: {{ .containerPort }}
+              name: {{ .name }}
+              protocol: {{ .protocol | default "TCP" }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "carpai.fullname" . }}-config
+          env:
+            {{- if .Values.postgresql.enabled }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.envSecrets.DATABASE_URL.secretName }}
+                  key: {{ .Values.server.envSecrets.DATABASE_URL.secretKey }}
+            {{- end }}
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_MODE
+              value: {{ .Values.redis.config | default "cluster" | quote }}
+            - name: REDIS_URL
+              value: {{ range $i := until (int .Values.redis.replicas) }}{{- if $i }},{{ end }}redis://{{ include "carpai.fullname" $ }}-redis-node-{{ $i }}.{{ include "carpai.fullname" $ }}-redis-node:{{ $.Values.redis.port }}{{ end }}
+            {{- end }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.envSecrets.JWT_SECRET.secretName }}
+                  key: {{ .Values.server.envSecrets.JWT_SECRET.secretKey }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.envSecrets.API_KEY.secretName }}
+                  key: {{ .Values.server.envSecrets.API_KEY.secretKey }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.server.probes.liveness.path }}
+              port: {{ (index .Values.server.ports 0).containerPort }}
+            initialDelaySeconds: {{ .Values.server.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.server.probes.readiness.path }}
+              port: {{ (index .Values.server.ports 0).containerPort }}
+            initialDelaySeconds: {{ .Values.server.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.readiness.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.server.probes.startup.path }}
+              port: {{ (index .Values.server.ports 0).containerPort }}
+            initialDelaySeconds: {{ .Values.server.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.server.probes.startup.failureThreshold }}
+          volumeMounts:
+            {{- if .Values.persistence.plugins.enabled }}
+            - name: plugins-volume
+              mountPath: /data/plugins
+            {{- end }}
+            {{- if .Values.persistence.sessions.enabled }}
+            - name: sessions-volume
+              mountPath: /data/sessions
+            {{- end }}
+            {{- if .Values.persistence.data.enabled }}
+            - name: data-volume
+              mountPath: /data
+            {{- end }}
+            {{- with .Values.server.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        {{- if .Values.persistence.plugins.enabled }}
+        - name: plugins-volume
+          persistentVolumeClaim:
+            claimName: {{ include "carpai.fullname" . }}-plugins
+        {{- end }}
+        {{- if .Values.persistence.sessions.enabled }}
+        - name: sessions-volume
+          persistentVolumeClaim:
+            claimName: {{ include "carpai.fullname" . }}-sessions
+        {{- end }}
+        {{- if .Values.persistence.data.enabled }}
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: {{ include "carpai.fullname" . }}-data
+        {{- end }}
+        {{- with .Values.server.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

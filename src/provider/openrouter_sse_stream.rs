@@ -146,7 +146,7 @@ async fn stream_response(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = crate::util::http_error_body(response, "HTTP error").await;
+        let body = crate::core::util::http_error_body(response, "HTTP error").await;
         anyhow::bail!(
             "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\nHint: verify the selected model exists in `/models`, your key has access, and the endpoint supports POST /chat/completions with streaming.",
             url,

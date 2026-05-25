@@ -102,7 +102,7 @@ impl App {
                 ""
             };
             message.push_str(&format!(
-                "- **{}** â€” `{}`{}\n  - {}\n  - {}\n",
+                "- **{}** â€?`{}`{}\n  - {}\n  - {}\n",
                 model.display_name,
                 model.id,
                 default_suffix,
@@ -117,7 +117,7 @@ impl App {
             crate::subscription_catalog::JcodeTier::Pro100,
         ] {
             message.push_str(&format!(
-                "- {} â€” ${}/mo retail, about ${:.2} usable inference budget\n",
+                "- {} â€?${}/mo retail, about ${:.2} usable inference budget\n",
                 tier.display_name(),
                 tier.retail_price_usd(),
                 tier.usable_budget_usd()
@@ -1522,11 +1522,11 @@ impl App {
 
                             let config_dir = crate::storage::app_config_dir()?;
                             std::fs::create_dir_all(&config_dir)?;
-                            crate::platform::set_directory_permissions_owner_only(&config_dir)?;
+                            crate::core::platform::set_directory_permissions_owner_only(&config_dir)?;
 
                             let file_path = config_dir.join(&env_file);
                             std::fs::write(&file_path, content)?;
-                            crate::platform::set_permissions_owner_only(&file_path)?;
+                            crate::core::platform::set_permissions_owner_only(&file_path)?;
                             crate::env::set_var(&key_name, &key);
                             Ok(())
                         })()
@@ -1987,7 +1987,7 @@ impl App {
                 self.set_status_notice(format!("â¬‡ï¸  Downloading {}...", version));
             }
             UpdateStatus::Installed { version } => {
-                self.set_status_notice(format!("âœ… Updated to {} â€” restarting", version));
+                self.set_status_notice(format!("âœ?Updated to {} â€?restarting", version));
             }
             UpdateStatus::UpToDate => {}
             UpdateStatus::Error(e) => {

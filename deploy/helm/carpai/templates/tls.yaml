@@ -1,0 +1,49 @@
+{{- if .Values.tls.enabled }}
+# ─────────────────────────────────────────────────────
+# cert-manager ClusterIssuer (internal CA)
+# ─────────────────────────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ include "carpai.fullname" . }}-ca-issuer
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ include "carpai.fullname" . }}-ca-secret
+{{- end }}
+
+{{- if .Values.certificate.enabled }}
+# ─────────────────────────────────────────────────────
+# Certificate for internal TLS
+# ─────────────────────────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "carpai.fullname" . }}-tls-cert
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "carpai.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "carpai.fullname" . }}-tls-secret
+  duration: {{ .Values.certificate.duration }}
+  renewBefore: {{ .Values.certificate.renewBefore }}
+  subject:
+    organizations:
+      - CarpAI
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    {{- range .Values.certificate.dnsNames }}
+    - {{ . }}
+    {{- end }}
+  issuerRef:
+    name: {{ .Values.certificate.clusterIssuer }}
+    kind: ClusterIssuer
+{{- end }}

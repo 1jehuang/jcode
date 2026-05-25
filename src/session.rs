@@ -73,6 +73,8 @@ fn is_visible_conversation_message(message: &StoredMessage) -> bool {
 pub struct Session {
     pub id: String,
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_title: Option<String>,
@@ -168,6 +170,8 @@ struct SessionStartupStub {
     id: String,
     #[serde(default)]
     parent_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -709,7 +713,7 @@ impl Session {
 
     pub fn create(parent_id: Option<String>, title: Option<String>) -> Self {
         let now = Utc::now();
-        let (id, short_name) = new_memorable_session_id();
+        let id = new_memorable_session_id();
         let is_debug = default_is_test_session();
         let mut session = Self {
             id,
@@ -898,7 +902,7 @@ impl Session {
     pub fn display_name(&self) -> &str {
         self.short_name
             .as_deref()
-            .or_else(|| extract_session_name(&self.id))
+            .or_else(|| extract_session_name(&self.id).as_deref())
             .unwrap_or(&self.id)
     }
 
@@ -1091,7 +1095,7 @@ impl Session {
         token_usage: Option<StoredTokenUsage>,
         display_role: Option<StoredDisplayRole>,
     ) -> String {
-        let id = new_id("message");
+        let id = new_id();
         self.append_stored_message(StoredMessage {
             id: id.clone(),
             role,

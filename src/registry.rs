@@ -73,7 +73,7 @@ impl ServerRegistry {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
-            if let Err(e) = crate::platform::set_directory_permissions_owner_only(parent) {
+            if let Err(e) = crate::core::platform::set_directory_permissions_owner_only(parent) {
                 crate::logging::info(&format!(
                     "Registry save: failed to harden directory permissions for {}: {}",
                     parent.display(),
@@ -84,7 +84,7 @@ impl ServerRegistry {
 
         let content = serde_json::to_string_pretty(self)?;
         fs::write(&path, content).await?;
-        if let Err(e) = crate::platform::set_permissions_owner_only(&path) {
+        if let Err(e) = crate::core::platform::set_permissions_owner_only(&path) {
             crate::logging::info(&format!(
                 "Registry save: failed to harden file permissions for {}: {}",
                 path.display(),
@@ -212,7 +212,7 @@ pub fn server_debug_socket_path(name: &str) -> PathBuf {
 
 /// Check if a process is still running
 fn is_process_running(pid: u32) -> bool {
-    crate::platform::is_process_running(pid)
+    crate::core::platform::is_process_running(pid)
 }
 
 /// Unregister a server from the registry

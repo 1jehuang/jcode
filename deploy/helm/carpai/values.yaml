@@ -1,0 +1,371 @@
+# =============================================================================
+# CarpAI Helm Chart - Global Configuration Values
+# =============================================================================
+
+# Global settings applied across all components
+global:
+  # Kubernetes namespace for all CarpAI resources
+  namespace: "carpai"
+  # Container image registry (empty = use default Docker Hub)
+  image:
+    registry: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+
+# =============================================================================
+# Server Configuration
+# =============================================================================
+server:
+  name: carpai
+  replicas: 3
+  image:
+    repository: carpai
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  ports:
+    - name: http
+      containerPort: 8080
+      protocol: TCP
+      servicePort: 80
+    - name: grpc
+      containerPort: 50051
+      protocol: TCP
+      servicePort: 50051
+    - name: websocket
+      containerPort: 8080
+      protocol: TCP
+      servicePort: 8080
+    - name: metrics
+      containerPort: 9090
+      protocol: TCP
+      servicePort: 9090
+    - name: rest
+      containerPort: 8081
+      protocol: TCP
+      servicePort: 8081
+
+  # Environment variables set directly in ConfigMap
+  env:
+    RUST_LOG: "carpai=info,axum=info"
+    APP_ENV: "production"
+    DASHBOARD_ENABLED: "true"
+    DASHBOARD_PORT: "8080"
+    DASHBOARD_REFRESH_INTERVAL: "5"
+    AUTO_MODE_DEFAULT: "false"
+    AUTO_APPROVAL_THRESHOLD: "0.85"
+    MAX_AUTO_ACTIONS: "50"
+    PLUGINS_DIR: "/data/plugins"
+    SESSION_DIR: "/data/sessions"
+    VERSION_DIR: "/data/versions"
+    CLUSTER_MODE: "single"
+    NODE_ID: "auto"
+    VECTOR_STORE_TYPE: "pgvector"
+    REDIS_MODE: "cluster"
+    TENANT_ISOLATION_ENABLED: "true"
+    MODEL_ROUTING_ENABLED: "true"
+    SESSION_STICKY_ENABLED: "true"
+    SESSION_STICKY_TTL_SECS: "3600"
+    KV_CACHE_STORAGE_TYPE: "nvme"
+    KV_CACHE_STORAGE_PATH: "/data/kv_cache"
+    KV_CACHE_TTL_SECS: "3600"
+    LOAD_BALANCER_STRATEGY: "three_layer"
+    BACKPRESSURE_THRESHOLD: "80"
+    ENABLE_DYNAMIC_BACKPRESSURE: "true"
+    MAX_CONCURRENT_SESSIONS: "100"
+
+  # Environment variables sourced from Secrets
+  envSecrets:
+    DATABASE_URL:
+      secretName: carpai-secrets
+      secretKey: database-url
+    JWT_SECRET:
+      secretName: carpai-secrets
+      secretKey: jwt-secret
+    API_KEY:
+      secretName: carpai-secrets
+      secretKey: api-key
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  probes:
+    liveness:
+      path: /api/health
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      path: /api/health
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 1
+    startup:
+      path: /api/health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 30
+
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - carpai
+            topologyKey: kubernetes.io/hostname
+
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+  podLabels: {}
+
+  extraVolumes: []
+  # - name: extra-volume
+  #   emptyDir: {}
+  extraVolumeMounts: []
+  # - name: extra-volume
+  #   mountPath: /extra/data
+
+# =============================================================================
+# Ingress Configuration
+# =============================================================================
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: carpai.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+        - path: /dashboard
+          pathType: Prefix
+        - path: /api
+          pathType: Prefix
+  tls:
+    - hosts:
+        - carpai.example.com
+      secretName: carpai-tls
+
+# =============================================================================
+# Horizontal Pod Autoscaler
+# =============================================================================
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: active_connections
+        target:
+          type: AverageValue
+          averageValue: "100"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+      selectPolicy: Min
+
+# =============================================================================
+# PodDisruptionBudget
+# =============================================================================
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# =============================================================================
+# Persistent Storage
+# =============================================================================
+persistence:
+  plugins:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+  sessions:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  data:
+    enabled: false
+    size: 20Gi
+    storageClass: ""
+
+# =============================================================================
+# PostgreSQL + pgvector
+# =============================================================================
+postgresql:
+  enabled: true
+  image: pgvector/pgvector:pg15
+  replicas: 1
+  port: 5432
+  database: carpai
+  user: carpai
+  existingSecret: ""
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  persistence:
+    size: 50Gi
+    storageClass: ""
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    persistence:
+      size: 100Gi
+      storageClass: ""
+
+# =============================================================================
+# Redis Cluster
+# =============================================================================
+redis:
+  enabled: true
+  image: redis:7-alpine
+  replicas: 6
+  port: 6379
+  gossipPort: 16379
+  config:
+    maxmemory: "512mb"
+    maxmemoryPolicy: allkeys-lru
+    appendonly: true
+  resources:
+    requests:
+      cpu: "0.5"
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    size: 10Gi
+    storageClass: ""
+
+# =============================================================================
+# Monitoring (Prometheus + Grafana)
+# =============================================================================
+monitoring:
+  enabled: true
+  prometheus:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+  grafana:
+    dashboard:
+      enabled: true
+      refresh: 5s
+
+# =============================================================================
+# CarpAI Operator (CarpAICluster CRD controller)
+# =============================================================================
+operator:
+  enabled: false
+  image: python:3.11-slim
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: 128Mi
+    limits:
+      cpu: "500m"
+      memory: 512Mi
+
+# =============================================================================
+# Data Operator (RedisCluster & MilvusCluster CRD controller)
+# =============================================================================
+dataOperator:
+  enabled: false
+
+# =============================================================================
+# MCP Gateway (Model Context Protocol)
+# =============================================================================
+mcp:
+  enabled: false
+  gateway:
+    image: carpai/mcp-gateway:latest
+    replicas: 1
+    resources:
+      requests:
+        cpu: "100m"
+        memory: 128Mi
+      limits:
+        cpu: "500m"
+        memory: 512Mi
+  ingress:
+    enabled: false
+    hosts:
+      - mcp.carpai.local
+
+# =============================================================================
+# TLS / cert-manager
+# =============================================================================
+tls:
+  enabled: false
+  certManager:
+    clusterIssuer: letsencrypt-prod
+    duration: 2160h
+    renewBefore: 360h
+  dnsNames:
+    - "*.carpai-system.svc.cluster.local"
+    - "carpai.carpai-system.svc.cluster.local"
+
+certificate:
+  enabled: false
+  clusterIssuer: carpai-ca-issuer
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+    - "*.carpai-system.svc.cluster.local"
+    - "carpai.carpai-system.svc.cluster.local"

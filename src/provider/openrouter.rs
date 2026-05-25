@@ -432,7 +432,7 @@ async fn fetch_models_from_api(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = crate::util::http_error_body(response, "HTTP error").await;
+        let body = crate::core::util::http_error_body(response, "HTTP error").await;
         anyhow::bail!(
             "OpenAI-compatible model catalog request failed\n  endpoint: {}\n  auth: {}\n  status: {}\n  response: {}\nHint: verify the base URL includes the API version (usually /v1), the key is valid for this endpoint, and the provider supports GET /models.",
             url,
@@ -1471,7 +1471,7 @@ impl OpenRouterProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
+            let body = crate::core::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!("Endpoints API error ({}): {}", status, body);
         }
 
@@ -1526,7 +1526,7 @@ impl OpenRouterProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::util::http_error_body(response, "HTTP error").await;
+            let body = crate::core::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!("Endpoints API error ({}): {}", status, body);
         }
 

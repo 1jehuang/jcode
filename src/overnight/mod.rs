@@ -51,7 +51,7 @@ pub struct OvernightStartOptions {
 }
 
 pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLaunch> {
-    let run_id = crate::id::new_id("overnight");
+    let run_id = crate::id::new_id();
     let started_at = Utc::now();
     let duration = ChronoDuration::minutes(options.duration.minutes as i64);
     let target_wake_at = started_at + duration;

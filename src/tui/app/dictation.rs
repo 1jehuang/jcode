@@ -24,7 +24,7 @@ impl ActiveDictation {
     async fn request_stop(&self) -> Result<(), String> {
         #[cfg(unix)]
         {
-            crate::platform::signal_detached_process_group(self.pid, libc::SIGINT)
+            crate::core::platform::signal_detached_process_group(self.pid, libc::SIGINT)
                 .map_err(|e| format!("failed to stop dictation: {}", e))
         }
         #[cfg(not(unix))]
@@ -66,7 +66,7 @@ impl App {
             if let Some(active) = self.dictation_session.take() {
                 let dictation_id = self.dictation_request_id.clone().unwrap_or_default();
                 let session_id = self.dictation_target_session_id.clone();
-                self.set_status_notice("🎙 Stopping dictation...");
+                self.set_status_notice("馃帣 Stopping dictation...");
                 tokio::spawn(async move {
                     if let Err(error) = active.request_stop().await {
                         Bus::global().publish(BusEvent::DictationFailed {
@@ -132,12 +132,12 @@ impl App {
         };
 
         let child = Arc::new(Mutex::new(Some(child)));
-        let dictation_id = crate::id::new_id("dictation");
+        let dictation_id = crate::id::new_id();
         self.dictation_session = Some(ActiveDictation::new(pid, Arc::clone(&child)));
         self.dictation_in_flight = true;
         self.dictation_request_id = Some(dictation_id.clone());
         self.dictation_target_session_id = target_session_id.clone();
-        self.set_status_notice("🎙 Dictation running — press again to stop");
+        self.set_status_notice("馃帣 Dictation running 鈥?press again to stop");
 
         let stdout_buf = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf = Arc::new(Mutex::new(Vec::new()));
@@ -257,7 +257,7 @@ async fn wait_for_dictation_exit(
             if let Some(_pid) = pid {
                 #[cfg(unix)]
                 {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGINT);
+                    let _ = crate::core::platform::signal_detached_process_group(pid, libc::SIGINT);
                 }
                 #[cfg(not(unix))]
                 {
@@ -408,7 +408,7 @@ fn transcript_from_command_output(stdout: &str) -> Option<String> {
             continue;
         }
 
-        if line.starts_with('拼') {
+        if line.starts_with('鎷?) {
             continue;
         }
 
@@ -442,14 +442,14 @@ fn is_status_only_line(line: &str) -> bool {
     line == "=================================================="
         || line.starts_with("Loading WebRTC VAD")
         || line.contains("Live transcription started")
-        || line.starts_with('🎤')
-        || line.starts_with('📝')
+        || line.starts_with('馃帳')
+        || line.starts_with('馃摑')
         || line.starts_with("Saving to:")
-        || line.starts_with('🌐')
+        || line.starts_with('馃寪')
         || line.starts_with("Auto-translating")
-        || line.starts_with('🀄')
+        || line.starts_with('馃€?)
         || line.starts_with("Pinyin shown")
-        || line.starts_with('🎯')
+        || line.starts_with('馃幆')
         || line.starts_with("Silence threshold:")
         || line.starts_with("Listening...")
         || line.contains("Recording...")
@@ -529,11 +529,11 @@ mod tests {
     fn transcript_from_output_strips_live_transcribe_status_lines() {
         let output = concat!(
             "\x1b[2mLoading WebRTC VAD...\x1b[0m\n",
-            "\x1b[96m🎤 Live transcription started (Ctrl+C to stop)\x1b[0m\n",
+            "\x1b[96m馃帳 Live transcription started (Ctrl+C to stop)\x1b[0m\n",
             "\x1b[2mListening...\x1b[0m\n",
             "\x1b[2m[17:00:00]\x1b[0m \x1b[93m[EN]\x1b[0m \x1b[96mhello world\x1b[0m\n",
-            "\x1b[2m[17:00:03]\x1b[0m \x1b[93m[ZH]\x1b[0m \x1b[92m你好\x1b[0m\n",
-            "           \x1b[2m拼 nǐ hǎo\x1b[0m\n",
+            "\x1b[2m[17:00:03]\x1b[0m \x1b[93m[ZH]\x1b[0m \x1b[92m浣犲ソ\x1b[0m\n",
+            "           \x1b[2m鎷?n菒 h菐o\x1b[0m\n",
             "           \x1b[3m\x1b[95m-> hello\x1b[0m\n",
             "==================================================\n",
             "\x1b[96mTranscription stopped.\x1b[0m\n"

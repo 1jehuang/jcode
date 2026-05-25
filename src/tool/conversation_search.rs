@@ -185,7 +185,7 @@ impl Tool for ConversationSearchTool {
                             crate::message::ContentBlock::Text { text, .. } => {
                                 // Truncate very long messages
                                 if text.len() > 1000 {
-                                    output.push_str(crate::util::truncate_str(text, 1000));
+                                    output.push_str(&crate::util::truncate_str(text, 1000).to_string());
                                     output.push_str("... (truncated)\n");
                                 } else {
                                     output.push_str(text);

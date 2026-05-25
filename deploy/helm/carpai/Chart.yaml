@@ -1,0 +1,21 @@
+apiVersion: v2
+name: carpai
+description: CarpAI - AI-powered coding assistant server with multi-tenant, distributed inference, and enterprise features
+type: application
+version: 0.1.0
+appVersion: latest
+kubeVersion: ">=1.24.0-0"
+keywords:
+  - carpai
+  - ai
+  - coding-assistant
+  - llm
+  - enterprise
+home: https://github.com/juming75/CarpAI
+sources:
+  - https://github.com/juming75/CarpAI
+maintainers:
+  - name: CarpAI Team
+    email: team@carpai.dev
+    url: https://carpai.dev
+icon: https://carpai.dev/icon.png

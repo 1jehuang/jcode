@@ -1,97 +1,4 @@
 //! Prometheus metrics collection for CarpAI Server
-
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
-use prometheus_client::registry::Registry;
-use std::sync::Arc;
-
-pub struct MetricsCollector {
-    pub registry: Registry,
-    pub http_requests_total: Counter,
-    pub http_request_duration_seconds: Histogram,
-    pub grpc_requests_total: Counter,
-    pub grpc_request_duration_seconds: Histogram,
-    pub agent_turns_total: Counter,
-    pub agent_turn_duration_seconds: Histogram,
-    pub active_agent_turns: Gauge,
-    pub tokens_prompt_total: Counter,
-    pub tokens_completion_total: Counter,
-    pub active_sessions: Gauge,
-    pub sessions_created_total: Counter,
-    pub tool_executions_total: Counter,
-    pub tool_execution_failures_total: Counter,
-    pub errors_total: Counter,
-    pub quota_exceeded_total: Counter,
-}
-
-impl MetricsCollector {
-    pub fn new() -> Self {
-        let mut registry = Registry::default();
-        let http_requests_total = Counter::default();
-        registry.register("http_requests_total", "Total HTTP requests", http_requests_total.clone());
-        let http_request_duration_seconds = Histogram::default();
-        registry.register("http_request_duration_seconds", "HTTP request duration", http_request_duration_seconds.clone());
-        let grpc_requests_total = Counter::default();
-        registry.register("grpc_requests_total", "Total gRPC requests", grpc_requests_total.clone());
-        let grpc_request_duration_seconds = Histogram::default();
-        registry.register("grpc_request_duration_seconds", "gRPC request duration", grpc_request_duration_seconds.clone());
-        let agent_turns_total = Counter::default();
-        registry.register("agent_turns_total", "Total agent turns", agent_turns_total.clone());
-        let agent_turn_duration_seconds = Histogram::default();
-        registry.register("agent_turn_duration_seconds", "Agent turn duration", agent_turn_duration_seconds.clone());
-        let active_agent_turns = Gauge::default();
-        registry.register("active_agent_turns", "Active agent turns", active_agent_turns.clone());
-        let tokens_prompt_total = Counter::default();
-        registry.register("tokens_prompt_total", "Total prompt tokens", tokens_prompt_total.clone());
-        let tokens_completion_total = Counter::default();
-        registry.register("tokens_completion_total", "Total completion tokens", tokens_completion_total.clone());
-        let active_sessions = Gauge::default();
-        registry.register("active_sessions", "Active sessions", active_sessions.clone());
-        let sessions_created_total = Counter::default();
-        registry.register("sessions_created_total", "Total sessions created", sessions_created_total.clone());
-        let tool_executions_total = Counter::default();
-        registry.register("tool_executions_total", "Total tool executions", tool_executions_total.clone());
-        let tool_execution_failures_total = Counter::default();
-        registry.register("tool_execution_failures_total", "Tool execution failures", tool_execution_failures_total.clone());
-        let errors_total = Counter::default();
-        registry.register("errors_total", "Total errors", errors_total.clone());
-        let quota_exceeded_total = Counter::default();
-        registry.register("quota_exceeded_total", "Quota exceeded events", quota_exceeded_total.clone());
-
-        Self {
-            registry,
-            http_requests_total,
-            http_request_duration_seconds,
-            grpc_requests_total,
-            grpc_request_duration_seconds,
-            agent_turns_total,
-            agent_turn_duration_seconds,
-            active_agent_turns,
-            tokens_prompt_total,
-            tokens_completion_total,
-            active_sessions,
-            sessions_created_total,
-            tool_executions_total,
-            tool_execution_failures_total,
-            errors_total,
-            quota_exceeded_total,
-        }
-    }
-
-    pub fn into_arc(self) -> Arc<Self> {
-        Arc::new(self)
-    }
-}
-
-impl Default for MetricsCollector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub fn register_metrics() -> Arc<MetricsCollector> {
-    MetricsCollector::new().into_arc()
-}
-//! Prometheus metrics collection for CarpAI Server
 //!
 //! This module provides metrics for monitoring:
 //! - Request counts and latencies
@@ -182,7 +89,7 @@ impl MetricsCollector {
             http_requests_total.clone(),
         );
 
-        let http_request_duration_seconds = Histogram::default();
+        let http_request_duration_seconds = Histogram::new([0.001, 0.01, 0.1, 1.0, 10.0, 60.0].into_iter());
         registry.register(
             "http_request_duration_seconds",
             "HTTP request duration",
@@ -196,7 +103,7 @@ impl MetricsCollector {
             grpc_requests_total.clone(),
         );
 
-        let grpc_request_duration_seconds = Histogram::default();
+        let grpc_request_duration_seconds = Histogram::new([0.001, 0.01, 0.1, 1.0, 10.0, 60.0].into_iter());
         registry.register(
             "grpc_request_duration_seconds",
             "gRPC request duration",
@@ -210,7 +117,7 @@ impl MetricsCollector {
             agent_turns_total.clone(),
         );
 
-        let agent_turn_duration_seconds = Histogram::default();
+        let agent_turn_duration_seconds = Histogram::new([0.001, 0.01, 0.1, 1.0, 10.0, 60.0].into_iter());
         registry.register(
             "agent_turn_duration_seconds",
             "Agent turn duration",
@@ -273,7 +180,7 @@ impl MetricsCollector {
             tool_execution_failures_total.clone(),
         );
 
-        let tool_execution_duration_seconds = Histogram::default();
+        let tool_execution_duration_seconds = Histogram::new([0.001, 0.01, 0.1, 1.0, 10.0, 60.0].into_iter());
         registry.register(
             "tool_execution_duration_seconds",
             "Tool execution duration",
@@ -345,103 +252,4 @@ pub fn register_metrics() -> Arc<MetricsCollector> {
 pub fn record_http_request(path: &str, method: &str, duration_secs: f64, status: u16) {
     // This would be called from middleware
     let _ = (path, method, duration_secs, status);
-}
-
-/// Helper to record agent turn metrics
-pub fn record_agent_turn(duration_secs: f64, prompt_tokens: u64, completion_tokens: u64) {
-    // This would be called from the agent loop
-    let _ = (duration_secs, prompt_tokens, completion_tokens);
-}
-// Prometheus metrics collection for CarpAI Server
-
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
-use prometheus_client::registry::Registry;
-use std::sync::Arc;
-
-pub struct MetricsCollector {
-    pub registry: Registry,
-    pub http_requests_total: Counter,
-    pub http_request_duration_seconds: Histogram,
-    pub grpc_requests_total: Counter,
-    pub grpc_request_duration_seconds: Histogram,
-    pub agent_turns_total: Counter,
-    pub agent_turn_duration_seconds: Histogram,
-    pub active_agent_turns: Gauge,
-    pub tokens_prompt_total: Counter,
-    pub tokens_completion_total: Counter,
-    pub active_sessions: Gauge,
-    pub sessions_created_total: Counter,
-    pub tool_executions_total: Counter,
-    pub tool_execution_failures_total: Counter,
-    pub errors_total: Counter,
-    pub quota_exceeded_total: Counter,
-}
-
-impl MetricsCollector {
-    pub fn new() -> Self {
-        let mut registry = Registry::default();
-        let http_requests_total = Counter::default();
-        registry.register("http_requests_total", "Total HTTP requests", http_requests_total.clone());
-        let http_request_duration_seconds = Histogram::default();
-        registry.register("http_request_duration_seconds", "HTTP request duration", http_request_duration_seconds.clone());
-        let grpc_requests_total = Counter::default();
-        registry.register("grpc_requests_total", "Total gRPC requests", grpc_requests_total.clone());
-        let grpc_request_duration_seconds = Histogram::default();
-        registry.register("grpc_request_duration_seconds", "gRPC request duration", grpc_request_duration_seconds.clone());
-        let agent_turns_total = Counter::default();
-        registry.register("agent_turns_total", "Total agent turns", agent_turns_total.clone());
-        let agent_turn_duration_seconds = Histogram::default();
-        registry.register("agent_turn_duration_seconds", "Agent turn duration", agent_turn_duration_seconds.clone());
-        let active_agent_turns = Gauge::default();
-        registry.register("active_agent_turns", "Active agent turns", active_agent_turns.clone());
-        let tokens_prompt_total = Counter::default();
-        registry.register("tokens_prompt_total", "Total prompt tokens", tokens_prompt_total.clone());
-        let tokens_completion_total = Counter::default();
-        registry.register("tokens_completion_total", "Total completion tokens", tokens_completion_total.clone());
-        let active_sessions = Gauge::default();
-        registry.register("active_sessions", "Active sessions", active_sessions.clone());
-        let sessions_created_total = Counter::default();
-        registry.register("sessions_created_total", "Total sessions created", sessions_created_total.clone());
-        let tool_executions_total = Counter::default();
-        registry.register("tool_executions_total", "Total tool executions", tool_executions_total.clone());
-        let tool_execution_failures_total = Counter::default();
-        registry.register("tool_execution_failures_total", "Tool execution failures", tool_execution_failures_total.clone());
-        let errors_total = Counter::default();
-        registry.register("errors_total", "Total errors", errors_total.clone());
-        let quota_exceeded_total = Counter::default();
-        registry.register("quota_exceeded_total", "Quota exceeded events", quota_exceeded_total.clone());
-
-        Self {
-            registry,
-            http_requests_total,
-            http_request_duration_seconds,
-            grpc_requests_total,
-            grpc_request_duration_seconds,
-            agent_turns_total,
-            agent_turn_duration_seconds,
-            active_agent_turns,
-            tokens_prompt_total,
-            tokens_completion_total,
-            active_sessions,
-            sessions_created_total,
-            tool_executions_total,
-            tool_execution_failures_total,
-            errors_total,
-            quota_exceeded_total,
-        }
-    }
-
-    pub fn into_arc(self) -> Arc<Self> {
-        Arc::new(self)
-    }
-}
-
-impl Default for MetricsCollector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub fn register_metrics() -> Arc<MetricsCollector> {
-    MetricsCollector::new().into_arc()
 }

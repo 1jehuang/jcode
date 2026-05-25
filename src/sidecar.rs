@@ -546,7 +546,7 @@ Output ONLY the formatted lines, no other text. If no NEW memories worth extract
             system.push_str("\n\nAlready known (do NOT re-extract these or close paraphrases):\n");
             for mem in existing.iter().take(80) {
                 system.push_str("- ");
-                system.push_str(crate::util::truncate_str(mem, 150));
+                system.push_str(&crate::util::truncate_str(mem.as_str(), 150).to_string());
                 system.push('\n');
             }
         }

@@ -307,7 +307,7 @@ pub(super) fn handle_run_subagent(
 
     tokio::spawn(async move {
         let description = derive_subagent_description(&prompt);
-        let tool_call_id = crate::id::new_id("call");
+        let tool_call_id = crate::id::new_id();
         let tool_name = "subagent".to_string();
         let tool_input = serde_json::json!({
             "description": description,

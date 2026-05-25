@@ -4,7 +4,7 @@ use super::{
     spawn_selfdev_in_new_terminal,
 };
 #[cfg(unix)]
-use crate::platform::set_permissions_executable;
+use crate::core::platform::set_permissions_executable;
 #[cfg(unix)]
 use crate::transport::Listener;
 #[cfg(unix)]

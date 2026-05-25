@@ -363,7 +363,7 @@ pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Lin
     let server_name = app.server_display_name();
     let short_model = shorten_model_name(&model);
     let icon = connection_type_icon(app.connection_type().as_deref())
-        .unwrap_or_else(|| crate::id::session_icon(&session_name));
+        .unwrap_or_else(|| crate::id::session_icon());
     let nice_model = format_model_name(&short_model);
     let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
     let align = Alignment::Center;

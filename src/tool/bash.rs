@@ -807,7 +807,7 @@ impl BashTool {
             cmd.current_dir(dir);
         }
 
-        let mut child = crate::platform::spawn_detached(&mut cmd)?;
+        let mut child = crate::core::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
 
@@ -829,7 +829,7 @@ impl BashTool {
             }
 
             if started.elapsed() >= timeout_duration {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                let _ = crate::core::platform::signal_detached_process_group(pid, libc::SIGKILL);
                 let _ = tokio::fs::remove_file(&info.output_file).await;
                 let _ = tokio::fs::remove_file(&info.status_file).await;
                 return Err(anyhow::anyhow!("Command timed out after {}ms", timeout_ms));
@@ -944,7 +944,7 @@ impl BashTool {
 								#[cfg(unix)]
 								{
 									if let Some(pid) = child.id() {
-										let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+										let _ = crate::core::platform::signal_detached_process_group(pid, libc::SIGKILL);
 									} else {
 										let _ = child.start_kill();
 									}

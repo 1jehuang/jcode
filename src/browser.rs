@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-use crate::{platform, storage};
+use crate::{storage};
+use crate::core::platform;
 
 const GITHUB_API_LATEST: &str =
     "https://api.github.com/repos/1jehuang/firefox-agent-bridge/releases/latest";
