@@ -388,9 +388,6 @@ impl App {
         }
     }
 
-    /// Maximum number of entries kept in input history.
-    const INPUT_HISTORY_MAX: usize = 100;
-
     /// Push a submitted input into history (called from `submit_input`).
     pub(super) fn push_input_history(&mut self, text: String) {
         let trimmed = text.trim().to_string();
@@ -407,7 +404,8 @@ impl App {
             self.input_history.remove(existing);
         }
         self.input_history.push(trimmed);
-        if self.input_history.len() > Self::INPUT_HISTORY_MAX {
+        let max = crate::config::config().input_history.max_entries;
+        if self.input_history.len() > max {
             self.input_history.remove(0);
         }
         self.save_input_history();
@@ -662,9 +660,10 @@ impl App {
         let Some(arr) = value.get("history").and_then(|v| v.as_array()) else {
             return Vec::new();
         };
+        let max = crate::config::config().input_history.max_entries;
         arr.iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .take(Self::INPUT_HISTORY_MAX)
+            .take(max)
             .collect()
     }
 }

@@ -300,6 +300,11 @@ desktop_notifications = true
 # discord_channel_id = ""    # Channel ID to post in
 # discord_bot_user_id = ""   # Bot's user ID (for filtering own messages)
 # discord_reply_enabled = false  # Messages in channel become agent directives
+
+[input_history]
+# Maximum number of entries kept in input history (default: 100)
+# Can also be set via JCODE_INPUT_HISTORY_MAX env var.
+# max_entries = 100
 "#;
 
         std::fs::write(&path, default_content)?;

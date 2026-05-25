@@ -563,6 +563,13 @@ impl Config {
                 crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
             }
         }
+
+        // Input history
+        if let Ok(v) = std::env::var("JCODE_INPUT_HISTORY_MAX") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.input_history.max_entries = n;
+            }
+        }
     }
 }
 
