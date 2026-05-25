@@ -31,11 +31,12 @@ pub fn router_with_ctx(ctx: Arc<ServerContext>) -> Router<Arc<ServerContext>> {
 // Legacy function for backward compatibility
 pub fn router(_config: &ServerConfig) -> Router {
     Router::new()
-        .route("/chat/completions", post(chat_completions_no_ctx))
+        .route("/chat/completions", post(chat_completions))
         .route("/completions", post(completions))
         .route("/sessions", get(list_sessions))
-        .route("/sessions/:id", get(get_session))
+        .route("/sessions/:id", get(get_session).delete(delete_session))
         .route("/tools", get(list_tools))
+        .route("/tools/:name", post(execute_tool))
         .route("/health", get(health_check))
 }
 

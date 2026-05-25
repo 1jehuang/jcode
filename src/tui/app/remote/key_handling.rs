@@ -749,7 +749,7 @@ async fn handle_remote_key_internal(
                         let session_id = app
                             .remote_session_id
                             .clone()
-                            .unwrap_or_else(|| crate::id::new_id("ses"));
+                            .unwrap_or_else(|| crate::id::new_id());
                         app.save_input_for_reload(&session_id);
                         app.reload_requested = Some(session_id);
                         app.should_quit = true;

@@ -29,6 +29,15 @@ tracing = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 humantime = "2"
 
+# Async streams
+tokio-stream = "0.1"
+
+# Random number generation for jitter in backoff
+rand = "0.8"
+
+# Regex for error classification
+regex = "1"
+
 # Internal crates
 jcode-types = { path = "../jcode-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }

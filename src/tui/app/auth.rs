@@ -102,7 +102,7 @@ impl App {
                 ""
             };
             message.push_str(&format!(
-                "- **{}** â€?`{}`{}\n  - {}\n  - {}\n",
+                "- **{}** â†’ `{}`{}\n  - {}\n  - {}\n",
                 model.display_name,
                 model.id,
                 default_suffix,
@@ -117,7 +117,7 @@ impl App {
             crate::subscription_catalog::JcodeTier::Pro100,
         ] {
             message.push_str(&format!(
-                "- {} â€?${}/mo retail, about ${:.2} usable inference budget\n",
+                "- {} â†’ ${}/mo retail, about ${:.2} usable inference budget\n",
                 tier.display_name(),
                 tier.retail_price_usd(),
                 tier.usable_budget_usd()
@@ -1987,7 +1987,7 @@ impl App {
                 self.set_status_notice(format!("â¬‡ï¸  Downloading {}...", version));
             }
             UpdateStatus::Installed { version } => {
-                self.set_status_notice(format!("âœ?Updated to {} â€?restarting", version));
+                self.set_status_notice(format!("-> Updated to {} -> restarting", version));
             }
             UpdateStatus::UpToDate => {}
             UpdateStatus::Error(e) => {

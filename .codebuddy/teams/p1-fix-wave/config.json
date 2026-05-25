@@ -1,0 +1,28 @@
+{
+  "name": "p1-fix-wave",
+  "leadAgentId": "59f0d7ecc8db413f9c233e3999bc1cc4",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-25T01:33:13.250Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@p1-fix-wave",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "layer1-agent@p1-fix-wave",
+      "name": "layer1-agent",
+      "role": "Fix Layer1 config errors"
+    },
+    {
+      "memberId": "layer4-agent@p1-fix-wave",
+      "name": "layer4-agent",
+      "role": "Fix Layer4 syntax errors"
+    }
+  ],
+  "isAutoTeam": false
+}

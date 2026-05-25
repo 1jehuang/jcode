@@ -68,6 +68,12 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
 /// 进程 FD 诊断快照（桩实现）
 pub struct ProcessFdDiagnosticSnapshot(pub Vec<(String, u64)>);
 
+impl std::fmt::Display for ProcessFdDiagnosticSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProcessFdDiagnosticSnapshot({} entries)", self.0.len())
+    }
+}
+
 pub fn process_fd_diagnostic_snapshot() -> ProcessFdDiagnosticSnapshot {
     ProcessFdDiagnosticSnapshot(Vec::new())
 }

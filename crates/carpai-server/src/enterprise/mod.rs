@@ -11,4 +11,4 @@ pub mod audit;
 
 pub use multi_tenant::{TenantContext, TenantExtractor};
 pub use quota::{UsageQuota, QuotaTracker, QuotaEnforcer};
-pub use audit::{AuditLog, AuditEvent, AuditWriter};
+pub use audit::{AuditEvent, AuditWriter};

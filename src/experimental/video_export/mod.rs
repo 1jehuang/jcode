@@ -685,9 +685,9 @@ text.emoji {{ font-family: "Noto Color Emoji", "Symbols Nerd Font", "{}", sans-s
             let first_char = sym.chars().next().unwrap_or(' ');
             if is_box_drawing(first_char) {
                 let fg = color_to_hex(cell.fg);
-                if first_char == '-' || first_char == 'â”? {
+                if first_char == '-' || first_char == 'â”€' {
                     let start_x = x;
-                    let thick = first_char == 'â”?;
+                    let thick = first_char == 'â”€';
                     while x < width && !should_skip_cell(x) {
                         let c = buf[(x, y)].symbol().chars().next().unwrap_or(' ');
                         if c != first_char || color_to_hex(buf[(x, y)].fg) != fg { break; }
@@ -828,75 +828,75 @@ fn box_drawing_to_svg(
     let (left, right_seg, up, down, thick) = match ch {
         '-' => (true, true, false, false, false),
         '|' => (false, false, true, true, false),
-        'â”? => (false, true, false, true, false),
-        'â”? => (true, false, false, true, false),
-        'â”? => (false, true, true, false, false),
-        'â”? => (true, false, true, false, false),
-        'â”? => (false, true, true, true, false),
-        'â”? => (true, false, true, true, false),
-        'â”? => (true, true, false, true, false),
-        'â”? => (true, true, true, false, false),
-        'â”? => (true, true, true, true, false),
-        'â•? => {
+        'â”œ' => (false, true, false, true, false),
+        'â”¤' => (true, false, false, true, false),
+        'â”¬' => (false, true, true, false, false),
+        'â”´' => (true, false, true, false, false),
+        'â”¼' => (false, true, true, true, false),
+        'â”½' => (true, false, true, true, false),
+        'â”œ' => (true, true, false, true, false),
+        'â”¬' => (true, true, true, false, false),
+        'â”¼' => (true, true, true, true, false),
+        'â•­' => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {right},{cy} L {arcx},{cy} A {r},{r} 0 0 0 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 right=right, cy=cy, arcx=cx+r, r=r, cx=cx, arcy=cy+r, b=b, color=color, t=t
             ));
         }
-        'â•? => {
+        'â•®' => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {px},{cy} L {arcx},{cy} A {r},{r} 0 0 1 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 px=px, cy=cy, arcx=cx-r, r=r, cx=cx, arcy=cy+r, b=b, color=color, t=t
             ));
         }
-        'â•? => {
+        'â•¯' => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 0 {arcx},{cy} L {right},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 cx=cx, py=py, arcy=cy-r, r=r, arcx=cx+r, cy=cy, right=right, color=color, t=t
             ));
         }
-        'â•? => {
+        'â•°' => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 1 {arcx},{cy} L {px},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
                 cx=cx, py=py, arcy=cy-r, r=r, arcx=cx-r, cy=cy, px=px, color=color, t=t
             ));
         }
-        'â”? => (true, true, false, false, true),
-        'â”? => (false, false, true, true, true),
-        'â”? => (false, true, false, true, true),
-        'â”? => (true, false, false, true, true),
-        'â”? => (false, true, true, false, true),
-        'â”? => (true, false, true, false, true),
-        'â”? => (false, true, true, true, true),
-        'â”? => (true, false, true, true, true),
-        'â”? => (true, true, false, true, true),
-        'â”? => (true, true, true, false, true),
-        'â•? => (true, true, true, true, true),
-        'â•? => {
+        'â•' => (true, true, false, false, true),
+        'â•‘' => (false, false, true, true, true),
+        'â”œ' => (false, true, false, true, true),
+        'â”¤' => (true, false, false, true, true),
+        'â”¬' => (false, true, true, false, true),
+        'â”´' => (true, false, true, false, true),
+        'â”¼' => (false, true, true, true, true),
+        'â”½' => (true, false, true, true, true),
+        'â”œ' => (true, true, false, true, true),
+        'â”¬' => (true, true, true, false, true),
+        'â”¼' => (true, true, true, true, true),
+        'â•' => {
             let g = 1u32;
             return Some(format!(
                 concat!(r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#, r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#),
                 px, cy-g, right, cy-g, color, t, px, cy+g, right, cy+g, color, t
             ));
         }
-        'â•? => {
+        'â•‘' => {
             let g = 1u32;
             return Some(format!(
                 concat!(r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#, r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#),
                 cx-g, py, cx-g, b, color, t, cx+g, py, cx+g, b, color, t
             ));
         }
-        'â–? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw, ch_h, color)),
+        'â–ˆ' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw, ch_h, color)),
         'â–€' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw, ch_h / 2, color)),
-        'â–? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py+ch_h/2, cw, ch_h/2, color)),
-        'â–? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw/2, ch_h, color)),
-        'â–? => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px+cw/2, py, cw/2, ch_h, color)),
-        'â–? | 'â–? | 'â–? => {
-            let opacity = match ch { 'â–? => 0.25, 'â–? => 0.50, 'â–? => 0.75, _ => 0.5 };
+        'â–„' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py+ch_h/2, cw, ch_h/2, color)),
+        'â–Œ' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px, py, cw/2, ch_h, color)),
+        'â–' => return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#, px+cw/2, py, cw/2, ch_h, color)),
+        'â–‘' | 'â–’' | 'â–“' => {
+            let opacity = match ch { 'â–‘' => 0.25, 'â–’' => 0.50, 'â–“' => 0.75, _ => 0.5 };
             return Some(format!(r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}" opacity="{}"/>"#, px, py, cw, ch_h, color, opacity));
         }
         _ => return None,

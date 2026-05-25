@@ -143,15 +143,17 @@ impl AgentService for AgentServiceImpl {
         use carpai_internal::{SessionStore, SessionId, StoredMessage, MessageRole, ContentBlock};
 
         let session_id = SessionId(req.session_id);
+        let role_str = req.message.as_ref().map(|m| m.role.as_str()).unwrap_or("user");
+        let content_str = req.message.as_ref().map(|m| m.content.as_str()).unwrap_or_default();
         let message = StoredMessage {
             id: uuid::Uuid::new_v4().to_string(),
-            role: match req.role.as_str() {
+            role: match role_str {
                 "user" => MessageRole::User,
                 "assistant" => MessageRole::Assistant,
                 "system" => MessageRole::System,
                 _ => MessageRole::User,
             },
-            content: vec![ContentBlock::Text { text: req.content }],
+            content: vec![ContentBlock::Text { text: content_str.to_string() }],
             timestamp: chrono::Utc::now(),
             token_usage: None,
             model: None,
@@ -177,7 +179,7 @@ impl AgentService for AgentServiceImpl {
         use carpai_internal::{SessionStore, SessionId};
 
         let session_id = SessionId(req.session_id);
-        let session = self.ctx.agent_ctx.sessions.load_session(&session_id)
+        let session: Box<dyn carpai_internal::Session> = self.ctx.agent_ctx.sessions.load_session(&session_id)
             .await
             .map_err(|e| Status::internal(format!("Failed to load session: {}", e)))?
             .ok_or_else(|| Status::not_found("Session not found"))?;
@@ -196,7 +198,7 @@ impl AgentService for AgentServiceImpl {
                 }
             };
 
-            carpai::agent::ChatMessage {
+            ChatMessage {
                 role: match msg.role {
                     carpai_internal::MessageRole::User => "user".to_string(),
                     carpai_internal::MessageRole::Assistant => "assistant".to_string(),
@@ -205,12 +207,14 @@ impl AgentService for AgentServiceImpl {
                 },
                 content,
                 name: None,
+                tool_call: None,
+                tool_call_id: None,
             }
         }).collect();
 
         Ok(Response::new(GetSessionMessagesResponse {
             messages,
-            session_id: req.session_id,
+            total: messages.len() as i32,
         }))
     }
 }

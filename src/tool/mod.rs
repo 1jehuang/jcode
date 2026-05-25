@@ -62,7 +62,7 @@ pub async fn record_tool_audit(
     error_message: Option<String>,
     duration_ms: u64,
 ) {
-    if let Some(ref logger) = audit_logger {
+    if let Some(logger) = audit_logger {
         if let Err(e) = logger.record_invocation(
             user_id,
             session_id,

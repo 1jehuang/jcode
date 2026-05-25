@@ -1,5 +1,5 @@
 use opentelemetry::{global, metrics::MeterProvider as _};
-use opentelemetry_sdk::metrics::{meter_provider::MeterProvider, PeriodicReader};
+use opentelemetry_sdk::metrics::{MeterProvider, PeriodicReader};
 use opentelemetry_otlp::WithExportConfig;
 use std::time::Duration;
 use tokio::net::TcpListener;

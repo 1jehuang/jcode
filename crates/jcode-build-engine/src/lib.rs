@@ -152,6 +152,7 @@ impl BuildEngine {
             active_tasks: 0,
             last_heartbeat: chrono::Utc::now(),
             labels: std::collections::HashMap::new(),
+            region: Some("local".to_string()),
             zone: Some("local".to_string()),
             started_at: chrono::Utc::now(),
             version: crate::BUILD_ENGINE_VERSION.to_string(),

@@ -10,6 +10,57 @@ use serde::{Deserialize, Serialize};
 use jcode_types::*;
 use jcode_provider_core::models::*;
 
+use crate::abort_controller::{AbortController, AbortSignal, AbortReason};
+use crate::model_fallback::FallbackTrigger;
+
+/// 工具执行结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub output: Option<String>,
+    pub is_error: bool,
+    pub duration_ms: u64,
+}
+
+impl ToolResult {
+    pub fn success(tool_call_id: String, output: String) -> Self {
+        Self {
+            tool_call_id,
+            output: Some(output),
+            is_error: false,
+            duration_ms: 0,
+        }
+    }
+    
+    pub fn error(tool_call_id: String, error: String) -> Self {
+        Self {
+            tool_call_id,
+            output: Some(error),
+            is_error: true,
+            duration_ms: 0,
+        }
+    }
+}
+
+/// 助手消息 (完整响应)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantMessage {
+    pub role: String,
+    pub content: Vec<ContentBlock>,
+    pub model: Option<String>,
+    pub stop_reason: Option<String>,
+    pub usage: Option<UsageInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageInfo {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// 模型标识符
+pub type ModelId = String;
+
 /// Agent 循环跨迭代状态 (对应 Claude Code State)
 #[derive(Debug, Clone)]
 pub struct AgentLoopState {
@@ -113,7 +164,7 @@ pub enum ContinueReason {
 }
 
 /// 终端状态 (循环退出原因)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TerminalState {
     /// 正常完成
     Completed { reason: String },

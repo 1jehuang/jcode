@@ -7,6 +7,7 @@ use axum::{
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use governor::middleware::NoOpMiddleware;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_governor::{
@@ -16,7 +17,7 @@ use tower_governor::{
 };
 use tracing::warn;
 
-type IpGovernorLayer = GovernorLayer<SmartIpKeyExtractor, ()>;
+type IpGovernorLayer = GovernorLayer<SmartIpKeyExtractor, NoOpMiddleware>;
 
 /// Rate limit configuration
 #[derive(Debug, Clone)]
@@ -47,7 +48,7 @@ pub fn create_rate_limit_layer(config: RateLimitConfig) -> IpGovernorLayer {
             .expect("Failed to build rate limit config"),
     );
 
-    GovernorLayer::<SmartIpKeyExtractor, ()>::new(conf)
+    GovernorLayer::<SmartIpKeyExtractor, NoOpMiddleware>::new(conf)
 }
 
 /// Per-endpoint rate limiter with different limits

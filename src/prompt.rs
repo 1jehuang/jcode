@@ -35,7 +35,7 @@ impl SplitSystemPrompt {
             self.static_part.clone()
         } else {
             format!("{}\n\n{}", self.static_part, self.dynamic_part)
-        })
+        }) as usize
     }
 }
 

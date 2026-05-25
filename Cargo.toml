@@ -463,6 +463,7 @@ dashmap = { version = "6", optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 carpai-sdk = { path = "crates/carpai-sdk", optional = true }
 carpai-internal = { path = "crates/carpai-internal" }
+governor = "0.10.4"
 
 [features]
 # ═══════════════════════════════════════════════════════════════

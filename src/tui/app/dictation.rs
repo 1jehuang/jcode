@@ -408,7 +408,7 @@ fn transcript_from_command_output(stdout: &str) -> Option<String> {
             continue;
         }
 
-        if line.starts_with('鎷?) {
+        if line.starts_with("✔") {
             continue;
         }
 
@@ -442,14 +442,14 @@ fn is_status_only_line(line: &str) -> bool {
     line == "=================================================="
         || line.starts_with("Loading WebRTC VAD")
         || line.contains("Live transcription started")
-        || line.starts_with('馃帳')
-        || line.starts_with('馃摑')
+        || line.starts_with("💬")
+        || line.starts_with("🎙")
         || line.starts_with("Saving to:")
-        || line.starts_with('馃寪')
+        || line.starts_with("💾")
         || line.starts_with("Auto-translating")
-        || line.starts_with('馃€?)
+        || line.starts_with("€")
         || line.starts_with("Pinyin shown")
-        || line.starts_with('馃幆')
+        || line.starts_with("🎯")
         || line.starts_with("Silence threshold:")
         || line.starts_with("Listening...")
         || line.contains("Recording...")

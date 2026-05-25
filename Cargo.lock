@@ -1557,6 +1557,7 @@ dependencies = [
  "futures-util",
  "glob",
  "global-hotkey",
+ "governor 0.10.4",
  "hex",
  "http 1.4.0",
  "hyper 1.9.0",
@@ -1756,6 +1757,7 @@ dependencies = [
  "jcode-provider-core",
  "lru 0.12.5",
  "once_cell",
+ "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -1850,7 +1852,9 @@ dependencies = [
  "prometheus-client",
  "prost 0.13.5",
  "prost-types 0.13.5",
+ "rand 0.8.6",
  "redis 0.26.1",
+ "regex",
  "serde",
  "serde_json",
  "sqlx",
@@ -3992,6 +3996,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "governor"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9efcab3c1958580ff1f25a2a41be1668f7603d849bb63af523b208a3cc1223b8"
+dependencies = [
+ "cfg-if",
+ "dashmap 6.2.1",
+ "futures-sink",
+ "futures-timer",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hashbrown 0.16.1",
+ "nonzero_ext",
+ "parking_lot",
+ "portable-atomic",
+ "quanta",
+ "rand 0.9.4",
+ "smallvec",
+ "spinning_top",
+ "web-time 1.1.0",
+]
+
+[[package]]
 name = "gpu-alloc"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4965,10 +4992,13 @@ dependencies = [
  "jcode-provider-core",
  "jcode-types",
  "pin-project-lite",
+ "rand 0.8.6",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tokio-test",
  "tokio-util",
  "tracing",
@@ -11555,7 +11585,7 @@ checksum = "aea939ea6cfa7c4880f3e7422616624f97a567c16df67b53b11f0d03917a8e46"
 dependencies = [
  "axum 0.7.9",
  "forwarded-header-value",
- "governor",
+ "governor 0.6.3",
  "http 1.4.0",
  "pin-project",
  "thiserror 1.0.69",

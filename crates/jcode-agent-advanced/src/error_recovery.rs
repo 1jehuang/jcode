@@ -223,7 +223,7 @@ impl BackoffStrategy {
             Self::Fixed { interval_ms } => Some(*interval_ms),
             
             Self::Linear { base_ms } => {
-                Some(base_ms.saturating_mul(attempt))
+                Some(base_ms.saturating_mul(attempt.into()))
             }
             
             Self::Exponential { base_ms } => {
@@ -237,7 +237,7 @@ impl BackoffStrategy {
                 
                 // 添加随机抖动: ±jitter_factor%
                 let range = capped_delay * jitter_factor;
-                let jitter = rand::rng().gen_range(-range..=range);
+                let jitter = rand::thread_rng().gen_range(-range..=range);
                 
                 Some((capped_delay + jitter).max(1.0) as u64)
             }
@@ -270,7 +270,7 @@ impl RetryPolicy {
             retryable_categories: vec![
                 ErrorCategory::NetworkTimeout,
                 ErrorCategory::RateLimited { retry_after_secs: 60 },
-                ErrorCategory::ModelErrorOverloaded,
+                ErrorCategory::ModelOverloaded,
                 ErrorCategory::ServerError(503),
             ],
             abort_on_timeout: true,

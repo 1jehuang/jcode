@@ -900,10 +900,11 @@ impl Session {
 
     /// Get the display name for this session (short memorable name if available)
     pub fn display_name(&self) -> &str {
-        self.short_name
-            .as_deref()
-            .or_else(|| extract_session_name(&self.id).as_deref())
-            .unwrap_or(&self.id)
+        if let Some(name) = self.short_name.as_deref() {
+            name
+        } else {
+            &self.id
+        }
     }
 
     /// Mark this session as a canary tester

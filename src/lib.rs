@@ -15,8 +15,10 @@
 // ===== Core Foundation (always included) =====
 pub mod core;
 pub mod id;
+pub mod update;
 pub mod utils;
 pub use utils as util;
+pub mod video_export;
 
 // ===== Agent System (always included — core abstraction) =====
 pub mod agent;

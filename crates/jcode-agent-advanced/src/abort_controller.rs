@@ -18,7 +18,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 /// Abort 原因分类 (对应 Claude Code 的多种 abort 场景)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AbortReason {
     /// 用户主动取消 (Ctrl+C / UI 取消按钮)
     UserCancelled,
@@ -127,7 +127,7 @@ impl AbortSignal {
     /// 
     /// 返回 abort 原因。如果从未触发则一直等待。
     pub async fn wait_aborted(&self) -> Option<AbortReason> {
-        self.inner.notified().await;
+        self.inner.notify.notified().await;
         self.reason()
     }
     
@@ -140,7 +140,7 @@ impl AbortSignal {
         timeout: std::time::Duration
     ) -> Option<AbortReason> {
         tokio::select! {
-            _ = self.inner.notified() => self.reason(),
+            _ = self.inner.notify.notified() => self.reason(),
             _ = tokio::time::sleep(timeout) => None,
         }
     }

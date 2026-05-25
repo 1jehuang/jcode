@@ -174,6 +174,7 @@ impl GlobalScheduler {
             node_count: self.node_state.count(),
             pending_tasks: self.task_queue.depth(),
             cache_hit_rate: 0.0, uptime_seconds: 0,
+            task_scheduler_ready: true,
         }
     }
 }

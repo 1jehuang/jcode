@@ -256,7 +256,7 @@ impl ModelFallbackManager {
         self.emit_event(LoopEvent::ModelFallbackTriggered {
             from: previous_model,
             to: fallback_model.clone(),
-            trigger: trigger.clone(),
+            reason: trigger.clone(),
         });
         
         tracing::warn!(

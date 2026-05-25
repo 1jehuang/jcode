@@ -40,7 +40,7 @@ impl Application {
         let rest_router = crate::rest::router_with_ctx(Arc::clone(&ctx));
 
         // gRPC routes - now with ServerContext injected
-        let grpc_router = crate::grpc::server_with_ctx(Arc::clone(&ctx));
+        let grpc_router = crate::grpc::grpc_server_with_ctx(Arc::clone(&ctx));
 
         // WebSocket routes
         let ws_router = crate::ws::router();

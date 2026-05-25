@@ -28,10 +28,10 @@ mod streaming_tool_executor;
 
 pub use types::*;
 pub use agent_loop::{AgentLoop, AgentLoopConfig, LoopEvent, TerminalState};
-pub use parallel_executor::{ParallelToolExecutor, DependencyGraph, ToolExecutionPlan};
+pub use parallel_executor::{ParallelToolExecutor, DependencyGraph, ExecutionPlan};
 pub use abort_controller::{AbortController, AbortSignal, AbortReason};
 pub use error_recovery::{
-    ErrorRecoveryStrategy, RetryPolicy, BackoffStrategy, 
+    RetryPolicy, BackoffStrategy, 
     RecoveryAction, ErrorClassifier, ToolFallbackRegistry
 };
 pub use model_fallback::{ModelFallbackManager, FallbackChain, FallbackTrigger};

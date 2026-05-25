@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -88,7 +89,7 @@ impl DependencyGraph {
     
     /// 解析为执行计划 (Kahn 算法拓扑排序)
     pub fn resolve_execution_plan(&self) -> Result<ExecutionPlan, String> {
-        let mut in_degree: HashMap<String, usize = HashMap::new();
+        let mut in_degree: HashMap<String, usize> = HashMap::new();
         
         // 计算入度
         for node in &self.nodes {

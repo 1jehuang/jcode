@@ -86,7 +86,7 @@ impl ApiKeyValidator {
     }
 
     /// Extract the key part (without prefix)
-    pub fn extract_key(&self, api_key: &str) -> Option<&str> {
+    pub fn extract_key<'a>(&'a self, api_key: &'a str) -> Option<&'a str> {
         if api_key.starts_with(&*self.expected_prefix) {
             Some(&api_key[self.expected_prefix.len()..])
         } else {

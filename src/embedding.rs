@@ -481,7 +481,7 @@ pub fn stats() -> EmbedderStats {
 }
 
 #[cfg(not(feature = "embeddings"))]
-pub fn embed(_text: &str) -> Result<EmbeddingVec> {
+pub fn embed(_text: &str) -> anyhow::Result<EmbeddingVec> {
     Err(anyhow::anyhow!("embeddings feature is not enabled"))
 }
 

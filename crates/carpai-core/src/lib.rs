@@ -27,6 +27,10 @@
 // --- Configuration ---
 pub mod config;
 
+// --- Abort/Retry utilities ---
+pub mod abort;
+pub mod retry;
+
 // --- Local Implementations (Layer 1) ---
 pub mod session_impl;
 pub mod tool_executor_impl;

@@ -17,6 +17,26 @@ use tracing::{warn, info};
 use carpai_internal::AgentContext;
 use crate::grpc_client::GrpcClient;
 
+/// 重试配置
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_attempts: u32,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub backoff_multiplier: f64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_delay_ms: 100,
+            max_delay_ms: 5000,
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
 /// Bridge operation mode
 #[derive(Debug, Clone)]
 pub enum BridgeMode {

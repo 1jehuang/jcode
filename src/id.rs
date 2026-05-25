@@ -20,6 +20,6 @@ pub fn server_icon() -> &'static str {
     "🖥️"
 }
 
-pub fn session_icon(_name: &str) -> &'static str {
+pub fn session_icon() -> &'static str {
     "💬"
 }

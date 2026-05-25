@@ -465,15 +465,15 @@ impl App {
     /// or restore stashed position if already at bottom.
     pub(super) fn toggle_scroll_bookmark(&mut self) {
         if let Some(saved) = self.scroll_bookmark.take() {
-            // We have a bookmark â€?teleport back to it
+            // We have a bookmark -> teleport back to it
             self.scroll_offset = saved;
             self.auto_scroll_paused = saved > 0;
             self.set_status_notice("ðŸ“Œ Returned to bookmark");
         } else if self.auto_scroll_paused && self.scroll_offset > 0 {
-            // We're scrolled up â€?save position and jump to bottom
+            // We're scrolled up -> save position and jump to bottom
             self.scroll_bookmark = Some(self.scroll_offset);
             self.follow_chat_bottom();
-            self.set_status_notice("ðŸ“Œ Bookmark set â€?press again to return");
+            self.set_status_notice("ðŸ“Œ Bookmark set -> press again to return");
         }
         // If already at bottom with no bookmark, do nothing
     }
@@ -599,9 +599,9 @@ impl App {
     pub(super) fn toggle_typing_scroll_lock(&mut self) {
         self.typing_scroll_lock = !self.typing_scroll_lock;
         let status = if self.typing_scroll_lock {
-            "Typing scroll lock: ON â€?typing stays at current chat position"
+            "Typing scroll lock: ON -> typing stays at current chat position"
         } else {
-            "Typing scroll lock: OFF â€?typing follows chat bottom"
+            "Typing scroll lock: OFF -> typing follows chat bottom"
         };
         self.set_status_notice(status);
     }
@@ -1439,7 +1439,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 ));
             }
             if todos.len() > 8 {
-                todo_lines.push_str(&format!("- â€?{} more\n", todos.len() - 8));
+                todo_lines.push_str(&format!("- and {} more\n", todos.len() - 8));
             }
         }
 

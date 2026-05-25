@@ -986,7 +986,7 @@ async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
 
     crate::auth::copilot::save_github_token(&token, &username)?;
 
-    eprintln!("  �?Authenticated as {} via GitHub Copilot", username);
+    eprintln!("  ║Authenticated as {} via GitHub Copilot", username);
     crate::telemetry::record_auth_success("copilot", "oauth_device_code");
     Ok(())
 }
@@ -1051,14 +1051,14 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
 async fn login_google_flow(no_browser: bool) -> Result<()> {
     use auth::google::{GmailAccessTier, GoogleCredentials};
 
-    eprintln!("╔══════════════════════════════════════════╗");
-    eprintln!("�?      Gmail Integration Setup            �?);
-    eprintln!("╚══════════════════════════════════════════╝\n");
+    eprintln!("==========================================");
+    eprintln!("=      Gmail Integration Setup            =");
+    eprintln!("==========================================\n");
 
     let _creds = match auth::google::load_credentials() {
         Ok(creds) => {
             eprintln!(
-                "�?Google credentials found (client_id: {}...)\n",
+                "Google credentials found (client_id: {}...)\n",
                 &creds.client_id[..20.min(creds.client_id.len())]
             );
             creds
@@ -1108,7 +1108,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
                     };
                     auth::google::save_credentials(&creds)?;
                     eprintln!(
-                        "\n�?Credentials saved to {}\n",
+                        "\nCredentials saved to {}\n",
                         auth::google::credentials_path()?.display()
                     );
                     creds
@@ -1145,7 +1145,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
                     let creds = auth::google::load_credentials()
                         .context("Could not parse the credentials file. Make sure it's the OAuth client JSON from Google Cloud Console.")?;
 
-                    eprintln!("\n�?Credentials imported to {}\n", dest.display());
+                    eprintln!("\nCredentials imported to {}\n", dest.display());
                     creds
                 }
                 "3" => {
@@ -1227,7 +1227,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
                         client_secret,
                     };
                     auth::google::save_credentials(&creds)?;
-                    eprintln!("\n�?Credentials saved!\n");
+                    eprintln!("\nCredentials saved!\n");
                     creds
                 }
                 _ => {
@@ -1266,7 +1266,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
     let tokens = auth::google::login(tier, no_browser).await?;
 
     eprintln!("\n╔══════════════════════════════════════════╗");
-    eprintln!("�? �?Gmail setup complete!                 �?);
+    eprintln!("║ ║Gmail setup complete!                 ║");
     eprintln!("╚══════════════════════════════════════════╝\n");
     if let Some(email) = &tokens.email {
         eprintln!("  Account:      {}", email);
