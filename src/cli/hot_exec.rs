@@ -162,7 +162,7 @@ pub fn hot_rebuild(session_id: &str) -> Result<()> {
         anyhow::bail!("Tests failed - staying on current version");
     }
 
-    eprintln!("âœ?All tests passed");
+    eprintln!("âœ… All tests passed");
 
     if let Err(e) = build::install_local_release(&repo_dir) {
         eprintln!("Warning: install failed: {}", e);
@@ -259,7 +259,7 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             publish(SessionUpdateStatus::Error {
                 session_id,
                 action,
-                message: "Build failed â€?staying on the current binary.".to_string(),
+                message: "Build failed ï¿½?staying on the current binary.".to_string(),
             });
             return;
         }
@@ -289,7 +289,7 @@ pub fn spawn_background_session_rebuild(session_id: String) {
             publish(SessionUpdateStatus::Error {
                 session_id,
                 action,
-                message: "Tests failed â€?staying on the current binary. Fix the failing tests and try /rebuild again.".to_string(),
+                message: "Tests failed ï¿½?staying on the current binary. Fix the failing tests and try /rebuild again.".to_string(),
             });
             return;
         }
@@ -351,7 +351,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                 ));
             }) {
                 Ok(path) => {
-                    update::print_centered(&format!("âœ?Installed {}", release.tag_name));
+                    update::print_centered(&format!("ï¿½?Installed {}", release.tag_name));
 
                     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
                     let exe = build::client_update_candidate(is_selfdev)
@@ -374,7 +374,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                     return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
                 }
                 Err(e) => {
-                    update::print_centered(&format!("âœ?Download failed: {}", e));
+                    update::print_centered(&format!("ï¿½?Download failed: {}", e));
                     update::print_centered("Resuming session with current version...");
                 }
             }
@@ -383,7 +383,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
             update::print_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
         }
         Err(e) => {
-            update::print_centered(&format!("âœ?Update check failed: {}", e));
+            update::print_centered(&format!("ï¿½?Update check failed: {}", e));
             update::print_centered("Resuming session with current version...");
         }
     }
@@ -498,7 +498,7 @@ pub fn run_update() -> Result<()> {
                             update::format_download_progress_bar(progress)
                         ));
                     })?;
-                update::print_centered(&format!("âœ?Updated to {}", release.tag_name));
+                update::print_centered(&format!("ï¿½?Updated to {}", release.tag_name));
                 update::print_centered("Restart jcode to use the new version.");
             }
             Ok(None) => {

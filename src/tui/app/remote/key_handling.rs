@@ -781,7 +781,7 @@ async fn handle_remote_key_internal(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| crate::id::new_id("ses"));
+                        .unwrap_or_else(|| crate::id::new_id());
                     app.start_background_client_rebuild(session_id);
                     return Ok(());
                 }

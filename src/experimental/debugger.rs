@@ -218,7 +218,7 @@ impl DebugClient {
     }
 
     pub async fn attach(&mut self, pid: u32) -> Result<DebugSession> {
-        let id = crate::id::new_id("debug");
+        let id = crate::id::new_id();
         let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let adapter = Self::resolve_adapter(self.config.debugger_type);
 

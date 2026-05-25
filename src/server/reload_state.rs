@@ -686,7 +686,7 @@ mod tests {
         let (tx, _) = reload_ack();
 
         for _ in 0..5 {
-            let request_id = crate::id::new_id("reload-repeat");
+            let request_id = crate::id::new_id();
             let ack = ReloadAck {
                 hash: format!("hash-{}", request_id),
                 request_id: request_id.clone(),
