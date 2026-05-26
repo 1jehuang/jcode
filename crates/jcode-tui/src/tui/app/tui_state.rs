@@ -724,7 +724,18 @@ impl crate::tui::TuiState for App {
 
     fn input_history_search_status(&self) -> Option<(&str, Option<usize>, usize)> {
         let search = self.input_history_search.as_ref()?;
-        Some((&search.query, search.match_index, self.input_history.len()))
+        let selected_display = if search.matches.is_empty() { None } else { Some(search.selected) };
+        Some((&search.query, selected_display, search.matches.len()))
+    }
+
+    fn input_history_search_matches(&self) -> Option<(Vec<&str>, usize)> {
+        let search = self.input_history_search.as_ref()?;
+        let texts: Vec<&str> = search
+            .matches
+            .iter()
+            .filter_map(|&idx| self.input_history.get(idx).map(|s| s.as_str()))
+            .collect();
+        Some((texts, search.selected))
     }
 
     fn context_snapshot(&self) -> crate::tui::ContextSnapshot {

@@ -542,10 +542,11 @@ struct CommandCandidatesCache {
 pub(super) struct HistorySearchState {
     /// The search query typed by the user.
     pub(super) query: String,
-    /// Index into `input_history` of the current match (searching backwards from end).
-    /// `None` means no match found.
-    pub(super) match_index: Option<usize>,
-    /// The original input before the search started (restored on Esc).
+    /// All matching history indices (sorted newest-first), recomputed on query change.
+    pub(super) matches: Vec<usize>,
+    /// Index into `matches` of the currently highlighted result.
+    pub(super) selected: usize,
+    /// The original input before the search started (restored on Esc with no match).
     pub(super) saved_input: String,
     /// The original cursor position before the search started.
     pub(super) saved_cursor: usize,

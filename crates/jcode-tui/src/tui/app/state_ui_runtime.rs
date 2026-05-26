@@ -469,9 +469,12 @@ impl App {
             return;
         }
         self.reset_input_history_browse();
+        // Pre-compute all matches with empty query (everything matches)
+        let all_indices: Vec<usize> = (0..self.input_history.len()).rev().collect();
         self.input_history_search = Some(super::HistorySearchState {
             query: String::new(),
-            match_index: None,
+            matches: all_indices,
+            selected: 0,
             saved_input: self.input.clone(),
             saved_cursor: self.cursor_pos,
         });
@@ -495,29 +498,37 @@ impl App {
         self.input_history_search_find_match();
     }
 
-    /// Cycle to the next older match (Ctrl+R again while searching).
-    pub(super) fn input_history_search_next(&mut self) {
+    /// Move selection up in search results (older).
+    pub(super) fn input_history_search_up(&mut self) {
         let Some(ref mut search) = self.input_history_search else {
             return;
         };
-        if search.query.is_empty() {
+        if search.selected > 0 {
+            search.selected -= 1;
+        }
+        self.update_input_from_search_selection();
+    }
+
+    /// Move selection down in search results (newer).
+    pub(super) fn input_history_search_down(&mut self) {
+        let Some(ref mut search) = self.input_history_search else {
             return;
-        }
-        let query_lower = search.query.to_lowercase();
-        // Start searching from one before the current match
-        let start = match search.match_index {
-            Some(idx) => idx.saturating_sub(1),
-            None => self.input_history.len().saturating_sub(1),
         };
-        for i in (0..=start).rev() {
-            if self.input_history[i].to_lowercase().contains(&query_lower) {
-                search.match_index = Some(i);
-                self.input = self.input_history[i].clone();
-                self.cursor_pos = self.input.len();
-                return;
-            }
+        if search.selected + 1 < search.matches.len() {
+            search.selected += 1;
         }
-        // No older match found; keep current match
+        self.update_input_from_search_selection();
+    }
+
+    /// Update the input field from the currently selected search match.
+    fn update_input_from_search_selection(&mut self) {
+        let Some(ref search) = self.input_history_search else {
+            return;
+        };
+        if let Some(&idx) = search.matches.get(search.selected) {
+            self.input = self.input_history[idx].clone();
+            self.cursor_pos = self.input.len();
+        }
     }
 
     /// Accept the current search result (Enter).
@@ -525,9 +536,9 @@ impl App {
         let Some(search) = self.input_history_search.take() else {
             return;
         };
-        if let Some(idx) = search.match_index {
-            // Save undo state: capture the *original* pre-search input. find_match has
-            // already overwritten self.input, so temporarily restore the original.
+        let selected_idx = search.matches.get(search.selected).copied();
+        if let Some(idx) = selected_idx {
+            // Save undo state with the original pre-search input.
             if search.saved_input != self.input_history[idx] {
                 let matched_input = self.input.clone();
                 let matched_cursor = self.cursor_pos;
@@ -543,20 +554,15 @@ impl App {
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
         }
-        // If no match, leave input as-is (cleared by find_match during search)
+        // If no matches, leave input as-is (cleared by find_match during search)
     }
 
     /// Cancel the search and restore original input (Esc with no match).
     pub(super) fn cancel_input_history_search(&mut self) {
         if let Some(search) = self.input_history_search.take() {
-            if search.match_index.is_none() {
-                self.input = search.saved_input;
-                self.cursor_pos = search.saved_cursor;
-                self.reset_tab_completion();
-                self.sync_model_picker_preview_from_input();
-            } else if let Some(idx) = search.match_index {
-                // Esc with match: accept the match (input was already set by find_match)
-                // Save undo state with the original pre-search input
+            let selected_idx = search.matches.get(search.selected).copied();
+            if let Some(idx) = selected_idx {
+                // Esc with match: accept the match
                 if search.saved_input != self.input_history[idx] {
                     let matched_input = self.input.clone();
                     let matched_cursor = self.cursor_pos;
@@ -569,44 +575,43 @@ impl App {
                 self.input_history_index = Some(idx);
                 self.reset_tab_completion();
                 self.sync_model_picker_preview_from_input();
+            } else {
+                // No match: restore original input
+                self.input = search.saved_input;
+                self.cursor_pos = search.saved_cursor;
+                self.reset_tab_completion();
+                self.sync_model_picker_preview_from_input();
             }
         }
     }
 
-    /// Internal: find the most recent match for the current query.
+    /// Internal: recompute all matches for the current query and clamp selection.
     fn input_history_search_find_match(&mut self) {
         let Some(ref mut search) = self.input_history_search else {
             return;
         };
         if search.query.is_empty() {
-            search.match_index = None;
+            search.matches = (0..self.input_history.len()).rev().collect();
+            search.selected = 0;
+            // Empty query: restore the original pre-search input
             self.input = search.saved_input.clone();
             self.cursor_pos = search.saved_cursor;
             return;
         }
         let query_lower = search.query.to_lowercase();
-        // Search backwards from end (or from current match position to avoid jumping)
-        let start = match search.match_index {
-            Some(idx)
-                if self.input_history[idx]
-                    .to_lowercase()
-                    .contains(&query_lower) =>
-            {
-                idx
-            }
-            _ => self.input_history.len().saturating_sub(1),
-        };
-        for i in (0..=start).rev() {
-            if self.input_history[i].to_lowercase().contains(&query_lower) {
-                search.match_index = Some(i);
-                self.input = self.input_history[i].clone();
-                self.cursor_pos = self.input.len();
-                return;
-            }
+        search.matches = (0..self.input_history.len())
+            .rev()
+            .filter(|&i| self.input_history[i].to_lowercase().contains(&query_lower))
+            .collect();
+        search.selected = search.selected.min(search.matches.len().saturating_sub(1));
+        if let Some(&idx) = search.matches.get(search.selected) {
+            self.input = self.input_history[idx].clone();
+            self.cursor_pos = self.input.len();
+        } else {
+            search.selected = 0;
+            self.input.clear();
+            self.cursor_pos = 0;
         }
-        search.match_index = None;
-        self.input.clear();
-        self.cursor_pos = 0;
     }
 
     /// Clear all input history entries.

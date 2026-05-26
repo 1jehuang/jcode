@@ -1512,9 +1512,7 @@ pub(super) fn draw_input(
     let mut suggestion_lines: Vec<Line> = Vec::new();
     if let Some((query, _match_index, _total)) = app.input_history_search_status() {
         hint_shown = true;
-        // Search query line: shows what the user is searching for above the matched result.
-        // The matched history entry is already set as app.input and will be rendered
-        // by wrap_input_text below.
+        // Search query line: shows what the user is searching for
         lines.push(Line::from(vec![
             Span::styled(
                 "  🔍 ",
@@ -1529,6 +1527,44 @@ pub(super) fn draw_input(
                 Style::default().fg(rgb(255, 180, 100)),
             ),
         ]));
+        // Multi-line results: show all matching entries with selection highlight
+        if let Some((matches, selected)) = app.input_history_search_matches() {
+            let max_visible = (area.height as usize).saturating_sub(lines.len() + 1).min(8);
+            let total_matches = matches.len();
+            // Calculate scroll window around selected item
+            let scroll_start = if total_matches <= max_visible {
+                0
+            } else {
+                selected.saturating_sub(max_visible / 2).min(total_matches - max_visible)
+            };
+            for (display_idx, &text) in matches.iter().enumerate().skip(scroll_start).take(max_visible) {
+                let is_selected = display_idx == selected;
+                let truncated = if text.len() > line_width.saturating_sub(6) {
+                    format!("{}…", &text[..line_width.saturating_sub(7)])
+                } else {
+                    text.to_string()
+                };
+                let indicator = if is_selected { "▸ " } else { "  " };
+                let style = if is_selected {
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgb(120, 140, 160))
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(indicator, style),
+                    Span::styled(truncated, style),
+                ]));
+            }
+            if total_matches > max_visible {
+                let remaining = total_matches - scroll_start - max_visible.min(total_matches - scroll_start);
+                if remaining > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  … {} more", remaining),
+                        Style::default().fg(rgb(80, 100, 120)),
+                    )));
+                }
+            }
+        }
     } else if has_suggestions {
         suggestion_lines = command_suggestion_lines(app, &suggestions);
     } else if let Some(shell_hint) = shell_mode_hint(mode) {

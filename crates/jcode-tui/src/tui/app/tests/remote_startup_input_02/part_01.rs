@@ -1423,7 +1423,7 @@ fn test_ctrl_r_search_starts_and_shows_status() {
     assert!(status.is_some());
     let (query, match_idx, total) = status.unwrap();
     assert_eq!(query, "");
-    assert_eq!(match_idx, None);
+    assert_eq!(match_idx, Some(0)); // empty query shows all, selected=0
     assert_eq!(total, 2);
 }
 
@@ -1441,7 +1441,7 @@ fn test_ctrl_r_search_char_finds_match() {
     assert_eq!(app.cursor_pos, 7);
     let status = crate::tui::TuiState::input_history_search_status(&app).unwrap();
     assert_eq!(status.0, "g");
-    assert_eq!(status.1, Some(1)); // index 1
+    assert_eq!(status.1, Some(0)); // selected=0 (first in matches list)
 }
 
 #[test]
@@ -1490,22 +1490,23 @@ fn test_ctrl_r_search_next_cycles() {
     app.input_history_search_char('f');
     app.input_history_search_char('o');
 
-    // First match should be the most recent "foo" at index 2
+    // First match should be the most recent "foo" at index 2 (selected=0 in matches list)
     assert_eq!(app.input, "foo");
-    let (_, match_idx, _) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
-    assert_eq!(match_idx, Some(2));
+    let (_, match_idx, count) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
+    assert_eq!(match_idx, Some(0)); // selected=0 (first in matches list)
+    assert_eq!(count, 3); // 3 matches
 
-    // Cycle to next
-    app.input_history_search_next();
+    // Navigate down to next match
+    app.input_history_search_down();
     assert_eq!(app.input, "foobar");
     let (_, match_idx, _) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
     assert_eq!(match_idx, Some(1));
 
-    // Cycle to next
-    app.input_history_search_next();
+    // Navigate down to next match
+    app.input_history_search_down();
     assert_eq!(app.input, "foo");
     let (_, match_idx, _) = crate::tui::TuiState::input_history_search_status(&app).unwrap();
-    assert_eq!(match_idx, Some(0));
+    assert_eq!(match_idx, Some(2));
 }
 
 #[test]

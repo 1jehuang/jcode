@@ -2739,7 +2739,7 @@ pub(super) fn handle_history_search_key(
     match code {
         // Ctrl+R again: cycle to next older match
         KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input_history_search_next();
+            app.input_history_search_down();
             return Ok(());
         }
         // Enter: accept match and exit search
@@ -2767,15 +2767,14 @@ pub(super) fn handle_history_search_key(
             app.input_history_search_backspace();
             return Ok(());
         }
-        // Down arrow: accept the current match and exit search
-        // (allows continuing to Down through history after Ctrl+R search)
+        // Down arrow: navigate to next (newer) match
         KeyCode::Down => {
-            app.accept_input_history_search();
+            app.input_history_search_down();
             return Ok(());
         }
-        // Up arrow: cycle to next older match
+        // Up arrow: navigate to previous (older) match
         KeyCode::Up => {
-            app.input_history_search_next();
+            app.input_history_search_up();
             return Ok(());
         }
         // Printable character: append to search query (exclude Ctrl and Alt combos)

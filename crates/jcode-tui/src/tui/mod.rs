@@ -226,6 +226,10 @@ pub trait TuiState {
     fn input_history_search_status(&self) -> Option<(&str, Option<usize>, usize)> {
         None
     }
+    /// Returns `Some((match_texts, selected))` with all search result entries and the selected index.
+    fn input_history_search_matches(&self) -> Option<(Vec<&str>, usize)> {
+        None
+    }
     /// Context info (what's loaded in context window - static + dynamic)
     fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Authoritative, freshness-tagged context snapshot used by widgets.
