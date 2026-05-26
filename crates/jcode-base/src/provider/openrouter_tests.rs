@@ -1263,6 +1263,38 @@ fn named_openai_compatible_context_window_populates_global_cache() {
 }
 
 #[test]
+fn named_openai_compatible_provider_level_context_window_fallback() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    // Matches the user's config pattern: context_window at provider level,
+    // model entry with no context_window of its own.
+    let mut config = crate::config::NamedProviderConfig {
+        base_url: "https://opengateway.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("mimo-v2.5-pro".to_string()),
+        context_window: Some(1_000_000),
+        models: vec![crate::config::NamedProviderModelConfig {
+            id: "mimo-v2.5-pro".to_string(),
+            context_window: None,
+            input: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    config.model_catalog = false;
+
+    let provider =
+        OpenRouterProvider::new_named_openai_compatible("opengateway", &config).expect("provider");
+
+    // Provider instance should use provider-level context_window.
+    assert_eq!(provider.context_window(), 1_000_000);
+    // Global cache should also be populated.
+    assert_eq!(
+        crate::provider::context_limit_for_model("mimo-v2.5-pro"),
+        Some(1_000_000)
+    );
+}
+
+#[test]
 fn named_openai_compatible_loads_api_key_from_env_file() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new().expect("create temp dir");

@@ -1118,6 +1118,9 @@ impl OpenRouterProvider {
             .filter(|id| !id.is_empty())
             .map(ToString::to_string)
             .collect::<Vec<_>>();
+        // Build per-model context limits. Per-model context_window takes
+        // precedence; provider-level context_window serves as the default
+        // for models that don't specify their own.
         let static_context_limits = profile
             .models
             .iter()
@@ -1126,9 +1129,8 @@ impl OpenRouterProvider {
                 if id.is_empty() {
                     return None;
                 }
-                model
-                    .context_window
-                    .map(|limit| (id.to_ascii_lowercase(), limit))
+                let limit = model.context_window.or(profile.context_window);
+                limit.map(|limit| (id.to_ascii_lowercase(), limit))
             })
             .collect::<HashMap<_, _>>();
         // Populate the global context-limit cache so that resolution paths
