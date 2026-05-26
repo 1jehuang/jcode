@@ -1,0 +1,41 @@
+# CarpAI NOTICE
+
+## Third-Party Code Acknowledgments
+
+This project incorporates code from multiple open-source projects:
+
+### 1. Qwencode (QwenLM/qwen-code)
+- Source: https://github.com/QwenLM/qwen-code
+- License: Apache License, Version 2.0
+- Copyright (c) 2024 Alibaba Cloud (www.alibabacloud.com)
+- Used in: crates/qwen-llm/
+
+### 2. jcode
+- Source: https://github.com/<jcode-owner>/jcode
+- License: MIT License
+- Copyright (c) [Year] [Author/Organization]
+- Used in: crates/jcode-agent/
+
+### 3. opencode
+- Source: https://github.com/<opencode-owner>/opencode (archived)
+- License: MIT License
+- Copyright (c) [Year] [Author/Organization]
+- Used in: crates/opencode-commands/
+
+---
+
+## Trademark Notice
+
+"Qwen" is a trademark of Alibaba Cloud.
+This project is a third-party integration and is NOT affiliated with or endorsed by Alibaba Group.
+
+---
+
+## Copyright
+
+Copyright (c) 2024 CarpAI Team
+All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
