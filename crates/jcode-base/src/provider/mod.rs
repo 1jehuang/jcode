@@ -245,7 +245,7 @@ pub use self::models::{
     model_availability_for_account, model_unavailability_detail_for_account,
     note_openai_model_catalog_refresh_attempt, persist_anthropic_model_catalog,
     persist_openai_model_catalog, populate_account_models, populate_anthropic_models,
-    populate_context_limits, provider_for_model, provider_for_model_with_hint,
+    populate_context_limits, populate_context_limits_from_config, provider_for_model, provider_for_model_with_hint,
     provider_unavailability_detail_for_account, record_model_unavailable_for_account,
     record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,

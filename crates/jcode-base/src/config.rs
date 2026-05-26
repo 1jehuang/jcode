@@ -158,8 +158,15 @@ struct ConfigCache {
 
 static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
     let fingerprint = ConfigCacheFingerprint::current();
+    let config = leak_config(Config::load());
+    // Populate the context-limit cache from named provider configs on initial
+    // load so that both the server and TUI processes have correct context
+    // limits from the very start. Read from the loaded config directly to
+    // avoid a deadlock (config() would try to read CONFIG_CACHE which is
+    // still being initialized).
+    populate_context_limits_from_config_ref(config);
     RwLock::new(ConfigCache {
-        config: leak_config(Config::load()),
+        config,
         fingerprint,
         last_checked: Instant::now(),
         force_reload: false,
@@ -168,6 +175,27 @@ static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
 
 fn leak_config(config: Config) -> &'static Config {
     Box::leak(Box::new(config))
+}
+
+/// Populate the context-limit cache from a config reference directly.
+/// Used during initial CONFIG_CACHE init to avoid a deadlock from calling
+/// config() inside the LazyLock initializer.
+fn populate_context_limits_from_config_ref(cfg: &Config) {
+    let mut limits = std::collections::HashMap::new();
+    for (_name, provider_cfg) in &cfg.providers {
+        for model in &provider_cfg.models {
+            let id = model.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(limit) = model.context_window.or(provider_cfg.context_window) {
+                limits.insert(id.to_ascii_lowercase(), limit);
+            }
+        }
+    }
+    if !limits.is_empty() {
+        crate::provider::populate_context_limits(limits);
+    }
 }
 
 /// Get the global config instance.
@@ -217,6 +245,10 @@ pub fn config() -> &'static Config {
     if let Some(reason) = reload_reason {
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
         notify_config_reloaded();
+        // Populate the context-limit cache from named provider configs so that
+        // both the server and TUI processes have correct context limits even
+        // before the provider instance is created.
+        crate::provider::populate_context_limits_from_config();
     }
 
     config

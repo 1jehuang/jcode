@@ -440,6 +440,28 @@ pub fn populate_context_limits(models: HashMap<String, usize>) {
     }
 }
 
+/// Populate the context limit cache from named provider model configs in the
+/// user's config file. Called early so both the server and TUI processes have
+/// the cache populated even before the provider instance is created.
+pub fn populate_context_limits_from_config() {
+    let cfg = crate::config::config();
+    let mut limits = HashMap::new();
+    for (_name, provider_cfg) in &cfg.providers {
+        for model in &provider_cfg.models {
+            let id = model.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(limit) = model.context_window.or(provider_cfg.context_window) {
+                limits.insert(id.to_ascii_lowercase(), limit);
+            }
+        }
+    }
+    if !limits.is_empty() {
+        populate_context_limits(limits);
+    }
+}
+
 /// Populate the account-available model list (called once at startup from the Codex API).
 pub fn populate_account_models(slugs: Vec<String>) {
     populate_account_models_for_scope(&current_openai_account_scope(), slugs);
