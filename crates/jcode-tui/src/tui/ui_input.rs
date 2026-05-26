@@ -1511,14 +1511,9 @@ pub(super) fn draw_input(
     let mut hint_line: Option<String> = None;
     let mut suggestion_lines: Vec<Line> = Vec::new();
     if app.input_history_search_status().is_some() {
+        // Search query and match info are shown in the notification bar above;
+        // no extra hint needed in the input area so the typed content stays visible.
         hint_shown = true;
-        let hint =
-            "  (reverse-i-search) Type to search, Ctrl+R next, Enter to accept, Esc to cancel";
-        hint_line = Some(hint.trim().to_string());
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(rgb(255, 180, 100)),
-        )));
     } else if has_suggestions {
         suggestion_lines = command_suggestion_lines(app, &suggestions);
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
