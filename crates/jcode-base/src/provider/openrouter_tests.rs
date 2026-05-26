@@ -1225,6 +1225,44 @@ fn named_openai_compatible_model_context_window_overrides_default() {
 }
 
 #[test]
+fn named_openai_compatible_context_window_populates_global_cache() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let mut config = crate::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("mimo-v2.5-pro".to_string()),
+        models: vec![crate::config::NamedProviderModelConfig {
+            id: "mimo-v2.5-pro".to_string(),
+            context_window: Some(128_000),
+            input: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    config.model_catalog = false;
+
+    let _provider =
+        OpenRouterProvider::new_named_openai_compatible("custom", &config).expect("provider");
+
+    // The global context limit cache should now contain the user-configured limit,
+    // so codepaths that don't have access to the provider instance (e.g. TUI
+    // info widget, compaction budget) still resolve the correct limit instead of
+    // falling back to DEFAULT_CONTEXT_LIMIT (200k).
+    assert_eq!(
+        crate::provider::context_limit_for_model_with_provider(
+            "mimo-v2.5-pro",
+            Some("openrouter"),
+        ),
+        Some(128_000)
+    );
+    // Also accessible without a provider hint via the cache.
+    assert_eq!(
+        crate::provider::context_limit_for_model("mimo-v2.5-pro"),
+        Some(128_000)
+    );
+}
+
+#[test]
 fn named_openai_compatible_loads_api_key_from_env_file() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new().expect("create temp dir");

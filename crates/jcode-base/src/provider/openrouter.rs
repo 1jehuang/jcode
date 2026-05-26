@@ -1131,6 +1131,13 @@ impl OpenRouterProvider {
                     .map(|limit| (id.to_ascii_lowercase(), limit))
             })
             .collect::<HashMap<_, _>>();
+        // Populate the global context-limit cache so that resolution paths
+        // outside this provider instance (e.g. TUI info widget, compaction
+        // budget) also see user-configured limits, even when the upstream
+        // endpoint does not expose GET /v1/models.
+        if !static_context_limits.is_empty() {
+            crate::provider::populate_context_limits(static_context_limits.clone());
+        }
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
