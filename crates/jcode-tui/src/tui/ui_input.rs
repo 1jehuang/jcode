@@ -11,7 +11,7 @@ use crate::tui::color_support::rgb;
 use crate::tui::detect_kv_cache_problem;
 use crate::tui::info_widget::occasional_status_tip;
 use crate::tui::layout_utils;
-use ratatui::{prelude::*, widgets::Paragraph};
+use ratatui::{prelude::*, widgets::{Block, Borders, BorderType, Clear, Padding, Paragraph, Wrap}};
 
 fn shell_mode_color() -> Color {
     rgb(110, 214, 151)
@@ -1510,61 +1510,10 @@ pub(super) fn draw_input(
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
     let mut suggestion_lines: Vec<Line> = Vec::new();
-    if let Some((query, _match_index, _total)) = app.input_history_search_status() {
+    if app.input_history_search_status().is_some() {
         hint_shown = true;
-        // Search query line: shows what the user is searching for
-        lines.push(Line::from(vec![
-            Span::styled(
-                "  🔍 ",
-                Style::default().fg(rgb(255, 180, 100)),
-            ),
-            Span::styled(
-                query,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "█",
-                Style::default().fg(rgb(255, 180, 100)),
-            ),
-        ]));
-        // Multi-line results: show all matching entries with selection highlight
-        if let Some((matches, selected)) = app.input_history_search_matches() {
-            let max_visible = (area.height as usize).saturating_sub(lines.len() + 1).min(8);
-            let total_matches = matches.len();
-            // Calculate scroll window around selected item
-            let scroll_start = if total_matches <= max_visible {
-                0
-            } else {
-                selected.saturating_sub(max_visible / 2).min(total_matches - max_visible)
-            };
-            for (display_idx, &text) in matches.iter().enumerate().skip(scroll_start).take(max_visible) {
-                let is_selected = display_idx == selected;
-                let truncated = if text.len() > line_width.saturating_sub(6) {
-                    format!("{}…", &text[..line_width.saturating_sub(7)])
-                } else {
-                    text.to_string()
-                };
-                let indicator = if is_selected { "▸ " } else { "  " };
-                let style = if is_selected {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(rgb(120, 140, 160))
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(indicator, style),
-                    Span::styled(truncated, style),
-                ]));
-            }
-            if total_matches > max_visible {
-                let remaining = total_matches - scroll_start - max_visible.min(total_matches - scroll_start);
-                if remaining > 0 {
-                    lines.push(Line::from(Span::styled(
-                        format!("  … {} more", remaining),
-                        Style::default().fg(rgb(80, 100, 120)),
-                    )));
-                }
-            }
-        }
+        // Search results are rendered as a floating overlay above the input area
+        // (see draw_search_overlay). Only mark hint_shown here.
     } else if has_suggestions {
         suggestion_lines = command_suggestion_lines(app, &suggestions);
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
@@ -1968,4 +1917,129 @@ enum QueuedMsgType {
     Pending,
     Interleave,
     Queued,
+}
+
+/// Draw a floating search overlay above the input area during Ctrl+R search.
+/// The overlay renders the search query line and all matching history entries
+/// with selection highlight, positioned just above the input area.
+pub(super) fn draw_search_overlay(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    input_area: Rect,
+    terminal_height: u16,
+) {
+    let Some((query, _match_idx, _total)) = app.input_history_search_status() else {
+        return;
+    };
+    let Some((matches, selected)) = app.input_history_search_matches() else {
+        return;
+    };
+
+    let area_width = frame.area().width;
+    let content_width = (area_width as usize).saturating_sub(4); // 2 border + 2 padding
+
+    // Build overlay lines
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Search query line
+    lines.push(Line::from(vec![
+        Span::styled(
+            "🔍 ",
+            Style::default().fg(rgb(255, 180, 100)),
+        ),
+        Span::styled(
+            query.to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "█",
+            Style::default().fg(rgb(255, 180, 100)),
+        ),
+    ]));
+
+    // Separator
+    lines.push(Line::from(Span::styled(
+        "─".repeat(content_width.min(60)),
+        Style::default().fg(rgb(60, 60, 60)),
+    )));
+
+    // Result entries
+    let max_results = 8;
+    let total_matches = matches.len();
+    let scroll_start = if total_matches <= max_results {
+        0
+    } else {
+        selected
+            .saturating_sub(max_results / 2)
+            .min(total_matches - max_results)
+    };
+
+    for (display_idx, &text) in matches
+        .iter()
+        .enumerate()
+        .skip(scroll_start)
+        .take(max_results)
+    {
+        let is_selected = display_idx == selected;
+        let truncated = if text.len() > content_width.saturating_sub(4) {
+            format!("{}…", &text[..content_width.saturating_sub(5)])
+        } else {
+            text.to_string()
+        };
+        let indicator = if is_selected { "▸ " } else { "  " };
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+                .bg(rgb(40, 50, 70))
+        } else {
+            Style::default().fg(rgb(120, 140, 160))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(indicator.to_string(), style),
+            Span::styled(truncated, style),
+        ]));
+    }
+
+    if total_matches > max_results {
+        let shown = max_results.min(total_matches - scroll_start);
+        let remaining = total_matches - scroll_start - shown;
+        if remaining > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more", remaining),
+                Style::default().fg(rgb(80, 100, 120)),
+            )));
+        }
+    }
+
+    let overlay_height = (lines.len() as u16 + 2).min(terminal_height.saturating_sub(2)); // +2 for border
+
+    // Position above the input area
+    let overlay_y = input_area.y.saturating_sub(overlay_height);
+    let overlay_area = Rect {
+        x: input_area.x,
+        y: overlay_y,
+        width: area_width,
+        height: overlay_height,
+    };
+
+    // Clear the overlay area first
+    frame.render_widget(Clear, overlay_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(rgb(255, 180, 100)))
+        .title(Span::styled(
+            " History Search ",
+            Style::default()
+                .fg(rgb(255, 180, 100))
+                .add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::horizontal(1));
+
+    let inner = block.inner(overlay_area);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(block, overlay_area);
+    frame.render_widget(paragraph, inner);
 }

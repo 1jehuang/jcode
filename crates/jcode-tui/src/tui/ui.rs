@@ -2376,6 +2376,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         &mut debug_capture,
     );
 
+    // Draw floating search overlay above input when Ctrl+R is active
+    input_ui::draw_search_overlay(frame, app, chunks[6], area.height);
+
     if donut_height > 0 {
         animations::draw_idle_animation(frame, app, chunks[7]);
     }
