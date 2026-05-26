@@ -418,7 +418,12 @@ impl App {
         }
         let new_idx = match self.input_history_index {
             Some(idx) => idx.saturating_sub(1),
-            None => self.input_history.len() - 1,
+            None => {
+                // Save the current input before entering history browse mode
+                // so Down-past-end can restore it.
+                self.input_history_pre_browse = Some((self.input.clone(), self.cursor_pos));
+                self.input_history.len() - 1
+            }
         };
         self.input_history_index = Some(new_idx);
         self.input = self.input_history[new_idx].clone();
@@ -437,10 +442,15 @@ impl App {
             self.input = self.input_history[next].clone();
             self.cursor_pos = self.input.len();
         } else {
-            // Past the end: clear input and exit history browsing
+            // Past the end: restore pre-browse input and exit history browsing
             self.input_history_index = None;
-            self.input.clear();
-            self.cursor_pos = 0;
+            if let Some((saved, saved_cursor)) = self.input_history_pre_browse.take() {
+                self.input = saved;
+                self.cursor_pos = saved_cursor;
+            } else {
+                self.input.clear();
+                self.cursor_pos = 0;
+            }
         }
         true
     }
@@ -448,6 +458,7 @@ impl App {
     /// Reset history browsing state (call when the user manually edits input).
     pub(super) fn reset_input_history_browse(&mut self) {
         self.input_history_index = None;
+        self.input_history_pre_browse = None;
         self.input_history_search = None;
     }
 

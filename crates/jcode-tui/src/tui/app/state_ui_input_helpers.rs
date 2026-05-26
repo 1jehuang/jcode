@@ -1068,6 +1068,12 @@ impl App {
             return false;
         }
 
+        // When browsing input history, arrow keys should navigate history
+        // rather than command suggestions.
+        if self.input_history_index.is_some() {
+            return false;
+        }
+
         match code {
             KeyCode::Down
                 if Self::arrow_modifiers_allow_command_suggestion_navigation(modifiers) =>

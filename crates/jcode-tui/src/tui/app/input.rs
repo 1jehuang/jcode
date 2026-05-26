@@ -2767,6 +2767,17 @@ pub(super) fn handle_history_search_key(
             app.input_history_search_backspace();
             return Ok(());
         }
+        // Down arrow: accept the current match and exit search
+        // (allows continuing to Down through history after Ctrl+R search)
+        KeyCode::Down => {
+            app.accept_input_history_search();
+            return Ok(());
+        }
+        // Up arrow: cycle to next older match
+        KeyCode::Up => {
+            app.input_history_search_next();
+            return Ok(());
+        }
         // Printable character: append to search query (exclude Ctrl and Alt combos)
         KeyCode::Char(c) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.input_history_search_char(c);

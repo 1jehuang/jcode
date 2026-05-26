@@ -961,6 +961,8 @@ pub struct App {
     input_history: Vec<String>,
     // Index into `input_history` while browsing; None when not browsing
     input_history_index: Option<usize>,
+    // Saved input before Up-arrow history browsing started (restored on Down-past-end)
+    input_history_pre_browse: Option<(String, usize)>,
     // Ctrl+R reverse incremental search state; None when not searching
     input_history_search: Option<HistorySearchState>,
     // Undo history for in-progress input editing (Ctrl+Z)
