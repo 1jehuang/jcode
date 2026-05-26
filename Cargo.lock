@@ -3783,6 +3783,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-jbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jcode-agent-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "jcode-memory-types"
 version = "0.1.0"
 dependencies = [

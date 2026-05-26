@@ -1,0 +1,24 @@
+[package]
+name = "jcode-jbench"
+version = "0.1.0"
+edition = "2024"
+description = "JBench — jcode's git-commit-reconstruction eval framework (scaffold)"
+
+[lib]
+name = "jcode_jbench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jbench"
+path = "src/bin/jbench.rs"
+
+[dependencies]
+jcode-agent-runtime = { path = "../../crates/jcode-agent-runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

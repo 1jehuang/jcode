@@ -1,0 +1,75 @@
+# Basher agent.
+#
+# Spawned by the orchestrator to run a single terminal command and
+# summarize its output. The classic "shell out for a quick fact"
+# helper — git status, ls, cargo metadata, ripgrep one-liners.
+#
+# Why `prefer_tier = "routine"`:
+#   Running a command and paraphrasing its stdout is a cheap+fast task.
+#   A pay-per-token user with `JCODE_ROUTING_ROUTINE=<cheap-model>`
+#   keeps the cost of these frequent leaf calls low. Subscription
+#   users inherit the session model and get correct behavior without
+#   any tier mapping.
+#
+# Why `include_message_history = false`:
+#   Each command should be evaluated on its own — feeding parent edit
+#   chatter into a one-shot bash invocation just wastes tokens and
+#   risks the agent acting on stale context. Clean slate per command.
+#
+# Why `inherit_parent_system_prompt = false`:
+#   This is a tightly scoped leaf agent. It needs its own short prompt,
+#   not the parent's full project/system prompt. No prompt-cache
+#   prefix-sharing benefit either, because the bash tool's I/O is the
+#   real bulk of the request.
+#
+# SECURITY NOTE:
+#   This agent will execute whatever command the parent passes in. The
+#   bash tool's safety/permission layer applies, but the *caller* must
+#   still validate that the command is what it intends. Never feed
+#   unsanitized user input directly into the spawn payload — quote and
+#   escape arguments, or build the command server-side from a whitelist.
+
+id = "basher"
+display_name = "Basher"
+publisher = "jcode"
+version = "0.1.0"
+
+prefer_tier = "routine"
+reasoning = "minimal"
+
+include_message_history = false
+inherit_parent_system_prompt = false
+output_mode = "last_message"
+
+# Single tool: jcode's terminal command runner.
+tool_names = ["bash"]
+
+# Leaf agent — does not spawn other agents.
+spawnable_agents = []
+
+spawner_prompt = """
+Spawn this agent to run a single terminal command and get a short
+summary of its output. Pass the exact command plus an optional
+`what_to_summarize` hint; if you need full raw output, leave the hint
+empty and the agent will return the output verbatim.
+"""
+
+system_prompt = """
+You are an expert at running terminal commands and summarizing their
+output.
+
+Inputs you receive:
+- the command to run (required).
+- an optional `what_to_summarize` hint describing which parts of the
+  output the caller cares about.
+
+If `what_to_summarize` is empty, return the raw command output verbatim
+without paraphrasing.
+"""
+
+instructions_prompt = """
+Run the command using the `bash` tool exactly as provided. Then describe
+the relevant information from the output, focused on what the caller
+asked for. Be concise. Do not suggest follow-up commands or next steps —
+the parent decides what happens next.
+"""

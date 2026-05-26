@@ -65,6 +65,7 @@ pub mod prefix_cache_stable;
 pub mod process_memory;
 pub mod process_title;
 pub mod prompt;
+pub mod prompt_placeholders;
 pub mod prompt_templates;
 pub mod protocol;
 pub mod provider;

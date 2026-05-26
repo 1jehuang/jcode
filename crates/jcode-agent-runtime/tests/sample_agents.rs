@@ -112,3 +112,89 @@ fn sample_agents_validate_cleanly() {
             .unwrap_or_else(|err| panic!("{} failed validation: {err}", loaded.definition.id));
     }
 }
+
+#[test]
+fn basher_sample_has_expected_shape() {
+    let dir = samples_dir();
+    let mut reg = AgentRegistry::new();
+    reg.load_directory(&dir, SourceKind::ProjectLocal)
+        .expect("load_directory");
+
+    let agent = reg
+        .get("basher")
+        .expect("basher registered")
+        .definition
+        .clone();
+
+    assert_eq!(agent.id, "basher");
+    assert_eq!(agent.display_name, "Basher");
+    assert_eq!(agent.prefer_tier, Some(ModelTier::Routine));
+    assert_eq!(agent.reasoning, Some(ReasoningEffort::Minimal));
+    assert!(
+        !agent.include_message_history,
+        "basher uses a clean slate per command"
+    );
+    assert!(
+        !agent.inherit_parent_system_prompt,
+        "basher has its own short system prompt"
+    );
+    assert_eq!(agent.output_mode, OutputMode::LastMessage);
+    assert_eq!(agent.tool_names, vec!["bash"]);
+    assert!(agent.spawnable_agents.is_empty(), "leaf agent");
+
+    // No tier env var set → resolve falls back to the session model.
+    let resolved = agent.resolve_model("session-model");
+    assert_eq!(
+        resolved, "session-model",
+        "no JCODE_ROUTING_ROUTINE → session default"
+    );
+}
+
+#[test]
+fn editor_sample_has_expected_shape() {
+    let dir = samples_dir();
+    let mut reg = AgentRegistry::new();
+    reg.load_directory(&dir, SourceKind::ProjectLocal)
+        .expect("load_directory");
+
+    let agent = reg
+        .get("editor")
+        .expect("editor registered")
+        .definition
+        .clone();
+
+    assert_eq!(agent.id, "editor");
+    assert_eq!(agent.display_name, "Code Editor");
+    assert_eq!(agent.prefer_tier, Some(ModelTier::Thinking));
+    assert_eq!(agent.reasoning, Some(ReasoningEffort::Medium));
+    assert!(
+        agent.include_message_history,
+        "editor needs to see what the user asked for"
+    );
+    assert!(
+        agent.inherit_parent_system_prompt,
+        "editor must inherit parent system prompt for prompt-cache hits"
+    );
+    assert!(
+        agent.system_prompt.is_empty(),
+        "system_prompt must be empty when inheriting (enforced by validation)"
+    );
+    assert_eq!(agent.output_mode, OutputMode::AllMessages);
+    for expected in [
+        "read",
+        "str_replace",
+        "write",
+        "edit",
+        "multiedit",
+        "apply_patch",
+        "hashline_edit",
+        "patch",
+    ] {
+        assert!(
+            agent.tool_names.iter().any(|t| t == expected),
+            "editor tool_names missing `{expected}`: {:?}",
+            agent.tool_names,
+        );
+    }
+    assert!(agent.spawnable_agents.is_empty(), "leaf agent");
+}

@@ -121,3 +121,46 @@ impl Agent {
         self.build_memory_prompt_nonblocking_shared(messages.to_vec().into(), _memory_event_tx)
     }
 }
+
+
+/// Wrap a step prompt body in `<system_reminder>...</system_reminder>` tags.
+///
+/// Step prompts are emitted by the harness (not typed by the user), but they
+/// arrive in the conversation transcript at the same position a user message
+/// would. Without disambiguation, the LLM tends to treat them as a fresh user
+/// turn — re-greeting, re-asking, or otherwise breaking flow.
+///
+/// Wrapping the body in `<system_reminder>` tags signals "this is harness
+/// scaffolding, not the user speaking" and lets the model continue its
+/// existing turn cleanly. Returns an empty string when `prompt` is empty so
+/// callers don't end up emitting an empty tag pair.
+///
+/// This helper is intentionally not yet wired into step-prompt emission;
+/// integration will land alongside the Phase 1 `AgentDefinition.step_prompt`
+/// changes.
+pub fn wrap_as_system_reminder(prompt: &str) -> String {
+    if prompt.is_empty() {
+        String::new()
+    } else {
+        format!("<system_reminder>{}</system_reminder>", prompt)
+    }
+}
+
+#[cfg(test)]
+mod wrap_as_system_reminder_tests {
+    use super::wrap_as_system_reminder;
+
+    #[test]
+    fn wrap_as_system_reminder_empty_input_returns_empty() {
+        assert_eq!(wrap_as_system_reminder(""), "");
+    }
+
+    #[test]
+    fn wrap_as_system_reminder_non_empty_input_wrapped_correctly() {
+        let body = "remaining steps: 3";
+        assert_eq!(
+            wrap_as_system_reminder(body),
+            "<system_reminder>remaining steps: 3</system_reminder>"
+        );
+    }
+}

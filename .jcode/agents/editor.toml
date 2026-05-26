@@ -1,0 +1,87 @@
+# Code editor agent.
+#
+# Spawned by the orchestrator to perform precise, reasoned code edits.
+# Reads files first, prefers surgical `str_replace`-style edits over
+# whole-file rewrites, and matches the surrounding project's style.
+#
+# Why `prefer_tier = "thinking"`:
+#   Edits need reasoning — a wrong substitution silently breaks the
+#   build or, worse, changes behavior in a way tests don't catch. A
+#   pay-per-token user with `JCODE_ROUTING_THINKING=<premium-model>`
+#   gets the right tool for the job; subscription users inherit the
+#   session model.
+#
+# Why `inherit_parent_system_prompt = true`:
+#   This is the prompt-cache prefix-sharing trick — the biggest
+#   single-knob token-cost win in the harness. When parent and child
+#   share an identical system prompt prefix, the provider's prompt
+#   cache delivers a cache hit on the child's first turn, typically
+#   ~90% input-token savings on Anthropic models. The editor is one
+#   of the most-spawned sub-agents, so this matters.
+#
+#   IMPORTANT: `system_prompt` MUST be empty when
+#   `inherit_parent_system_prompt = true`. The runtime's
+#   `AgentDefinition::validate` enforces this and refuses to load the
+#   agent otherwise. Per-agent specialization lives in
+#   `instructions_prompt` only.
+#
+# Why `include_message_history = true`:
+#   The editor needs to see what the user asked for and any prior
+#   discussion that shaped the requested change. Without history it
+#   would re-derive context the parent already has.
+
+id = "editor"
+display_name = "Code Editor"
+publisher = "jcode"
+version = "0.1.0"
+
+prefer_tier = "thinking"
+reasoning = "medium"
+
+inherit_parent_system_prompt = true
+include_message_history = true
+output_mode = "all_messages"
+
+# system_prompt MUST be empty when inherit_parent_system_prompt = true
+# (validated at load time). Specialization is purely in
+# instructions_prompt below.
+
+# Edit-focused tool surface: read first, then surgical edits, with
+# whole-file write available as a last resort.
+tool_names = [
+    "read",
+    "str_replace",
+    "write",
+    "edit",
+    "multiedit",
+    "apply_patch",
+    "hashline_edit",
+    "patch",
+]
+
+# Leaf agent — performs the edit itself; does not spawn helpers.
+spawnable_agents = []
+
+spawner_prompt = """
+Spawn this agent for precise code edits that need reasoning. The editor
+reads the relevant files, makes the requested change, matches existing
+project conventions, and reports what it changed. Use it when a single
+substitution or small multi-file edit is well-scoped.
+"""
+
+instructions_prompt = """
+You are an expert code editor.
+
+Make the requested edit:
+1. Read the target file(s) first to confirm current contents.
+2. Prefer `str_replace` over `write` — surgical substitutions are
+   safer and produce smaller diffs than whole-file rewrites.
+3. Match existing project conventions (imports, formatting, naming,
+   error handling). Look at sibling code if unsure.
+4. Do not introduce new dependencies. If the change appears to need
+   one, stop and report instead of adding it.
+
+After the edit, briefly state what was changed (file paths + a
+one-sentence summary). Do not restate code already visible in the
+edit's diff.
+"""
