@@ -1441,14 +1441,14 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
         ));
     }
 
-    if let Some((query, match_index, total)) = app.input_history_search_status() {
+    if let Some((_query, match_index, total)) = app.input_history_search_status() {
         push_sep(&mut spans);
         let match_info = match match_index {
-            Some(idx) => format!("{}/{}", idx + 1, total),
+            Some(idx) => format!("match {}/{}", idx + 1, total),
             None => "no match".to_string(),
         };
         spans.push(Span::styled(
-            format!("(reverse-i-search)'{}': {}", query, match_info),
+            format!("🔍 {}", match_info),
             Style::default().fg(rgb(255, 180, 100)),
         ));
     }
@@ -1510,10 +1510,25 @@ pub(super) fn draw_input(
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
     let mut suggestion_lines: Vec<Line> = Vec::new();
-    if app.input_history_search_status().is_some() {
-        // Search query and match info are shown in the notification bar above;
-        // no extra hint needed in the input area so the typed content stays visible.
+    if let Some((query, _match_index, _total)) = app.input_history_search_status() {
         hint_shown = true;
+        // Search query line: shows what the user is searching for above the matched result.
+        // The matched history entry is already set as app.input and will be rendered
+        // by wrap_input_text below.
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  🔍 ",
+                Style::default().fg(rgb(255, 180, 100)),
+            ),
+            Span::styled(
+                query,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "█",
+                Style::default().fg(rgb(255, 180, 100)),
+            ),
+        ]));
     } else if has_suggestions {
         suggestion_lines = command_suggestion_lines(app, &suggestions);
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
