@@ -903,6 +903,8 @@ impl crate::tui::TuiState for App {
                     id: item.id.clone(),
                     blocked_by: item.blocked_by.clone(),
                     assigned_to: item.assigned_to.clone(),
+                    confidence: None,
+                    completion_confidence: None,
                 })
                 .collect()
         } else {
@@ -1299,6 +1301,11 @@ impl crate::tui::TuiState for App {
 
     fn help_scroll(&self) -> Option<usize> {
         self.help_scroll
+    }
+
+    fn model_status_overlay(&self) -> Option<(usize, &str)> {
+        self.model_status_scroll
+            .map(|scroll| (scroll, self.model_status_content.as_str()))
     }
 
     fn session_picker_overlay(

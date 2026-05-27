@@ -87,6 +87,8 @@ fn test_refactor_status_summarizes_current_todos() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
+                    confidence: Some(76),
+                    completion_confidence: None,
                 },
                 crate::todo::TodoItem {
                     id: "two".to_string(),
@@ -95,6 +97,8 @@ fn test_refactor_status_summarizes_current_todos() {
                     priority: "medium".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
+                    confidence: None,
+                    completion_confidence: None,
                 },
             ],
         )
@@ -114,6 +118,7 @@ fn test_refactor_status_summarizes_current_todos() {
                 .contains("1 incomplete · 1 completed · 0 cancelled")
         );
         assert!(msg.content.contains("Split giant module"));
+        assert!(msg.content.contains("confidence 76%"));
     });
 }
 
@@ -132,6 +137,8 @@ fn test_refactor_resume_uses_saved_mode_and_current_todos() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             }],
         )
         .expect("save todos");

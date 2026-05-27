@@ -242,7 +242,7 @@ fn progress_from_counts(
     )
 }
 
-fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTaskProgress>> {
+pub(super) fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTaskProgress>> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -953,8 +953,8 @@ impl BashTool {
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
         let working_dir = ctx.working_dir.clone();
-        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
-        let timeout_duration = Duration::from_millis(timeout_ms);
+        let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
+        let timeout_duration = timeout_ms.map(Duration::from_millis);
 
         let wake = params.wake;
         let notify = params.notify || wake;
@@ -1000,28 +1000,33 @@ impl BashTool {
                     let mut stderr_lines = stderr.map(|s| BufReader::new(s).lines());
                     let mut stdout_done = stdout_lines.is_none();
                     let mut stderr_done = stderr_lines.is_none();
-                    let timeout_sleep = tokio::time::sleep(timeout_duration);
+                    let timeout_sleep = timeout_duration.map(tokio::time::sleep);
                     tokio::pin!(timeout_sleep);
                     let mut timed_out = false;
 
-                    while !stdout_done || !stderr_done {
-                        tokio::select! {
-							_ = &mut timeout_sleep => {
-								timed_out = true;
-								#[cfg(unix)]
-								{
-									if let Some(pid) = child.id() {
-										let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-									} else {
-										let _ = child.start_kill();
-									}
-								}
-								#[cfg(not(unix))]
-								{
-									let _ = child.start_kill();
-								}
-								break;
-							}
+	                    while !stdout_done || !stderr_done {
+	                        tokio::select! {
+	                            _ = async {
+	                                match timeout_sleep.as_mut().as_pin_mut() {
+	                                    Some(sleep) => sleep.await,
+	                                    None => std::future::pending().await,
+	                                }
+	                            }, if timeout_duration.is_some() => {
+	                                timed_out = true;
+	                                #[cfg(unix)]
+	                                {
+	                                    if let Some(pid) = child.id() {
+	                                        let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+	                                    } else {
+	                                        let _ = child.start_kill();
+	                                    }
+	                                }
+	                                #[cfg(not(unix))]
+	                                {
+	                                    let _ = child.start_kill();
+	                                }
+	                                break;
+	                            }
                             line = async {
                                 match stdout_lines.as_mut() {
                                     Some(r) => r.next_line().await,
@@ -1055,12 +1060,12 @@ impl BashTool {
                         let _ = child.wait().await;
                         let timeout_line = format!(
                             "\n--- Command timed out after {}ms ---\n",
-                            timeout_ms
+                            timeout_ms.unwrap_or_default()
                         );
                         file.write_all(timeout_line.as_bytes()).await.ok();
                         return Ok(TaskResult::failed(
                             Some(124),
-                            format!("Command timed out after {}ms", timeout_ms),
+                            format!("Command timed out after {}ms", timeout_ms.unwrap_or_default()),
                         ));
                     }
 

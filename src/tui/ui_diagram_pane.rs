@@ -825,7 +825,10 @@ pub(crate) fn draw_pinned_diagram(
         Style::default().fg(dim_color()),
     ));
     title_parts.push(Span::styled(
-        " Alt+M side panel",
+        format!(
+            " {} side panel",
+            crate::tui::keybind::side_panel_toggle_key_label()
+        ),
         Style::default().fg(dim_color()),
     ));
 

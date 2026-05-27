@@ -84,7 +84,7 @@ impl MultiProvider {
         provider: LoginProviderDescriptor,
     ) -> Option<&'static str> {
         match provider.target {
-            LoginProviderTarget::Claude => Some("claude"),
+            LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => Some("claude"),
             LoginProviderTarget::OpenAi | LoginProviderTarget::OpenAiApiKey => Some("openai"),
             LoginProviderTarget::OpenRouter => Some("openrouter"),
             LoginProviderTarget::Bedrock => Some("bedrock"),
@@ -138,11 +138,9 @@ impl MultiProvider {
         } else if profile_id.is_some() {
             bare_name.to_string()
         } else if api_method == "openrouter" && provider_display != "auto" {
-            if bare_name.contains('/') {
-                format!("{}@{}", bare_name, provider_display)
-            } else {
-                format!("anthropic/{}@{}", bare_name, provider_display)
-            }
+            let model_id = crate::provider::openrouter_catalog_model_id(bare_name)
+                .unwrap_or_else(|| bare_name.to_string());
+            format!("{}@{}", model_id, provider_display)
         } else {
             bare_name.to_string()
         };
@@ -269,6 +267,14 @@ mod tests {
             "anthropic/claude-sonnet-4-5@anthropic"
         );
         assert_eq!(openrouter.provider_key.as_deref(), Some("openrouter"));
+
+        let openrouter_openai =
+            MultiProvider::default_model_selection_from_route("gpt-5.5", "openrouter", "OpenAI");
+        assert_eq!(openrouter_openai.model_spec, "openai/gpt-5.5@OpenAI");
+        assert_eq!(
+            openrouter_openai.provider_key.as_deref(),
+            Some("openrouter")
+        );
     }
 
     #[test]

@@ -6,6 +6,9 @@ use super::{
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+const MACOS_APP_ICON_FILE_NAME: &str = "Jcode.icns";
+const MACOS_APP_ICON_BYTES: &[u8] = include_bytes!("../../assets/app-icons/Jcode.icns");
+
 pub(super) fn should_refresh_macos_app_launcher(state: &SetupHintsState) -> bool {
     match (macos_app_launcher_dir(), legacy_macos_app_launcher_dir()) {
         (Ok(app_dir), Ok(legacy_app_dir)) => {
@@ -28,7 +31,9 @@ pub(super) fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)>
 
     let contents_dir = app_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
+    let resources_dir = contents_dir.join("Resources");
     std::fs::create_dir_all(&macos_dir)?;
+    std::fs::create_dir_all(&resources_dir)?;
 
     let exe = std::env::current_exe()?;
     let exe_path = exe.to_string_lossy().into_owned();
@@ -36,6 +41,10 @@ pub(super) fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)>
     let launcher_path = macos_dir.join("jcode-launcher");
     let launcher_script = macos_launcher_script(terminal, &exe_path, &app_dir);
     std::fs::write(&launcher_path, launcher_script)?;
+    std::fs::write(
+        resources_dir.join(MACOS_APP_ICON_FILE_NAME),
+        MACOS_APP_ICON_BYTES,
+    )?;
 
     #[cfg(unix)]
     {
@@ -60,6 +69,8 @@ pub(super) fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)>
     <string>{version}</string>
     <key>CFBundleExecutable</key>
     <string>jcode-launcher</string>
+    <key>CFBundleIconFile</key>
+    <string>{icon_file}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSApplicationCategoryType</key>
@@ -67,7 +78,8 @@ pub(super) fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)>
 </dict>
 </plist>
 "#,
-        version = env!("JCODE_VERSION")
+        version = env!("JCODE_VERSION"),
+        icon_file = MACOS_APP_ICON_FILE_NAME,
     );
     std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
 
@@ -104,10 +116,18 @@ fn macos_app_launcher_executable_path(app_dir: &Path) -> PathBuf {
         .join("jcode-launcher")
 }
 
+fn macos_app_launcher_icon_path(app_dir: &Path) -> PathBuf {
+    app_dir
+        .join("Contents")
+        .join("Resources")
+        .join(MACOS_APP_ICON_FILE_NAME)
+}
+
 fn macos_app_launcher_is_valid(app_dir: &Path) -> bool {
     app_dir.is_dir()
         && macos_app_launcher_info_plist_path(app_dir).is_file()
         && macos_app_launcher_executable_path(app_dir).is_file()
+        && macos_app_launcher_icon_path(app_dir).is_file()
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<()> {

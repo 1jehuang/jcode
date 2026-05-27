@@ -744,7 +744,7 @@ pub(crate) async fn run_live_openai_compatible_tool_smoke(
         resolved.api_base.trim_end_matches('/')
     );
     let tool_name = "auth_tool_probe";
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [
             {"role": "user", "content": "Call the auth_tool_probe tool now. Do not answer in text."}
@@ -763,10 +763,12 @@ pub(crate) async fn run_live_openai_compatible_tool_smoke(
                 }
             }
         ],
-        "tool_choice": "auto",
         "stream": false,
         "max_tokens": 256
     });
+    if !resolved.api_base.contains("fptcloud.com") {
+        body["tool_choice"] = serde_json::json!("auto");
+    }
     let request = crate::provider::shared_http_client()
         .post(&url)
         .bearer_auth(api_key)

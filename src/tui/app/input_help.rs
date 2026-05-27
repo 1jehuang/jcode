@@ -25,6 +25,12 @@ impl App {
             "model" => {
                 "`/model`\nOpen model picker.\n\n`/model <name>`\nSwitch model.\n\n`/model <name>@<provider>`\nPin OpenRouter routing (`@auto` clears pin)."
             }
+            "provider-test-coverage"
+            | "provider test coverage"
+            | "model-status"
+            | "model status" => {
+                "`/provider-test-coverage`\nShow jcode live verification evidence for the current provider/model.\n\n`/provider-test-coverage <provider> <model>`\nLook up a specific provider/model pair in the live-test coverage ledger.\n\nThe report shows last-tested time, jcode build, passed/missing checkpoints, readiness gaps, and a caveat that missing evidence is not a provider failure."
+            }
             "refresh-model-list" => {
                 "`/refresh-model-list`\nForce-refresh provider model catalogs, update `/model`, and persist the refreshed cache."
             }

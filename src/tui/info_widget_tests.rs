@@ -3,7 +3,8 @@ use super::{
     Margins, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryInfo, MemoryState, PipelineState,
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     occasional_status_tip, render_kv_cache_widget, render_memory_compact, render_memory_widget,
-    render_model_widget, truncate_smart,
+    render_model_widget, render_todos_compact, render_todos_expanded, render_todos_widget,
+    truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -64,6 +65,48 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     assert!(text.contains("20>"));
     assert!(text.contains("69k miss"));
     assert!(text.contains("provider switch"));
+}
+
+#[test]
+fn todos_widgets_show_item_and_aggregate_confidence() {
+    let data = InfoWidgetData {
+        todos: vec![
+            crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Validate confidence UI".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(80),
+                completion_confidence: None,
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            },
+            crate::todo::TodoItem {
+                id: "todo-2".to_string(),
+                content: "Ship completed item".to_string(),
+                status: "completed".to_string(),
+                priority: "medium".to_string(),
+                confidence: Some(70),
+                completion_confidence: Some(95),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let normal_text = lines_text(&render_todos_widget(&data, Rect::new(0, 0, 80, 8)));
+    assert!(normal_text.contains("86%"));
+    assert!(normal_text.contains("80%"));
+    assert!(normal_text.contains("95%"));
+
+    let expanded_text = lines_text(&render_todos_expanded(&data, Rect::new(0, 0, 80, 8)));
+    assert!(expanded_text.contains("86%"));
+    assert!(expanded_text.contains("80%"));
+    assert!(expanded_text.contains("95%"));
+
+    let compact_text = lines_text(&render_todos_compact(&data, Rect::new(0, 0, 80, 2)));
+    assert!(compact_text.contains("86%"));
 }
 
 fn node(kind: &str, label: &str, degree: usize) -> GraphNode {
@@ -830,6 +873,8 @@ fn placements_never_include_border_only_widgets() {
             id: "todo-1".to_string(),
             blocked_by: Vec::new(),
             assigned_to: None,
+            confidence: None,
+            completion_confidence: None,
         }],
         queue_mode: Some(true),
         memory_info: Some(MemoryInfo {

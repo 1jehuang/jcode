@@ -103,7 +103,9 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     assert!(last.content.contains("`cerebras-large`"));
     assert!(last.content.contains("`cerebras-reasoning`"));
     assert!(app.display_messages.iter().any(|message| {
-        message.role == "system" && message.content.contains("**Model List Refresh Started**")
+        message.role == "background_task"
+            && message.content.contains("**Background task progress** `refresh-model-list`")
+            && message.content.contains("Starting provider model catalog refresh")
     }));
 }
 
@@ -200,6 +202,51 @@ fn test_remote_runtime_activity_notification_renders_as_system_message() {
     assert_eq!(
         app.status_notice(),
         Some("Auth Change Received".to_string())
+    );
+}
+
+#[test]
+fn test_remote_catalog_activity_notification_upserts_progress_card() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    for message in [
+        crate::message::format_model_refresh_progress_markdown(
+            "Starting provider model catalog refresh",
+            Some(5),
+        ),
+        crate::message::format_model_refresh_progress_markdown(
+            "Waiting on provider APIs (2s elapsed)",
+            None,
+        ),
+    ] {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Notification {
+                from_session: "jcode".to_string(),
+                from_name: Some("Jcode".to_string()),
+                notification_type: crate::protocol::NotificationType::Message {
+                    scope: Some("catalog_activity".to_string()),
+                    channel: None,
+                },
+                message,
+            },
+            &mut remote,
+        );
+    }
+
+    let cards: Vec<_> = app
+        .display_messages
+        .iter()
+        .filter(|message| message.role == "background_task")
+        .collect();
+    assert_eq!(cards.len(), 1, "progress updates should upsert one card");
+    assert!(cards[0].content.contains("refresh-model-list"));
+    assert!(cards[0].content.contains("Waiting on provider APIs"));
+    assert_eq!(
+        app.status_notice(),
+        Some("Waiting on provider APIs (2s elapsed)".to_string())
     );
 }
 

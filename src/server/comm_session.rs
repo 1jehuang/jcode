@@ -143,6 +143,29 @@ fn provider_key_for_spawn_model(
     crate::provider::provider_for_model(model).map(str::to_string)
 }
 
+fn resolve_swarm_spawn_model_and_provider(
+    configured_swarm_model: Option<String>,
+    coordinator_model: Option<String>,
+    coordinator_provider_key: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match configured_swarm_model {
+        Some(model) => {
+            let provider_key = if coordinator_model.as_deref() == Some(model.as_str()) {
+                coordinator_provider_key
+                    .or_else(|| provider_key_for_spawn_model(Some(&model), None))
+            } else {
+                provider_key_for_spawn_model(Some(&model), None)
+            };
+            (Some(model), provider_key)
+        }
+        None => {
+            let provider_key = coordinator_provider_key
+                .or_else(|| provider_key_for_spawn_model(coordinator_model.as_deref(), None));
+            (coordinator_model, provider_key)
+        }
+    }
+}
+
 fn persist_headed_startup_message(session_id: &str, message: &str) {
     crate::tui::App::save_startup_submission_for_session(
         session_id,
@@ -326,9 +349,11 @@ pub(super) async fn spawn_swarm_agent(
     let agents_config = &crate::config::config().agents;
     let configured_swarm_model = agents_config.swarm_model.clone();
     let resolved_spawn_mode = spawn_mode.unwrap_or(agents_config.swarm_spawn_mode);
-    let spawn_model = coordinator_model.or(configured_swarm_model);
-    let spawn_provider_key = coordinator_provider_key
-        .or_else(|| provider_key_for_spawn_model(spawn_model.as_deref(), None));
+    let (spawn_model, spawn_provider_key) = resolve_swarm_spawn_model_and_provider(
+        configured_swarm_model,
+        coordinator_model,
+        coordinator_provider_key,
+    );
 
     let startup_message = initial_message
         .as_deref()

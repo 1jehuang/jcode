@@ -164,9 +164,9 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
         false,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
         None,
-        None,
-        None,
-        None,
+        Some("flex"),
+        Some("jcode-test-cache"),
+        Some("24h"),
         Some(160_000),
     );
 
@@ -188,6 +188,15 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
     if let Some(context_management) = base_request.get("context_management") {
         continuation["context_management"] = context_management.clone();
     }
+    if let Some(service_tier) = base_request.get("service_tier") {
+        continuation["service_tier"] = service_tier.clone();
+    }
+    if let Some(prompt_cache_key) = base_request.get("prompt_cache_key") {
+        continuation["prompt_cache_key"] = prompt_cache_key.clone();
+    }
+    if let Some(prompt_cache_retention) = base_request.get("prompt_cache_retention") {
+        continuation["prompt_cache_retention"] = prompt_cache_retention.clone();
+    }
     continuation["store"] = serde_json::json!(false);
     continuation["parallel_tool_calls"] = serde_json::json!(false);
 
@@ -202,6 +211,9 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
     assert_eq!(continuation["type"], "response.create");
     assert_eq!(continuation["previous_response_id"], "resp_abc123");
     assert_eq!(continuation["model"], "gpt-5.4");
+    assert_eq!(continuation["service_tier"], "flex");
+    assert_eq!(continuation["prompt_cache_key"], "jcode-test-cache");
+    assert_eq!(continuation["prompt_cache_retention"], "24h");
     assert_eq!(
         continuation["context_management"],
         serde_json::json!([
@@ -211,4 +223,48 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
             }
         ])
     );
+}
+
+#[test]
+fn test_websocket_continuation_delta_skips_reasoning_items() {
+    let input = vec![
+        serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "first" }]
+        }),
+        serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "ok" }]
+        }),
+        serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_duplicate_from_previous_response",
+            "summary": []
+        }),
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "done"
+        }),
+        serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "continue" }]
+        }),
+    ];
+
+    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2);
+
+    assert_eq!(skipped_reasoning, 1);
+    assert_eq!(delta.len(), 2);
+    assert!(
+        delta
+            .iter()
+            .all(|item| item.get("type").and_then(|value| value.as_str()) != Some("reasoning")),
+        "previous_response_id deltas must not replay rs_* reasoning items"
+    );
+    assert_eq!(delta[0]["type"], "function_call_output");
+    assert_eq!(delta[1]["type"], "message");
 }

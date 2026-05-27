@@ -1027,7 +1027,10 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::catalog(
                 Some(session_id.clone()),
-                "**Model List Refresh Started**\n\nFetching the provider model catalog now. Jcode will show the discovered model and route changes when the refresh completes.",
+                crate::message::format_model_refresh_progress_markdown(
+                    "Starting provider model catalog refresh",
+                    Some(5),
+                ),
                 Some("Refreshing model list..."),
             ),
         ));
@@ -1036,10 +1039,8 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let result = provider
-                    .refresh_model_catalog()
-                    .await
-                    .map_err(|error| error.to_string());
+                let result =
+                    refresh_model_catalog_with_progress(provider, session_id.clone()).await;
                 crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelRefreshCompleted(
                     crate::bus::ModelRefreshCompleted { session_id, result },
                 ));
@@ -1050,9 +1051,10 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     .enable_all()
                     .build()
                 {
-                    Ok(runtime) => runtime
-                        .block_on(provider.refresh_model_catalog())
-                        .map_err(|error| error.to_string()),
+                    Ok(runtime) => runtime.block_on(refresh_model_catalog_with_progress(
+                        provider,
+                        session_id.clone(),
+                    )),
                     Err(error) => Err(error.to_string()),
                 };
                 crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelRefreshCompleted(
@@ -1341,6 +1343,40 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+async fn refresh_model_catalog_with_progress(
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+    session_id: String,
+) -> Result<crate::provider::ModelCatalogRefreshSummary, String> {
+    let started = std::time::Instant::now();
+    let refresh = provider.refresh_model_catalog();
+    tokio::pin!(refresh);
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            result = &mut refresh => {
+                return result.map_err(|error| error.to_string());
+            }
+            _ = heartbeat.tick() => {
+                let elapsed_secs = started.elapsed().as_secs();
+                if elapsed_secs > 0 {
+                    crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+                        crate::bus::UiActivity::catalog(
+                            Some(session_id.clone()),
+                            crate::message::format_model_refresh_progress_markdown(
+                                &format!("Waiting on provider APIs ({elapsed_secs}s elapsed)"),
+                                None,
+                            ),
+                            Some("Refreshing model list..."),
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 impl App {
     pub(super) fn handle_model_refresh_completed(
         &mut self,
@@ -1352,6 +1388,12 @@ impl App {
         match completed.result {
             Ok(summary) => {
                 self.invalidate_model_picker_cache();
+                self.upsert_background_task_progress_message(
+                    crate::message::format_model_refresh_progress_markdown(
+                        "Model list refresh complete",
+                        Some(100),
+                    ),
+                );
                 self.push_display_message(DisplayMessage::system(format_model_refresh_summary(
                     &summary,
                 )));
@@ -1361,6 +1403,12 @@ impl App {
                 ));
             }
             Err(error) => {
+                self.upsert_background_task_progress_message(
+                    crate::message::format_model_refresh_progress_markdown(
+                        "Model list refresh failed",
+                        None,
+                    ),
+                );
                 self.push_display_message(DisplayMessage::error(format!(
                     "Failed to refresh model list: {}",
                     error

@@ -26,6 +26,7 @@ pub enum LoginProviderTarget {
     AutoImport,
     Jcode,
     Claude,
+    ClaudeApiKey,
     OpenAi,
     OpenAiApiKey,
     OpenRouter,

@@ -254,7 +254,16 @@ pub(super) fn handle_ui_activity(app: &mut App, activity: UiActivity) -> bool {
             app.push_display_message(DisplayMessage::background_task(activity.message.clone()))
         }
         UiActivityKind::Auth | UiActivityKind::Catalog => {
-            app.push_display_message(DisplayMessage::system(activity.message.clone()))
+            if activity.kind == UiActivityKind::Catalog
+                && crate::message::parse_background_task_progress_notification_markdown(
+                    &activity.message,
+                )
+                .is_some()
+            {
+                app.upsert_background_task_progress_message(activity.message.clone());
+            } else {
+                app.push_display_message(DisplayMessage::system(activity.message.clone()))
+            }
         }
     }
     if let Some(status_notice) = activity.status_notice {

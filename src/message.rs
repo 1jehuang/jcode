@@ -19,8 +19,8 @@ pub use notifications::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
     background_task_display_label, background_task_status_notice,
     format_background_task_notification_markdown, format_background_task_progress_markdown,
-    format_input_shell_result_markdown, input_shell_status_notice,
-    parse_background_task_notification_markdown,
+    format_input_shell_result_markdown, format_model_refresh_progress_markdown,
+    input_shell_status_notice, parse_background_task_notification_markdown,
     parse_background_task_progress_notification_markdown,
 };
 

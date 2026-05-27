@@ -53,6 +53,7 @@ const MAX_MAX_PER_SESSION: usize = 20;
 const DEFAULT_MAX_SCAN_SESSIONS: usize = 1000;
 const MAX_MAX_SCAN_SESSIONS: usize = 10_000;
 const MAX_CONTEXT_MESSAGES: usize = 5;
+const INDEX_SCORE_CANDIDATE_MULTIPLIER: usize = 2;
 const INDEX_VERSION: u32 = 1;
 const INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";
 static SESSION_SEARCH_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<SessionSearchIndex>>>> =
@@ -621,6 +622,7 @@ fn search_sessions_blocking(
             }
 
             if !files.is_empty() {
+                let using_index = !options.exhaustive;
                 let mut candidates = if options.exhaustive {
                     let raw_filter_outcomes = filter_candidates_parallel(&files, query);
                     report.read_errors += raw_filter_outcomes
@@ -654,6 +656,18 @@ fn search_sessions_blocking(
                 };
                 candidates.sort_unstable_by(|a, b| b.mtime.cmp(&a.mtime));
                 report.candidate_jcode_sessions = candidates.len();
+                if using_index {
+                    let indexed_budget = options
+                        .limit
+                        .saturating_mul(options.max_per_session)
+                        .saturating_mul(INDEX_SCORE_CANDIDATE_MULTIPLIER)
+                        .max(options.limit)
+                        .max(1);
+                    if candidates.len() > indexed_budget {
+                        candidates.truncate(indexed_budget);
+                        report.truncated = true;
+                    }
+                }
                 if candidates.len() > MAX_DESERIALIZE {
                     candidates.truncate(MAX_DESERIALIZE);
                     report.truncated = true;

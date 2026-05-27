@@ -28,6 +28,8 @@ pub(crate) use external_auth::{
 pub enum ProviderChoice {
     Jcode,
     Claude,
+    #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
+    AnthropicApi,
     #[deprecated(
         note = "Claude Code CLI subprocess transport is deprecated; use ProviderChoice::Claude for native Anthropic OAuth/API transport"
     )]
@@ -124,6 +126,7 @@ impl ProviderChoice {
         match self {
             Self::Jcode => "jcode",
             Self::Claude => "claude",
+            Self::AnthropicApi => "anthropic-api",
             Self::ClaudeSubprocess => "claude-subprocess",
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
@@ -181,6 +184,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Claude,
         crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::AnthropicApi,
+        crate::provider_catalog::ANTHROPIC_API_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::ClaudeSubprocess,
@@ -1160,7 +1167,7 @@ pub async fn login_and_bootstrap_provider(
             Arc::new(provider::MultiProvider::new())
         }
         LoginProviderTarget::Jcode => Arc::new(provider::jcode::JcodeProvider::new()),
-        LoginProviderTarget::Claude => {
+        LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => {
             disable_subscription_runtime_mode();
             Arc::new(provider::MultiProvider::new())
         }
@@ -1310,6 +1317,13 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             ensure_claude_auth_allowed_for_explicit_choice()?;
             init_notice("Using Claude (provider locked)");
+            lock_model_provider("claude");
+            Arc::new(provider::MultiProvider::with_preference_fast(false))
+        }
+        ProviderChoice::AnthropicApi => {
+            disable_subscription_runtime_mode();
+            ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")?;
+            init_notice("Using Anthropic API key provider (provider locked)");
             lock_model_provider("claude");
             Arc::new(provider::MultiProvider::with_preference_fast(false))
         }
