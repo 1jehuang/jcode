@@ -1220,7 +1220,13 @@ fn render_background_task_progress_message(
         &progress.tool_name,
         progress.display_name.as_deref(),
     );
-    let title = format!("◌ bg {} · {}", task_label, progress.task_id);
+    let is_model_refresh =
+        progress.task_id == "refresh-model-list" && progress.tool_name == "catalog";
+    let title = if is_model_refresh {
+        format!("◌ model refresh · {}", task_label)
+    } else {
+        format!("◌ bg {} · {}", task_label, progress.task_id)
+    };
 
     let mut box_content = vec![render_compact_progress_line(
         progress,
@@ -1230,14 +1236,16 @@ fn render_background_task_progress_message(
         label_style,
         text_style,
     )];
-    let hint = format!(
-        "Latest status: bg action=\"status\" task_id=\"{}\"",
-        progress.task_id
-    );
-    box_content.push(super::truncate_line_with_ellipsis_to_width(
-        &Line::from(Span::styled(hint, label_style)),
-        inner_width,
-    ));
+    if !is_model_refresh {
+        let hint = format!(
+            "Latest status: bg action=\"status\" task_id=\"{}\"",
+            progress.task_id
+        );
+        box_content.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(hint, label_style)),
+            inner_width,
+        ));
+    }
 
     let mut lines = render_rounded_box(&title, box_content, max_box_width, border_style);
     if centered {

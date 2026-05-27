@@ -357,7 +357,7 @@ pub fn parse_frontmatter(raw: &str) -> (Option<String>, String, Vec<ArgDecl>) {
     // Skip the closing `---` line + optional newline.
     let body_start = close_idx + after_first[close_idx..].find('\n').unwrap_or(0);
     let body = after_first[body_start..]
-        .trim_start_matches(|c: char| c == '\n' || c == '\r')
+        .trim_start_matches(['\n', '\r'])
         .to_string();
 
     let args = parse_args_block(frontmatter);
@@ -478,9 +478,9 @@ pub fn parse_user_args(input: &str) -> (Vec<String>, std::collections::HashMap<S
 fn tokenize_args(input: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
-    let mut chars = input.chars().peekable();
+    let chars = input.chars().peekable();
     let mut quote: Option<char> = None;
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match (ch, quote) {
             (c, Some(q)) if c == q => {
                 quote = None;

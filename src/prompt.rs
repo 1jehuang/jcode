@@ -76,6 +76,8 @@ pub struct ContextInfo {
     pub memory_chars: usize,
     /// Prompt overlay section size (chars)
     pub prompt_overlay_chars: usize,
+    /// Preferred tools section size (chars)
+    pub preferred_tools_chars: usize,
 
     // === Dynamic (Conversation) ===
     /// Tool definitions sent to API (chars)
@@ -118,6 +120,7 @@ impl ContextInfo {
             + self.selfdev_chars
             + self.memory_chars
             + self.prompt_overlay_chars
+            + self.preferred_tools_chars
             + self.tool_defs_chars
     }
 
@@ -152,6 +155,9 @@ impl ContextInfo {
         }
         if self.prompt_overlay_chars > 0 {
             parts.push(("overlay", self.prompt_overlay_chars, "🧩"));
+        }
+        if self.preferred_tools_chars > 0 {
+            parts.push(("tools", self.preferred_tools_chars, "🧰"));
         }
         parts
     }
@@ -253,6 +259,14 @@ pub fn build_system_prompt_full(
         parts.push(content);
     }
 
+    // Add optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
+    let (preferred_tools_content, preferred_tools_chars) =
+        load_preferred_tools_files_from_dir(working_dir);
+    if let Some(content) = preferred_tools_content {
+        info.preferred_tools_chars = preferred_tools_chars;
+        parts.push(content);
+    }
+
     if let Some(memory) = memory_prompt {
         info.memory_chars = memory.len();
         parts.push(memory.to_string());
@@ -335,6 +349,14 @@ pub fn build_system_prompt_split(
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
+        static_parts.push(content);
+    }
+
+    // Add optional preferred-tool guidance (static per project/user)
+    let (preferred_tools_content, preferred_tools_chars) =
+        load_preferred_tools_files_from_dir(working_dir);
+    if let Some(content) = preferred_tools_content {
+        info.preferred_tools_chars = preferred_tools_chars;
         static_parts.push(content);
     }
 
@@ -830,6 +852,50 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
         && let Some((content, size)) = load_file(
             &global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
+        )
+    {
+        total_chars += size;
+        contents.push(content);
+    }
+
+    if contents.is_empty() {
+        (None, 0)
+    } else {
+        (Some(contents.join("\n\n")), total_chars)
+    }
+}
+
+/// Load optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
+fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
+    let mut contents = vec![];
+    let mut total_chars = 0usize;
+
+    let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
+        if path.exists() {
+            std::fs::read_to_string(path).ok().map(|content| {
+                let raw_size = content.len();
+                let formatted = format!("# {}\n\n{}", label, content.trim());
+                (formatted, raw_size)
+            })
+        } else {
+            None
+        }
+    };
+
+    let project_dir = working_dir.unwrap_or(Path::new("."));
+    if let Some((content, size)) = load_file(
+        &project_dir.join(".jcode").join("preferred-tools.md"),
+        "Project Preferred Tools (.jcode/preferred-tools.md)",
+    ) {
+        total_chars += size;
+        contents.push(content);
+    }
+
+    if let Ok(global_preferred_tools) =
+        crate::storage::jcode_dir().map(|dir| dir.join("preferred-tools.md"))
+        && let Some((content, size)) = load_file(
+            &global_preferred_tools,
+            "Global Preferred Tools (~/.jcode/preferred-tools.md)",
         )
     {
         total_chars += size;

@@ -32,10 +32,12 @@ use jcode_session_types::{
     session_search_truncate_title_text as truncate_title_text,
     session_search_working_dir_matches as working_dir_matches,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// Max session snapshots/journals to deserialize after raw pre-filtering.
@@ -51,6 +53,11 @@ const MAX_MAX_PER_SESSION: usize = 20;
 const DEFAULT_MAX_SCAN_SESSIONS: usize = 1000;
 const MAX_MAX_SCAN_SESSIONS: usize = 10_000;
 const MAX_CONTEXT_MESSAGES: usize = 5;
+const INDEX_SCORE_CANDIDATE_MULTIPLIER: usize = 2;
+const INDEX_VERSION: u32 = 1;
+const INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";
+static SESSION_SEARCH_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<SessionSearchIndex>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct SearchInput {
@@ -112,6 +119,9 @@ struct SearchInput {
     /// Bound the number of recent sessions scanned per source.
     #[serde(default)]
     max_scan_sessions: Option<i64>,
+    /// Scan every available Jcode session instead of the recent indexed subset.
+    #[serde(default)]
+    exhaustive: Option<bool>,
 }
 
 pub struct SessionSearchTool;
@@ -126,6 +136,34 @@ impl Default for SessionSearchTool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Warm the recent-session search index in the background so the first
+/// interactive `session_search` call does not pay the cold indexing cost.
+pub fn spawn_recent_index_warmup() {
+    tokio::task::spawn_blocking(|| {
+        let start = std::time::Instant::now();
+        let result = (|| -> Result<usize> {
+            let sessions_dir = storage::jcode_dir()?.join("sessions");
+            let collection = collect_session_files(&sessions_dir, DEFAULT_MAX_SCAN_SESSIONS)?;
+            if collection.files.is_empty() {
+                return Ok(0);
+            }
+            load_or_build_recent_index(&sessions_dir, &collection.files)?;
+            Ok(collection.files.len())
+        })();
+
+        match result {
+            Ok(count) => crate::logging::info(&format!(
+                "Session search index warmup completed for {count} session(s) in {}ms",
+                start.elapsed().as_millis()
+            )),
+            Err(err) => crate::logging::info(&format!(
+                "Session search index warmup skipped/failed after {}ms: {err}",
+                start.elapsed().as_millis()
+            )),
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +188,7 @@ struct SearchOptions {
     context_before: usize,
     context_after: usize,
     max_scan_sessions: usize,
+    exhaustive: bool,
 }
 
 impl SearchOptions {
@@ -176,6 +215,7 @@ impl SearchOptions {
             context_before: 0,
             context_after: 0,
             max_scan_sessions: DEFAULT_MAX_SCAN_SESSIONS,
+            exhaustive: false,
         }
     }
 }
@@ -216,6 +256,27 @@ struct RawFilterOutcome {
 struct SearchWorkerOutcome {
     results: Vec<SearchResult>,
     parse_errors: usize,
+}
+
+#[derive(Default)]
+struct SessionFileCollection {
+    files: Vec<SessionFileCandidate>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionSearchIndex {
+    version: u32,
+    entries: Vec<SessionSearchIndexEntry>,
+    terms: HashMap<String, Vec<usize>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionSearchIndexEntry {
+    session_id: String,
+    snapshot_path: PathBuf,
+    journal_path: PathBuf,
+    mtime_ms: u64,
 }
 
 #[async_trait]
@@ -324,6 +385,10 @@ impl Tool for SessionSearchTool {
                     "minimum": 1,
                     "maximum": MAX_MAX_SCAN_SESSIONS,
                     "description": "Bound the number of recent sessions scanned per source."
+                },
+                "exhaustive": {
+                    "type": "boolean",
+                    "description": "Search every available Jcode session instead of the recent indexed subset. Slower, but useful for deep recall."
                 }
             },
             "required": ["query"]
@@ -367,6 +432,7 @@ impl Tool for SessionSearchTool {
             Ok(value) => value,
             Err(message) => return Ok(ToolOutput::new(message).with_title("session_search")),
         };
+        let exhaustive = params.exhaustive.unwrap_or(false);
         let max_scan_sessions = match validate_bounded_usize(
             params.max_scan_sessions,
             DEFAULT_MAX_SCAN_SESSIONS,
@@ -374,7 +440,13 @@ impl Tool for SessionSearchTool {
             MAX_MAX_SCAN_SESSIONS,
             "max_scan_sessions",
         ) {
-            Ok(value) => value,
+            Ok(value) => {
+                if exhaustive {
+                    usize::MAX
+                } else {
+                    value
+                }
+            }
             Err(message) => return Ok(ToolOutput::new(message).with_title("session_search")),
         };
         let role_filter = match parse_role_filter(params.role.as_deref()) {
@@ -429,6 +501,7 @@ impl Tool for SessionSearchTool {
             context_before,
             context_after,
             max_scan_sessions,
+            exhaustive,
         };
 
         let report = tokio::task::spawn_blocking({
@@ -537,13 +610,11 @@ fn search_sessions_blocking(
     }
 
     if source_matches_filter("jcode", options) {
-        let mut files = collect_session_files(sessions_dir)?;
+        let collection = collect_session_files(sessions_dir, options.max_scan_sessions)?;
+        report.truncated |= collection.truncated;
+        let mut files = collection.files;
         if !files.is_empty() {
             files.sort_unstable_by(|a, b| b.mtime.cmp(&a.mtime));
-            if files.len() > options.max_scan_sessions {
-                files.truncate(options.max_scan_sessions);
-                report.truncated = true;
-            }
             report.scanned_jcode_sessions = files.len();
 
             if !options.include_current {
@@ -551,17 +622,52 @@ fn search_sessions_blocking(
             }
 
             if !files.is_empty() {
-                let raw_filter_outcomes = filter_candidates_parallel(&files, query);
-                report.read_errors += raw_filter_outcomes
-                    .iter()
-                    .map(|outcome| outcome.read_errors)
-                    .sum::<usize>();
-                let mut candidates: Vec<SessionFileCandidate> = raw_filter_outcomes
-                    .into_iter()
-                    .flat_map(|outcome| outcome.candidates)
-                    .collect();
+                let using_index = !options.exhaustive;
+                let mut candidates = if options.exhaustive {
+                    let raw_filter_outcomes = filter_candidates_parallel(&files, query);
+                    report.read_errors += raw_filter_outcomes
+                        .iter()
+                        .map(|outcome| outcome.read_errors)
+                        .sum::<usize>();
+                    raw_filter_outcomes
+                        .into_iter()
+                        .flat_map(|outcome| outcome.candidates)
+                        .collect()
+                } else {
+                    match load_or_build_recent_index(sessions_dir, &files)
+                        .map(|index| index_candidates(&index, query, &files))
+                    {
+                        Ok(candidates) => candidates,
+                        Err(err) => {
+                            crate::logging::warn(&format!(
+                                "session_search index unavailable; falling back to raw scan: {err}"
+                            ));
+                            let raw_filter_outcomes = filter_candidates_parallel(&files, query);
+                            report.read_errors += raw_filter_outcomes
+                                .iter()
+                                .map(|outcome| outcome.read_errors)
+                                .sum::<usize>();
+                            raw_filter_outcomes
+                                .into_iter()
+                                .flat_map(|outcome| outcome.candidates)
+                                .collect()
+                        }
+                    }
+                };
                 candidates.sort_unstable_by(|a, b| b.mtime.cmp(&a.mtime));
                 report.candidate_jcode_sessions = candidates.len();
+                if using_index {
+                    let indexed_budget = options
+                        .limit
+                        .saturating_mul(options.max_per_session)
+                        .saturating_mul(INDEX_SCORE_CANDIDATE_MULTIPLIER)
+                        .max(options.limit)
+                        .max(1);
+                    if candidates.len() > indexed_budget {
+                        candidates.truncate(indexed_budget);
+                        report.truncated = true;
+                    }
+                }
                 if candidates.len() > MAX_DESERIALIZE {
                     candidates.truncate(MAX_DESERIALIZE);
                     report.truncated = true;
@@ -605,10 +711,15 @@ fn search_sessions_blocking(
     Ok(report)
 }
 
-fn collect_session_files(sessions_dir: &Path) -> Result<Vec<SessionFileCandidate>> {
-    let mut files = Vec::new();
+fn collect_session_files(
+    sessions_dir: &Path,
+    max_scan_sessions: usize,
+) -> Result<SessionFileCollection> {
+    let mut timestamped: BinaryHeap<Reverse<(u64, PathBuf, String)>> = BinaryHeap::new();
+    let mut untimestamped = Vec::new();
+    let mut truncated = false;
     if !sessions_dir.exists() {
-        return Ok(files);
+        return Ok(SessionFileCollection::default());
     }
     for entry in std::fs::read_dir(sessions_dir)?.flatten() {
         let path = entry.path();
@@ -621,6 +732,32 @@ fn collect_session_files(sessions_dir: &Path) -> Result<Vec<SessionFileCandidate
         else {
             continue;
         };
+        if let Some(timestamp_ms) = session_id_timestamp_ms(&stem) {
+            timestamped.push(Reverse((timestamp_ms, path, stem)));
+            if timestamped.len() > max_scan_sessions {
+                timestamped.pop();
+                truncated = true;
+            }
+        } else {
+            untimestamped.push((path, stem));
+        }
+    }
+
+    let mut files =
+        Vec::with_capacity(timestamped.len() + untimestamped.len().min(max_scan_sessions));
+    for Reverse((timestamp_ms, path, stem)) in timestamped.into_sorted_vec() {
+        let journal_path = session_journal_path_from_snapshot(&path);
+        files.push(SessionFileCandidate {
+            snapshot_path: path,
+            journal_path,
+            session_id_hint: stem,
+            mtime: system_time_from_unix_millis(timestamp_ms),
+        });
+    }
+
+    // Legacy or imported snapshot names may not contain a timestamp. They are
+    // uncommon, so only stat these fallback paths instead of every session file.
+    for (path, stem) in untimestamped {
         let journal_path = session_journal_path_from_snapshot(&path);
         let snapshot_mtime = modified_time_or_epoch(&path);
         let journal_mtime = modified_time_or_epoch(&journal_path);
@@ -631,7 +768,160 @@ fn collect_session_files(sessions_dir: &Path) -> Result<Vec<SessionFileCandidate
             mtime: snapshot_mtime.max(journal_mtime),
         });
     }
-    Ok(files)
+
+    if files.len() > max_scan_sessions {
+        files.sort_unstable_by(|a, b| b.mtime.cmp(&a.mtime));
+        files.truncate(max_scan_sessions);
+        truncated = true;
+    }
+
+    Ok(SessionFileCollection { files, truncated })
+}
+
+fn session_id_timestamp_ms(session_id: &str) -> Option<u64> {
+    session_id.split('_').find_map(|part| {
+        (part.len() == 13)
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    })
+}
+
+fn system_time_from_unix_millis(timestamp_ms: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(timestamp_ms)
+}
+
+fn system_time_to_unix_millis(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn index_path_for_sessions_dir(sessions_dir: &Path) -> PathBuf {
+    sessions_dir
+        .parent()
+        .unwrap_or(sessions_dir)
+        .join("cache")
+        .join(INDEX_FILE_NAME)
+}
+
+fn load_or_build_recent_index(
+    sessions_dir: &Path,
+    files: &[SessionFileCandidate],
+) -> Result<Arc<SessionSearchIndex>> {
+    let index_path = index_path_for_sessions_dir(sessions_dir);
+    if let Some(index) = get_cached_session_search_index(&index_path, files) {
+        return Ok(index);
+    }
+
+    if let Ok(raw) = std::fs::read(&index_path)
+        && let Ok(index) = serde_json::from_slice::<SessionSearchIndex>(&raw)
+        && index_matches_files(&index, files)
+    {
+        return Ok(cache_session_search_index(index_path, index));
+    }
+
+    let index = build_recent_index(files)?;
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = index_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serde_json::to_vec(&index)?)?;
+    std::fs::rename(tmp_path, &index_path)?;
+    Ok(cache_session_search_index(index_path, index))
+}
+
+fn get_cached_session_search_index(
+    index_path: &Path,
+    files: &[SessionFileCandidate],
+) -> Option<Arc<SessionSearchIndex>> {
+    let cache = SESSION_SEARCH_INDEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache.lock().ok()?;
+    let index = guard.get(index_path)?;
+    index_matches_files(index, files).then(|| Arc::clone(index))
+}
+
+fn cache_session_search_index(
+    index_path: PathBuf,
+    index: SessionSearchIndex,
+) -> Arc<SessionSearchIndex> {
+    let index = Arc::new(index);
+    let cache = SESSION_SEARCH_INDEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(index_path, Arc::clone(&index));
+    }
+    index
+}
+
+fn index_matches_files(index: &SessionSearchIndex, files: &[SessionFileCandidate]) -> bool {
+    index.version == INDEX_VERSION
+        && index.entries.len() == files.len()
+        && index.entries.iter().zip(files).all(|(entry, file)| {
+            entry.session_id == file.session_id_hint
+                && entry.snapshot_path == file.snapshot_path
+                && entry.journal_path == file.journal_path
+                && entry.mtime_ms == system_time_to_unix_millis(file.mtime)
+        })
+}
+
+fn build_recent_index(files: &[SessionFileCandidate]) -> Result<SessionSearchIndex> {
+    let mut entries = Vec::with_capacity(files.len());
+    let mut terms: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (idx, file) in files.iter().enumerate() {
+        entries.push(SessionSearchIndexEntry {
+            session_id: file.session_id_hint.clone(),
+            snapshot_path: file.snapshot_path.clone(),
+            journal_path: file.journal_path.clone(),
+            mtime_ms: system_time_to_unix_millis(file.mtime),
+        });
+
+        let mut read_errors = 0;
+        let raw = read_candidate_raw(file, &mut read_errors).unwrap_or_default();
+        let mut doc_terms = tokenize_index_document(&file.session_id_hint, &raw);
+        doc_terms.sort_unstable();
+        doc_terms.dedup();
+        for term in doc_terms {
+            terms.entry(term).or_default().push(idx);
+        }
+    }
+
+    Ok(SessionSearchIndex {
+        version: INDEX_VERSION,
+        entries,
+        terms,
+    })
+}
+
+fn tokenize_index_document(session_id: &str, raw: &[u8]) -> Vec<String> {
+    let mut text = String::with_capacity(session_id.len() + raw.len().min(1024 * 1024));
+    text.push_str(session_id);
+    text.push(' ');
+    text.push_str(&String::from_utf8_lossy(raw));
+    jcode_session_types::tokenize_session_search_query(&text.to_lowercase())
+}
+
+fn index_candidates(
+    index: &SessionSearchIndex,
+    query: &QueryProfile,
+    files: &[SessionFileCandidate],
+) -> Vec<SessionFileCandidate> {
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for term in &query.terms {
+        if let Some(postings) = index.terms.get(term) {
+            for &idx in postings {
+                *counts.entry(idx).or_insert(0) += 1;
+            }
+        }
+    }
+
+    counts
+        .into_iter()
+        .filter_map(|(idx, count)| {
+            (count >= query.min_term_matches)
+                .then(|| files.get(idx).cloned())
+                .flatten()
+        })
+        .collect()
 }
 
 fn modified_time_or_epoch(path: &Path) -> SystemTime {
@@ -764,6 +1054,20 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         report.external_sources.push("claude");
         for session in sessions.into_iter().take(options.max_scan_sessions) {
             let path = PathBuf::from(&session.full_path);
+            if !external_path_or_raw_matches_query(&path, query)
+                && !external_text_matches_query(&session.session_id, query)
+                && !external_text_matches_query(&session.first_prompt, query)
+                && !session
+                    .summary
+                    .as_deref()
+                    .is_some_and(|summary| external_text_matches_query(summary, query))
+                && !session
+                    .project_path
+                    .as_deref()
+                    .is_some_and(|project| external_text_matches_query(project, query))
+            {
+                continue;
+            }
             let messages = load_claude_external_messages(&path, options.include_tools);
             let created_at = session.created.unwrap_or_else(Utc::now);
             let updated_at = session.modified.or(session.created).unwrap_or(created_at);
@@ -795,6 +1099,7 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         &mut report,
         "codex",
         ".codex/sessions",
+        query,
         options,
         load_codex_external_session,
     );
@@ -803,6 +1108,7 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         &mut report,
         "pi",
         ".pi/agent/sessions",
+        query,
         options,
         load_pi_external_session,
     );
@@ -827,6 +1133,7 @@ fn collect_external_jsonl_source(
     report: &mut SearchReport,
     source: &'static str,
     root_relative: &str,
+    query: &QueryProfile,
     options: &SearchOptions,
     loader: fn(&Path, bool) -> ImportCoreResult<Option<ExternalSessionRecord>>,
 ) {
@@ -841,12 +1148,28 @@ fn collect_external_jsonl_source(
     }
     report.external_sources.push(source);
     for path in collect_recent_files_recursive(&root, "jsonl", options.max_scan_sessions) {
+        if !external_path_or_raw_matches_query(&path, query) {
+            continue;
+        }
         match loader(&path, options.include_tools) {
             Ok(Some(record)) => records.push(record),
             Ok(None) => {}
             Err(_) => report.parse_errors += 1,
         }
     }
+}
+
+fn external_path_or_raw_matches_query(path: &Path, query: &QueryProfile) -> bool {
+    if path_matches_query(&path.to_string_lossy(), query) {
+        return true;
+    }
+    std::fs::read(path)
+        .map(|raw| raw_matches_query(&raw, query))
+        .unwrap_or(false)
+}
+
+fn external_text_matches_query(text: &str, query: &QueryProfile) -> bool {
+    jcode_session_types::normalized_session_search_text_matches(&text.to_lowercase(), query)
 }
 
 fn collect_opencode_external_sessions(

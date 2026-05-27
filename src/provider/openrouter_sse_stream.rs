@@ -4,6 +4,24 @@ fn truncated_stream_payload_context(data: &str) -> String {
     crate::util::truncate_str(&data.trim().replace('\n', "\\n"), 240).to_string()
 }
 
+fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
+    let lower = api_base.to_ascii_lowercase();
+    if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
+        return "Ollama hint: make sure `ollama serve` is running, the model is installed with `ollama pull <model>`, and run jcode with an installed model, for example `jcode --provider ollama --model llama3.2 run 'hello'`.";
+    }
+
+    if lower.contains("localhost:1234") || lower.contains("127.0.0.1:1234") {
+        return "LM Studio hint: start the Local Server in LM Studio, load a chat model, and run jcode with the exact model id shown by LM Studio's /v1/models endpoint.";
+    }
+
+    if lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]") {
+        return "Local endpoint hint: make sure the server is running, the base URL includes /v1, the selected model is loaded, and the server supports streaming POST /chat/completions.";
+    }
+
+    let _ = model;
+    "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
+}
+
 // ============================================================================
 // SSE Stream Parser
 // ============================================================================
@@ -129,11 +147,13 @@ async fn stream_response(
         .send()
         .await
         .with_context(|| {
+            let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
             format!(
-                "Failed to send OpenAI-compatible chat request\n  endpoint: {}\n  model: {}\n  auth: {}\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).",
+                "Failed to send OpenAI-compatible chat request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
                 url,
                 model,
-                auth.label()
+                auth.label(),
+                hint
             )
         })?;
 
@@ -147,13 +167,15 @@ async fn stream_response(
     if !response.status().is_success() {
         let status = response.status();
         let body = crate::util::http_error_body(response, "HTTP error").await;
+        let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
         anyhow::bail!(
-            "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\nHint: verify the selected model exists in `/models`, your key has access, and the endpoint supports POST /chat/completions with streaming.",
+            "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
             url,
             model,
             auth.label(),
             status,
-            body
+            body,
+            hint
         );
     }
 
@@ -181,10 +203,11 @@ async fn stream_response(
             Err(_) => {
                 crate::logging::warn("OpenRouter SSE stream timed out (no data for 180s)");
                 anyhow::bail!(
-                    "OpenAI-compatible stream timeout\n  endpoint: {}\n  model: {}\n  auth: {}\n  timeout: no data received for 180 seconds\nHint: the provider may not support streaming, the model may be overloaded, or the request may be stuck before emitting tokens.",
+                    "OpenAI-compatible stream timeout\n  endpoint: {}\n  model: {}\n  auth: {}\n  timeout: no data received for 180 seconds\n{}",
                     url,
                     model,
-                    auth.label()
+                    auth.label(),
+                    local_endpoint_troubleshooting_hint(&api_base, &model)
                 );
             }
         };
@@ -761,5 +784,21 @@ mod tests {
             StreamEvent::MessageEnd { stop_reason } if stop_reason.as_deref() == Some("tool_calls")
         ));
         assert!(stream.tool_call_accumulators.is_empty());
+    }
+
+    #[test]
+    fn local_endpoint_hint_mentions_ollama_actions() {
+        let hint = local_endpoint_troubleshooting_hint("http://localhost:11434/v1", "llama3.2");
+        assert!(hint.contains("ollama serve"));
+        assert!(hint.contains("ollama pull"));
+        assert!(hint.contains("--provider ollama"));
+    }
+
+    #[test]
+    fn local_endpoint_hint_mentions_lm_studio_server() {
+        let hint = local_endpoint_troubleshooting_hint("http://127.0.0.1:1234/v1", "local-model");
+        assert!(hint.contains("LM Studio"));
+        assert!(hint.contains("Local Server"));
+        assert!(hint.contains("/v1/models"));
     }
 }

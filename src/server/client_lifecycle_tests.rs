@@ -1,13 +1,21 @@
 use super::*;
-use crate::message::{Message, ToolDefinition};
+use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
+use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct IsolatedRuntimeDir {
     _prev_runtime: Option<std::ffi::OsString>,
     _temp: tempfile::TempDir,
+}
+
+struct IsolatedReloadRecoveryEnv {
+    prev_home: Option<std::ffi::OsString>,
+    prev_runtime: Option<std::ffi::OsString>,
+    _home: tempfile::TempDir,
+    _runtime: tempfile::TempDir,
 }
 
 #[tokio::test]
@@ -205,6 +213,40 @@ impl IsolatedRuntimeDir {
     }
 }
 
+impl IsolatedReloadRecoveryEnv {
+    fn new() -> Self {
+        let home = tempfile::TempDir::new().expect("jcode home");
+        let runtime = tempfile::TempDir::new().expect("runtime dir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+        crate::server::clear_reload_marker();
+        Self {
+            prev_home,
+            prev_runtime,
+            _home: home,
+            _runtime: runtime,
+        }
+    }
+}
+
+impl Drop for IsolatedReloadRecoveryEnv {
+    fn drop(&mut self) {
+        crate::server::clear_reload_marker();
+        if let Some(prev_home) = self.prev_home.take() {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+        if let Some(prev_runtime) = self.prev_runtime.take() {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
+
 impl Drop for IsolatedRuntimeDir {
     fn drop(&mut self) {
         crate::server::clear_reload_marker();
@@ -218,6 +260,32 @@ impl Drop for IsolatedRuntimeDir {
 
 struct PanicOnForkProvider {
     forked: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Default)]
+struct CompleteImmediatelyProvider;
+
+#[async_trait]
+impl Provider for CompleteImmediatelyProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(stream::iter(vec![Ok(StreamEvent::MessageEnd {
+            stop_reason: None,
+        })])))
+    }
+
+    fn name(&self) -> &str {
+        "complete-immediately"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
 }
 
 #[async_trait]
@@ -354,6 +422,102 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             "rejecting during reload should not fork or invoke provider work"
         );
     });
+}
+
+#[test]
+fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_accepted_reload_recovery";
+    let continuation = "stored continuation accepted by server";
+
+    super::super::reload_recovery::persist_intent(
+        "reload-accepted-continuation",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: Some("stored notice".to_string()),
+            continuation_message: continuation.to_string(),
+        },
+        "synthetic accepted continuation test",
+    )?;
+    assert!(super::super::reload_recovery::has_pending_for_session(
+        session_id
+    ));
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.model = Some("complete-immediately".to_string());
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+
+        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let mut client_is_processing = false;
+        let mut processing_message_id = None;
+        let mut processing_session_id = None;
+        let mut processing_task = None;
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        start_processing_message(
+            ProcessingMessage {
+                id: 77,
+                content: "continue after reload".to_string(),
+                images: Vec::new(),
+                system_reminder: Some(continuation.to_string()),
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+
+        assert!(client_is_processing);
+        assert_eq!(processing_message_id, Some(77));
+        assert_eq!(processing_session_id.as_deref(), Some(session_id));
+        assert!(processing_task.is_some());
+        assert!(
+            !super::super::reload_recovery::has_pending_for_session(session_id),
+            "server acceptance of the exact hidden continuation should consume the durable intent"
+        );
+
+        let (done_id, result, _report) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                .await
+                .expect("processing task should finish")
+                .expect("processing task should report completion");
+        assert_eq!(done_id, 77);
+        result?;
+        if let Some(handle) = processing_task.take() {
+            handle.await.expect("processing task join");
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    Ok(())
 }
 
 #[test]

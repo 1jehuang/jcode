@@ -36,6 +36,7 @@ mod provider_control;
 mod reload;
 mod reload_recovery;
 mod reload_state;
+mod reload_trace;
 mod runtime;
 mod socket;
 mod swarm;
@@ -669,7 +670,13 @@ impl Server {
                 shutdown_signals.insert(session_id.clone(), agent_guard.graceful_shutdown_signal());
             }
 
-            let has_stored_recovery_intent = reload_recovery::has_pending_for_session(&session_id);
+            let stored_recovery_record = reload_recovery::peek_for_session(&session_id)
+                .ok()
+                .flatten();
+            let has_stored_recovery_intent = stored_recovery_record
+                .as_ref()
+                .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
+                .unwrap_or(false);
             let should_resume = has_stored_recovery_intent || {
                 let agent_guard = agent.lock().await;
                 self::client_session::restored_session_was_interrupted(
@@ -678,6 +685,19 @@ impl Server {
                     &agent_guard,
                 )
             };
+            if let Some(record) = stored_recovery_record.as_ref() {
+                reload_trace::record_value(
+                    &record.reload_id,
+                    "startup_recovery_decision",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "has_stored_recovery_intent": has_stored_recovery_intent,
+                        "should_resume": should_resume,
+                        "previous_status": previous_status,
+                        "is_headless": true,
+                    }),
+                );
+            }
 
             if !should_resume {
                 ReloadContext::log_recovery_outcome(
@@ -709,7 +729,7 @@ impl Server {
                 continue;
             }
 
-            let stored_directive = reload_recovery::claim_pending_for_session(&session_id)
+            let stored_directive = reload_recovery::pending_directive_for_session(&session_id)
                 .ok()
                 .flatten();
             let reload_ctx = if stored_directive.is_none() {
@@ -742,8 +762,19 @@ impl Server {
             let recover_event_counter = Arc::clone(&self.event_counter);
             let recover_swarm_event_tx = self.swarm_event_tx.clone();
             let recover_swarm_state = self.swarm_state.clone();
+            let recovery_reload_id = stored_recovery_record.map(|record| record.reload_id);
 
             tokio::spawn(async move {
+                if let Some(reload_id) = recovery_reload_id.as_deref() {
+                    reload_trace::record_value(
+                        reload_id,
+                        "continuation_started",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "source": "server_startup_headless",
+                        }),
+                    );
+                }
                 update_member_status(
                     &session_id,
                     "running",
@@ -764,6 +795,19 @@ impl Server {
                     persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
                 }
 
+                match reload_recovery::mark_delivered_if_matching_continuation(
+                    &session_id,
+                    &reminder,
+                    "server_startup_headless",
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {}
+                    Err(error) => crate::logging::warn(&format!(
+                        "Failed to mark headless reload recovery intent delivered for {}: {}",
+                        session_id, error
+                    )),
+                }
+
                 let event_tx = self::state::session_event_fanout_sender(
                     session_id.clone(),
                     Arc::clone(&recover_swarm_members),
@@ -779,6 +823,17 @@ impl Server {
 
                 let (status, detail) = match result {
                     Ok(()) => {
+                        if let Some(reload_id) = recovery_reload_id.as_deref() {
+                            reload_trace::record_value(
+                                reload_id,
+                                "continuation_finished",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "source": "server_startup_headless",
+                                    "status": "ready",
+                                }),
+                            );
+                        }
                         ReloadContext::log_recovery_outcome(
                             "server_startup_headless",
                             &session_id,
@@ -788,6 +843,17 @@ impl Server {
                         ("ready", None)
                     }
                     Err(error) => {
+                        if let Some(reload_id) = recovery_reload_id.as_deref() {
+                            reload_trace::record_value(
+                                reload_id,
+                                "continuation_failed",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "source": "server_startup_headless",
+                                    "error": error.to_string(),
+                                }),
+                            );
+                        }
                         ReloadContext::log_recovery_outcome(
                             "server_startup_headless",
                             &session_id,
@@ -898,6 +964,11 @@ impl Server {
                 "Embedding model not installed yet; skipping eager preload during server startup",
             );
         }
+
+        // Warm the lightweight session-search index after daemon startup. This
+        // keeps the first agent `session_search` call from paying the cold
+        // indexing cost while leaving exhaustive searches available on demand.
+        crate::tool::spawn_recent_index_warmup();
 
         // Spawn reload monitor (event-driven via in-process channel).
         // In the unified server design, self-dev sessions share the main server,

@@ -100,6 +100,7 @@ pub(super) fn peek_for_session(session_id: &str) -> Result<Option<ReloadRecovery
     crate::storage::read_json(&path).map(Some)
 }
 
+#[cfg(test)]
 pub(super) fn has_pending_for_session(session_id: &str) -> bool {
     peek_for_session(session_id)
         .ok()
@@ -108,13 +109,15 @@ pub(super) fn has_pending_for_session(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Claim a pending recovery directive for delivery in a bootstrap/history payload.
+/// Return the pending recovery directive for inclusion in a bootstrap/history
+/// payload without consuming it.
 ///
-/// This is intentionally server-owned and durable: after a directive is attached
-/// to a history payload we mark it delivered so duplicate history requests do not
-/// queue duplicate continuation turns. Compatibility fallbacks can still recover
-/// older reloads that predate this store.
-pub(super) fn claim_pending_for_session(
+/// A History frame can be lost if the client disconnects or re-execs after the
+/// server writes the payload but before the TUI queues/sends the hidden
+/// continuation. Therefore History generation must not mark the durable intent
+/// delivered. Delivery is recorded only when the replacement server accepts the
+/// matching continuation message.
+pub(super) fn pending_directive_for_session(
     session_id: &str,
 ) -> Result<Option<ReloadRecoveryDirective>> {
     let path = path_for_session(session_id)?;
@@ -122,8 +125,16 @@ pub(super) fn claim_pending_for_session(
         return Ok(None);
     }
 
-    let mut record: ReloadRecoveryRecord = crate::storage::read_json(&path)?;
+    let record: ReloadRecoveryRecord = crate::storage::read_json(&path)?;
     if record.status != ReloadRecoveryStatus::Pending {
+        super::reload_trace::record_value(
+            &record.reload_id,
+            "intent_peek_skipped",
+            serde_json::json!({
+                "session_id": session_id,
+                "status": format!("{:?}", record.status),
+            }),
+        );
         crate::logging::info(&format!(
             "reload recovery store: skipping non-pending intent session={} reload_id={} status={:?}",
             session_id, record.reload_id, record.status
@@ -131,15 +142,90 @@ pub(super) fn claim_pending_for_session(
         return Ok(None);
     }
 
-    record.status = ReloadRecoveryStatus::Delivered;
-    record.delivered_at = Some(chrono::Utc::now().to_rfc3339());
     let directive = record.directive.clone();
-    crate::storage::write_json(&path, &record)?;
+    super::reload_trace::record_value(
+        &record.reload_id,
+        "intent_attached_to_history",
+        serde_json::json!({
+            "session_id": session_id,
+            "role": record.role.as_str(),
+            "path": path,
+        }),
+    );
     crate::logging::info(&format!(
-        "reload recovery store: claimed intent reload_id={} session={} role={}",
+        "reload recovery store: attached pending intent reload_id={} session={} role={} without marking delivered",
         record.reload_id,
         session_id,
         record.role.as_str()
     ));
     Ok(Some(directive))
+}
+
+pub(super) fn mark_delivered_if_matching_continuation(
+    session_id: &str,
+    continuation_message: &str,
+    accepted_by: &str,
+) -> Result<bool> {
+    let path = path_for_session(session_id)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let mut record: ReloadRecoveryRecord = crate::storage::read_json(&path)?;
+    if record.status != ReloadRecoveryStatus::Pending {
+        super::reload_trace::record_value(
+            &record.reload_id,
+            "intent_delivery_skipped",
+            serde_json::json!({
+                "session_id": session_id,
+                "status": format!("{:?}", record.status),
+                "accepted_by": accepted_by,
+            }),
+        );
+        return Ok(false);
+    }
+
+    if record.directive.continuation_message != continuation_message {
+        super::reload_trace::record_value(
+            &record.reload_id,
+            "intent_delivery_mismatch",
+            serde_json::json!({
+                "session_id": session_id,
+                "accepted_by": accepted_by,
+                "expected_chars": record.directive.continuation_message.len(),
+                "received_chars": continuation_message.len(),
+            }),
+        );
+        crate::logging::warn(&format!(
+            "reload recovery store: continuation mismatch session={} reload_id={} accepted_by={} expected_chars={} received_chars={}",
+            session_id,
+            record.reload_id,
+            accepted_by,
+            record.directive.continuation_message.len(),
+            continuation_message.len()
+        ));
+        return Ok(false);
+    }
+
+    record.status = ReloadRecoveryStatus::Delivered;
+    record.delivered_at = Some(chrono::Utc::now().to_rfc3339());
+    crate::storage::write_json(&path, &record)?;
+    super::reload_trace::record_value(
+        &record.reload_id,
+        "intent_delivered",
+        serde_json::json!({
+            "session_id": session_id,
+            "role": record.role.as_str(),
+            "accepted_by": accepted_by,
+            "path": path,
+        }),
+    );
+    crate::logging::info(&format!(
+        "reload recovery store: delivered intent reload_id={} session={} role={} accepted_by={}",
+        record.reload_id,
+        session_id,
+        record.role.as_str(),
+        accepted_by
+    ));
+    Ok(true)
 }

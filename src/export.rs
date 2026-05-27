@@ -138,40 +138,40 @@ pub fn redact_secrets(input: &str) -> String {
     }
     static PATS: OnceLock<Vec<Pat>> = OnceLock::new();
     let pats = PATS.get_or_init(|| {
-        let mut v: Vec<Pat> = Vec::new();
-        // sk-… style keys (OpenAI, Anthropic, z.ai). Match `sk-` followed by
-        // 20+ url-safe chars or dots/dashes. Anchor on word boundary to avoid
-        // chewing surrounding text.
-        v.push(Pat {
-            re: Regex::new(r"\bsk-[A-Za-z0-9_\-\.]{20,}").unwrap(),
-            replace: "[REDACTED:sk]",
-        });
-        // GitHub tokens.
-        v.push(Pat {
-            re: Regex::new(r"\bgh[opsru]_[A-Za-z0-9]{20,}").unwrap(),
-            replace: "[REDACTED:github]",
-        });
-        // Bearer tokens (header-shape). Replace token only, keep "Bearer ".
-        v.push(Pat {
-            re: Regex::new(r"\b(Bearer\s+)[A-Za-z0-9_\-\.]{16,}").unwrap(),
-            replace: "${1}[REDACTED:bearer]",
-        });
-        // z.ai-shape: 32 hex . 12+ alnum (token format used by z.ai's
-        // anthropic-compatible endpoint and similar).
-        v.push(Pat {
-            re: Regex::new(r"\b[a-f0-9]{32}\.[A-Za-z0-9]{12,}").unwrap(),
-            replace: "[REDACTED:zai]",
-        });
-        // Env-var assignments for known secret names (case-insensitive name,
-        // stops at end of line / quote / comma).
-        v.push(Pat {
-            re: Regex::new(
-                r#"(?i)\b(ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENAI_COMPAT_API_KEY|OPENROUTER_API_KEY|ZHIPU_API_KEY|COHERE_API_KEY|GITHUB_TOKEN|GH_TOKEN|MINIMAX_API_KEY|XAI_API_KEY|DEEPSEEK_API_KEY|FIREWORKS_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|OPENCODE_API_KEY|OPENCODE_GO_API_KEY|TOGETHER_API_KEY|PERPLEXITY_API_KEY|CEREBRAS_API_KEY|NVIDIA_API_KEY|AZURE_OPENAI_API_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_AUTH_TOKEN)(\s*=\s*)([^\r\n,'"\s]+)"#,
-            )
-            .unwrap(),
-            replace: "${1}${2}[REDACTED:env]",
-        });
-        v
+        vec![
+            // sk-… style keys (OpenAI, Anthropic, z.ai). Match `sk-` followed by
+            // 20+ url-safe chars or dots/dashes. Anchor on word boundary to avoid
+            // chewing surrounding text.
+            Pat {
+                re: Regex::new(r"\bsk-[A-Za-z0-9_\-\.]{20,}").unwrap(),
+                replace: "[REDACTED:sk]",
+            },
+            // GitHub tokens.
+            Pat {
+                re: Regex::new(r"\bgh[opsru]_[A-Za-z0-9]{20,}").unwrap(),
+                replace: "[REDACTED:github]",
+            },
+            // Bearer tokens (header-shape). Replace token only, keep "Bearer ".
+            Pat {
+                re: Regex::new(r"\b(Bearer\s+)[A-Za-z0-9_\-\.]{16,}").unwrap(),
+                replace: "${1}[REDACTED:bearer]",
+            },
+            // z.ai-shape: 32 hex . 12+ alnum (token format used by z.ai's
+            // anthropic-compatible endpoint and similar).
+            Pat {
+                re: Regex::new(r"\b[a-f0-9]{32}\.[A-Za-z0-9]{12,}").unwrap(),
+                replace: "[REDACTED:zai]",
+            },
+            // Env-var assignments for known secret names (case-insensitive name,
+            // stops at end of line / quote / comma).
+            Pat {
+                re: Regex::new(
+                    r#"(?i)\b(ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENAI_COMPAT_API_KEY|OPENROUTER_API_KEY|ZHIPU_API_KEY|COHERE_API_KEY|GITHUB_TOKEN|GH_TOKEN|MINIMAX_API_KEY|XAI_API_KEY|DEEPSEEK_API_KEY|FIREWORKS_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|OPENCODE_API_KEY|OPENCODE_GO_API_KEY|TOGETHER_API_KEY|PERPLEXITY_API_KEY|CEREBRAS_API_KEY|NVIDIA_API_KEY|AZURE_OPENAI_API_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_AUTH_TOKEN)(\s*=\s*)([^\r\n,'"\s]+)"#,
+                )
+                .unwrap(),
+                replace: "${1}${2}[REDACTED:env]",
+            },
+        ]
     });
 
     let mut out = input.to_string();
@@ -432,6 +432,25 @@ pub fn render_html(session: &crate::session::Session) -> String {
                         encrypted_content.len()
                     ));
                 }
+                ContentBlock::AnthropicThinking { thinking, .. } => {
+                    let trimmed = thinking.trim();
+                    if !trimmed.is_empty() {
+                        out.push_str(&format!(
+                            "<details><summary>thinking</summary>\n<div class=\"text\">{}</div>\n</details>\n",
+                            html_escape(trimmed)
+                        ));
+                    }
+                }
+                ContentBlock::OpenAIReasoning { summary, .. } => {
+                    let joined = summary.join("\n");
+                    let trimmed = joined.trim();
+                    if !trimmed.is_empty() {
+                        out.push_str(&format!(
+                            "<details><summary>reasoning</summary>\n<div class=\"text\">{}</div>\n</details>\n",
+                            html_escape(trimmed)
+                        ));
+                    }
+                }
             }
         }
         out.push_str("</section>\n");
@@ -501,6 +520,23 @@ fn render_stored_message(out: &mut String, idx: usize, msg: &crate::session::Sto
                     "_[OpenAI native compaction artifact: {} chars]_\n\n",
                     encrypted_content.len()
                 ));
+            }
+            ContentBlock::AnthropicThinking { thinking, .. } => {
+                let trimmed = thinking.trim();
+                if !trimmed.is_empty() {
+                    out.push_str("<details><summary>thinking</summary>\n\n");
+                    out.push_str(trimmed);
+                    out.push_str("\n\n</details>\n\n");
+                }
+            }
+            ContentBlock::OpenAIReasoning { summary, .. } => {
+                let joined = summary.join("\n");
+                let trimmed = joined.trim();
+                if !trimmed.is_empty() {
+                    out.push_str("<details><summary>reasoning</summary>\n\n");
+                    out.push_str(trimmed);
+                    out.push_str("\n\n</details>\n\n");
+                }
             }
         }
     }
@@ -752,7 +788,7 @@ DEEPSEEK_API_KEY=anotherSecret67890
             "ZHIPU_API_KEY",
             "DEEPSEEK_API_KEY",
         ] {
-            assert!(out.contains(&format!("{name}")), "{name} name lost: {out}");
+            assert!(out.contains(&name.to_string()), "{name} name lost: {out}");
         }
         assert!(!out.contains("anotherSecret67890"));
         assert!(!out.contains("mySecretToken12345"));

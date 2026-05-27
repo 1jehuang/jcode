@@ -807,7 +807,7 @@ fn grouped_u64(value: u64) -> String {
     let raw = value.to_string();
     let mut grouped = String::with_capacity(raw.len() + raw.len() / 3);
     for (index, ch) in raw.chars().enumerate() {
-        if index > 0 && (raw.len() - index) % 3 == 0 {
+        if index > 0 && (raw.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(ch);
@@ -1719,9 +1719,17 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             todo_lines.push_str("- none\n");
         } else {
             for todo in todos.iter().take(8) {
+                let (confidence_label, confidence) = if todo.status == "completed" {
+                    ("done", todo.completion_confidence.or(todo.confidence))
+                } else {
+                    ("confidence", todo.confidence)
+                };
+                let confidence = confidence
+                    .map(|score| format!("{}%", score))
+                    .unwrap_or_else(|| "?".to_string());
                 todo_lines.push_str(&format!(
-                    "- [{}|{}] {}\n",
-                    todo.status, todo.priority, todo.content
+                    "- [{}|{}|{} {}] {}\n",
+                    todo.status, todo.priority, confidence_label, confidence, todo.content
                 ));
             }
             if todos.len() > 8 {
@@ -1795,7 +1803,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             context.tool_definition_tokens(),
         ));
         context_report.push_str(&format!(
-            "- system prompt: {} chars\n- session context: {} chars\n- project AGENTS.md: {} ({})\n- global ~/.AGENTS.md: {} ({})\n- prompt overlays: {} chars\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",
+            "- system prompt: {} chars\n- session context: {} chars\n- project AGENTS.md: {} ({})\n- global ~/.AGENTS.md: {} ({})\n- prompt overlays: {} chars\n- preferred tools: {} chars\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",
             context.system_prompt_chars,
             context.session_context_chars,
             if context.has_project_agents_md { "loaded" } else { "not loaded" },
@@ -1803,6 +1811,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             if context.has_global_agents_md { "loaded" } else { "not loaded" },
             context.global_agents_md_chars,
             context.prompt_overlay_chars,
+            context.preferred_tools_chars,
             context.skills_chars,
             context.selfdev_chars,
             context.memory_chars,

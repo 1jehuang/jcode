@@ -1026,6 +1026,14 @@ impl Session {
                     ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => {
                         *text = crate::message::redact_secrets(text);
                     }
+                    ContentBlock::AnthropicThinking { thinking, .. } => {
+                        *thinking = crate::message::redact_secrets(thinking);
+                    }
+                    ContentBlock::OpenAIReasoning { summary, .. } => {
+                        for item in summary {
+                            *item = crate::message::redact_secrets(item);
+                        }
+                    }
                     ContentBlock::ToolResult { content, .. } => {
                         *content = crate::message::redact_secrets(content);
                     }

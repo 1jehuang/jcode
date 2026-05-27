@@ -65,19 +65,31 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
         return None;
     }
 
-    match app.status {
-        ProcessingStatus::Sending
-        | ProcessingStatus::Connecting(_)
-        | ProcessingStatus::Thinking(_)
-        | ProcessingStatus::Streaming => Some(jcode_tui_style::theme::activity_indicator(
+    if status_uses_primary_spinner(&app.status) {
+        Some(jcode_tui_style::theme::activity_indicator(
             status_spinner_elapsed(app),
             STATUS_SPINNER_FPS,
             true,
-        )),
-        ProcessingStatus::Idle
-        | ProcessingStatus::WaitingForNetwork { .. }
-        | ProcessingStatus::RunningTool(_) => None,
+        ))
+    } else {
+        None
     }
+}
+
+/// Statuses whose full status line starts with the primary green circular spinner.
+///
+/// Keep this in sync with `ui_input::draw_status`: these statuses can be safely
+/// refreshed by the one-cell spinner fast path when the status line is left aligned.
+/// Tool execution uses its own full-line activity indicator, and network waits use
+/// a static amber retry marker, so neither belongs here.
+pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
+    matches!(
+        status,
+        ProcessingStatus::Sending
+            | ProcessingStatus::Connecting(_)
+            | ProcessingStatus::Thinking(_)
+            | ProcessingStatus::Streaming
+    )
 }
 
 #[derive(Default)]
@@ -567,6 +579,21 @@ mod tests {
             "the app lifetime clock can be on a different spinner frame than the status clock"
         );
         assert_eq!(fast_path_symbol, full_status_symbol);
+    }
+
+    #[test]
+    fn primary_spinner_statuses_are_explicit() {
+        assert!(status_uses_primary_spinner(&ProcessingStatus::Sending));
+        assert!(status_uses_primary_spinner(&ProcessingStatus::Streaming));
+        assert!(!status_uses_primary_spinner(
+            &ProcessingStatus::RunningTool("bash".to_string())
+        ));
+        assert!(!status_uses_primary_spinner(&ProcessingStatus::Idle));
+        assert!(!status_uses_primary_spinner(
+            &ProcessingStatus::WaitingForNetwork {
+                listener: "network".to_string(),
+            }
+        ));
     }
 
     #[test]

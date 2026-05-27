@@ -4,6 +4,7 @@ use crate::session::{Session, StoredDisplayRole};
 use chrono::Duration;
 use serde_json::json;
 use std::path::Path;
+use std::time::Instant;
 
 fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
     let _guard = crate::storage::lock_test_env();
@@ -147,6 +148,76 @@ fn empty_sessions_dir_returns_no_results_instead_of_panicking() {
         let results = run_search(home, "anything distinctive", &options);
         assert!(results.is_empty());
     });
+}
+
+#[test]
+fn timestamped_session_collection_respects_recent_limit_without_mtime_stat() {
+    with_temp_home(|home| {
+        save_test_session(
+            "session_1760000000000_old",
+            vec![(Role::User, vec![text("old-needle")])],
+        );
+        save_test_session(
+            "session_1760000001000_mid",
+            vec![(Role::User, vec![text("mid-needle")])],
+        );
+        save_test_session(
+            "session_1760000002000_new",
+            vec![(Role::User, vec![text("new-needle")])],
+        );
+
+        let collection = collect_session_files(&home.join("sessions"), 2).expect("collect files");
+        assert!(collection.truncated);
+        let ids = collection
+            .files
+            .iter()
+            .map(|candidate| candidate.session_id_hint.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"session_1760000002000_new"));
+        assert!(ids.contains(&"session_1760000001000_mid"));
+        assert!(!ids.contains(&"session_1760000000000_old"));
+    });
+}
+
+#[test]
+#[ignore = "local performance benchmark over the real ~/.jcode session corpus"]
+fn bench_real_session_search_corpus() {
+    if std::env::var("JCODE_SESSION_SEARCH_BENCH_REAL")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        eprintln!("set JCODE_SESSION_SEARCH_BENCH_REAL=1 to run against the real session corpus");
+        return;
+    }
+
+    let sessions_dir = crate::storage::jcode_dir()
+        .expect("jcode dir")
+        .join("sessions");
+    let mut options = SearchOptions::for_test("benchmark-current-session");
+    options.include_external = false;
+    options.max_scan_sessions = 1000;
+
+    for query in ["session_search", "optimization", "nonexistentneedle123"] {
+        let start = Instant::now();
+        let report = search_sessions_blocking(
+            &sessions_dir,
+            &QueryProfile::new(query),
+            &options,
+            "benchmark-log-session",
+        )
+        .expect("search succeeds");
+        eprintln!(
+            "BENCH query={query} elapsed_ms={} scanned={} candidates={} results={} truncated={}",
+            start.elapsed().as_millis(),
+            report.scanned_jcode_sessions,
+            report.candidate_jcode_sessions,
+            report.results.len(),
+            report.truncated
+        );
+    }
 }
 
 #[test]

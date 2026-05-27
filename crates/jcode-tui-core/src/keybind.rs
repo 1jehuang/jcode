@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+pub const LINE_SCROLL_AMOUNT: i32 = 3;
+
 #[derive(Clone, Debug)]
 pub struct KeyBinding {
     pub code: KeyCode,
@@ -8,9 +10,53 @@ pub struct KeyBinding {
 
 impl KeyBinding {
     pub fn matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.matches_for_platform(code, modifiers, cfg!(target_os = "macos"))
+    }
+
+    pub fn matches_for_platform(
+        &self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        is_macos: bool,
+    ) -> bool {
         let (code, modifiers) = normalize_key(code, modifiers);
         let (bind_code, bind_mods) = normalize_key(self.code, self.modifiers);
-        code == bind_code && modifiers == bind_mods
+        if code == bind_code && modifiers == bind_mods {
+            return true;
+        }
+
+        is_macos
+            && modifiers.is_empty()
+            && bind_mods == KeyModifiers::ALT
+            && macos_option_char_to_ascii_key(code)
+                .is_some_and(|ascii| bind_code == KeyCode::Char(ascii))
+    }
+}
+
+pub fn macos_option_char_to_ascii_key(code: KeyCode) -> Option<char> {
+    let KeyCode::Char(ch) = code else {
+        return None;
+    };
+
+    match ch {
+        'å' => Some('a'),
+        '∫' => Some('b'),
+        'ç' => Some('c'),
+        '∂' => Some('d'),
+        '´' => Some('e'),
+        'ƒ' => Some('f'),
+        '˙' => Some('h'),
+        'ˆ' => Some('i'),
+        '∆' => Some('j'),
+        '˚' => Some('k'),
+        '¬' => Some('l'),
+        'µ' => Some('m'),
+        'ß' => Some('s'),
+        '†' => Some('t'),
+        '¨' => Some('u'),
+        '√' => Some('v'),
+        '¥' => Some('y'),
+        _ => None,
     }
 }
 
@@ -258,10 +304,10 @@ impl ScrollKeys {
     /// Check if a key matches scroll up (returns scroll amount, negative = up)
     pub fn scroll_amount(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i32> {
         if self.matches_scroll_up(code, modifiers) {
-            return Some(-3); // Scroll up 3 lines
+            return Some(-LINE_SCROLL_AMOUNT);
         }
         if self.matches_scroll_down(code, modifiers) {
-            return Some(3); // Scroll down 3 lines
+            return Some(LINE_SCROLL_AMOUNT);
         }
         if self.page_up.matches(code, modifiers) {
             return Some(-10); // Page up
@@ -273,8 +319,8 @@ impl ScrollKeys {
             && self.down.matches(KeyCode::Char('j'), KeyModifiers::CONTROL);
         if legacy_ctrl_fallback && modifiers.contains(KeyModifiers::CONTROL) {
             match code {
-                KeyCode::Char('k') => return Some(-3),
-                KeyCode::Char('j') => return Some(3),
+                KeyCode::Char('k') => return Some(-LINE_SCROLL_AMOUNT),
+                KeyCode::Char('j') => return Some(LINE_SCROLL_AMOUNT),
                 _ => {}
             }
         }
@@ -287,8 +333,8 @@ impl ScrollKeys {
             && (modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META));
         if mac_command {
             match code {
-                KeyCode::Char('k') | KeyCode::Char('K') => return Some(-3),
-                KeyCode::Char('j') | KeyCode::Char('J') => return Some(3),
+                KeyCode::Char('k') | KeyCode::Char('K') => return Some(-LINE_SCROLL_AMOUNT),
+                KeyCode::Char('j') | KeyCode::Char('J') => return Some(LINE_SCROLL_AMOUNT),
                 _ => {}
             }
         }
@@ -308,6 +354,16 @@ impl ScrollKeys {
         // - Ctrl+[ / Ctrl+] in terminals with keyboard enhancement
         //   (Ctrl+[ is indistinguishable from Esc without keyboard enhancement)
         if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('[') => return Some(-1),
+                KeyCode::Char(']') => return Some(1),
+                _ => {}
+            }
+        }
+
+        // macOS compatibility fallback: terminals that forward Command as SUPER/META
+        // can use Cmd+[ / Cmd+] for prompt jumps, mirroring Ctrl+[ / Ctrl+].
+        if modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META) {
             match code {
                 KeyCode::Char('[') => return Some(-1),
                 KeyCode::Char(']') => return Some(1),
@@ -529,6 +585,21 @@ mod tests {
     }
 
     #[test]
+    fn test_line_scroll_keys_scroll_three_lines() {
+        let keys = test_scroll_keys();
+
+        assert_eq!(LINE_SCROLL_AMOUNT, 3);
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::ALT),
+            Some(-3)
+        );
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::ALT),
+            Some(3)
+        );
+    }
+
+    #[test]
     fn test_scroll_amount_cmd_fallback_macos_only() {
         let mut keys = test_scroll_keys();
         keys.up_fallback = None;
@@ -560,6 +631,27 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_jump_cmd_bracket_fallback() {
+        let keys = test_scroll_keys();
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('['), KeyModifiers::SUPER),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char(']'), KeyModifiers::SUPER),
+            Some(1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('['), KeyModifiers::META),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char(']'), KeyModifiers::META),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn test_prompt_jump_ctrl_digit_reserved_for_rank_jump() {
         let keys = test_scroll_keys();
         assert_eq!(
@@ -578,6 +670,16 @@ mod tests {
         assert_eq!(cmd.code, KeyCode::Char('j'));
         assert!(cmd.modifiers.contains(KeyModifiers::SUPER));
 
+        for raw in ["command+k", "super+k", "win+k", "windows+k"] {
+            let binding = parse_keybinding(raw).unwrap_or_else(|| panic!("{raw} should parse"));
+            assert_eq!(binding.code, KeyCode::Char('k'));
+            assert_eq!(binding.modifiers, KeyModifiers::SUPER);
+        }
+
+        let control = parse_keybinding("control+j").expect("control+j should parse");
+        assert_eq!(control.code, KeyCode::Char('j'));
+        assert_eq!(control.modifiers, KeyModifiers::CONTROL);
+
         let option_left = parse_keybinding("option+left").expect("option+left should parse");
         assert_eq!(option_left.code, KeyCode::Left);
         assert!(option_left.modifiers.contains(KeyModifiers::ALT));
@@ -585,6 +687,43 @@ mod tests {
         let meta = parse_keybinding("meta+k").expect("meta+k should parse");
         assert_eq!(meta.code, KeyCode::Char('k'));
         assert!(meta.modifiers.contains(KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn key_binding_matches_macos_option_translated_characters() {
+        let binding = parse_keybinding("alt+s").expect("alt+s should parse");
+
+        assert!(binding.matches_for_platform(KeyCode::Char('s'), KeyModifiers::ALT, false,));
+        assert!(binding.matches_for_platform(KeyCode::Char('ß'), KeyModifiers::empty(), true,));
+        assert!(!binding.matches_for_platform(KeyCode::Char('ß'), KeyModifiers::empty(), false,));
+    }
+
+    #[test]
+    fn macos_option_character_map_covers_default_alt_shortcuts() {
+        for (option_char, ascii) in [
+            ('å', 'a'),
+            ('∫', 'b'),
+            ('ç', 'c'),
+            ('∂', 'd'),
+            ('´', 'e'),
+            ('ƒ', 'f'),
+            ('˙', 'h'),
+            ('ˆ', 'i'),
+            ('∆', 'j'),
+            ('˚', 'k'),
+            ('¬', 'l'),
+            ('µ', 'm'),
+            ('ß', 's'),
+            ('†', 't'),
+            ('¨', 'u'),
+            ('√', 'v'),
+            ('¥', 'y'),
+        ] {
+            assert_eq!(
+                macos_option_char_to_ascii_key(KeyCode::Char(option_char)),
+                Some(ascii)
+            );
+        }
     }
 
     #[test]

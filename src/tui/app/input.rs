@@ -11,11 +11,73 @@ use crate::bus::{
 use crate::util::truncate_str;
 use anyhow::Result;
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::DefaultTerminal;
+use std::io::{Read, Write};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
+
+pub(super) fn edit_input_in_external_editor(app: &mut App) {
+    match edit_text_in_external_editor(&app.input) {
+        Ok(edited) => {
+            if edited != app.input {
+                app.remember_input_undo_state();
+                app.input = edited;
+                app.cursor_pos = app.input.len();
+                app.sync_model_picker_preview_from_input();
+            }
+            app.set_status_notice("Prompt edited in $EDITOR");
+        }
+        Err(err) => app.set_status_notice(format!("Failed to open $EDITOR: {err}")),
+    }
+}
+
+fn edit_text_in_external_editor(initial_text: &str) -> Result<String> {
+    let mut file = tempfile::Builder::new()
+        .prefix("jcode-prompt-")
+        .suffix(".md")
+        .tempfile()?;
+    file.write_all(initial_text.as_bytes())?;
+    file.flush()?;
+    let path = file.path().to_path_buf();
+
+    let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    if raw_was_enabled {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+
+    let status_result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec ${VISUAL:-${EDITOR:-vi}} \"$@\"")
+        .arg("jcode-editor")
+        .arg(&path)
+        .status();
+
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        crossterm::cursor::Hide
+    );
+    if raw_was_enabled {
+        let _ = crossterm::terminal::enable_raw_mode();
+    }
+
+    let status = status_result?;
+    if !status.success() {
+        anyhow::bail!("editor exited with status {status}");
+    }
+
+    let mut edited = String::new();
+    std::fs::File::open(&path)?.read_to_string(&mut edited)?;
+    Ok(edited)
+}
 
 fn mission_turn_reminder(session_id: &str) -> Option<String> {
     crate::mission::active_system_reminder(session_id)
@@ -379,14 +441,16 @@ fn input_exceeds_submit_limit(input: &str) -> Option<String> {
     (size > MAX_SUBMITTED_TEXT_BYTES).then(|| oversized_message_notice(size))
 }
 
-pub(super) fn paste_image_from_clipboard(app: &mut App) {
-    app.set_status_notice("Reading clipboard image...");
-    spawn_clipboard_paste(app, ClipboardPasteKind::ImageOnly);
-}
-
 pub(super) fn paste_from_clipboard(app: &mut App) {
     app.set_status_notice("Reading clipboard...");
     spawn_clipboard_paste(app, ClipboardPasteKind::Smart);
+}
+
+fn is_clipboard_paste_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    matches!(code, KeyCode::Char('v' | 'V'))
+        && modifiers.intersects(
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META,
+        )
 }
 
 fn active_clipboard_session_id(app: &App) -> String {
@@ -554,8 +618,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardPasteContent, ClipboardPasteKind, preferred_wayland_text_type,
-        read_clipboard_for_paste_with, shifted_printable_fallback, text_input_for_key,
+        ClipboardPasteContent, ClipboardPasteKind, is_clipboard_paste_shortcut,
+        preferred_wayland_text_type, read_clipboard_for_paste_with, shifted_printable_fallback,
+        text_input_for_key,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -604,6 +669,33 @@ mod tests {
             matches!(content, ClipboardPasteContent::Empty),
             "expected empty paste, got {content:?}"
         );
+    }
+
+    #[test]
+    fn paste_shortcut_accepts_control_alt_command_and_meta_v() {
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+            KeyModifiers::META,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        ] {
+            assert!(
+                is_clipboard_paste_shortcut(KeyCode::Char('v'), modifiers),
+                "{modifiers:?}+v should paste clipboard contents"
+            );
+            assert!(
+                is_clipboard_paste_shortcut(KeyCode::Char('V'), modifiers),
+                "{modifiers:?}+V should paste clipboard contents"
+            );
+        }
+
+        assert!(!is_clipboard_paste_shortcut(
+            KeyCode::Char('v'),
+            KeyModifiers::empty()
+        ));
     }
 
     #[test]
@@ -708,7 +800,7 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     // terminal always deliver text. Checking clipboard_image() here caused a bug where
     // text pastes were misidentified as images when the clipboard also had image data
     // (common on Wayland where apps advertise multiple MIME types). Image pasting is
-    // handled by explicit clipboard shortcuts instead (Ctrl+V smart-pastes, Alt+V forces image).
+    // handled by explicit clipboard shortcuts instead (Ctrl+V/Alt+V/Cmd+V smart-paste).
     if let Some(url) = super::extract_image_url(&text) {
         crate::logging::info(&format!("Downloading image from pasted URL: {}", url));
         app.set_status_notice("Downloading image...");
@@ -846,6 +938,145 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     }
 
     insert_input_text(app, text);
+    true
+}
+
+fn visible_prompt_history(app: &App) -> Vec<String> {
+    app.display_messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
+        .collect()
+}
+
+fn byte_offset_for_line_column(
+    input: &str,
+    line_start: usize,
+    line_end: usize,
+    column: usize,
+) -> usize {
+    let mut offset = line_end;
+    for (idx, (byte_offset, _)) in input[line_start..line_end].char_indices().enumerate() {
+        if idx == column {
+            offset = line_start + byte_offset;
+            break;
+        }
+    }
+    offset
+}
+
+pub(super) fn handle_multiline_input_navigation(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    if !modifiers.is_empty()
+        || !matches!(code, KeyCode::Up | KeyCode::Down)
+        || !app.input.contains('\n')
+    {
+        return false;
+    }
+
+    let input = app.input.as_str();
+    let cursor = app.cursor_pos.min(input.len());
+    let line_start = input[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let line_end = input[cursor..]
+        .find('\n')
+        .map(|idx| cursor + idx)
+        .unwrap_or(input.len());
+    let column = input[line_start..cursor].chars().count();
+
+    let target = match code {
+        KeyCode::Up => {
+            if line_start == 0 {
+                return false;
+            }
+            let previous_line_end = line_start - 1;
+            let previous_line_start = input[..previous_line_end]
+                .rfind('\n')
+                .map(|idx| idx + 1)
+                .unwrap_or(0);
+            byte_offset_for_line_column(input, previous_line_start, previous_line_end, column)
+        }
+        KeyCode::Down => {
+            if line_end >= input.len() {
+                return false;
+            }
+            let next_line_start = line_end + 1;
+            let next_line_end = input[next_line_start..]
+                .find('\n')
+                .map(|idx| next_line_start + idx)
+                .unwrap_or(input.len());
+            byte_offset_for_line_column(input, next_line_start, next_line_end, column)
+        }
+        _ => return false,
+    };
+
+    app.cursor_pos = target;
+    true
+}
+
+pub(super) fn handle_prompt_history_navigation(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
+    let explicit_history = modifiers == KeyModifiers::CONTROL;
+    if !(modifiers.is_empty() || explicit_history) || !matches!(code, KeyCode::Up | KeyCode::Down) {
+        return false;
+    }
+
+    let history = visible_prompt_history(app);
+    if history.is_empty() {
+        return false;
+    }
+
+    let target = if app.input.is_empty() {
+        match code {
+            KeyCode::Up => Some(history.len() - 1),
+            KeyCode::Down => None,
+            _ => None,
+        }
+    } else {
+        let Some(current_index) = history.iter().rposition(|prompt| prompt == &app.input) else {
+            if explicit_history && matches!(code, KeyCode::Up) {
+                return history
+                    .last()
+                    .map(|prompt| {
+                        app.input = prompt.clone();
+                        app.cursor_pos = app.input.len();
+                        app.reset_tab_completion();
+                        app.sync_model_picker_preview_from_input();
+                    })
+                    .is_some();
+            }
+            return false;
+        };
+        match code {
+            KeyCode::Up => Some(current_index.saturating_sub(1)),
+            KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
+            KeyCode::Down => {
+                app.input.clear();
+                app.cursor_pos = 0;
+                app.reset_tab_completion();
+                app.sync_model_picker_preview_from_input();
+                return true;
+            }
+            _ => None,
+        }
+    };
+
+    let Some(target) = target else {
+        return false;
+    };
+    let Some(prompt) = history.get(target) else {
+        return false;
+    };
+    app.input = prompt.clone();
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
     true
 }
 
@@ -1511,8 +1742,15 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         && !msg.is_empty()
     {
         parts.push(msg);
+        had_pending = true;
     }
-    parts.extend(std::mem::take(&mut app.queued_messages));
+    if !app.queued_messages.is_empty() {
+        parts.extend(std::mem::take(&mut app.queued_messages));
+        if !app.has_queued_followups() {
+            app.pending_queued_dispatch = false;
+        }
+        had_pending = true;
+    }
 
     if !parts.is_empty() {
         app.input = parts.join("\n\n");
@@ -1568,18 +1806,26 @@ impl App {
             return false;
         }
 
-        let incomplete = super::commands::incomplete_poke_todos(self);
+        let todos = super::commands::poke_todos(self);
+        let incomplete: Vec<_> = todos
+            .iter()
+            .filter(|todo| super::commands::is_incomplete_poke_todo(todo))
+            .cloned()
+            .collect();
         if incomplete.is_empty() {
-            let had_todos = crate::todo::todos_exist(&super::commands::active_session_id(self))
-                .unwrap_or(false);
             self.auto_poke_incomplete_todos = false;
-            if !had_todos {
+            if todos.is_empty() {
                 return false;
             }
             self.push_display_message(DisplayMessage::system(
-                "✅ Todos complete. Auto-poke finished.".to_string(),
+                "✅ Todos complete. Auto-poke finished; queued hidden confidence reminder."
+                    .to_string(),
             ));
-            return false;
+            self.hidden_queued_system_messages.push(
+                super::commands::build_todo_confidence_summary_message(&todos),
+            );
+            self.pending_queued_dispatch = true;
+            return true;
         }
 
         self.push_display_message(DisplayMessage::system(format!(
@@ -1674,12 +1920,11 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
 pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char('u') => {
-            if app.cursor_pos > 0 {
-                app.remember_input_undo_state();
-            }
-            app.input.drain(..app.cursor_pos);
-            app.cursor_pos = 0;
-            app.sync_model_picker_preview_from_input();
+            delete_input_to_start(app);
+            true
+        }
+        KeyCode::Char('k') => {
+            delete_input_to_end(app);
             true
         }
         KeyCode::Char('z') => {
@@ -1695,7 +1940,7 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Char('e') => {
-            app.cursor_pos = app.input.len();
+            edit_input_in_external_editor(app);
             true
         }
         KeyCode::Char('b') => {
@@ -1711,13 +1956,7 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Char('w') | KeyCode::Char('\u{8}') | KeyCode::Backspace => {
-            let start = app.find_word_boundary_back();
-            if start < app.cursor_pos {
-                app.remember_input_undo_state();
-            }
-            app.input.drain(start..app.cursor_pos);
-            app.cursor_pos = start;
-            app.sync_model_picker_preview_from_input();
+            delete_input_word_back(app);
             true
         }
         KeyCode::Char('s') => {
@@ -1762,6 +2001,66 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
     }
 }
 
+pub(super) fn delete_input_to_start(app: &mut App) {
+    if app.cursor_pos > 0 {
+        app.remember_input_undo_state();
+    }
+    app.input.drain(..app.cursor_pos);
+    app.cursor_pos = 0;
+    app.sync_model_picker_preview_from_input();
+}
+
+pub(super) fn delete_input_to_end(app: &mut App) {
+    if app.cursor_pos < app.input.len() {
+        app.remember_input_undo_state();
+    }
+    app.input.truncate(app.cursor_pos);
+    app.sync_model_picker_preview_from_input();
+}
+
+pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
+    match code {
+        // macOS terminals that forward Command may report Command+Delete as Super+Backspace,
+        // Super+Delete, or Super+DEL. Treat all of them as delete-to-start, matching native
+        // macOS text fields and avoiding overlap with Option/Alt word-delete shortcuts.
+        KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
+            delete_input_to_start(app);
+            true
+        }
+        KeyCode::Left | KeyCode::Home | KeyCode::Char('a') => {
+            app.cursor_pos = 0;
+            true
+        }
+        KeyCode::Right | KeyCode::End | KeyCode::Char('e') => {
+            app.cursor_pos = app.input.len();
+            true
+        }
+        KeyCode::Char('z') => {
+            app.undo_input_change();
+            true
+        }
+        KeyCode::Char('x') => {
+            cut_input_line_to_clipboard(app);
+            true
+        }
+        KeyCode::Char('v') => {
+            paste_from_clipboard(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn delete_input_word_back(app: &mut App) {
+    let start = app.find_word_boundary_back();
+    if start < app.cursor_pos {
+        app.remember_input_undo_state();
+    }
+    app.input.drain(start..app.cursor_pos);
+    app.cursor_pos = start;
+    app.sync_model_picker_preview_from_input();
+}
+
 pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char('b') => {
@@ -1781,14 +2080,10 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             app.sync_model_picker_preview_from_input();
             true
         }
-        KeyCode::Backspace => {
-            let start = app.find_word_boundary_back();
-            if start < app.cursor_pos {
-                app.remember_input_undo_state();
-            }
-            app.input.drain(start..app.cursor_pos);
-            app.cursor_pos = start;
-            app.sync_model_picker_preview_from_input();
+        // macOS terminals vary between Backspace, Delete, and DEL for Option+Delete.
+        // Keep all aliases on word-delete-back so the documented Alt/Option+Backspace works.
+        KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
+            delete_input_word_back(app);
             true
         }
         KeyCode::Char('i') => {
@@ -1802,7 +2097,7 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Char('v') => {
-            paste_image_from_clipboard(app);
+            paste_from_clipboard(app);
             true
         }
         KeyCode::Char('a') if app.input.is_empty() => {
@@ -1950,7 +2245,24 @@ pub(super) fn handle_pre_control_shortcuts(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('y')) {
+    if modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(code, KeyCode::Char('k'))
+        && !app.input.is_empty()
+    {
+        delete_input_to_end(app);
+        return true;
+    }
+
+    if is_clipboard_paste_shortcut(code, modifiers) {
+        paste_from_clipboard(app);
+        return true;
+    }
+
+    let macos_option_shortcut =
+        crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
+    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('y')))
+        || macos_option_shortcut == Some('y')
+    {
         app.toggle_copy_selection_mode();
         return true;
     }
@@ -1959,15 +2271,19 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
+    if crate::tui::keybind::matches_side_panel_toggle_key(code, modifiers) {
         app.toggle_side_panel();
         return true;
     }
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')) {
+    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')))
+        || macos_option_shortcut == Some('t')
+    {
         app.toggle_diagram_pane_position();
         return true;
     }
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')) {
+    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')))
+        || macos_option_shortcut == Some('s')
+    {
         app.toggle_typing_scroll_lock();
         return true;
     }
@@ -2009,6 +2325,14 @@ pub(super) fn handle_pre_control_shortcuts(
     if modifiers.contains(KeyModifiers::ALT) && handle_alt_key(app, code) {
         return true;
     }
+    if let Some(shortcut) = macos_option_shortcut
+        && handle_alt_key(app, KeyCode::Char(shortcut))
+    {
+        return true;
+    }
+    if modifiers.contains(KeyModifiers::SUPER) && handle_super_key(app, code) {
+        return true;
+    }
 
     handle_navigation_shortcuts(app, code, modifiers)
 }
@@ -2018,20 +2342,24 @@ pub(super) fn handle_visible_copy_shortcut(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    let KeyCode::Char(c) = code else {
+    let Some(c) = visible_copy_shortcut_key(code, modifiers) else {
         return false;
     };
-
-    if !modifiers.contains(KeyModifiers::ALT) {
-        return false;
-    }
 
     // Many terminals encode Alt+Shift+<letter> as just Alt + uppercase letter
     // instead of reporting an explicit Shift modifier. Accept either form so the
     // on-screen [Alt] [⇧] copy badges behave consistently.
     let explicit_shift = modifiers.contains(KeyModifiers::SHIFT);
     let implicit_shift = c.is_ascii_uppercase();
-    if !explicit_shift && !implicit_shift {
+    let macos_option_shift =
+        crate::tui::keybind::shortcut_char_for_macos_option_shift_key(code, modifiers).is_some();
+    if !explicit_shift && !implicit_shift && !macos_option_shift {
+        // Some terminals report Alt+Shift+E as Alt+lowercase `e` with no
+        // explicit SHIFT modifier. Keep the relaxed fallback scoped to the
+        // expand badge so plain Alt+letter copy shortcuts do not become active.
+        if c.eq_ignore_ascii_case(&'e') && handle_expand_edit_badge_shortcut(app, c) {
+            return true;
+        }
         return false;
     }
 
@@ -2056,16 +2384,40 @@ pub(super) fn handle_visible_copy_shortcut(
     false
 }
 
+fn visible_copy_shortcut_key(code: KeyCode, modifiers: KeyModifiers) -> Option<char> {
+    if let Some(key) =
+        crate::tui::keybind::shortcut_char_for_macos_option_shift_key(code, modifiers)
+    {
+        return Some(key);
+    }
+
+    let KeyCode::Char(c) = code else {
+        return None;
+    };
+
+    modifiers.contains(KeyModifiers::ALT).then_some(c)
+}
+
 fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
     if !key.eq_ignore_ascii_case(&'e') {
         return false;
     }
 
+    let visible_expand_badge = crate::tui::ui::visible_expand_edit_badge();
+    let has_edit_tool_message = app.display_edit_tool_message_count > 0
+        || app.display_messages.iter().any(|message| {
+            message
+                .tool_data
+                .as_ref()
+                .map(|tool| crate::tui::ui::tools_ui::is_edit_tool_name(&tool.name))
+                .unwrap_or(false)
+        });
+
     // The inline edit badge is rendered from the inline diff mode itself, while
     // opening it from other diff modes requires at least one edit tool message.
     // Keep this predicate in one place so the [Alt] [⇧] [E] badge uses the same
     // shortcut path as visible copy badges without falling through to copy key E.
-    if !app.diff_mode.is_inline() && app.display_edit_tool_message_count == 0 {
+    if !visible_expand_badge && !app.diff_mode.is_inline() && !has_edit_tool_message {
         return false;
     }
 
@@ -2094,6 +2446,11 @@ pub(super) fn handle_modal_key(
 
     if app.help_scroll.is_some() {
         app.handle_help_key(code)?;
+        return Ok(true);
+    }
+
+    if app.model_status_scroll.is_some() {
+        app.handle_model_status_key(code)?;
         return Ok(true);
     }
 
@@ -2441,6 +2798,19 @@ impl App {
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
 
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Up {
+            if retrieve_pending_message_for_edit(self) {
+                return Ok(());
+            }
+            handle_prompt_history_navigation(self, code, modifiers);
+            return Ok(());
+        }
+
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Down {
+            handle_prompt_history_navigation(self, code, modifiers);
+            return Ok(());
+        }
+
         // Handle ctrl combos regardless of processing state
         if modifiers.contains(KeyModifiers::CONTROL)
             && handle_global_control_shortcuts(self, code, diagram_available)
@@ -2473,6 +2843,12 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if handle_multiline_input_navigation(self, code, modifiers)
+            || handle_prompt_history_navigation(self, code, modifiers)
+        {
+            return Ok(());
         }
 
         if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
@@ -2757,7 +3133,7 @@ impl App {
         }
 
         let mut raw_input = std::mem::take(&mut self.input);
-        let mut input = self.expand_paste_placeholders(&raw_input);
+        let input = self.expand_paste_placeholders(&raw_input);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
             self.cursor_pos = self.input.len();
@@ -2811,6 +3187,7 @@ impl App {
             || commands::handle_session_command(self, trimmed)
             || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)
+            || commands::handle_model_status_command(self, trimmed)
             || super::debug::handle_debug_command(self, trimmed)
             || super::model_context::handle_model_command(self, trimmed)
             || super::commands::handle_usage_command(self, trimmed)

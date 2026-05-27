@@ -499,25 +499,46 @@ pub(super) fn handle_openai_output_item(
             return stream_text_or_recovered_tool_call(&text, pending);
         }
         "reasoning" => {
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let mut summary = Vec::new();
             if let Some(summary_arr) = item.get("summary").and_then(|v| v.as_array()) {
-                let mut summary_text = String::new();
                 for summary_item in summary_arr {
                     if summary_item.get("type").and_then(|v| v.as_str()) == Some("summary_text")
                         && let Some(text) = summary_item.get("text").and_then(|v| v.as_str())
                     {
-                        if !summary_text.is_empty() {
-                            summary_text.push('\n');
-                        }
-                        summary_text.push_str(text);
+                        summary.push(text.to_string());
                     }
                 }
-                if !summary_text.is_empty() {
-                    pending.push_back(StreamEvent::ThinkingStart);
-                    pending.push_back(StreamEvent::ThinkingDelta(summary_text));
-                    pending.push_back(StreamEvent::ThinkingEnd);
-                    return pending.pop_front();
-                }
             }
+            let encrypted_content = item
+                .get("encrypted_content")
+                .and_then(|v| v.as_str())
+                .map(|value| value.to_string());
+            let status = item
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|value| value.to_string());
+
+            if !id.is_empty() && (encrypted_content.is_some() || !summary.is_empty()) {
+                pending.push_back(StreamEvent::OpenAIReasoning {
+                    id,
+                    summary: summary.clone(),
+                    encrypted_content,
+                    status,
+                });
+            }
+
+            if !summary.is_empty() {
+                pending.push_back(StreamEvent::ThinkingStart);
+                pending.push_back(StreamEvent::ThinkingDelta(summary.join("\n")));
+                pending.push_back(StreamEvent::ThinkingEnd);
+                return pending.pop_front();
+            }
+            return pending.pop_front();
         }
         _ => {}
     }

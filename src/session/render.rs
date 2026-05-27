@@ -315,7 +315,9 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_data,
                     });
                 }
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
                     images.push(RenderedImage {
                         media_type: media_type.clone(),

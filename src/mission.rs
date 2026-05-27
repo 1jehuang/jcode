@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MissionStatus {
@@ -145,10 +147,23 @@ pub fn active_system_reminder(session_id: &str) -> Result<Option<String>> {
     if !matches!(mission.status, MissionStatus::Active) {
         return Ok(None);
     }
-    Ok(Some(format!(
-        "# Active Mission\nObjective: {}\nLong-horizon intent: {}\n\nPursue this mission adaptively. Continuously update the todo list as discoveries change the task frontier. Consider semantically adjacent work that supports the intent. Validate progress before claiming completion. Stop only if complete, blocked, unsafe, paused, budget-limited, or a user decision is required.",
-        mission.objective, mission.long_horizon_intent
-    )))
+    Ok(Some(render_mission_continuation_prompt(&mission)))
+}
+
+pub fn render_mission_continuation_prompt(mission: &Mission) -> String {
+    MISSION_CONTINUATION_TEMPLATE
+        .replace("{{ objective }}", &escape_xml_text(&mission.objective))
+        .replace(
+            "{{ long_horizon_intent }}",
+            &escape_xml_text(&mission.long_horizon_intent),
+        )
+}
+
+fn escape_xml_text(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn save(mission: &Mission) -> Result<()> {

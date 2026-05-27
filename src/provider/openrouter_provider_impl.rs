@@ -21,7 +21,7 @@ impl Provider for OpenRouterProvider {
                 None
             }
         });
-        let allow_reasoning = thinking_enabled != Some(false);
+        let allow_reasoning = self.supports_provider_features && thinking_enabled != Some(false);
         let include_reasoning_content =
             thinking_enabled == Some(true) || (allow_reasoning && Self::is_kimi_model(&model));
 
@@ -541,7 +541,10 @@ impl Provider for OpenRouterProvider {
 
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
-            request["tool_choice"] = serde_json::json!("auto");
+            if self.profile_id.as_deref() != Some("fpt") && !self.api_base.contains("fptcloud.com")
+            {
+                request["tool_choice"] = serde_json::json!("auto");
+            }
         }
 
         // Optional thinking override for OpenRouter (provider-specific).
@@ -683,7 +686,13 @@ impl Provider for OpenRouterProvider {
     }
 
     fn supports_image_input(&self) -> bool {
-        false
+        // Direct OpenAI-compatible local providers such as Ollama and LM Studio
+        // document image content support on /v1/chat/completions. We already
+        // serialize image blocks using OpenAI's image_url content-part shape in
+        // complete(), so advertise support for direct compatibility profiles.
+        // Keep the legacy OpenRouter aggregator behavior unchanged here because
+        // image availability is model/provider-route dependent there.
+        !self.supports_provider_features
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
@@ -970,9 +979,11 @@ impl Provider for OpenRouterProvider {
                 }
             }
 
-            for model in targets {
-                let _ = self.refresh_endpoints(&model).await;
-            }
+            futures::stream::iter(targets)
+                .for_each_concurrent(4, |model| async move {
+                    let _ = self.refresh_endpoints(&model).await;
+                })
+                .await;
         }
 
         let after_models = self.available_models_display();

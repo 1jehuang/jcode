@@ -10,8 +10,12 @@ use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::io::{BufRead, BufReader};
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 use workspace::{KeyInput, KeyOutcome, SessionTranscriptMessage};
 
 pub(crate) const SINGLE_SESSION_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
@@ -580,6 +584,7 @@ pub(crate) struct GitHubIssuePreview {
 struct SingleSessionWelcomeState {
     name: Option<String>,
     recovery_session_count: usize,
+    continuation_suggestion: Option<String>,
     // True for the fresh-start chat that owns the welcome hero as visual UI.
     // The hero must stay out of `body_styled_lines()` so it never becomes part
     // of the persisted/rendered transcript text.
@@ -594,6 +599,7 @@ impl SingleSessionWelcomeState {
         Self {
             name,
             recovery_session_count: 0,
+            continuation_suggestion: latest_external_cli_continuation_suggestion(),
             timeline: !has_session,
             hero_phrase_index,
         }
@@ -3967,6 +3973,7 @@ impl SingleSessionApp {
         self.stdin_response.hash(&mut hasher);
         self.welcome.name.hash(&mut hasher);
         self.welcome.recovery_session_count.hash(&mut hasher);
+        self.welcome.continuation_suggestion.hash(&mut hasher);
         self.welcome.timeline.hash(&mut hasher);
         self.welcome.hero_phrase_index.hash(&mut hasher);
         self.view.text_scale.to_bits().hash(&mut hasher);
@@ -4010,6 +4017,10 @@ impl SingleSessionApp {
 
     pub(crate) fn welcome_hero_text(&self) -> String {
         handwritten_welcome_phrase(self.welcome.hero_phrase_index).to_string()
+    }
+
+    pub(crate) fn welcome_continuation_suggestion(&self) -> Option<&str> {
+        self.welcome.continuation_suggestion.as_deref()
     }
 
     pub(crate) fn is_welcome_timeline_visible(&self) -> bool {
@@ -5930,6 +5941,210 @@ pub(crate) fn sanitize_welcome_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(name.to_string())
+}
+
+#[derive(Clone, Debug)]
+struct ExternalCliSessionCandidate {
+    source: &'static str,
+    modified: SystemTime,
+    working_dir: Option<String>,
+    context: Option<String>,
+}
+
+fn latest_external_cli_continuation_suggestion() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        latest_external_cli_continuation_suggestion_from_home(&home)
+    }))
+    .ok()
+    .flatten()
+}
+
+fn latest_external_cli_continuation_suggestion_from_home(home: &Path) -> Option<String> {
+    let mut candidates = Vec::new();
+    candidates.extend(latest_jsonl_candidates(
+        &home.join(".codex/sessions"),
+        "Codex",
+        32,
+    ));
+    candidates.extend(latest_jsonl_candidates(
+        &home.join(".claude/projects"),
+        "Claude Code",
+        32,
+    ));
+    latest_external_cli_continuation_suggestion_from_candidates(candidates)
+}
+
+fn latest_external_cli_continuation_suggestion_from_candidates(
+    candidates: Vec<ExternalCliSessionCandidate>,
+) -> Option<String> {
+    let candidate = candidates
+        .into_iter()
+        .max_by_key(|candidate| candidate.modified)?;
+    let location = candidate
+        .working_dir
+        .as_deref()
+        .and_then(|dir| Path::new(dir).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| format!(" in {name}"))
+        .unwrap_or_default();
+    let context = candidate
+        .context
+        .as_deref()
+        .map(|context| format!(": {}", compact_tool_text(context, 72)))
+        .unwrap_or_default();
+    Some(format!(
+        "continue the latest {source} session{location}{context}",
+        source = candidate.source
+    ))
+}
+
+fn latest_jsonl_candidates(
+    root: &Path,
+    source: &'static str,
+    scan_limit: usize,
+) -> Vec<ExternalCliSessionCandidate> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    collect_recent_jsonl_files(root, &mut files, scan_limit.saturating_mul(8));
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.truncate(scan_limit);
+    files
+        .into_iter()
+        .filter_map(|(path, modified)| external_cli_candidate_from_jsonl(&path, source, modified))
+        .collect()
+}
+
+fn collect_recent_jsonl_files(
+    root: &Path,
+    files: &mut Vec<(PathBuf, SystemTime)>,
+    max_files: usize,
+) {
+    if files.len() >= max_files {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if files.len() >= max_files {
+            break;
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            collect_recent_jsonl_files(&path, files, max_files);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            files.push((path, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+        }
+    }
+}
+
+fn external_cli_candidate_from_jsonl(
+    path: &Path,
+    source: &'static str,
+    modified: SystemTime,
+) -> Option<ExternalCliSessionCandidate> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut working_dir = None;
+    let mut last_user_text = None;
+    let mut summary_text = None;
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if working_dir.is_none() {
+            working_dir = value
+                .get("cwd")
+                .or_else(|| value.get("payload").and_then(|payload| payload.get("cwd")))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+        }
+        if summary_text.is_none() {
+            summary_text = value
+                .get("summary")
+                .or_else(|| {
+                    value
+                        .get("payload")
+                        .and_then(|payload| payload.get("summary"))
+                })
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string);
+        }
+        if jsonl_message_role(&value) == Some("user")
+            && let Some(text) = jsonl_message_text(&value)
+            && !text.trim().is_empty()
+        {
+            last_user_text = Some(text);
+        }
+    }
+    if working_dir.is_none() && last_user_text.is_none() && summary_text.is_none() {
+        return None;
+    }
+    Some(ExternalCliSessionCandidate {
+        source,
+        modified,
+        working_dir,
+        context: last_user_text.or(summary_text),
+    })
+}
+
+fn jsonl_message_role(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("message")
+        .and_then(|message| message.get("role"))
+        .or_else(|| value.get("role"))
+        .or_else(|| value.get("payload").and_then(|payload| payload.get("role")))
+        .and_then(|role| role.as_str())
+}
+
+fn jsonl_message_text(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .or_else(|| value.get("content"))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("content"))
+        })?;
+    text_from_json_content(content)
+}
+
+fn text_from_json_content(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    let blocks = value.as_array()?;
+    let text = blocks
+        .iter()
+        .filter_map(|block| {
+            block
+                .get("text")
+                .or_else(|| block.get("content"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn stdin_response_styled_lines(state: &StdinResponseState) -> Vec<SingleSessionStyledLine> {
@@ -9055,6 +9270,69 @@ mod tests {
             app.render_inline_widget_styled_lines().len(),
             "render line count should match styled-line rendering"
         );
+    }
+
+    #[test]
+    fn latest_external_cli_suggestion_uses_newest_candidate_context() {
+        let old = ExternalCliSessionCandidate {
+            source: "Claude Code",
+            modified: SystemTime::UNIX_EPOCH,
+            working_dir: Some("/tmp/old-project".to_string()),
+            context: Some("old task".to_string()),
+        };
+        let new = ExternalCliSessionCandidate {
+            source: "Codex",
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            working_dir: Some("/home/user/jcode".to_string()),
+            context: Some("implement startup continuation suggestions".to_string()),
+        };
+
+        let suggestion =
+            latest_external_cli_continuation_suggestion_from_candidates(vec![old, new])
+                .expect("newest external session should produce a suggestion");
+
+        assert_eq!(
+            suggestion,
+            "continue the latest Codex session in jcode: implement startup continuation suggestions"
+        );
+    }
+
+    #[test]
+    fn latest_external_cli_suggestion_missing_roots_returns_none() {
+        let home =
+            std::env::temp_dir().join(format!("jcode-missing-external-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(
+            latest_external_cli_continuation_suggestion_from_home(&home),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_external_cli_suggestion_ignores_malformed_jsonl() {
+        let home = std::env::temp_dir().join(format!(
+            "jcode-malformed-external-cli-{}-{:?}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let codex_dir = home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).expect("create fake codex dir");
+        std::fs::write(
+            codex_dir.join("broken.jsonl"),
+            "not json\n{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]\n",
+        )
+        .expect("write malformed jsonl");
+
+        assert_eq!(
+            latest_external_cli_continuation_suggestion_from_home(&home),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

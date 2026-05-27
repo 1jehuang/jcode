@@ -19,8 +19,8 @@ pub use notifications::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
     background_task_display_label, background_task_status_notice,
     format_background_task_notification_markdown, format_background_task_progress_markdown,
-    format_input_shell_result_markdown, input_shell_status_notice,
-    parse_background_task_notification_markdown,
+    format_input_shell_result_markdown, format_model_refresh_progress_markdown,
+    input_shell_status_notice, parse_background_task_notification_markdown,
     parse_background_task_progress_notification_markdown,
 };
 
@@ -214,6 +214,33 @@ pub fn redact_secrets(text: &str) -> String {
 
 pub const GENERATED_IMAGE_TOOL_NAME: &str = "image_generation";
 pub const GENERATED_IMAGE_MAX_AUTO_VISION_BYTES: u64 = 20 * 1024 * 1024;
+
+pub fn push_reasoning_content_block(
+    blocks: &mut Vec<ContentBlock>,
+    provider_name: &str,
+    reasoning_content: &str,
+    reasoning_signature: Option<&str>,
+) {
+    if reasoning_content.is_empty() {
+        return;
+    }
+
+    if provider_name.eq_ignore_ascii_case("anthropic") {
+        if let Some(signature) = reasoning_signature.filter(|s| !s.is_empty()) {
+            blocks.push(ContentBlock::AnthropicThinking {
+                thinking: reasoning_content.to_string(),
+                signature: signature.to_string(),
+            });
+        }
+    } else if provider_name.eq_ignore_ascii_case("openai") {
+        // OpenAI reasoning is stored as native `OpenAIReasoning` output items
+        // when available, so avoid adding a duplicate generic reasoning block.
+    } else {
+        blocks.push(ContentBlock::Reasoning {
+            text: reasoning_content.to_string(),
+        });
+    }
+}
 
 pub fn generated_image_tool_input(
     path: &str,

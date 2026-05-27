@@ -76,6 +76,29 @@ impl ContentBlockMemoryStats {
                 self.reasoning_bytes += text.len();
                 self.record_bytes(text.len());
             }
+            ContentBlock::AnthropicThinking {
+                thinking,
+                signature,
+            } => {
+                self.reasoning_blocks += 1;
+                let bytes = thinking.len() + signature.len();
+                self.reasoning_bytes += bytes;
+                self.record_bytes(bytes);
+            }
+            ContentBlock::OpenAIReasoning {
+                id,
+                summary,
+                encrypted_content,
+                status,
+            } => {
+                self.reasoning_blocks += 1;
+                let bytes = id.len()
+                    + summary.iter().map(String::len).sum::<usize>()
+                    + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                    + status.as_ref().map(String::len).unwrap_or(0);
+                self.reasoning_bytes += bytes;
+                self.record_bytes(bytes);
+            }
             ContentBlock::ToolUse { input, .. } => {
                 self.tool_use_blocks += 1;
                 let input_bytes = estimate_json_bytes(input);

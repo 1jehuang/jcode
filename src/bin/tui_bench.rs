@@ -296,6 +296,7 @@ enum BenchMode {
     Streaming,
     FileDiff,
     SidePanel,
+    CopySelection,
     MermaidUi,
     MermaidFlicker,
 }
@@ -348,6 +349,8 @@ struct BenchState {
     linked_refresh_path: Option<PathBuf>,
     linked_refresh_generation: usize,
     session_source: Option<String>,
+    copy_selection_range: Option<jcode::tui::CopySelectionRange>,
+    copy_selection_mode: bool,
 }
 
 impl BenchState {
@@ -450,6 +453,8 @@ impl BenchState {
                 .flatten(),
             linked_refresh_generation: 0,
             session_source: None,
+            copy_selection_range: None,
+            copy_selection_mode: matches!(mode, BenchMode::CopySelection),
         })
     }
 
@@ -526,6 +531,8 @@ impl BenchState {
             linked_refresh_path: None,
             linked_refresh_generation: 0,
             session_source: Some(session.id),
+            copy_selection_range: None,
+            copy_selection_mode: matches!(mode, BenchMode::CopySelection),
         })
     }
 
@@ -628,7 +635,9 @@ fn stored_message_visible_text(message: &jcode::session::StoredMessage) -> Strin
             ContentBlock::Image { media_type, .. } => {
                 parts.push(format!("[image:{}]", media_type));
             }
-            ContentBlock::OpenAICompaction { .. } => {}
+            ContentBlock::OpenAICompaction { .. }
+            | ContentBlock::AnthropicThinking { .. }
+            | ContentBlock::OpenAIReasoning { .. } => {}
         }
     }
     parts.join("\n\n")
@@ -1152,11 +1161,11 @@ impl TuiState for BenchState {
     }
 
     fn copy_selection_mode(&self) -> bool {
-        false
+        self.copy_selection_mode
     }
 
     fn copy_selection_range(&self) -> Option<jcode::tui::CopySelectionRange> {
-        None
+        self.copy_selection_range
     }
 
     fn copy_selection_status(&self) -> Option<jcode::tui::CopySelectionStatus> {
@@ -1277,6 +1286,8 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
     let mut frame_times_ms: Vec<f64> = Vec::with_capacity(args.frames);
+    let mut copy_extract_times_ms: Vec<f64> = Vec::new();
+    let mut copy_extract_bytes: usize = 0;
     let mut side_panel_profiles: Vec<SidePanelFrameProfile> = Vec::new();
     for frame in 0..args.frames {
         if args.scroll_cycle > 0 {
@@ -1301,6 +1312,23 @@ fn main() -> Result<()> {
             state.is_processing = true;
             state.status = ProcessingStatus::Streaming;
         }
+        if matches!(args.mode, BenchMode::CopySelection) {
+            let start_line = state.scroll_offset;
+            let visible_lines = args.height.saturating_sub(6).max(1) as usize;
+            let end_line = start_line.saturating_add(visible_lines.saturating_sub(1));
+            state.copy_selection_range = Some(jcode::tui::CopySelectionRange {
+                start: jcode::tui::CopySelectionPoint {
+                    pane: jcode::tui::CopySelectionPane::Chat,
+                    abs_line: start_line,
+                    column: 0,
+                },
+                end: jcode::tui::CopySelectionPoint {
+                    pane: jcode::tui::CopySelectionPane::Chat,
+                    abs_line: end_line,
+                    column: usize::MAX / 4,
+                },
+            });
+        }
         let markdown_before = profile_side_panel.then(jcode::tui::markdown::debug_stats);
         let mermaid_before = profile_side_panel.then(jcode::tui::mermaid::debug_stats);
         let side_panel_before = profile_side_panel.then(jcode::tui::side_panel_debug_stats);
@@ -1308,6 +1336,17 @@ fn main() -> Result<()> {
         terminal.draw(|f| jcode::tui::render_frame(f, &state))?;
         let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         frame_times_ms.push(frame_ms);
+        if matches!(args.mode, BenchMode::CopySelection)
+            && frame >= args.warmup_frames
+            && frame % 8 == 0
+            && let Some(range) = state.copy_selection_range
+        {
+            let copy_start = Instant::now();
+            if let Some(text) = jcode::tui::debug_copy_selection_text_for_bench(range) {
+                copy_extract_bytes = copy_extract_bytes.saturating_add(text.len());
+            }
+            copy_extract_times_ms.push(copy_start.elapsed().as_secs_f64() * 1000.0);
+        }
         if let (Some(markdown_before), Some(mermaid_before), Some(side_panel_before)) =
             (markdown_before, mermaid_before, side_panel_before)
         {
@@ -1454,7 +1493,15 @@ fn main() -> Result<()> {
                 "warm": warm_summary,
                 "fps": fps,
                 "avg_total_ms": avg_ms,
-            }
+            },
+            "copy_selection": if matches!(args.mode, BenchMode::CopySelection) {
+                Some(json!({
+                    "extract_every_n_frames": 8,
+                    "extract_samples": copy_extract_times_ms.len(),
+                    "extract_bytes": copy_extract_bytes,
+                    "extract_timing": summarize_timing(&copy_extract_times_ms),
+                }))
+            } else { None }
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());

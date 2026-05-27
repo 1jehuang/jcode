@@ -200,6 +200,27 @@ impl ProviderMessageMemoryStats {
                     self.reasoning_bytes += text.len();
                     self.record_bytes(text.len());
                 }
+                ContentBlock::AnthropicThinking {
+                    thinking,
+                    signature,
+                } => {
+                    let bytes = thinking.len() + signature.len();
+                    self.reasoning_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
+                ContentBlock::OpenAIReasoning {
+                    id,
+                    summary,
+                    encrypted_content,
+                    status,
+                } => {
+                    let bytes = id.len()
+                        + summary.iter().map(String::len).sum::<usize>()
+                        + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                        + status.as_ref().map(String::len).unwrap_or(0);
+                    self.reasoning_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
                 ContentBlock::ToolUse { input, .. } => {
                     let bytes = crate::process_memory::estimate_json_bytes(input);
                     self.tool_use_input_json_bytes += bytes;

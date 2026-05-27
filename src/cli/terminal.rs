@@ -23,13 +23,11 @@ pub fn get_current_session() -> Option<String> {
 /// Sent after `ratatui::restore()` (and after the equivalent in the signal
 /// handler). Each sequence covers a state ratatui itself doesn't reset:
 ///
-/// - `ESC [ r`        Reset scroll region (DECSTBM). Without this, some
-///                    terminals constrain typed input rendering to the
-///                    alt-screen region even after LeaveAlternateScreen,
-///                    which is exactly the reported "input invisible"
-///                    symptom.
-/// - `ESC [ ?25 h`    Show cursor — defensive duplicate of crossterm `Show`.
-/// - `ESC [ ?2004 l`  Disable bracketed paste — defensive duplicate.
+/// - `ESC [ r` — Reset scroll region (DECSTBM). Without this, some terminals
+///   constrain typed input rendering to the alt-screen region even after
+///   LeaveAlternateScreen, which is exactly the reported "input invisible" symptom.
+/// - `ESC [ ?25 h` — Show cursor (defensive duplicate of crossterm `Show`).
+/// - `ESC [ ?2004 l` — Disable bracketed paste (defensive duplicate).
 ///
 /// Returning the bytes (rather than writing inline) keeps the sequence
 /// testable.

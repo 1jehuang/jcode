@@ -236,675 +236,706 @@ impl App {
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
+            let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
-                matches!(self.provider.name(), "openrouter" | "anthropic");
+                crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
+            let mut reasoning_signature = String::new();
+            let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             let mut openai_native_compaction: Option<(String, usize)> = None;
 
             // Stream with input handling
             loop {
                 tokio::select! {
-                        // Redraw periodically
-                        _ = redraw_interval.tick() => {
-                            if let Some(chunk) = self.stream_buffer.flush() {
-                                self.append_streaming_text(&chunk);
-                            }
-                            // Poll for background compaction completion during streaming
-                            self.poll_compaction_completion();
+                    // Redraw periodically
+                    _ = redraw_interval.tick() => {
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.append_streaming_text(&chunk);
+                        }
+                        // Poll for background compaction completion during streaming
+                        self.poll_compaction_completion();
+                        status_spinner_renderer.draw_full(self, terminal)?;
+                    }
+                    bus_event = async {
+                        match bus_receiver.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => futures::future::pending::<std::result::Result<crate::bus::BusEvent, tokio::sync::broadcast::error::RecvError>>().await,
+                        }
+                    } => {
+                        if super::local::handle_bus_event(self, bus_event) {
                             status_spinner_renderer.draw_full(self, terminal)?;
                         }
-                        bus_event = async {
-                            match bus_receiver.as_mut() {
-                                Some(rx) => rx.recv().await,
-                                None => futures::future::pending::<std::result::Result<crate::bus::BusEvent, tokio::sync::broadcast::error::RecvError>>().await,
-                            }
-                        } => {
-                            if super::local::handle_bus_event(self, bus_event) {
-                                status_spinner_renderer.draw_full(self, terminal)?;
-                            }
-                        }
-                        // Handle keyboard input
-                        event = event_stream.next() => {
-                            match event {
-                                Some(Ok(Event::Key(key))) => {
-                                    self.update_copy_badge_key_event(key);
-                                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                                        let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
-                                        let _ = self.handle_key_press_event(key);
-                                        // Check for cancel request
-                                        if self.cancel_requested {
-                                            self.cancel_requested = false;
-                                            self.interleave_message = None;
-                                            self.pending_soft_interrupts.clear();
-                                            self.pending_soft_interrupt_requests.clear();
-                                            // Save partial assistant response before clearing
+                    }
+                    // Handle keyboard input
+                    event = event_stream.next() => {
+                        match event {
+                            Some(Ok(Event::Key(key))) => {
+                                self.update_copy_badge_key_event(key);
+                                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                    let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
+                                    let _ = self.handle_key_press_event(key);
+                                    // Check for cancel request
+                                    if self.cancel_requested {
+                                        self.cancel_requested = false;
+                                        self.interleave_message = None;
+                                        self.pending_soft_interrupts.clear();
+                                        self.pending_soft_interrupt_requests.clear();
+                                        // Save partial assistant response before clearing
+                                        if let Some(tool) = current_tool.take() {
+                                            tool_calls.push(tool);
+                                        }
+                                        if !text_content.is_empty() || !tool_calls.is_empty() {
+                                            let mut content_blocks = Vec::new();
+                                            if !text_content.is_empty() {
+                                                content_blocks.push(ContentBlock::Text {
+                                                    text: format!("{}\n\n[generation interrupted by user]", text_content),
+                                                    cache_control: None,
+                                                });
+                                            }
+                                            if store_reasoning_content {
+                                                crate::message::push_reasoning_content_block(
+                                                    &mut content_blocks,
+                                                    &provider_name,
+                                                    &reasoning_content,
+                                                    Some(&reasoning_signature),
+                                                );
+                                                content_blocks.extend(openai_reasoning_items.iter().cloned());
+                                            }
+                                            for tc in &tool_calls {
+                                                content_blocks.push(ContentBlock::ToolUse {
+                                                    id: tc.id.clone(),
+                                                    name: tc.name.clone(),
+                                                    input: tc.input.clone(),
+                                                });
+                                            }
+                                            if !content_blocks.is_empty() {
+                                                let content_clone = content_blocks.clone();
+                                                self.add_provider_message(Message {
+                                                    role: Role::Assistant,
+                                                    content: content_blocks,
+                                                    timestamp: Some(chrono::Utc::now()),
+                                                    tool_duration_ms: None,
+                                                });
+                                                self.session.add_message(Role::Assistant, content_clone);
+                                                let _ = self.session.save();
+                                            }
+                                            // Flush buffer and show partial response
+                                            if let Some(chunk) = self.stream_buffer.flush() {
+                                                self.append_streaming_text(&chunk);
+                                            }
+                                            if !self.streaming_text.is_empty() {
+                                                let content = self.take_streaming_text();
+                                                self.push_display_message(DisplayMessage {
+                                                    role: "assistant".to_string(),
+                                                    content,
+                                                    tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
+                                                    duration_secs: self.display_turn_duration_secs(),
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                            }
+                                        }
+                                        self.clear_streaming_render_state();
+                                        self.stream_buffer.clear();
+                                        self.streaming_tool_calls.clear();
+                                        self.schedule_queued_dispatch_after_interrupt();
+                                        self.push_display_message(DisplayMessage::system("Interrupted"));
+                                        return Ok(());
+                                    }
+                                    // Check for interleave request (Shift+Enter)
+                                    if let Some(interleave_msg) = self.interleave_message.take() {
+                                        // Save partial assistant response if any
+                                        if !text_content.is_empty() || !tool_calls.is_empty() {
+                                            // Complete any pending tool
                                             if let Some(tool) = current_tool.take() {
                                                 tool_calls.push(tool);
                                             }
-                                            if !text_content.is_empty() || !tool_calls.is_empty() {
-                                                let mut content_blocks = Vec::new();
-                                                if !text_content.is_empty() {
-                                                    content_blocks.push(ContentBlock::Text {
-                                                        text: format!("{}\n\n[generation interrupted by user]", text_content),
-                                                        cache_control: None,
-                                                    });
-                                                }
-                                                if store_reasoning_content && !reasoning_content.is_empty() {
-                                                    content_blocks.push(ContentBlock::Reasoning {
-                                                        text: reasoning_content.clone(),
-                                                    });
-                                                }
-                                                for tc in &tool_calls {
-                                                    content_blocks.push(ContentBlock::ToolUse {
-                                                        id: tc.id.clone(),
-                                                        name: tc.name.clone(),
-                                                        input: tc.input.clone(),
-                                                    });
-                                                }
-                                                if !content_blocks.is_empty() {
-                                                    let content_clone = content_blocks.clone();
-                                                    self.add_provider_message(Message {
-                                                        role: Role::Assistant,
-                                                        content: content_blocks,
-                                                        timestamp: Some(chrono::Utc::now()),
-                                                        tool_duration_ms: None,
-                                                    });
-                                                    self.session.add_message(Role::Assistant, content_clone);
-                                                    let _ = self.session.save();
-                                                }
-                                                // Flush buffer and show partial response
-                                                if let Some(chunk) = self.stream_buffer.flush() {
-                                                    self.append_streaming_text(&chunk);
-                                                }
-                                                if !self.streaming_text.is_empty() {
-                                                    let content = self.take_streaming_text();
-                                                    self.push_display_message(DisplayMessage {
-                                                        role: "assistant".to_string(),
-                                                        content,
-                                                        tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
-                                                        duration_secs: self.display_turn_duration_secs(),
-                                                        title: None,
-                                                        tool_data: None,
-                                                    });
-                                                }
+                                            // Build content blocks for partial response
+                                            let mut content_blocks = Vec::new();
+                                            if !text_content.is_empty() {
+                                                content_blocks.push(ContentBlock::Text {
+                                                    text: text_content.clone(),
+                                                    cache_control: None,
+                                                });
                                             }
-                                            self.clear_streaming_render_state();
-                                            self.stream_buffer.clear();
-                                            self.streaming_tool_calls.clear();
-                                            self.schedule_queued_dispatch_after_interrupt();
-                                            self.push_display_message(DisplayMessage::system("Interrupted"));
-                                            return Ok(());
-                                        }
-                                        // Check for interleave request (Shift+Enter)
-                                        if let Some(interleave_msg) = self.interleave_message.take() {
-                                            // Save partial assistant response if any
-                                            if !text_content.is_empty() || !tool_calls.is_empty() {
-                                                // Complete any pending tool
-                                                if let Some(tool) = current_tool.take() {
-                                                    tool_calls.push(tool);
-                                                }
-                                                // Build content blocks for partial response
-                                                let mut content_blocks = Vec::new();
-                                                if !text_content.is_empty() {
-                                                    content_blocks.push(ContentBlock::Text {
-                                                        text: text_content.clone(),
-                                                        cache_control: None,
-                                                    });
-                                                }
-                                                if store_reasoning_content && !reasoning_content.is_empty() {
-                                                    content_blocks.push(ContentBlock::Reasoning {
-                                                        text: reasoning_content.clone(),
-                                                    });
-                                                }
-                                                for tc in &tool_calls {
-                                                    content_blocks.push(ContentBlock::ToolUse {
-                                                        id: tc.id.clone(),
-                                                        name: tc.name.clone(),
-                                                        input: tc.input.clone(),
-                                                    });
-                                                }
-                                                // Add partial assistant response to messages
-                                                if !content_blocks.is_empty() {
-                                                    self.add_provider_message(Message {
-                                                        role: Role::Assistant,
-                                                        content: content_blocks,
-                                                        timestamp: Some(chrono::Utc::now()),
-                                                        tool_duration_ms: None,
-                                                    });
-                                                }
-                                                // Add display message for partial response
-                                                if !self.streaming_text.is_empty() {
-                                                    let content = self.take_streaming_text();
-                                                    self.push_display_message(DisplayMessage {
-                                                        role: "assistant".to_string(),
-                                                        content,
-                                                        tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
-                                                        duration_secs: None,
-                                                        title: None,
-                                                        tool_data: None,
-                                                    });
-                                                }
+                                            if store_reasoning_content {
+                                                crate::message::push_reasoning_content_block(
+                                                    &mut content_blocks,
+                                                    &provider_name,
+                                                    &reasoning_content,
+                                                    Some(&reasoning_signature),
+                                                );
+                                                content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
-                                            // Add user's interleaved message
-                                            self.add_provider_message(Message::user(&interleave_msg));
-                                            self.push_display_message(DisplayMessage {
-                                                role: "user".to_string(),
-                                                content: interleave_msg,
-                                                tool_calls: vec![],
-                                                duration_secs: None,
-                                                title: None,
-                                                tool_data: None,
-                                            });
-                                            // Clear streaming state and continue with new turn
-                                            self.clear_streaming_render_state();
-                                            self.streaming_tool_calls.clear();
-                                            self.stream_buffer = StreamBuffer::new();
-                                            reasoning_content.clear();
-                                            interleaved = true;
-                                            // Continue to next iteration of outer loop (new API call)
-                                            break;
+                                            for tc in &tool_calls {
+                                                content_blocks.push(ContentBlock::ToolUse {
+                                                    id: tc.id.clone(),
+                                                    name: tc.name.clone(),
+                                                    input: tc.input.clone(),
+                                                });
+                                            }
+                                            // Add partial assistant response to messages
+                                            if !content_blocks.is_empty() {
+                                                self.add_provider_message(Message {
+                                                    role: Role::Assistant,
+                                                    content: content_blocks,
+                                                    timestamp: Some(chrono::Utc::now()),
+                                                    tool_duration_ms: None,
+                                                });
+                                            }
+                                            // Add display message for partial response
+                                            if !self.streaming_text.is_empty() {
+                                                let content = self.take_streaming_text();
+                                                self.push_display_message(DisplayMessage {
+                                                    role: "assistant".to_string(),
+                                                    content,
+                                                    tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
+                                                    duration_secs: None,
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                            }
                                         }
-
-                                        if !scroll_only {
-                                            status_spinner_renderer.draw_full(self, terminal)?;
-                                        }
+                                        // Add user's interleaved message
+                                        self.add_provider_message(Message::user(&interleave_msg));
+                                        self.push_display_message(DisplayMessage {
+                                            role: "user".to_string(),
+                                            content: interleave_msg,
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        // Clear streaming state and continue with new turn
+                                        self.clear_streaming_render_state();
+                                        self.streaming_tool_calls.clear();
+                                        self.stream_buffer = StreamBuffer::new();
+                                        reasoning_content.clear();
+                                        interleaved = true;
+                                        // Continue to next iteration of outer loop (new API call)
+                                        break;
                                     }
-                                }
-                                Some(Ok(Event::Paste(text))) => {
-                                    self.handle_paste(text);
-                                    status_spinner_renderer.draw_full(self, terminal)?;
-                                }
-                                Some(Ok(Event::Mouse(mouse))) => {
-                                    let scroll_only = self.handle_mouse_event(mouse);
+
                                     if !scroll_only {
                                         status_spinner_renderer.draw_full(self, terminal)?;
                                     }
                                 }
-                                Some(Ok(Event::Resize(_, _))) => {
-                                    if self.should_redraw_after_resize() {
-                                        status_spinner_renderer.draw_full(self, terminal)?;
-                                    }
-                                }
-                                _ => {}
                             }
+                            Some(Ok(Event::Paste(text))) => {
+                                self.handle_paste(text);
+                                status_spinner_renderer.draw_full(self, terminal)?;
+                            }
+                            Some(Ok(Event::Mouse(mouse))) => {
+                                let scroll_only = self.handle_mouse_event(mouse);
+                                if !scroll_only {
+                                    status_spinner_renderer.draw_full(self, terminal)?;
+                                }
+                            }
+                            Some(Ok(Event::Resize(_, _))) => {
+                                if self.should_redraw_after_resize() {
+                                    status_spinner_renderer.draw_full(self, terminal)?;
+                                }
+                            }
+                            _ => {}
                         }
-                        // Handle stream events
-                        stream_event = stream.next() => {
-                            match stream_event {
-                                Some(Ok(event)) => {
-                                    // Track activity for status display
-                                    self.last_stream_activity = Some(Instant::now());
+                    }
+                    // Handle stream events
+                    stream_event = stream.next() => {
+                        match stream_event {
+                            Some(Ok(event)) => {
+                                // Track activity for status display
+                                self.last_stream_activity = Some(Instant::now());
 
-                                    if first_event {
-                                        first_event = false;
-                                    }
-                                    match event {
-                                        StreamEvent::TextDelta(text) => {
-                                            self.status = ProcessingStatus::Streaming;
-                                            text_content.push_str(&text);
-                                            self.resume_streaming_tps();
-                                            if let Some(chunk) = self.stream_buffer.push(&text) {
-                                                self.append_streaming_text(&chunk);
-                                                self.broadcast_debug(crate::tui::backend::DebugEvent::TextDelta {
-                                                    text: chunk.clone()
-                                                });
-                                                if eager_stream_redraw {
-                                                    status_spinner_renderer.draw_full(self, terminal)?;
-                                                }
+                                if first_event {
+                                    first_event = false;
+                                }
+                                match event {
+                                    StreamEvent::TextDelta(text) => {
+                                        self.status = ProcessingStatus::Streaming;
+                                        text_content.push_str(&text);
+                                        self.resume_streaming_tps();
+                                        if let Some(chunk) = self.stream_buffer.push(&text) {
+                                            self.append_streaming_text(&chunk);
+                                            self.broadcast_debug(crate::tui::backend::DebugEvent::TextDelta {
+                                                text: chunk.clone()
+                                            });
+                                            if eager_stream_redraw {
+                                                status_spinner_renderer.draw_full(self, terminal)?;
                                             }
                                         }
-                                        StreamEvent::ToolUseStart { id, name } => {
-                                            self.pause_streaming_tps(false);
-                                            self.clear_active_experimental_feature_notice();
-                                            self.broadcast_debug(crate::tui::backend::DebugEvent::ToolStart {
-                                                id: id.clone(),
-                                                name: name.clone(),
+                                    }
+                                    StreamEvent::ToolUseStart { id, name } => {
+                                        self.pause_streaming_tps(false);
+                                        self.clear_active_experimental_feature_notice();
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ToolStart {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                        });
+                                        self.commit_pending_streaming_assistant_message();
+                                        // Update status to show tool in progress
+                                        self.status = ProcessingStatus::RunningTool(name.clone());
+                                        if matches!(name.as_str(), "memory") {
+                                            crate::memory::set_state(
+                                                crate::tui::info_widget::MemoryState::Embedding,
+                                            );
+                                        }
+                                        self.streaming_tool_calls.push(ToolCall {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            input: serde_json::Value::Null,
+                                            intent: None,
+                                        });
+                                        current_tool = Some(ToolCall {
+                                            id,
+                                            name,
+                                            input: serde_json::Value::Null,
+                                            intent: None,
+                                        });
+                                        current_tool_input.clear();
+                                        if eager_stream_redraw {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                        }
+                                    }
+                                    StreamEvent::ToolInputDelta(delta) => {
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ToolInput {
+                                            delta: delta.clone()
+                                        });
+                                        current_tool_input.push_str(&delta);
+                                    }
+                                    StreamEvent::ToolUseEnd => {
+                                        self.pause_streaming_tps(false);
+                                        if let Some(mut tool) = current_tool.take() {
+                                            tool.input = crate::message::ToolCall::parse_streamed_input_to_object(
+                                                &current_tool_input,
+                                            );
+                                            tool.refresh_intent_from_input();
+                                            if let Some(key) = Self::experimental_feature_key_for_tool(&tool) {
+                                                self.note_experimental_feature_use(key);
+                                            }
+                                            if let Some(streaming_tool) = self
+                                                .streaming_tool_calls
+                                                .iter_mut()
+                                                .find(|tc| tc.id == tool.id)
+                                            {
+                                                streaming_tool.input = tool.input.clone();
+                                                streaming_tool.intent = tool.intent.clone();
+                                            }
+                                            self.broadcast_debug(crate::tui::backend::DebugEvent::ToolExec {
+                                                id: tool.id.clone(),
+                                                name: tool.name.clone(),
                                             });
                                             self.commit_pending_streaming_assistant_message();
-                                            // Update status to show tool in progress
-                                            self.status = ProcessingStatus::RunningTool(name.clone());
-                                            if matches!(name.as_str(), "memory") {
-                                                crate::memory::set_state(
-                                                    crate::tui::info_widget::MemoryState::Embedding,
-                                                );
-                                            }
-                                            self.streaming_tool_calls.push(ToolCall {
-                                                id: id.clone(),
-                                                name: name.clone(),
-                                                input: serde_json::Value::Null,
-                                                intent: None,
+
+                                            // Add tool call as its own display message
+                                            self.push_display_message(DisplayMessage {
+                                                role: "tool".to_string(),
+                                                content: tool.name.clone(),
+                                                tool_calls: vec![],
+                                                duration_secs: None,
+                                                title: None,
+                                                tool_data: Some(tool.clone()),
                                             });
-                                            current_tool = Some(ToolCall {
-                                                id,
-                                                name,
-                                                input: serde_json::Value::Null,
-                                                intent: None,
-                                            });
+
+                                            tool_calls.push(tool);
                                             current_tool_input.clear();
                                             if eager_stream_redraw {
                                                 status_spinner_renderer.draw_full(self, terminal)?;
                                             }
                                         }
-                                        StreamEvent::ToolInputDelta(delta) => {
-                                            self.broadcast_debug(crate::tui::backend::DebugEvent::ToolInput {
-                                                delta: delta.clone()
-                                            });
-                                            current_tool_input.push_str(&delta);
+                                    }
+                                    StreamEvent::TokenUsage {
+                                        input_tokens,
+                                        output_tokens,
+                                        cache_read_input_tokens,
+                                        cache_creation_input_tokens,
+                                    } => {
+                                        let mut usage_changed = false;
+                                        if let Some(input) = input_tokens {
+                                            self.streaming_input_tokens = input;
+                                            usage_changed = true;
                                         }
-                                        StreamEvent::ToolUseEnd => {
-                                            self.pause_streaming_tps(false);
-                                            if let Some(mut tool) = current_tool.take() {
-                                                tool.input = crate::message::ToolCall::parse_streamed_input_to_object(
-                                                    &current_tool_input,
-                                                );
-                                                tool.refresh_intent_from_input();
-                                                if let Some(key) = Self::experimental_feature_key_for_tool(&tool) {
-                                                    self.note_experimental_feature_use(key);
-                                                }
-                                                if let Some(streaming_tool) = self
-                                                    .streaming_tool_calls
-                                                    .iter_mut()
-                                                    .find(|tc| tc.id == tool.id)
-                                                {
-                                                    streaming_tool.input = tool.input.clone();
-                                                    streaming_tool.intent = tool.intent.clone();
-                                                }
-                                                self.broadcast_debug(crate::tui::backend::DebugEvent::ToolExec {
-                                                    id: tool.id.clone(),
-                                                    name: tool.name.clone(),
-                                                });
-                                                self.commit_pending_streaming_assistant_message();
-
-                                                // Add tool call as its own display message
-                                                self.push_display_message(DisplayMessage {
-                                                    role: "tool".to_string(),
-                                                    content: tool.name.clone(),
-                                                    tool_calls: vec![],
-                                                    duration_secs: None,
-                                                    title: None,
-                                                    tool_data: Some(tool.clone()),
-                                                });
-
-                                                tool_calls.push(tool);
-                                                current_tool_input.clear();
-                                                if eager_stream_redraw {
-                                                    status_spinner_renderer.draw_full(self, terminal)?;
-                                                }
+                                        if let Some(output) = output_tokens {
+                                            self.streaming_output_tokens = output;
+                                            self.accumulate_streaming_output_tokens(
+                                                output,
+                                                &mut call_output_tokens_seen,
+                                            );
+                                        }
+                                        if cache_read_input_tokens.is_some() {
+                                            self.streaming_cache_read_tokens = cache_read_input_tokens;
+                                            usage_changed = true;
+                                        }
+                                        if cache_creation_input_tokens.is_some() {
+                                            self.streaming_cache_creation_tokens =
+                                                cache_creation_input_tokens;
+                                            usage_changed = true;
+                                        }
+                                        if usage_changed {
+                                            self.update_compaction_usage_from_stream();
+                                            if let Some(context_tokens) = self.current_stream_context_tokens() {
+                                                self.check_context_warning(context_tokens);
                                             }
                                         }
-                                        StreamEvent::TokenUsage {
-                                            input_tokens,
-                                            output_tokens,
-                                            cache_read_input_tokens,
-                                            cache_creation_input_tokens,
-                                        } => {
-                                            let mut usage_changed = false;
-                                            if let Some(input) = input_tokens {
-                                                self.streaming_input_tokens = input;
-                                                usage_changed = true;
-                                            }
-                                            if let Some(output) = output_tokens {
-                                                self.streaming_output_tokens = output;
-                                                self.accumulate_streaming_output_tokens(
-                                                    output,
-                                                    &mut call_output_tokens_seen,
-                                                );
-                                            }
-                                            if cache_read_input_tokens.is_some() {
-                                                self.streaming_cache_read_tokens = cache_read_input_tokens;
-                                                usage_changed = true;
-                                            }
-                                            if cache_creation_input_tokens.is_some() {
-                                                self.streaming_cache_creation_tokens =
-                                                    cache_creation_input_tokens;
-                                                usage_changed = true;
-                                            }
-                                            if usage_changed {
-                                                self.update_compaction_usage_from_stream();
-                                                if let Some(context_tokens) = self.current_stream_context_tokens() {
-                                                    self.check_context_warning(context_tokens);
-                                                }
-                                            }
-                                            self.broadcast_debug(crate::tui::backend::DebugEvent::TokenUsage {
-                                                input_tokens: self.streaming_input_tokens,
-                                                output_tokens: self.streaming_output_tokens,
-                                                cache_read_input_tokens: self.streaming_cache_read_tokens,
-                                                cache_creation_input_tokens: self
-                                                    .streaming_cache_creation_tokens,
-                                            });
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::TokenUsage {
+                                            input_tokens: self.streaming_input_tokens,
+                                            output_tokens: self.streaming_output_tokens,
+                                            cache_read_input_tokens: self.streaming_cache_read_tokens,
+                                            cache_creation_input_tokens: self
+                                                .streaming_cache_creation_tokens,
+                                        });
+                                    }
+                                    StreamEvent::ConnectionType { connection } => {
+                                        self.connection_type = Some(connection);
+                                        self.update_terminal_title();
+                                    }
+                                    StreamEvent::ConnectionPhase { phase } => {
+                                        self.status = if matches!(phase, crate::message::ConnectionPhase::Streaming) {
+                                            ProcessingStatus::Streaming
+                                        } else {
+                                            ProcessingStatus::Connecting(phase)
+                                        };
+                                        if eager_stream_redraw {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
                                         }
-                                        StreamEvent::ConnectionType { connection } => {
-                                            self.connection_type = Some(connection);
-                                            self.update_terminal_title();
+                                    }
+                                    StreamEvent::StatusDetail { detail } => {
+                                        self.status_detail = Some(detail);
+                                        if eager_stream_redraw {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
                                         }
-                                        StreamEvent::ConnectionPhase { phase } => {
-                                            self.status = if matches!(phase, crate::message::ConnectionPhase::Streaming) {
-                                                ProcessingStatus::Streaming
-                                            } else {
-                                                ProcessingStatus::Connecting(phase)
+                                    }
+                                    StreamEvent::MessageEnd { .. } => {
+                                        self.pause_streaming_tps(true);
+                                        self.stream_message_ended = true;
+                                        saw_message_end = true;
+                                        if eager_stream_redraw {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                        }
+                                    }
+                                    StreamEvent::SessionId(sid) => {
+                                        self.provider_session_id = Some(sid);
+                                        if saw_message_end {
+                                            break;
+                                        }
+                                    }
+                                    StreamEvent::Error { message, .. } => {
+                                        let no_partial_output = text_content.is_empty()
+                                            && tool_calls.is_empty()
+                                            && current_tool.is_none()
+                                            && self.streaming_text.is_empty()
+                                            && !saw_message_end;
+                                        if no_partial_output
+                                            && let Some(reason) = crate::network_retry::classify_message(&message)
+                                        {
+                                            let plan = crate::network_retry::wait_plan();
+                                            self.push_display_message(DisplayMessage::system(format!(
+                                                "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
+                                                plan.listener_summary
+                                            )));
+                                            self.status = ProcessingStatus::WaitingForNetwork {
+                                                listener: plan.listener_summary.clone(),
                                             };
-                                            if eager_stream_redraw {
-                                                status_spinner_renderer.draw_full(self, terminal)?;
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                            crate::network_retry::wait_until_probably_online().await;
+                                            self.push_display_message(DisplayMessage::system(
+                                                "Network connectivity looks restored; retrying request.".to_string(),
+                                            ));
+                                            continue 'turn_loop;
+                                        }
+                                        return Err(anyhow::anyhow!("Stream error: {}", message));
+                                    }
+                                    StreamEvent::ThinkingStart => {
+                                        let start = Instant::now();
+                                        self.thinking_start = Some(start);
+                                        self.thinking_buffer.clear();
+                                        self.thinking_prefix_emitted = false;
+                                        // Always show Thinking in status bar
+                                        self.status = ProcessingStatus::Thinking(start);
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingStart);
+                                        if eager_stream_redraw {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                        }
+                                    }
+                                    StreamEvent::ThinkingSignatureDelta(signature) => {
+                                        if store_reasoning_content {
+                                            reasoning_signature.push_str(&signature);
+                                        }
+                                    }
+                                    StreamEvent::ThinkingDelta(thinking_text) => {
+                                        // Buffer thinking content and emit with prefix only once
+                                        self.thinking_buffer.push_str(&thinking_text);
+                                        // Display reasoning/thinking content from OpenAI
+                                        if let Some(chunk) = self.stream_buffer.flush() {
+                                            self.append_streaming_text(&chunk);
+                                        }
+                                        // Only show thinking content if enabled in config
+                                        if config().display.show_thinking {
+                                            // Only emit the prefix once at the start of thinking
+                                            if !self.thinking_prefix_emitted && !self.thinking_buffer.trim().is_empty() {
+                                                self.insert_thought_line(format!("💭 {}", self.thinking_buffer.trim_start()));
+                                                self.thinking_prefix_emitted = true;
+                                                self.thinking_buffer.clear();
+                                            } else if self.thinking_prefix_emitted {
+                                                // After prefix is emitted, append subsequent chunks directly
+                                                self.append_streaming_text(&thinking_text);
                                             }
                                         }
-                                        StreamEvent::StatusDetail { detail } => {
-                                            self.status_detail = Some(detail);
-                                            if eager_stream_redraw {
-                                                status_spinner_renderer.draw_full(self, terminal)?;
-                                            }
+                                        if store_reasoning_content {
+                                            reasoning_content.push_str(&thinking_text);
                                         }
-                                        StreamEvent::MessageEnd { .. } => {
-                                            self.pause_streaming_tps(true);
-                                            self.stream_message_ended = true;
-                                            saw_message_end = true;
-                                            if eager_stream_redraw {
-                                                status_spinner_renderer.draw_full(self, terminal)?;
-                                            }
+                                    }
+                                    StreamEvent::ThinkingEnd => {
+                                        self.thinking_start = None;
+                                        self.thinking_buffer.clear();
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingEnd);
+                                    }
+                                    StreamEvent::ThinkingDone { duration_secs } => {
+                                        // Flush any pending buffered text first
+                                        if let Some(chunk) = self.stream_buffer.flush() {
+                                            self.append_streaming_text(&chunk);
                                         }
-                                        StreamEvent::SessionId(sid) => {
-                                            self.provider_session_id = Some(sid);
-                                            if saw_message_end {
-                                                break;
-                                            }
-                                        }
-                                        StreamEvent::Error { message, .. } => {
-                                            let no_partial_output = text_content.is_empty()
-                                                && tool_calls.is_empty()
-                                                && current_tool.is_none()
-                                                && self.streaming_text.is_empty()
-                                                && !saw_message_end;
-                                            if no_partial_output
-                                                && let Some(reason) = crate::network_retry::classify_message(&message)
-                                            {
-                                                let plan = crate::network_retry::wait_plan();
-                                                self.push_display_message(DisplayMessage::system(format!(
-                                                    "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
-                                                    plan.listener_summary
-                                                )));
-                                                self.status = ProcessingStatus::WaitingForNetwork {
-                                                    listener: plan.listener_summary.clone(),
-                                                };
-                                                status_spinner_renderer.draw_full(self, terminal)?;
-                                                crate::network_retry::wait_until_probably_online().await;
-                                                self.push_display_message(DisplayMessage::system(
-                                                    "Network connectivity looks restored; retrying request.".to_string(),
-                                                ));
-                                                continue 'turn_loop;
-                                            }
-                                            return Err(anyhow::anyhow!("Stream error: {}", message));
-                                        }
-                                        StreamEvent::ThinkingStart => {
-                                            let start = Instant::now();
-                                            self.thinking_start = Some(start);
-                                            self.thinking_buffer.clear();
-                                            self.thinking_prefix_emitted = false;
-                                            // Always show Thinking in status bar
-                                            self.status = ProcessingStatus::Thinking(start);
-                                            self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingStart);
-                                            if eager_stream_redraw {
-                                                status_spinner_renderer.draw_full(self, terminal)?;
-                                            }
-                                        }
-                                        StreamEvent::ThinkingDelta(thinking_text) => {
-                                            // Buffer thinking content and emit with prefix only once
-                                            self.thinking_buffer.push_str(&thinking_text);
-                                            // Display reasoning/thinking content from OpenAI
-                                            if let Some(chunk) = self.stream_buffer.flush() {
-                                                self.append_streaming_text(&chunk);
-                                            }
-                                            // Only show thinking content if enabled in config
-                                            if config().display.show_thinking {
-                                                // Only emit the prefix once at the start of thinking
-                                                if !self.thinking_prefix_emitted && !self.thinking_buffer.trim().is_empty() {
-                                                    self.insert_thought_line(format!("💭 {}", self.thinking_buffer.trim_start()));
-                                                    self.thinking_prefix_emitted = true;
-                                                    self.thinking_buffer.clear();
-                                                } else if self.thinking_prefix_emitted {
-                                                    // After prefix is emitted, append subsequent chunks directly
-                                                    self.append_streaming_text(&thinking_text);
-                                                }
-                                            }
-                                            if store_reasoning_content {
-                                                reasoning_content.push_str(&thinking_text);
-                                            }
-                                        }
-                                        StreamEvent::ThinkingEnd => {
-                                            self.thinking_start = None;
-                                            self.thinking_buffer.clear();
-                                            self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingEnd);
-                                        }
-                                        StreamEvent::ThinkingDone { duration_secs } => {
-                                            // Flush any pending buffered text first
-                                            if let Some(chunk) = self.stream_buffer.flush() {
-                                                self.append_streaming_text(&chunk);
-                                            }
-                                            let thinking_msg = format!("*Thought for {:.1}s*", duration_secs);
-                                            self.insert_thought_line(thinking_msg);
-                                            self.thinking_prefix_emitted = false;
-                                            self.thinking_buffer.clear();
-                                        }
-                                        StreamEvent::Compaction {
-                                            trigger,
-                                            pre_tokens,
-                                            openai_encrypted_content,
-                                        } => {
-                                            if let Some(encrypted_content) = openai_encrypted_content {
-                                                openai_native_compaction
-                                                    .get_or_insert_with(|| {
-                                                        (encrypted_content, self.local_transcript_message_count())
-                                                    });
-                                            }
-                                            // Flush any pending buffered text first
-                                            if let Some(chunk) = self.stream_buffer.flush() {
-                                                self.append_streaming_text(&chunk);
-                                            }
-                                            let tokens_str = pre_tokens
-                                                .map(|t| format!(" (was {} tokens)", t))
-                                                .unwrap_or_default();
-                                            let compact_msg = format!(
-                                                "📦 **Compaction complete** — context summarized ({}){}\n\n",
-                                                trigger, tokens_str
-                                            );
-                                            self.append_streaming_text(&compact_msg);
-                                            self.context_warning_shown = false;
-                                        }
-                                        StreamEvent::UpstreamProvider { provider } => {
-                                            // Store the upstream provider (e.g., Fireworks, Together)
-                                            self.upstream_provider = Some(provider);
-                                        }
-                                        StreamEvent::ToolResult { tool_use_id, content, is_error } => {
-                                            // SDK already executed this tool
-                                            self.tool_result_ids.insert(tool_use_id.clone());
-                                            // Find the tool name from our tracking
-                                            let tool_name = self.streaming_tool_calls
-                                                .iter()
-                                                .find(|tc| tc.id == tool_use_id)
-                                                .map(|tc| tc.name.clone())
-                                                .unwrap_or_default();
-
-                                            self.broadcast_debug(crate::tui::backend::DebugEvent::ToolDone {
-                                                id: tool_use_id.clone(),
-                                                name: tool_name.clone(),
-                                                output: content.clone(),
-                                                is_error,
+                                        let thinking_msg = format!("*Thought for {:.1}s*", duration_secs);
+                                        self.insert_thought_line(thinking_msg);
+                                        self.thinking_prefix_emitted = false;
+                                        self.thinking_buffer.clear();
+                                    }
+                                    StreamEvent::OpenAIReasoning {
+                                        id,
+                                        summary,
+                                        encrypted_content,
+                                        status,
+                                    } => {
+                                        if store_reasoning_content {
+                                            openai_reasoning_items.push(ContentBlock::OpenAIReasoning {
+                                                id,
+                                                summary,
+                                                encrypted_content,
+                                                status,
                                             });
-
-                                            // Update the tool's DisplayMessage with the output (if it exists)
-                                            if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
-                                                dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
-                                            }) {
-                                                dm.content = content.clone();
-                                                self.bump_display_messages_version();
-                                            }
-
-                                            // Clear this tool from streaming_tool_calls
-                                            self.streaming_tool_calls.retain(|tc| tc.id != tool_use_id);
-
-                                            // Reset status back to Streaming
-                                            self.status = ProcessingStatus::Streaming;
-
-                                            sdk_tool_results.insert(tool_use_id, (content, is_error));
                                         }
-                                        StreamEvent::GeneratedImage {
-                                            id,
-                                            path,
-                                            metadata_path,
-                                            output_format,
-                                            revised_prompt,
-                                        } => {
-                                            self.pause_streaming_tps(false);
-                                            self.commit_pending_streaming_assistant_message();
-                                            let input = crate::message::generated_image_tool_input(
-                                                &path,
-                                                metadata_path.as_deref(),
-                                                &output_format,
-                                                revised_prompt.as_deref(),
-                                            );
-                                            let tool_call = ToolCall {
-                                                id: id.clone(),
-                                                name: crate::message::GENERATED_IMAGE_TOOL_NAME.to_string(),
-                                                input,
-                                                intent: Some("OpenAI native image generation".to_string()),
-                                            };
-                                            let summary = crate::message::generated_image_summary(
-                                                &path,
-                                                metadata_path.as_deref(),
-                                                &output_format,
-                                                revised_prompt.as_deref(),
-                                            );
-                                            self.push_display_message(DisplayMessage {
-                                                role: "tool".to_string(),
-                                                content: summary,
-                                                tool_calls: vec![],
-                                                duration_secs: None,
-                                                title: Some("Generated image".to_string()),
-                                                tool_data: Some(tool_call),
-                                            });
-                                            match crate::tui::write_generated_image_side_panel_page(
-                                                &self.session.id,
-                                                &id,
+                                    }
+                                    StreamEvent::Compaction {
+                                        trigger,
+                                        pre_tokens,
+                                        openai_encrypted_content,
+                                    } => {
+                                        if let Some(encrypted_content) = openai_encrypted_content {
+                                            openai_native_compaction
+                                                .get_or_insert_with(|| {
+                                                    (encrypted_content, self.local_transcript_message_count())
+                                                });
+                                        }
+                                        // Flush any pending buffered text first
+                                        if let Some(chunk) = self.stream_buffer.flush() {
+                                            self.append_streaming_text(&chunk);
+                                        }
+                                        let tokens_str = pre_tokens
+                                            .map(|t| format!(" (was {} tokens)", t))
+                                            .unwrap_or_default();
+                                        let compact_msg = format!(
+                                            "📦 **Compaction complete** — context summarized ({}){}\n\n",
+                                            trigger, tokens_str
+                                        );
+                                        self.append_streaming_text(&compact_msg);
+                                        self.context_warning_shown = false;
+                                    }
+                                    StreamEvent::UpstreamProvider { provider } => {
+                                        // Store the upstream provider (e.g., Fireworks, Together)
+                                        self.upstream_provider = Some(provider);
+                                    }
+                                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                                        // SDK already executed this tool
+                                        self.tool_result_ids.insert(tool_use_id.clone());
+                                        // Find the tool name from our tracking
+                                        let tool_name = self.streaming_tool_calls
+                                            .iter()
+                                            .find(|tc| tc.id == tool_use_id)
+                                            .map(|tc| tc.name.clone())
+                                            .unwrap_or_default();
+
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ToolDone {
+                                            id: tool_use_id.clone(),
+                                            name: tool_name.clone(),
+                                            output: content.clone(),
+                                            is_error,
+                                        });
+
+                                        // Update the tool's DisplayMessage with the output (if it exists)
+                                        if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
+                                            dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
+                                        }) {
+                                            dm.content = content.clone();
+                                            self.bump_display_messages_version();
+                                        }
+
+                                        // Clear this tool from streaming_tool_calls
+                                        self.streaming_tool_calls.retain(|tc| tc.id != tool_use_id);
+
+                                        // Reset status back to Streaming
+                                        self.status = ProcessingStatus::Streaming;
+
+                                        sdk_tool_results.insert(tool_use_id, (content, is_error));
+                                    }
+                                    StreamEvent::GeneratedImage {
+                                        id,
+                                        path,
+                                        metadata_path,
+                                        output_format,
+                                        revised_prompt,
+                                    } => {
+                                        self.pause_streaming_tps(false);
+                                        self.commit_pending_streaming_assistant_message();
+                                        let input = crate::message::generated_image_tool_input(
+                                            &path,
+                                            metadata_path.as_deref(),
+                                            &output_format,
+                                            revised_prompt.as_deref(),
+                                        );
+                                        let tool_call = ToolCall {
+                                            id: id.clone(),
+                                            name: crate::message::GENERATED_IMAGE_TOOL_NAME.to_string(),
+                                            input,
+                                            intent: Some("OpenAI native image generation".to_string()),
+                                        };
+                                        let summary = crate::message::generated_image_summary(
+                                            &path,
+                                            metadata_path.as_deref(),
+                                            &output_format,
+                                            revised_prompt.as_deref(),
+                                        );
+                                        self.push_display_message(DisplayMessage {
+                                            role: "tool".to_string(),
+                                            content: summary,
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: Some("Generated image".to_string()),
+                                            tool_data: Some(tool_call),
+                                        });
+                                        match crate::tui::write_generated_image_side_panel_page(
+                                            &self.session.id,
+                                            &id,
+                                            &path,
+                                            metadata_path.as_deref(),
+                                            &output_format,
+                                            revised_prompt.as_deref(),
+                                        ) {
+                                            Ok(snapshot) => self.set_side_panel_snapshot(snapshot),
+                                            Err(err) => crate::logging::warn(&format!(
+                                                "Failed to write generated image side panel page: {}",
+                                                err
+                                            )),
+                                        }
+                                        if provider.supports_image_input() {
+                                            if let Some(blocks) = crate::message::generated_image_visual_context_blocks(
                                                 &path,
                                                 metadata_path.as_deref(),
                                                 &output_format,
                                                 revised_prompt.as_deref(),
                                             ) {
-                                                Ok(snapshot) => self.set_side_panel_snapshot(snapshot),
-                                                Err(err) => crate::logging::warn(&format!(
-                                                    "Failed to write generated image side panel page: {}",
-                                                    err
-                                                )),
-                                            }
-                                            if provider.supports_image_input() {
-                                                if let Some(blocks) = crate::message::generated_image_visual_context_blocks(
-                                                    &path,
-                                                    metadata_path.as_deref(),
-                                                    &output_format,
-                                                    revised_prompt.as_deref(),
-                                                ) {
-                                                    generated_image_contexts.push(blocks);
-                                                } else {
-                                                    crate::logging::warn(&format!(
-                                                        "Generated image was not attached as visual context: {}",
-                                                        path
-                                                    ));
-                                                }
-                                            }
-                                            self.status = ProcessingStatus::Streaming;
-                                            if eager_stream_redraw {
-                                                status_spinner_renderer.draw_full(self, terminal)?;
+                                                generated_image_contexts.push(blocks);
+                                            } else {
+                                                crate::logging::warn(&format!(
+                                                    "Generated image was not attached as visual context: {}",
+                                                    path
+                                                ));
                                             }
                                         }
-                                        StreamEvent::NativeToolCall {
-                                            request_id,
-                                            tool_name,
-                                            input,
-                                        } => {
-                                            // Execute native tool and send result back to SDK bridge
-                                            let ctx = crate::tool::ToolContext {
-                                                session_id: self.session_id().to_string(),
-                                                message_id: self.session_id().to_string(),
-                                                tool_call_id: request_id.clone(),
-                                                working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
-                sandbox_root: crate::sandbox::current_sandbox_root(),
-                                                stdin_request_tx: None,
-                                                graceful_shutdown_signal: None,
-                                                execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
-                                            };
-                                            let tool_result = self
-                                                .registry
-                                                .execute(
-                                                    &tool_name,
-                                                    crate::message::ToolCall::normalize_input_to_object(input),
-                                                    ctx,
-                                                )
-                                                .await;
-                                            crate::telemetry::record_tool_call();
-                                            if tool_result.is_err() {
-                                                crate::telemetry::record_tool_failure();
-                                            }
-                                            let native_result = match tool_result {
-                                                Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
-                                                Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
-                                            };
-                                            if let Some(sender) = self.provider.native_result_sender() {
-                                                let _ = sender.send(native_result).await;
-                                            }
+                                        self.status = ProcessingStatus::Streaming;
+                                        if eager_stream_redraw {
+                                            status_spinner_renderer.draw_full(self, terminal)?;
+                                        }
+                                    }
+                                    StreamEvent::NativeToolCall {
+                                        request_id,
+                                        tool_name,
+                                        input,
+                                    } => {
+                                        // Execute native tool and send result back to SDK bridge
+                                        let ctx = crate::tool::ToolContext {
+                                            session_id: self.session_id().to_string(),
+                                            message_id: self.session_id().to_string(),
+                                            tool_call_id: request_id.clone(),
+                                            working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                                            sandbox_root: crate::sandbox::current_sandbox_root(),
+                                            stdin_request_tx: None,
+                                            graceful_shutdown_signal: None,
+                                            execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
+                                        };
+                                        let tool_result = self
+                                            .registry
+                                            .execute(
+                                                &tool_name,
+                                                crate::message::ToolCall::normalize_input_to_object(input),
+                                                ctx,
+                                            )
+                                            .await;
+                                        crate::telemetry::record_tool_call();
+                                        if tool_result.is_err() {
+                                            crate::telemetry::record_tool_failure();
+                                        }
+                                        let native_result = match tool_result {
+                                            Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
+                                            Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
+                                        };
+                                        if let Some(sender) = self.provider.native_result_sender() {
+                                            let _ = sender.send(native_result).await;
                                         }
                                     }
                                 }
-                                Some(Err(e)) => {
-                                    let no_partial_output = text_content.is_empty()
-                                        && tool_calls.is_empty()
-                                        && current_tool.is_none()
-                                        && self.streaming_text.is_empty()
-                                        && !saw_message_end;
-                                    if no_partial_output
-                                        && let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref())
-                                    {
-                                        let plan = crate::network_retry::wait_plan();
-                                        self.push_display_message(DisplayMessage::system(format!(
-                                            "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
-                                            plan.listener_summary
-                                        )));
-                                        self.status = ProcessingStatus::WaitingForNetwork {
-                                            listener: plan.listener_summary.clone(),
-                                        };
-                                        status_spinner_renderer.draw_full(self, terminal)?;
-                                        crate::network_retry::wait_until_probably_online().await;
-                                        self.push_display_message(DisplayMessage::system(
-                                            "Network connectivity looks restored; retrying request.".to_string(),
-                                        ));
-                                        continue 'turn_loop;
-                                    }
-                                    return Err(e);
+                            }
+                            Some(Err(e)) => {
+                                let no_partial_output = text_content.is_empty()
+                                    && tool_calls.is_empty()
+                                    && current_tool.is_none()
+                                    && self.streaming_text.is_empty()
+                                    && !saw_message_end;
+                                if no_partial_output
+                                    && let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref())
+                                {
+                                    let plan = crate::network_retry::wait_plan();
+                                    self.push_display_message(DisplayMessage::system(format!(
+                                        "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
+                                        plan.listener_summary
+                                    )));
+                                    self.status = ProcessingStatus::WaitingForNetwork {
+                                        listener: plan.listener_summary.clone(),
+                                    };
+                                    status_spinner_renderer.draw_full(self, terminal)?;
+                                    crate::network_retry::wait_until_probably_online().await;
+                                    self.push_display_message(DisplayMessage::system(
+                                        "Network connectivity looks restored; retrying request.".to_string(),
+                                    ));
+                                    continue 'turn_loop;
                                 }
-                                None => {
-                                    let no_partial_output = text_content.is_empty()
-                                        && tool_calls.is_empty()
-                                        && current_tool.is_none()
-                                        && self.streaming_text.is_empty()
-                                        && !saw_message_end;
-                                    if no_partial_output {
-                                        let plan = crate::network_retry::wait_plan();
-                                        self.push_display_message(DisplayMessage::system(format!(
-                                            "Stream ended before the model response completed; this may be a network disconnect. Waiting to retry: {}.",
-                                            plan.listener_summary
-                                        )));
-                                        self.status = ProcessingStatus::WaitingForNetwork {
-                                            listener: plan.listener_summary.clone(),
-                                        };
-                                        status_spinner_renderer.draw_full(self, terminal)?;
-                                        crate::network_retry::wait_until_probably_online().await;
-                                        self.push_display_message(DisplayMessage::system(
-                                            "Network connectivity looks restored; retrying request.".to_string(),
-                                        ));
-                                        continue 'turn_loop;
-                                    }
-                                    break;
+                                return Err(e);
+                            }
+                            None => {
+                                let no_partial_output = text_content.is_empty()
+                                    && tool_calls.is_empty()
+                                    && current_tool.is_none()
+                                    && self.streaming_text.is_empty()
+                                    && !saw_message_end;
+                                if no_partial_output {
+                                    let plan = crate::network_retry::wait_plan();
+                                    self.push_display_message(DisplayMessage::system(format!(
+                                        "Stream ended before the model response completed; this may be a network disconnect. Waiting to retry: {}.",
+                                        plan.listener_summary
+                                    )));
+                                    self.status = ProcessingStatus::WaitingForNetwork {
+                                        listener: plan.listener_summary.clone(),
+                                    };
+                                    status_spinner_renderer.draw_full(self, terminal)?;
+                                    crate::network_retry::wait_until_probably_online().await;
+                                    self.push_display_message(DisplayMessage::system(
+                                        "Network connectivity looks restored; retrying request.".to_string(),
+                                    ));
+                                    continue 'turn_loop;
                                 }
+                                break;
                             }
                         }
                     }
+                }
             }
 
             // If we interleaved a message, skip post-processing and go straight to new API call
@@ -920,10 +951,14 @@ impl App {
                     cache_control: None,
                 });
             }
-            if store_reasoning_content && !reasoning_content.is_empty() {
-                content_blocks.push(ContentBlock::Reasoning {
-                    text: reasoning_content.clone(),
-                });
+            if store_reasoning_content {
+                crate::message::push_reasoning_content_block(
+                    &mut content_blocks,
+                    &provider_name,
+                    &reasoning_content,
+                    Some(&reasoning_signature),
+                );
+                content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {

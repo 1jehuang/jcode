@@ -593,12 +593,19 @@ pub(crate) fn push_status_preview(
             continue;
         }
 
+        let tick_stride = status_preview_tick_stride(&lane);
         for surface in workspace
             .surfaces
             .iter()
             .filter(|surface| surface.lane == lane.lane)
         {
             let focused = workspace.is_focused(surface.id);
+            if !focused
+                && !status_preview_column_in_viewport(surface.column, visible_layout)
+                && !status_preview_should_draw_column(surface.column, &lane, tick_stride)
+            {
+                continue;
+            }
             let frame = surface_frames.and_then(|frames| frames.frame_for_surface(surface.id));
             push_status_preview_surface_tick(
                 vertices,
@@ -673,6 +680,24 @@ pub(crate) fn push_status_preview(
 
         cursor_x += lane_width + group_gap;
     }
+}
+
+fn status_preview_tick_stride(lane: &StatusPreviewLane) -> i32 {
+    let columns = lane.column_count();
+    ((columns + STATUS_PREVIEW_MAX_TICKS_PER_LANE - 1) / STATUS_PREVIEW_MAX_TICKS_PER_LANE).max(1)
+}
+
+fn status_preview_column_in_viewport(column: i32, visible_layout: VisibleColumnLayout) -> bool {
+    let first = visible_layout.first_visible_column;
+    let last = first + visible_layout.visible_columns.saturating_sub(1) as i32;
+    (first..=last).contains(&column)
+}
+
+fn status_preview_should_draw_column(column: i32, lane: &StatusPreviewLane, stride: i32) -> bool {
+    column
+        .saturating_sub(lane.min_column)
+        .rem_euclid(stride.max(1))
+        == 0
 }
 
 fn push_status_preview_surface_tick(

@@ -216,6 +216,51 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
 }
 
 #[test]
+fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
+    let mut saw_text_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
+    let mut pending = VecDeque::new();
+
+    let reasoning_done = r#"{
+        "type":"response.output_item.done",
+        "item":{
+            "id":"rs_123",
+            "type":"reasoning",
+            "status":"completed",
+            "encrypted_content":"enc_reasoning",
+            "summary":[{"type":"summary_text","text":"Checked the constraints."}]
+        }
+    }"#;
+    let event = parse_openai_response_event(
+        reasoning_done,
+        &mut saw_text_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("expected reasoning event");
+
+    match event {
+        StreamEvent::OpenAIReasoning {
+            id,
+            summary,
+            encrypted_content,
+            status,
+        } => {
+            assert_eq!(id, "rs_123");
+            assert_eq!(summary, vec!["Checked the constraints.".to_string()]);
+            assert_eq!(encrypted_content.as_deref(), Some("enc_reasoning"));
+            assert_eq!(status.as_deref(), Some("completed"));
+        }
+        other => panic!("expected OpenAIReasoning, got {:?}", other),
+    }
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ThinkingStart)));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ThinkingDelta(text)) if text == "Checked the constraints."));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ThinkingEnd)));
+}
+
+#[test]
 fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() {
     let _lock = crate::storage::lock_test_env();
     let original_dir = std::env::current_dir().expect("current dir");

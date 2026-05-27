@@ -152,9 +152,12 @@ impl Agent {
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
+            let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
-                matches!(self.provider.name(), "openrouter" | "anthropic");
+                crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
+            let mut reasoning_signature = String::new();
+            let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -217,6 +220,11 @@ impl Agent {
                         }
                         if store_reasoning_content {
                             reasoning_content.push_str(&thinking_text);
+                        }
+                    }
+                    StreamEvent::ThinkingSignatureDelta(signature) => {
+                        if store_reasoning_content {
+                            reasoning_signature.push_str(&signature);
                         }
                     }
                     StreamEvent::ThinkingEnd => {
@@ -443,6 +451,21 @@ impl Agent {
                         }
                         self.last_upstream_provider = Some(provider);
                     }
+                    StreamEvent::OpenAIReasoning {
+                        id,
+                        summary,
+                        encrypted_content,
+                        status,
+                    } => {
+                        if store_reasoning_content {
+                            openai_reasoning_items.push(ContentBlock::OpenAIReasoning {
+                                id,
+                                summary,
+                                encrypted_content,
+                                status,
+                            });
+                        }
+                    }
                     StreamEvent::Compaction {
                         trigger,
                         pre_tokens,
@@ -650,10 +673,14 @@ impl Agent {
                     cache_control: None,
                 });
             }
-            if store_reasoning_content && !reasoning_content.is_empty() {
-                content_blocks.push(ContentBlock::Reasoning {
-                    text: reasoning_content.clone(),
-                });
+            if store_reasoning_content {
+                crate::message::push_reasoning_content_block(
+                    &mut content_blocks,
+                    &provider_name,
+                    &reasoning_content,
+                    Some(&reasoning_signature),
+                );
+                content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {

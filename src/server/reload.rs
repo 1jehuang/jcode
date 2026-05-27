@@ -67,6 +67,15 @@ pub(super) async fn await_reload_signal(
             "Server: reload signal received via channel request={} hash={} triggering_session={:?} prefer_selfdev_binary={}",
             signal.request_id, signal.hash, signal.triggering_session, signal.prefer_selfdev_binary
         ));
+        super::reload_trace::record_value(
+            &signal.request_id,
+            "signal_received",
+            serde_json::json!({
+                "hash": signal.hash,
+                "triggering_session": signal.triggering_session,
+                "prefer_selfdev_binary": signal.prefer_selfdev_binary,
+            }),
+        );
         let reload_started = std::time::Instant::now();
         crate::server::write_reload_state(
             &signal.request_id,
@@ -95,8 +104,14 @@ pub(super) async fn await_reload_signal(
             signal.triggering_session.as_deref(),
         )
         .await;
+        super::reload_trace::record_value(
+            &signal.request_id,
+            "intent_persistence_complete",
+            serde_json::json!({}),
+        );
 
         graceful_shutdown_sessions(
+            &signal.request_id,
             &sessions,
             &swarm_members,
             &shutdown_signals,
@@ -110,6 +125,14 @@ pub(super) async fn await_reload_signal(
             reload_started.elapsed().as_millis(),
             crate::server::reload_state_summary(std::time::Duration::from_secs(60))
         ));
+        super::reload_trace::record_value(
+            &signal.request_id,
+            "graceful_shutdown_complete",
+            serde_json::json!({
+                "elapsed_ms": reload_started.elapsed().as_millis(),
+                "state": crate::server::reload_state_summary(std::time::Duration::from_secs(60)),
+            }),
+        );
 
         let prefers_selfdev = signal.prefer_selfdev_binary;
 
@@ -124,6 +147,16 @@ pub(super) async fn await_reload_signal(
                     reload_started.elapsed().as_millis(),
                     crate::server::reload_state_summary(std::time::Duration::from_secs(60))
                 ));
+                super::reload_trace::record_value(
+                    &signal.request_id,
+                    "exec_start",
+                    serde_json::json!({
+                        "binary_label": label,
+                        "binary": binary,
+                        "socket": socket,
+                        "elapsed_ms": reload_started.elapsed().as_millis(),
+                    }),
+                );
                 let mut cmd = ProcessCommand::new(&binary);
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
                 prepare_server_exec(&mut cmd, &socket);
@@ -165,6 +198,26 @@ async fn persist_reload_recovery_intents(
 ) {
     let mut candidates: Vec<(String, bool)> = {
         let members = swarm_members.read().await;
+        let snapshot = members
+            .iter()
+            .map(|(session_id, member)| {
+                serde_json::json!({
+                    "session_id": session_id,
+                    "status": member.status,
+                    "is_headless": member.is_headless,
+                    "swarm_id": member.swarm_id,
+                    "role": member.role,
+                })
+            })
+            .collect::<Vec<_>>();
+        super::reload_trace::record_value(
+            reload_id,
+            "candidate_snapshot",
+            serde_json::json!({
+                "triggering_session": triggering_session,
+                "members": snapshot,
+            }),
+        );
         members
             .iter()
             .filter(|(_, member)| member.status == "running")
@@ -192,6 +245,17 @@ async fn persist_reload_recovery_intents(
             is_headless || !is_triggering,
             None,
         ) else {
+            super::reload_trace::record_value(
+                reload_id,
+                "intent_skipped",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "triggering": is_triggering,
+                    "is_headless": is_headless,
+                    "has_reload_ctx": reload_ctx.is_some(),
+                    "reason": "no directive generated",
+                }),
+            );
             crate::logging::info(&format!(
                 "reload recovery store: no directive generated for reload_id={} session={} triggering={} headless={} has_reload_ctx={}",
                 reload_id,
@@ -221,15 +285,34 @@ async fn persist_reload_recovery_intents(
         if let Err(err) =
             super::reload_recovery::persist_intent(reload_id, &session_id, role, directive, reason)
         {
+            super::reload_trace::record_value(
+                reload_id,
+                "intent_persist_failed",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "error": err.to_string(),
+                }),
+            );
             crate::logging::warn(&format!(
                 "reload recovery store: failed to persist intent reload_id={} session={}: {}",
                 reload_id, session_id, err
             ));
+        } else {
+            super::reload_trace::record_value(
+                reload_id,
+                "intent_persisted",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "triggering": is_triggering,
+                    "is_headless": is_headless,
+                }),
+            );
         }
     }
 }
 
 pub(super) async fn graceful_shutdown_sessions(
+    reload_id: &str,
     _sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
@@ -237,6 +320,7 @@ pub(super) async fn graceful_shutdown_sessions(
     triggering_session: Option<&str>,
 ) {
     graceful_shutdown_sessions_with_timeout(
+        reload_id,
         _sessions,
         swarm_members,
         shutdown_signals,
@@ -248,6 +332,7 @@ pub(super) async fn graceful_shutdown_sessions(
 }
 
 async fn graceful_shutdown_sessions_with_timeout(
+    reload_id: &str,
     _sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
@@ -272,6 +357,13 @@ async fn graceful_shutdown_sessions_with_timeout(
     };
 
     if !unsignalable_sessions.is_empty() {
+        super::reload_trace::record_value(
+            reload_id,
+            "shutdown_unsignalable_sessions",
+            serde_json::json!({
+                "sessions": unsignalable_sessions,
+            }),
+        );
         crate::logging::warn(&format!(
             "Server: {} running session(s) had no shutdown signal and will not block reload: {:?}",
             unsignalable_sessions.len(),
@@ -303,6 +395,14 @@ async fn graceful_shutdown_sessions_with_timeout(
                 continue;
             };
             signal.fire();
+            super::reload_trace::record_value(
+                reload_id,
+                "shutdown_signal_sent",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "triggering_session": triggering_session,
+                }),
+            );
             crate::logging::info(&format!(
                 "Server: sent graceful shutdown signal to session {}",
                 session_id

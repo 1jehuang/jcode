@@ -1,9 +1,13 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-desktop/src/main_tests.rs": 3720,
-    "src/provider/openrouter_tests.rs": 1232,
-    "src/tui/app/tests/state_model_poke_03.rs": 2105,
+    "crates/jcode-desktop/src/main_tests.rs": 10005,
+    "crates/jcode-desktop/src/session_launch/tests.rs": 1207,
+    "src/live_tests.rs": 1781,
+    "src/provider/openrouter_tests.rs": 1470,
+    "src/session_tests/cases.rs": 1432,
+    "src/tui/app/tests/remote_startup_input_02/part_01.rs": 1305,
+    "src/tui/app/tests/state_model_poke_03.rs": 2101,
     "tests/e2e/test_support/mod.rs": 1325
   },
   "version": 1

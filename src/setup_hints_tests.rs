@@ -65,7 +65,23 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     let hints = startup_hints_for_launch(&state).expect("expected startup hint");
     let (_, message) = hints.display_message.expect("expected display message");
     assert!(message.contains("Alt+C"));
-    assert!(message.contains("Alt+;"));
+    assert!(message.contains("Cmd+;"));
+}
+
+#[test]
+fn mac_hotkey_launch_agent_plist_uses_valid_xml_quotes() {
+    let plist = mac_hotkey_launch_agent_plist(
+        "/Applications/Jcode.app/Contents/MacOS/jcode",
+        "/tmp/jcode-hotkey.out.log",
+        "/tmp/jcode-hotkey.err.log",
+        "ghostty",
+    );
+
+    assert!(plist.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    assert!(plist.contains("<plist version=\"1.0\">"));
+    assert!(!plist.contains("\\\""));
+    assert!(plist.contains("<string>setup-hotkey</string>"));
+    assert!(plist.contains("<string>--listen-macos-hotkey</string>"));
 }
 
 #[test]

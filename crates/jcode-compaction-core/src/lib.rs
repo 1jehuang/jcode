@@ -155,7 +155,9 @@ pub fn build_compaction_conversation_text(
                     };
                     conversation_text.push_str(&format!("[Result: {}]\n", truncated));
                 }
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { .. } => conversation_text.push_str("[Image]\n"),
                 ContentBlock::OpenAICompaction { .. } => {
                     conversation_text.push_str("[OpenAI native compaction]\n")
@@ -267,6 +269,21 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
         .map(|block| match block {
             ContentBlock::Text { text, .. } => text.len(),
             ContentBlock::Reasoning { text } => text.len(),
+            ContentBlock::AnthropicThinking {
+                thinking,
+                signature,
+            } => thinking.len() + signature.len(),
+            ContentBlock::OpenAIReasoning {
+                id,
+                summary,
+                encrypted_content,
+                status,
+            } => {
+                id.len()
+                    + summary.iter().map(String::len).sum::<usize>()
+                    + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                    + status.as_ref().map(String::len).unwrap_or(0)
+            }
             ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
             ContentBlock::ToolResult { content, .. } => content.len() + 20,
             ContentBlock::Image { data, .. } => data.len(),

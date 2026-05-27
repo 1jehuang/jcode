@@ -227,7 +227,9 @@ fn test_anthropic_thinking_sse_events() {
         &mut cache_creation_input_tokens,
         false,
     );
-    assert!(events.is_empty());
+    assert!(
+        matches!(events.as_slice(), [StreamEvent::ThinkingSignatureDelta(sig)] if sig == "signed")
+    );
 
     let stop = SseEvent {
         event_type: "content_block_stop".to_string(),
@@ -247,8 +249,33 @@ fn test_anthropic_thinking_sse_events() {
     assert!(!current_thinking_block);
 }
 
+#[test]
+fn test_anthropic_signed_thinking_replayed_in_request_blocks() {
+    let provider = AnthropicProvider::new();
+    let blocks = provider.format_content_blocks(
+        &[ContentBlock::AnthropicThinking {
+            thinking: "reasoning text".to_string(),
+            signature: "signed".to_string(),
+        }],
+        false,
+    );
+
+    let value = serde_json::to_value(&blocks).expect("serialize content blocks");
+    assert_eq!(
+        value,
+        serde_json::json!([
+            {
+                "type": "thinking",
+                "thinking": "reasoning text",
+                "signature": "signed"
+            }
+        ])
+    );
+}
+
 #[tokio::test]
 #[ignore = "live smoke: requires ANTHROPIC_API_KEY, or set JCODE_LIVE_ANTHROPIC_ALLOW_OAUTH=1 to use Claude OAuth credentials"]
+#[allow(clippy::await_holding_lock)]
 async fn live_anthropic_reasoning_smoke() -> Result<()> {
     let _env_lock = crate::storage::lock_test_env();
     let using_api_key = std::env::var_os("ANTHROPIC_API_KEY").is_some();

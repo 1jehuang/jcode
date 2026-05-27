@@ -466,6 +466,7 @@ async fn test_request_permission_is_ambient_only() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_no_builtin_tools_env_disables_registry() {
     // Issue #23: JCODE_NO_BUILTIN_TOOLS=1 must produce a Registry with no
     // built-in tools loaded. Extension/MCP tools (added separately) are
@@ -493,6 +494,7 @@ async fn test_no_builtin_tools_env_disables_registry() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_default_registry_has_builtin_tools() {
     // Negative control for the test above.
     let _lock = crate::storage::lock_test_env();

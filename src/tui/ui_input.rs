@@ -342,6 +342,49 @@ fn format_stream_tokens(tokens: u64) -> String {
     }
 }
 
+fn occasional_session_history_warning(
+    total_tokens: u64,
+    compaction_count: usize,
+    context_limit: Option<usize>,
+    width: usize,
+    elapsed_secs: u64,
+) -> Option<String> {
+    let context_limit = context_limit.and_then(|limit| u64::try_from(limit).ok());
+    let token_threshold = context_limit.unwrap_or(250_000).max(1);
+
+    if total_tokens < token_threshold || width < 64 {
+        return None;
+    }
+
+    // This is not current context usage, so keep it an occasional nudge rather
+    // than a persistent warning. The first reminder is never shown before the
+    // session has processed a full model context window, then it reappears at
+    // context-window-sized token intervals as the session grows. Keep the
+    // existing time gate as a short visibility window within each interval.
+    let token_interval = token_threshold;
+    let token_window = (token_interval / 20).clamp(10_000, 100_000);
+    if (total_tokens - token_threshold) % token_interval >= token_window {
+        return None;
+    }
+    if elapsed_secs % 300 >= 10 {
+        return None;
+    }
+
+    let tokens = format_stream_tokens(total_tokens);
+    let compactions = if compaction_count > 0 {
+        format!(
+            " and {compaction_count} compact{}",
+            if compaction_count == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
+
+    Some(format!(
+        "Session history: {tokens} tokens processed{compactions}; /clear starts fresh context"
+    ))
+}
+
 fn connection_phase_label(phase: &ConnectionPhase) -> String {
     match phase {
         ConnectionPhase::Authenticating => "refreshing auth".to_string(),
@@ -800,22 +843,27 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         }
     } else if let Some((total_in, total_out)) = app.total_session_tokens() {
         let total = total_in + total_out;
-        if total > 100_000 {
-            let warning_color = if total > 150_000 {
-                rgb(255, 100, 100)
-            } else {
-                rgb(255, 193, 7)
-            };
+        if let Some(warning) = occasional_session_history_warning(
+            total,
+            app.session_compaction_count(),
+            app.context_limit(),
+            area.width as usize,
+            app.animation_elapsed() as u64,
+        ) {
+            let severe_token_threshold = app
+                .context_limit()
+                .and_then(|limit| u64::try_from(limit).ok())
+                .map(|limit| limit.saturating_mul(3))
+                .unwrap_or(1_000_000);
+            let warning_color =
+                if total >= severe_token_threshold || app.session_compaction_count() >= 3 {
+                    rgb(255, 100, 100)
+                } else {
+                    rgb(255, 193, 7)
+                };
             Line::from(vec![
                 Span::styled("⚠ ", Style::default().fg(warning_color)),
-                Span::styled(
-                    format!("Session: {}k tokens ", total / 1000),
-                    Style::default().fg(warning_color),
-                ),
-                Span::styled(
-                    "(consider /clear for fresh context)",
-                    Style::default().fg(dim_color()),
-                ),
+                Span::styled(warning, Style::default().fg(warning_color)),
             ])
         } else if let Some(tip) =
             occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
@@ -874,6 +922,22 @@ fn streaming_status_spans(
 mod tests {
     use super::*;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn session_history_warning_is_clear_and_occasional() {
+        assert!(occasional_session_history_warning(249_999, 0, None, 100, 0).is_none());
+        assert!(occasional_session_history_warning(300_000, 0, None, 63, 0).is_none());
+        assert!(occasional_session_history_warning(300_000, 0, None, 100, 10).is_none());
+        assert!(occasional_session_history_warning(199_999, 0, Some(200_000), 100, 0).is_none());
+        assert!(occasional_session_history_warning(300_000, 0, Some(400_000), 100, 0).is_none());
+        assert!(occasional_session_history_warning(450_000, 0, Some(400_000), 100, 0).is_none());
+
+        let warning = occasional_session_history_warning(2_500_000, 4, Some(500_000), 100, 0)
+            .expect("large sessions should get a brief reminder");
+        assert!(warning.contains("Session history: 2.5M tokens processed and 4 compacts"));
+        assert!(warning.contains("/clear starts fresh context"));
+        assert!(!warning.contains("Context usage"));
+    }
 
     #[test]
     fn command_suggestion_hint_line_count_reserves_vertical_rows() {

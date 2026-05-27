@@ -115,15 +115,6 @@ impl App {
 
         match action {
             crate::bus::ClientMaintenanceAction::Update => {
-                self.set_status_notice("Checking for updates...");
-                self.set_client_maintenance_message(
-                    action,
-                    Self::client_maintenance_card_message(
-                        action,
-                        "checking for updates",
-                        "Running in the background. jcode will reload automatically when the update is ready.",
-                    ),
-                );
                 crate::update::spawn_background_session_update(session_id);
             }
             crate::bus::ClientMaintenanceAction::Rebuild => {
@@ -147,15 +138,8 @@ impl App {
         let action = ClientMaintenanceAction::Update;
         match status {
             UpdateStatus::Checking => {
-                self.set_status_notice("Checking for updates...");
-                self.set_client_maintenance_message(
-                    action,
-                    Self::client_maintenance_card_message(
-                        action,
-                        "checking for updates",
-                        "If an update is found, jcode will apply it quietly and restart.",
-                    ),
-                );
+                // Background update checks run at startup for normal sessions. Keep the
+                // UI quiet unless there is an update to report or work to perform.
             }
             UpdateStatus::Available { current, latest } => {
                 self.set_status_notice(format!("Update available: {} → {}", current, latest));
@@ -208,10 +192,11 @@ impl App {
                 );
             }
             UpdateStatus::UpToDate => {
-                if self.background_client_action.is_none() {
-                    self.pending_background_client_reload = None;
-                    self.remove_client_maintenance_message(action);
+                if self.background_client_action == Some(action) {
+                    self.background_client_action = None;
                 }
+                self.pending_background_client_reload = None;
+                self.remove_client_maintenance_message(action);
             }
             UpdateStatus::Error(error) => {
                 self.background_client_action = None;

@@ -560,9 +560,11 @@ impl App {
     ) -> Result<serde_json::Value, String> {
         self.scroll_offset = scroll_offset;
         self.auto_scroll_paused = mode == "paused";
+        let draw_start = std::time::Instant::now();
         if let Err(e) = terminal.draw(|f| crate::tui::ui::draw(f, self)) {
             return Err(format!("draw error ({}): {}", label, e));
         }
+        let draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
 
         let frame = crate::tui::visual_debug::latest_frame();
         let (frame_id, anomalies, image_regions, normalized_frame) = match frame {
@@ -677,6 +679,7 @@ impl App {
         Ok(serde_json::json!({
             "label": label,
             "mode": mode,
+            "draw_ms": draw_ms,
             "scroll_offset": scroll_offset,
             "scroll_top": scroll_top,
             "max_scroll": max_scroll,

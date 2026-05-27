@@ -9,6 +9,12 @@ use std::path::Path;
 
 pub struct HashlineEditTool;
 
+impl Default for HashlineEditTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HashlineEditTool {
     pub fn new() -> Self {
         Self
@@ -48,6 +54,7 @@ fn default_context_window() -> usize {
 // previously defined here as ~180 lines of jcode-internal code now
 // resolve to one-line wrappers around `hashline::sha256_window::*`.
 
+#[cfg(test)]
 #[inline]
 fn hash_window(content: &str, start_line: usize, end_line: usize) -> String {
     sha256_window::hash_window(content, start_line, end_line)
@@ -313,7 +320,7 @@ mod tests {
     #[test]
     fn test_apply_edit_success() {
         let content = test_content();
-        let (new, start, end) = apply_edit_within_window(
+        let (new, start, _end) = apply_edit_within_window(
             content,
             2,
             "    println!(\"hello\");",
@@ -390,7 +397,7 @@ mod tests {
         assert!(!h.is_empty());
 
         // Edit within that window should work
-        let (_, start, end) = apply_edit_within_window(
+        let (_, start, _end) = apply_edit_within_window(
             content,
             2,
             "    println!(\"你好\");",

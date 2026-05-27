@@ -256,6 +256,7 @@ impl AtPicker {
     /// score so the entry ranks higher next time.
     ///
     /// Best-effort: failures are logged and swallowed.
+    #[allow(dead_code)] // Public API kept for upcoming TUI wiring.
     pub fn record_selection(&self, path: &Path) {
         let Ok(frecency_guard) = self.inner.shared_frecency.write() else {
             return;
@@ -269,6 +270,7 @@ impl AtPicker {
     }
 
     /// Base path the picker is rooted at.
+    #[allow(dead_code)] // Public API kept for upcoming TUI wiring.
     pub fn base_path(&self) -> &Path {
         &self.inner.base_path
     }
@@ -344,6 +346,7 @@ impl AtPickerSlot {
 
     /// Returns `Some(AtPicker)` only if already initialized; never starts a
     /// new init. Used when we need a non-blocking peek.
+    #[allow(dead_code)] // Public API kept for upcoming TUI wiring.
     pub fn get(&self) -> Option<AtPicker> {
         match self {
             AtPickerSlot::Initialized(p) => Some(p.clone()),

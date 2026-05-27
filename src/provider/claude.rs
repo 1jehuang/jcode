@@ -85,7 +85,9 @@ impl ClaudeProvider {
                     ContentBlock::Text { text, .. } => parts.push(text.clone()),
                     ContentBlock::ToolResult { content, .. } => parts.push(content.clone()),
                     ContentBlock::ToolUse { .. } => {}
-                    ContentBlock::Reasoning { .. } => {}
+                    ContentBlock::Reasoning { .. }
+                    | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } => {}
                 }

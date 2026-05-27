@@ -720,6 +720,8 @@ pub struct ProviderConfig {
     pub openai_native_compaction_mode: String,
     /// Token threshold at which OpenAI auto native compaction should trigger.
     pub openai_native_compaction_threshold_tokens: usize,
+    /// Preserve provider-native reasoning/thinking items for future-turn context when supported.
+    pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
     pub cross_provider_failover: CrossProviderFailoverMode,
     /// Whether jcode should automatically try another account on the same provider
@@ -754,6 +756,7 @@ impl Default for ProviderConfig {
             openai_service_tier: Some("priority".to_string()),
             openai_native_compaction_mode: "auto".to_string(),
             openai_native_compaction_threshold_tokens: 200_000,
+            preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,

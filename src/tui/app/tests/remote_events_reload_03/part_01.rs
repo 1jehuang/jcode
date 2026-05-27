@@ -179,7 +179,11 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
         .iter()
         .find(|m| m.role == "system" && m.content.starts_with("Reload complete — continuing"))
         .expect("should have a short reload continuation message");
-    assert!(system_msg.content.starts_with("Reload complete — continuing"));
+    assert!(
+        system_msg
+            .content
+            .starts_with("Reload complete — continuing")
+    );
 
     assert!(app.queued_messages().is_empty());
     assert_eq!(app.hidden_queued_system_messages.len(), 1);
@@ -198,58 +202,76 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.handle_server_event(
-        crate::protocol::ServerEvent::History {
-            id: 1,
-            session_id: "ses_server_owned_reload".to_string(),
-            messages: vec![crate::protocol::HistoryMessage {
-                role: "assistant".to_string(),
-                content: "Reconnect me from server history".to_string(),
-                tool_calls: None,
-                tool_data: None,
-            }],
-            images: vec![],
-            provider_name: Some("claude".to_string()),
-            provider_model: Some("claude-sonnet-4-20250514".to_string()),
-            subagent_model: None,
-            autoreview_enabled: None,
-            autojudge_enabled: None,
-            available_models: vec![],
-            available_model_routes: vec![],
-            mcp_servers: vec![],
-            skills: vec![],
-            total_tokens: None,
-            token_usage_totals: None,
-            all_sessions: vec![],
-            client_count: None,
-            is_canary: None,
-            server_version: None,
-            server_name: None,
-            server_icon: None,
-            server_has_update: None,
-            was_interrupted: None,
-            reload_recovery: Some(crate::protocol::ReloadRecoverySnapshot {
-                reconnect_notice: Some("Reloaded with build srv1234".to_string()),
-                continuation_message: "Server-owned reload continuation".to_string(),
-            }),
-            connection_type: Some("websocket".to_string()),
-            status_detail: None,
-            upstream_provider: None,
-            reasoning_effort: None,
-            service_tier: None,
-            compaction_mode: crate::config::CompactionMode::Reactive,
-            activity: None,
-            side_panel: crate::side_panel::SidePanelSnapshot::default(),
-        },
-        &mut remote,
-    );
+    let event = crate::protocol::ServerEvent::History {
+        id: 1,
+        session_id: "ses_server_owned_reload".to_string(),
+        messages: vec![crate::protocol::HistoryMessage {
+            role: "assistant".to_string(),
+            content: "Reconnect me from server history".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        }],
+        images: vec![],
+        provider_name: Some("claude".to_string()),
+        provider_model: Some("claude-sonnet-4-20250514".to_string()),
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        reload_recovery: Some(crate::protocol::ReloadRecoverySnapshot {
+            reconnect_notice: Some("Reloaded with build srv1234".to_string()),
+            continuation_message: "Server-owned reload continuation".to_string(),
+        }),
+        connection_type: Some("websocket".to_string()),
+        status_detail: None,
+        upstream_provider: None,
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+    };
+
+    app.handle_server_event(event.clone(), &mut remote);
+    app.handle_server_event(event, &mut remote);
 
     assert_eq!(app.hidden_queued_system_messages.len(), 1);
     assert_eq!(
         app.hidden_queued_system_messages[0],
         "Server-owned reload continuation"
     );
-    assert!(app.reload_info.iter().any(|line| line.contains("srv1234")));
+    assert_eq!(
+        app.reload_info
+            .iter()
+            .filter(|line| line.contains("srv1234"))
+            .count(),
+        1,
+        "duplicate History payloads should not duplicate the visible reload notice"
+    );
+    assert_eq!(
+        app.display_messages()
+            .iter()
+            .filter(|message| {
+                message.role == "system"
+                    && message.content.contains("recovery directive was pending")
+            })
+            .count(),
+        1,
+        "duplicate History payloads should not duplicate the visible continuation notice"
+    );
 }
 
 #[test]

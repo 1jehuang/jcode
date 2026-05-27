@@ -30,6 +30,11 @@ fn test_openai_fast_mode_defaults_to_priority() {
 }
 
 #[test]
+fn preserve_reasoning_context_defaults_to_enabled() {
+    assert!(ProviderConfig::default().preserve_reasoning_context);
+}
+
+#[test]
 fn swarm_spawn_mode_defaults_to_visible() {
     assert_eq!(
         Config::default().agents.swarm_spawn_mode,

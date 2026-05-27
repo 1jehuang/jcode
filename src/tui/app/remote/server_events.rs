@@ -753,6 +753,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_side_pane_images = images;
             app.remote_available_entries = available_models;
             app.remote_model_options = available_model_routes;
+            app.persist_remote_model_catalog_cache();
             app.invalidate_model_picker_cache();
             app.remote_skills = skills;
             app.invalidate_command_candidates_cache();
@@ -927,19 +928,37 @@ pub(in crate::tui::app) fn handle_server_event(
             if let Some(reload_recovery) = reload_recovery
                 && !app.display_messages.is_empty()
             {
+                let continuation_message = reload_recovery.continuation_message;
                 crate::logging::info(&format!(
                     "History payload requested reload recovery continuation: session={} was_interrupted={:?}",
                     session_id, was_interrupted
                 ));
-                if let Some(notice) = reload_recovery.reconnect_notice {
+                if let Some(notice) = reload_recovery.reconnect_notice
+                    && !app.reload_info.iter().any(|existing| existing == &notice)
+                {
                     app.reload_info.push(notice);
                 }
-                app.push_display_message(DisplayMessage::system(
-                    "Reload complete — continuing because a recovery directive was pending."
-                        .to_string(),
-                ));
-                app.hidden_queued_system_messages
-                    .push(reload_recovery.continuation_message);
+                let already_queued = app
+                    .hidden_queued_system_messages
+                    .iter()
+                    .any(|queued| queued == &continuation_message)
+                    || app
+                        .rate_limit_pending_message
+                        .as_ref()
+                        .and_then(|pending| pending.system_reminder.as_ref())
+                        .is_some_and(|queued| queued == &continuation_message);
+                if already_queued {
+                    crate::logging::info(&format!(
+                        "History payload reload recovery continuation already queued/in-flight: session={}",
+                        session_id
+                    ));
+                } else {
+                    app.push_display_message(DisplayMessage::system(
+                        "Reload complete — continuing because a recovery directive was pending."
+                            .to_string(),
+                    ));
+                    app.hidden_queued_system_messages.push(continuation_message);
+                }
             } else if pending_reload_reconnect_status.is_some() {
                 let message = match was_interrupted {
                     Some(false) => {
@@ -1141,6 +1160,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.remote_available_entries = available_models;
             app.remote_model_options = available_model_routes;
+            app.persist_remote_model_catalog_cache();
             app.invalidate_model_picker_cache();
             if provider_meta_changed {
                 app.update_terminal_title();
@@ -1359,7 +1379,18 @@ pub(in crate::tui::app) fn handle_server_event(
             }
 
             if let Some(scope) = runtime_activity_scope {
-                if scope == "background_activity" {
+                if scope == "catalog_activity"
+                    && let Some(progress) =
+                        crate::message::parse_background_task_progress_notification_markdown(
+                            &message,
+                        )
+                {
+                    let status_notice = progress.summary.clone();
+                    app.upsert_background_task_progress_message(message.clone());
+                    persist_replay_display_message(app, "background_task", None, &message);
+                    app.set_status_notice(status_notice);
+                    return false;
+                } else if scope == "background_activity" {
                     app.push_display_message(DisplayMessage::background_task(message.clone()));
                     persist_replay_display_message(app, "background_task", None, &message);
                 } else {

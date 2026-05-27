@@ -633,6 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn exa_search_errors_when_api_key_unset() {
         let _lock = crate::storage::lock_test_env();
         let prev = std::env::var_os("EXA_API_KEY");
@@ -653,6 +654,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn exa_search_errors_when_api_key_blank() {
         let _lock = crate::storage::lock_test_env();
         let prev = std::env::var_os("EXA_API_KEY");

@@ -115,7 +115,7 @@ fn persist_reload_recovery_intents_records_running_peer_recovery() -> anyhow::Re
         Some("initiator"),
     ));
 
-    let peer_directive = crate::server::reload_recovery::claim_pending_for_session("peer")
+    let peer_directive = crate::server::reload_recovery::pending_directive_for_session("peer")
         .expect("claim peer recovery")
         .expect("peer recovery intent should exist");
     assert!(
@@ -124,13 +124,13 @@ fn persist_reload_recovery_intents_records_running_peer_recovery() -> anyhow::Re
             .contains("interrupted by a server reload")
     );
     assert!(
-        crate::server::reload_recovery::claim_pending_for_session("idle")
+        crate::server::reload_recovery::pending_directive_for_session("idle")
             .expect("claim idle recovery")
             .is_none(),
         "idle sessions should not get reload recovery intents"
     );
     assert!(
-        crate::server::reload_recovery::claim_pending_for_session("initiator")
+        crate::server::reload_recovery::pending_directive_for_session("initiator")
             .expect("claim initiator recovery")
             .is_none(),
         "initiator without selfdev reload context should not get a generic interrupted-peer intent"
@@ -195,6 +195,7 @@ async fn graceful_shutdown_sessions_signals_all_running_sessions_including_initi
     });
 
     graceful_shutdown_sessions(
+        "test-reload",
         &sessions,
         &swarm_members,
         &shutdown_signals,
@@ -254,6 +255,7 @@ async fn graceful_shutdown_sessions_does_not_wait_for_triggering_session_checkpo
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         graceful_shutdown_sessions(
+            "test-reload",
             &sessions,
             &swarm_members,
             &shutdown_signals,
@@ -300,6 +302,7 @@ async fn graceful_shutdown_sessions_skips_idle_sessions() {
     let (swarm_event_tx, _) = broadcast::channel(8);
 
     graceful_shutdown_sessions(
+        "test-reload",
         &sessions,
         &swarm_members,
         &shutdown_signals,
@@ -326,6 +329,7 @@ async fn graceful_shutdown_sessions_does_not_wait_on_running_sessions_without_si
 
     let started = Instant::now();
     graceful_shutdown_sessions(
+        "test-reload",
         &sessions,
         &swarm_members,
         &shutdown_signals,
@@ -361,6 +365,7 @@ async fn graceful_shutdown_sessions_waits_until_target_status_change_arrives() {
         let swarm_event_tx = swarm_event_tx.clone();
         async move {
             graceful_shutdown_sessions(
+                "test-reload",
                 &sessions,
                 &swarm_members,
                 &shutdown_signals,
@@ -424,6 +429,7 @@ async fn graceful_shutdown_sessions_ignores_unrelated_events_until_target_leaves
         let swarm_event_tx = swarm_event_tx.clone();
         async move {
             graceful_shutdown_sessions(
+                "test-reload",
                 &sessions,
                 &swarm_members,
                 &shutdown_signals,
@@ -500,6 +506,7 @@ async fn graceful_shutdown_sessions_treats_member_left_as_unblocked() {
         let swarm_event_tx = swarm_event_tx.clone();
         async move {
             graceful_shutdown_sessions(
+                "test-reload",
                 &sessions,
                 &swarm_members,
                 &shutdown_signals,
@@ -549,6 +556,7 @@ async fn graceful_shutdown_sessions_times_out_and_proceeds() {
 
     let started = Instant::now();
     graceful_shutdown_sessions_with_timeout(
+        "test-reload",
         &sessions,
         &swarm_members,
         &shutdown_signals,

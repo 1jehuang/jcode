@@ -203,6 +203,9 @@ impl App {
             }
             crate::provider_catalog::LoginProviderTarget::Jcode => self.start_jcode_login(),
             crate::provider_catalog::LoginProviderTarget::Claude => self.start_claude_login(),
+            crate::provider_catalog::LoginProviderTarget::ClaudeApiKey => {
+                self.start_anthropic_api_key_login()
+            }
             crate::provider_catalog::LoginProviderTarget::OpenAi => self.start_openai_login(),
             crate::provider_catalog::LoginProviderTarget::OpenAiApiKey => {
                 self.start_openai_api_key_login()
@@ -825,6 +828,19 @@ impl App {
             "OPENAI_API_KEY",
             Some("gpt-5.5"),
             Some("https://api.openai.com/v1"),
+            false,
+            None,
+        );
+    }
+
+    fn start_anthropic_api_key_login(&mut self) {
+        self.start_api_key_login(
+            "Anthropic API",
+            "https://console.anthropic.com/settings/keys",
+            "anthropic.env",
+            "ANTHROPIC_API_KEY",
+            Some("claude-sonnet-4-5-20250929"),
+            Some("https://api.anthropic.com"),
             false,
             None,
         );

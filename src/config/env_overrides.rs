@@ -497,6 +497,11 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("JCODE_PRESERVE_REASONING_CONTEXT") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.provider.preserve_reasoning_context = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_CROSS_PROVIDER_FAILOVER") {
             if let Some(mode) = CrossProviderFailoverMode::parse(&v) {
                 self.provider.cross_provider_failover = mode;

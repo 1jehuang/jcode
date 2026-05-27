@@ -220,9 +220,13 @@ impl PreparedChatFrame {
         })
     }
 
-    pub fn wrapped_plain_line(&self, abs_line: usize) -> Option<String> {
+    pub fn wrapped_plain_line(&self, abs_line: usize) -> Option<&str> {
         let (section, local) = self.line_section(abs_line)?;
-        section.prepared.wrapped_plain_lines.get(local).cloned()
+        section
+            .prepared
+            .wrapped_plain_lines
+            .get(local)
+            .map(String::as_str)
     }
 
     pub fn wrapped_copy_offset(&self, abs_line: usize) -> Option<usize> {
@@ -230,14 +234,13 @@ impl PreparedChatFrame {
         section.prepared.wrapped_copy_offsets.get(local).copied()
     }
 
-    pub fn raw_plain_line(&self, raw_line: usize) -> Option<String> {
-        let (_, local) = self.raw_section(raw_line)?;
-        self.raw_section(raw_line)?
-            .0
+    pub fn raw_plain_line(&self, raw_line: usize) -> Option<&str> {
+        let (section, local) = self.raw_section(raw_line)?;
+        section
             .prepared
             .raw_plain_lines
             .get(local)
-            .cloned()
+            .map(String::as_str)
     }
 
     pub fn wrapped_line_map(&self, abs_line: usize) -> Option<WrappedLineMap> {

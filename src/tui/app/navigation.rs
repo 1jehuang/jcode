@@ -202,6 +202,15 @@ impl App {
             );
         };
 
+        // In the steady state the renderer has already computed the exact scroll
+        // extent from the prepared/cached transcript. Avoid re-walking and
+        // measuring every message on each scroll input, which is noticeable in
+        // very long sessions. The estimate below is only needed while streaming
+        // can make LAST_MAX_SCROLL stale between frames.
+        if renderer_max > 0 && !self.is_processing && self.streaming_text.is_empty() {
+            return renderer_max;
+        }
+
         // While streaming, input can arrive after new text has been appended but before the next
         // full frame recomputes LAST_MAX_SCROLL.  Using only the stale rendered max makes the first
         // scroll-up convert from bottom-follow mode to an absolute offset that is too close to the

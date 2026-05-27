@@ -201,6 +201,7 @@ thread_local! {
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
+    static TEST_VISIBLE_EXPAND_EDIT_BADGE: Cell<bool> = const { Cell::new(false) };
     static TEST_PROMPT_VIEWPORT_STATE: RefCell<PromptViewportState> = RefCell::new(PromptViewportState::default());
     static TEST_COPY_VIEWPORT: RefCell<CopyViewportSnapshots> = RefCell::new(CopyViewportSnapshots::default());
 }
@@ -389,8 +390,47 @@ const COPY_BADGE_KEYS: [char; 12] = ['s', 'd', 'f', 'g', 'w', 'e', 'r', 't', 'x'
 static VISIBLE_COPY_TARGETS: OnceLock<Mutex<Vec<VisibleCopyTarget>>> = OnceLock::new();
 
 #[cfg(not(test))]
+static VISIBLE_EXPAND_EDIT_BADGE: OnceLock<Mutex<bool>> = OnceLock::new();
+
+#[cfg(not(test))]
 fn visible_copy_targets_state() -> &'static Mutex<Vec<VisibleCopyTarget>> {
     VISIBLE_COPY_TARGETS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(not(test))]
+fn visible_expand_edit_badge_state() -> &'static Mutex<bool> {
+    VISIBLE_EXPAND_EDIT_BADGE.get_or_init(|| Mutex::new(false))
+}
+
+pub(crate) fn set_visible_expand_edit_badge(visible: bool) {
+    #[cfg(test)]
+    {
+        TEST_VISIBLE_EXPAND_EDIT_BADGE.with(|state| state.set(visible));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = match visible_expand_edit_badge_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *state = visible;
+    }
+}
+
+pub(crate) fn visible_expand_edit_badge() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_VISIBLE_EXPAND_EDIT_BADGE.with(Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        let state = match visible_expand_edit_badge_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *state
+    }
 }
 
 fn set_visible_copy_targets(targets: Vec<VisibleCopyTarget>) {
@@ -1124,12 +1164,12 @@ impl CopyViewportSnapshot {
         }
     }
 
-    fn wrapped_plain_line(&self, abs_line: usize) -> Option<String> {
+    fn wrapped_plain_line(&self, abs_line: usize) -> Option<&str> {
         match &self.data {
             CopyViewportData::Dense {
                 wrapped_plain_lines,
                 ..
-            } => wrapped_plain_lines.get(abs_line).cloned(),
+            } => wrapped_plain_lines.get(abs_line).map(String::as_str),
             CopyViewportData::ChatFrame { prepared } => prepared.wrapped_plain_line(abs_line),
         }
     }
@@ -1144,11 +1184,11 @@ impl CopyViewportSnapshot {
         }
     }
 
-    fn raw_plain_line(&self, raw_line: usize) -> Option<String> {
+    fn raw_plain_line(&self, raw_line: usize) -> Option<&str> {
         match &self.data {
             CopyViewportData::Dense {
                 raw_plain_lines, ..
-            } => raw_plain_lines.get(raw_line).cloned(),
+            } => raw_plain_lines.get(raw_line).map(String::as_str),
             CopyViewportData::ChatFrame { prepared } => prepared.raw_plain_line(raw_line),
         }
     }
@@ -1492,7 +1532,9 @@ pub(crate) fn side_pane_point_from_screen(
 }
 
 fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<String> {
-    copy_snapshot_for_pane(pane)?.wrapped_plain_line(abs_line)
+    copy_snapshot_for_pane(pane)?
+        .wrapped_plain_line(abs_line)
+        .map(str::to_owned)
 }
 
 pub(crate) fn copy_viewport_line_text(abs_line: usize) -> Option<String> {
@@ -1564,31 +1606,51 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
         return Some(text);
     }
 
-    let mut out = Vec::new();
+    let selected_lines = end
+        .abs_line
+        .saturating_sub(start.abs_line)
+        .saturating_add(1);
+    let mut out = String::new();
     for abs_line in start.abs_line..=end.abs_line {
+        if abs_line > start.abs_line {
+            out.push('\n');
+        }
         let text = snapshot.wrapped_plain_line(abs_line)?;
-        let line_width = line_display_width(&text);
+        if abs_line != start.abs_line && abs_line != end.abs_line {
+            let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+            if copy_start == 0 {
+                if abs_line == start.abs_line + 1 {
+                    out.reserve(text.len().saturating_mul(selected_lines.min(8)));
+                }
+                out.push_str(text);
+                continue;
+            }
+        }
+        let line_width = line_display_width(text);
         let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
         let start_col = if abs_line == start.abs_line {
-            clamp_display_col(&text, start.column).max(copy_start)
+            clamp_display_col(text, start.column).max(copy_start)
         } else {
             copy_start
         };
         let end_col = if abs_line == end.abs_line {
-            clamp_display_col(&text, end.column).max(copy_start)
+            clamp_display_col(text, end.column).max(copy_start)
         } else {
             line_width
         };
 
         if end_col < start_col {
-            out.push(String::new());
             continue;
         }
 
-        out.push(display_col_slice(&text, start_col, end_col).to_string());
+        let slice = display_col_slice(text, start_col, end_col);
+        if abs_line == start.abs_line {
+            out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
+        }
+        out.push_str(slice);
     }
 
-    Some(out.join("\n"))
+    Some(out)
 }
 
 pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
@@ -1640,6 +1702,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if let Some(scroll) = app.help_scroll() {
         overlays::draw_help_overlay(frame, area, scroll, app);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
+    if let Some((scroll, content)) = app.model_status_overlay() {
+        overlays::draw_model_status_overlay(frame, area, scroll, content);
         finalize_frame_metrics(
             app,
             total_start,

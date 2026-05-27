@@ -25,7 +25,44 @@ pub fn recover_crashed_sessions_by_ids(session_ids: &[String]) -> Result<Vec<Str
         return Ok(Vec::new());
     }
     let allowed: HashSet<String> = session_ids.iter().cloned().collect();
-    recover_crashed_sessions_matching(Some(&allowed))
+    recover_crashed_sessions_for_allowed_ids(&allowed)
+}
+
+fn recover_crashed_sessions_for_allowed_ids(allowed_ids: &HashSet<String>) -> Result<Vec<String>> {
+    let sessions_dir = storage::jcode_dir()?.join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut recovered_parents: HashSet<String> = HashSet::new();
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false)
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && stem.starts_with("session_recovery_")
+            && let Ok(session) = Session::load_startup_stub(stem)
+            && let Some(parent) = session.parent_id
+        {
+            recovered_parents.insert(parent);
+        }
+    }
+
+    let mut crashed = Vec::with_capacity(allowed_ids.len());
+    for session_id in allowed_ids {
+        if recovered_parents.contains(session_id) || !session_exists(session_id) {
+            continue;
+        }
+        let mut session = Session::load(session_id)?;
+        if session.detect_crash() {
+            let _ = session.save();
+        }
+        if matches!(session.status, SessionStatus::Crashed { .. }) {
+            crashed.push(session);
+        }
+    }
+
+    recover_loaded_crashed_sessions(crashed)
 }
 
 fn recover_crashed_sessions_matching(allowed_ids: Option<&HashSet<String>>) -> Result<Vec<String>> {
@@ -76,6 +113,11 @@ fn recover_crashed_sessions_matching(allowed_ids: Option<&HashSet<String>>) -> R
     if allowed_ids.is_none() {
         retain_relevant_crash_group(&mut crashed);
     }
+
+    recover_loaded_crashed_sessions(crashed)
+}
+
+fn recover_loaded_crashed_sessions(mut crashed: Vec<Session>) -> Result<Vec<String>> {
     crashed.sort_by_key(|session| std::cmp::Reverse(crash_timestamp(session)));
 
     let mut new_ids = Vec::new();

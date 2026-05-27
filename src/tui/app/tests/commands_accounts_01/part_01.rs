@@ -175,6 +175,22 @@ fn test_help_topic_shows_command_details() {
 }
 
 #[test]
+fn test_help_topic_shows_provider_test_coverage_command_details() {
+    let mut app = create_test_app();
+    app.input = "/help provider-test-coverage".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing help response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("`/provider-test-coverage`"));
+    assert!(msg.content.contains("live verification evidence"));
+    assert!(msg.content.contains("readiness gaps"));
+}
+
+#[test]
 fn test_help_topic_shows_btw_command_details() {
     let mut app = create_test_app();
     app.input = "/help btw".to_string();
@@ -510,7 +526,7 @@ fn test_goals_command_opens_overview_in_side_panel() {
 }
 
 #[test]
-fn test_mission_command_sets_and_shows_status() {
+fn test_mission_and_goal_commands_are_disabled() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -519,32 +535,27 @@ fn test_mission_command_sets_and_shows_status() {
     let mut app = create_test_app();
     app.input = "/mission make browser control reliable".to_string();
     app.submit_input();
-    assert!(!app.is_processing, "/mission should queue before the event loop starts the turn");
-    assert!(app.pending_queued_dispatch, "/mission should dispatch immediately");
-    let queued = app.queued_messages.last().expect("missing mission kickoff prompt");
-    assert!(queued.contains("Start the active mission now"));
-    assert!(queued.contains("make browser control reliable"));
+    assert!(!app.is_processing, "/mission must not start a turn");
+    assert!(!app.pending_queued_dispatch, "/mission must not queue dispatch");
+    assert!(app.queued_messages.is_empty(), "/mission must not queue prompts");
     assert!(
-        app.display_messages()
-            .last()
-            .expect("missing mission set message")
-            .content
-            .contains("Mission set")
+        crate::mission::load(&app.session.id)
+            .expect("load mission")
+            .is_none(),
+        "/mission must not create a mission"
     );
-
-    app.pending_queued_dispatch = false;
-    app.queued_messages.clear();
 
     app.input = "/goal status".to_string();
     app.submit_input();
-    assert!(!app.is_processing, "/goal status must not start a stuck Sending turn");
-    assert!(!app.pending_queued_dispatch, "/goal status must not queue dispatch");
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing mission status message");
-    assert!(msg.content.contains("make browser control reliable"));
-    assert!(msg.content.contains("Long-horizon intent"));
+    assert!(!app.is_processing, "/goal must not start a turn");
+    assert!(!app.pending_queued_dispatch, "/goal must not queue dispatch");
+    assert!(app.queued_messages.is_empty(), "/goal must not queue prompts");
+    assert!(
+        crate::mission::load(&app.session.id)
+            .expect("load mission")
+            .is_none(),
+        "/goal must not create a mission"
+    );
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
@@ -570,36 +581,6 @@ fn test_goals_legacy_alias_is_not_captured_by_goal_mission_alias() {
     assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("goals"));
     let mission = crate::mission::load(&app.session.id).expect("load mission");
     assert!(mission.is_none(), "/goals should not create a mission named `s`");
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
-}
-
-#[test]
-fn test_mission_resume_dispatches_continuation() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
-
-    let mut app = create_test_app();
-    crate::mission::set(&app.session.id, "make browser control reliable").expect("set mission");
-    crate::mission::update_status(&app.session.id, crate::mission::MissionStatus::Paused)
-        .expect("pause mission");
-
-    app.input = "/mission resume".to_string();
-    app.submit_input();
-
-    assert!(app.pending_queued_dispatch, "/mission resume should dispatch immediately");
-    let queued = app
-        .queued_messages
-        .last()
-        .expect("missing mission resume prompt");
-    assert!(queued.contains("Continue the active mission now"));
-    assert!(queued.contains("make browser control reliable"));
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

@@ -253,6 +253,24 @@ fn named_openai_compatible_provider_exposes_static_models_as_routes() {
 }
 
 #[test]
+fn direct_openai_compatible_provider_advertises_image_input_support() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    let profile = crate::config::NamedProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        auth: crate::config::NamedProviderAuth::None,
+        default_model: Some("local-vision-model".to_string()),
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
+        .expect("local named profile should initialize without auth");
+
+    assert!(provider.supports_image_input());
+}
+
+#[test]
 fn minimax_profile_exposes_static_models_before_catalog_refresh() {
     let models = crate::provider_catalog::openai_compatible_profile_static_models(
         jcode_provider_metadata::MINIMAX_PROFILE,
@@ -816,6 +834,7 @@ async fn collect_openrouter_live_smoke_stream(
 
 #[tokio::test]
 #[ignore = "live smoke: requires OPENROUTER_API_KEY or configured OpenRouter credentials"]
+#[allow(clippy::await_holding_lock)]
 async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let Some(token) = OpenRouterProvider::get_api_key() else {

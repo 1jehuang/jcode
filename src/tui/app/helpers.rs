@@ -251,7 +251,7 @@ pub(super) fn format_tokens(tokens: u64) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ClipboardCommand {
+pub(super) struct ClipboardCommand {
     program: &'static str,
     args: &'static [&'static str],
 }

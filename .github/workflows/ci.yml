@@ -20,6 +20,12 @@ jobs:
     name: Quality Guardrails
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Mirror DEPLOY_KEY into env so step-level `if:` conditions can check
+      # whether it's set without referencing the `secrets` context directly
+      # (which GitHub Actions rejects with "Unrecognized named-value:
+      # 'secrets'" inside expressions outside of `with:`/`env:` bindings).
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,7 +33,7 @@ jobs:
           submodules: recursive
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
@@ -74,6 +80,8 @@ jobs:
     name: Mobile Simulator (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,7 +89,7 @@ jobs:
           submodules: recursive
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
@@ -106,6 +114,8 @@ jobs:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
+    env:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     strategy:
       fail-fast: false
       matrix:
@@ -123,7 +133,7 @@ jobs:
           submodules: recursive
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
@@ -206,6 +216,8 @@ jobs:
     name: Build & Test (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 150
+    env:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -213,7 +225,7 @@ jobs:
           submodules: recursive
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
@@ -378,6 +390,8 @@ jobs:
     name: Windows Cross-Target Check (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -385,7 +399,7 @@ jobs:
           submodules: recursive
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}

@@ -9150,22 +9150,33 @@ fn single_session_text_key_for_body_lines(
     let welcome_input_visible = true;
     let (welcome_hero, welcome_hint) = if welcome_chrome_visible {
         let welcome_hint = if app.draft.is_empty() {
-            vec![SingleSessionStyledLine::new(
+            let mut lines = vec![SingleSessionStyledLine::new(
                 "Type a message to start. Ask me to build, debug, explain, or automate something.",
                 SingleSessionLineStyle::Meta,
-            )]
+            )];
+            if let Some(suggestion) = app.welcome_continuation_suggestion() {
+                lines.push(SingleSessionStyledLine::new(
+                    format!("Suggestion: {suggestion}"),
+                    SingleSessionLineStyle::Status,
+                ));
+            }
+            lines
         } else {
             Vec::new()
         };
         (app.welcome_hero_text(), welcome_hint)
     } else if app.is_fresh_welcome_visible() && app.draft.is_empty() {
-        (
-            String::new(),
-            vec![SingleSessionStyledLine::new(
-                "Type a message to start. Ask me to build, debug, explain, or automate something.",
-                SingleSessionLineStyle::Meta,
-            )],
-        )
+        let mut lines = vec![SingleSessionStyledLine::new(
+            "Type a message to start. Ask me to build, debug, explain, or automate something.",
+            SingleSessionLineStyle::Meta,
+        )];
+        if let Some(suggestion) = app.welcome_continuation_suggestion() {
+            lines.push(SingleSessionStyledLine::new(
+                format!("Suggestion: {suggestion}"),
+                SingleSessionLineStyle::Status,
+            ));
+        }
+        (String::new(), lines)
     } else {
         (String::new(), Vec::new())
     };

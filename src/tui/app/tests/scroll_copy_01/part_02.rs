@@ -37,6 +37,176 @@ fn test_scroll_cmd_j_k_fallback_in_app() {
 }
 
 #[test]
+fn test_empty_prompt_up_down_browses_previous_prompts() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("first prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second prompt"),
+    ];
+    app.bump_display_messages_version();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "second prompt");
+    assert_eq!(app.cursor_pos, app.input.len());
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "first prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "first prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "second prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert!(app.input.is_empty());
+    assert_eq!(app.cursor_pos, 0);
+}
+
+#[test]
+fn test_ctrl_up_browses_history_when_no_pending_message() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("first prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second prompt"),
+    ];
+    app.bump_display_messages_version();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "second prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "first prompt");
+}
+
+#[test]
+fn test_prompt_history_up_does_not_replace_unmatched_draft() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.input = "draft".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.cursor_pos, "draft".len());
+}
+
+#[test]
+fn test_multiline_prompt_up_down_moves_cursor_within_input() {
+    let mut app = create_test_app();
+    app.input = "abc\ndefg\nxy".to_string();
+    app.cursor_pos = "abc\nde".len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.cursor_pos, "ab".len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.cursor_pos, "abc\nde".len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.cursor_pos, app.input.len());
+}
+
+#[test]
+fn test_multiline_history_prompt_prioritizes_cursor_until_boundary() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("line one\nline two"),
+    ];
+    app.input = "line one\nline two".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "line one\nline two");
+    assert_eq!(app.cursor_pos, "line one".len());
+
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "older prompt");
+    assert_eq!(app.cursor_pos, app.input.len());
+}
+
+#[test]
+fn test_ctrl_up_down_always_browses_prompt_history() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("line one\nline two"),
+    ];
+    app.input = "line one\nline two".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "older prompt");
+    assert_eq!(app.cursor_pos, app.input.len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "line one\nline two");
+    assert_eq!(app.cursor_pos, app.input.len());
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.display_messages = vec![
+        DisplayMessage::user("first remote prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second remote prompt"),
+    ];
+
+    rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(app.input, "second remote prompt");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(app.input, "first remote prompt");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert_eq!(app.input, "second remote prompt");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Down, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_remote_ctrl_up_retrieves_pending_queue_before_prompt_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.display_messages = vec![DisplayMessage::user("previous remote prompt")];
+    app.queued_messages.push("queued followup".to_string());
+    app.pending_queued_dispatch = true;
+
+    rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input, "queued followup");
+    assert!(app.queued_messages.is_empty());
+    assert!(!app.pending_queued_dispatch);
+}
+
+#[test]
 fn test_remote_prompt_jump_ctrl_brackets() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
@@ -97,6 +267,8 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             },
         ]));
 

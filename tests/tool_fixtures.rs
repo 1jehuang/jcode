@@ -104,11 +104,10 @@ fn collect_fixtures() -> Vec<(String, Fixture)> {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
-        if let Some(needle) = filter.as_deref() {
-            if !stem.contains(needle) {
+        if let Some(needle) = filter.as_deref()
+            && !stem.contains(needle) {
                 continue;
             }
-        }
         let raw = std::fs::read_to_string(&path).expect("read fixture");
         let fixture: Fixture =
             serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {}: {}", stem, e));

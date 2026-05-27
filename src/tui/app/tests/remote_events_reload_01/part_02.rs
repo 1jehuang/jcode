@@ -88,6 +88,8 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             }],
         )
         .expect("save todos");
@@ -138,6 +140,8 @@ fn test_remote_poke_status_and_off_update_state() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             }],
         )
         .expect("save todos");
@@ -263,7 +267,10 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
         &mut remote,
     );
 
-    let last = app.display_messages().last().expect("rewind completion notice");
+    let last = app
+        .display_messages()
+        .last()
+        .expect("rewind completion notice");
     assert!(last.content.contains("✓ Rewound to message 1"));
     assert!(last.content.contains("Undo anytime with `/rewind undo`"));
 }

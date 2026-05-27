@@ -26,7 +26,7 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &str {
-        "Read or update the todo list."
+        "Read or update the todo list. Include confidence for each item and completion_confidence when marking an item completed."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -39,7 +39,7 @@ impl Tool for TodoTool {
                     "description": "Todo list to save.",
                     "items": {
                         "type": "object",
-                        "required": ["content", "status", "priority", "id"],
+                        "required": ["content", "status", "priority", "id", "confidence"],
                         "properties": {
                             "content": {
                                 "type": "string",
@@ -56,6 +56,18 @@ impl Tool for TodoTool {
                             "id": {
                                 "type": "string",
                                 "description": "ID."
+                            },
+                            "confidence": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 100,
+                                "description": "Forward-looking confidence, 0-100, that this todo can be completed correctly. Set when creating or substantially revising a todo."
+                            },
+                            "completion_confidence": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 100,
+                                "description": "Confidence, 0-100, that this todo is correctly completed. Set when marking the todo completed; omit until then."
                             }
                         }
                     }
@@ -122,5 +134,21 @@ mod tests {
         assert_eq!(props.len(), 2);
         assert!(props.contains_key("intent"));
         assert!(props.contains_key("todos"));
+
+        let item = props["todos"]
+            .get("items")
+            .and_then(|v| v.as_object())
+            .expect("todos should describe item objects");
+        let required = item
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("todo item should advertise required fields");
+        assert!(required.iter().any(|v| v == "confidence"));
+        let item_props = item
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("todo item should advertise properties");
+        assert!(item_props.contains_key("confidence"));
+        assert!(item_props.contains_key("completion_confidence"));
     }
 }

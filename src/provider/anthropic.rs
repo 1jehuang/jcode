@@ -864,6 +864,15 @@ impl AnthropicProvider {
                         cache_control: None,
                     });
                 }
+                ContentBlock::AnthropicThinking {
+                    thinking,
+                    signature,
+                } => {
+                    result.push(ApiContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: signature.clone(),
+                    });
+                }
                 ContentBlock::ToolUse { id, name, input } => {
                     result.push(ApiContentBlock::ToolUse {
                         id: crate::message::sanitize_tool_id(id),
@@ -1846,6 +1855,7 @@ struct SseEvent {
 }
 
 /// Process an SSE event and return StreamEvents if applicable
+#[allow(clippy::too_many_arguments)]
 fn process_sse_event(
     event: &SseEvent,
     current_tool_use: &mut Option<ToolUseAccumulator>,
@@ -1919,10 +1929,8 @@ fn process_sse_event(
                     ApiDelta::ThinkingDelta { thinking } => {
                         events.push(StreamEvent::ThinkingDelta(thinking));
                     }
-                    ApiDelta::SignatureDelta { .. } => {
-                        // Anthropic signs thinking blocks so clients can round-trip them.
-                        // jcode currently displays the streamed summary but does not persist
-                        // provider signatures in the generic ContentBlock::Reasoning shape.
+                    ApiDelta::SignatureDelta { signature } => {
+                        events.push(StreamEvent::ThinkingSignatureDelta(signature));
                     }
                 }
             }
@@ -2242,6 +2250,8 @@ enum ApiContentBlock {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
 }
@@ -2331,6 +2341,7 @@ struct ContentBlockDeltaEvent {
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 enum ApiDelta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
@@ -2341,7 +2352,7 @@ enum ApiDelta {
     #[serde(rename = "signature_delta")]
     SignatureDelta {
         #[serde(rename = "signature")]
-        _signature: String,
+        signature: String,
     },
 }
 

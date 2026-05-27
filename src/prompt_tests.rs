@@ -135,6 +135,74 @@ fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
 }
 
 #[test]
+fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::create_dir_all(temp.path()).unwrap();
+    std::fs::write(
+        temp.path().join("preferred-tools.md"),
+        "global preferred tools instructions",
+    )
+    .unwrap();
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project_dir.path().join(".jcode")).unwrap();
+    std::fs::write(
+        project_dir.path().join(".jcode/preferred-tools.md"),
+        "project preferred tools instructions",
+    )
+    .unwrap();
+
+    let direct = load_preferred_tools_files_from_dir(Some(project_dir.path()));
+
+    assert!(direct.0.is_some(), "expected preferred tools content");
+    let direct_content = direct.0.unwrap();
+    assert!(
+        direct_content.contains("Project Preferred Tools (.jcode/preferred-tools.md)"),
+        "expected project preferred tools section heading"
+    );
+    assert!(
+        direct_content.contains("project preferred tools instructions"),
+        "expected project preferred tools content"
+    );
+    assert!(
+        direct_content.contains("Global Preferred Tools (~/.jcode/preferred-tools.md)"),
+        "expected global preferred tools section heading"
+    );
+    assert!(
+        direct_content.contains("global preferred tools instructions"),
+        "expected global preferred tools content"
+    );
+
+    let (prompt, info) = build_system_prompt_full(None, &[], false, None, Some(project_dir.path()));
+    assert!(prompt.contains("project preferred tools instructions"));
+    assert!(prompt.contains("global preferred tools instructions"));
+    assert!(info.preferred_tools_chars > 0);
+
+    let (split, split_info) =
+        build_system_prompt_split(None, &[], false, None, Some(project_dir.path()));
+    assert!(
+        split
+            .static_part
+            .contains("project preferred tools instructions")
+    );
+    assert!(
+        split
+            .static_part
+            .contains("global preferred tools instructions")
+    );
+    assert!(split_info.preferred_tools_chars > 0);
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn test_non_selfdev_prompt_includes_lightweight_selfdev_hint() {
     let prompt = build_system_prompt(None, &[]);
     assert!(prompt.contains("Self-Development Access"));

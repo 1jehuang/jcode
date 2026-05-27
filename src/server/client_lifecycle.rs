@@ -2497,6 +2497,19 @@ async fn start_processing_message(
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
 
+    if let Some(reminder) = system_reminder.as_deref()
+        && let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
+            client_session_id,
+            reminder,
+            "client_message_accepted",
+        )
+    {
+        crate::logging::warn(&format!(
+            "Failed to mark reload recovery intent delivered for accepted message session={} id={}: {}",
+            client_session_id, id, error
+        ));
+    }
+
     update_member_status(
         client_session_id,
         "running",

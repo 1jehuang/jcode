@@ -4246,6 +4246,17 @@ fn desktop_maps_standard_clipboard_shortcuts_across_platform_modifiers() {
         KeyInput::PasteText
     );
     assert_eq!(
+        to_key_input(&Key::Character("v".into()), ModifiersState::ALT),
+        KeyInput::PasteText
+    );
+    assert_eq!(
+        to_key_input(
+            &Key::Character("v".into()),
+            ModifiersState::ALT | ModifiersState::SHIFT
+        ),
+        KeyInput::PasteText
+    );
+    assert_eq!(
         to_key_input(&Key::Character("x".into()), ModifiersState::SUPER),
         KeyInput::CutInputLine
     );
@@ -9603,6 +9614,7 @@ fn workspace_session_panel_composes_single_session_geometry() {
             space_hold_progress: None,
             surface_frames: None,
             exiting_surfaces: &HashMap::new(),
+            workspace_panel_cache: None,
             status_color: workspace_status_bar_target_color(&workspace),
             status_text_frame: None,
         },
@@ -9721,6 +9733,7 @@ fn workspace_session_panel_reuses_single_session_primitive_exactly() {
             space_hold_progress: None,
             surface_frames: None,
             exiting_surfaces: &HashMap::new(),
+            workspace_panel_cache: None,
             status_color: workspace_status_bar_target_color(&workspace),
             status_text_frame: None,
         },

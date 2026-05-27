@@ -1294,6 +1294,13 @@ pub(super) fn draw_side_panel_markdown(
         format!(" {}/{} ", page_index, page_count),
         Style::default().fg(dim_color()),
     ));
+    title_parts.push(Span::styled(
+        format!(
+            " {} hide ",
+            crate::tui::keybind::side_panel_toggle_key_label()
+        ),
+        Style::default().fg(dim_color()),
+    ));
     if focused {
         title_parts.push(Span::styled(
             " j/k scroll ",

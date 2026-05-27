@@ -860,6 +860,14 @@ impl Agent {
                     ContentBlock::Reasoning { text } => {
                         md.push_str(&format!("*Thinking:* {}\n\n", text));
                     }
+                    ContentBlock::AnthropicThinking { thinking, .. } => {
+                        md.push_str(&format!("*Thinking:* {}\n\n", thinking));
+                    }
+                    ContentBlock::OpenAIReasoning { summary, .. } => {
+                        if !summary.is_empty() {
+                            md.push_str(&format!("*Thinking:* {}\n\n", summary.join("\n")));
+                        }
+                    }
                     ContentBlock::ToolUse { name, input, .. } => {
                         let input_str = serde_json::to_string_pretty(input)
                             .unwrap_or_else(|_| input.to_string());

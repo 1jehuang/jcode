@@ -130,6 +130,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry("/model", "List or switch models"));
     lines.push(help_entry("/model <name>", "Switch to a different model"));
+    lines.push(help_entry(
+        "/provider-test-coverage",
+        "Show live-test evidence for the current provider/model",
+    ));
     lines.push(help_entry("/agents", "Configure models for agent roles"));
     lines.push(help_entry(
         "/effort <level>",
@@ -262,10 +266,6 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Run layered verification and produce proof",
     ));
     lines.push(help_entry(
-        "/mission <objective>",
-        "Start/show an autonomous mission (/goal alias)",
-    ));
-    lines.push(help_entry(
         "/initiatives",
         "Open initiatives overview / resume an initiative",
     ));
@@ -357,7 +357,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     )));
     lines.push(Line::from(""));
     lines.push(key_entry(
-        "Alt+M",
+        crate::tui::keybind::side_panel_toggle_key_label(),
         "Toggle side panel (or diagram pane if empty)",
     ));
     lines.push(key_entry("Alt+T", "Toggle diagram position (side/top)"));
@@ -385,11 +385,27 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Quit (press twice to confirm)",
     ));
     lines.push(key_entry("Ctrl+X", "Cut entire input line to clipboard"));
+    lines.push(key_entry("Ctrl+E", "Edit prompt in $EDITOR"));
     lines.push(key_entry(
         "Ctrl+A",
         "Copy visible chat viewport plus nearby context",
     ));
     lines.push(key_entry("Ctrl+U", "Clear input line"));
+    lines.push(key_entry("Ctrl+K", "Delete to end of input"));
+    lines.push(key_entry(
+        "Alt+Backspace / Alt+Delete",
+        "Delete previous word in input",
+    ));
+    lines.push(key_entry(
+        "Cmd/Super+Backspace / Delete",
+        "Delete to start of input",
+    ));
+    lines.push(key_entry(
+        "Cmd/Super+Left / Right",
+        "Move to start / end of input",
+    ));
+    lines.push(key_entry("Cmd/Super+Z", "Undo input edit"));
+    lines.push(key_entry("Cmd/Super+X / V", "Cut input / paste clipboard"));
     lines.push(key_entry("Ctrl+S", "Stash / pop input (save for later)"));
     lines.push(key_entry("Ctrl+Backspace", "Delete previous word in input"));
     lines.push(key_entry("Ctrl+B / Ctrl+F", "Move by word left / right"));
@@ -405,8 +421,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
     lines.push(key_entry("Ctrl+R", "Recover from missing tool outputs"));
-    lines.push(key_entry("Ctrl+V", "Paste clipboard (text or image)"));
-    lines.push(key_entry("Alt+V", "Paste image from clipboard"));
+    lines.push(key_entry(
+        "Ctrl+V / Alt+V",
+        "Paste clipboard (text or image)",
+    ));
     lines.push(key_entry(
         "Alt+A",
         "Quick-copy visible chat viewport plus nearby context",
@@ -456,6 +474,56 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         .block(block)
         .scroll((scroll as u16, 0));
 
+    frame.render_widget(paragraph, area);
+}
+
+pub(super) fn draw_model_status_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    scroll: usize,
+    content: &str,
+) {
+    clear_area(frame, area);
+
+    let title_style = Style::default()
+        .fg(accent_color())
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(rgb(210, 210, 220));
+    let dim_style = Style::default().fg(dim_color());
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled("  Model Status", title_style)));
+    lines.push(Line::from(Span::styled(
+        "  Live verification evidence for provider/model behavior in jcode",
+        dim_style,
+    )));
+    lines.push(Line::from(""));
+
+    for raw in content.lines() {
+        if let Some(title) = raw.strip_prefix("# ") {
+            lines.push(Line::from(Span::styled(format!("  {title}"), title_style)));
+        } else if let Some(title) = raw.strip_prefix("## ") {
+            lines.push(Line::from(Span::styled(format!("  {title}"), title_style)));
+        } else if raw.trim().is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(Span::styled(format!("  {raw}"), text_style)));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓ scroll, PgUp/PgDn page, q/Esc close",
+        dim_style,
+    )));
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" /provider-test-coverage "),
+        )
+        .scroll((scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, area);
 }
 
