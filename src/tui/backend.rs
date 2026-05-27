@@ -326,6 +326,16 @@ impl RemoteConnection {
         } else {
             bootstrap_request = "subscribe_resume";
         }
+        // The initial History payload intentionally omits expanded model-route
+        // metadata to keep attach/resume fast. Request it immediately as a
+        // follow-up so `/model` does not have to render the lightweight
+        // `remote-catalog` fallback indefinitely.
+        conn.send_request(Request::GetModelCatalog {
+            id: conn.next_request_id,
+        })
+        .await?;
+        conn.next_request_id += 1;
+
         let bootstrap_request_ms = bootstrap_request_start.elapsed().as_millis();
 
         crate::logging::info(&format!(

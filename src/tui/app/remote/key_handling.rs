@@ -294,11 +294,15 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
+    if crate::tui::keybind::matches_side_panel_toggle_key(code, modifiers) {
         app.toggle_side_panel();
         return Ok(());
     }
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')) {
+    let macos_option_shortcut =
+        crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
+    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')))
+        || macos_option_shortcut == Some('t')
+    {
         app.toggle_diagram_pane_position();
         return Ok(());
     }
@@ -320,7 +324,9 @@ async fn handle_remote_key_internal(
         apply_remote_effort_direction(app, remote, direction).await?;
         return Ok(());
     }
-    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')) {
+    if (modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')))
+        || macos_option_shortcut == Some('s')
+    {
         app.toggle_typing_scroll_lock();
         return Ok(());
     }
@@ -337,8 +343,9 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if modifiers.contains(KeyModifiers::ALT) {
-        match code {
+    if modifiers.contains(KeyModifiers::ALT) || macos_option_shortcut.is_some() {
+        let alt_code = macos_option_shortcut.map(KeyCode::Char).unwrap_or(code);
+        match alt_code {
             KeyCode::Char('b') => {
                 if matches!(app.status, ProcessingStatus::RunningTool(_)) {
                     remote.background_tool().await?;
@@ -360,13 +367,38 @@ async fn handle_remote_key_internal(
                 app.input.drain(app.cursor_pos..end);
                 return Ok(());
             }
-            KeyCode::Backspace => {
-                let start = app.find_word_boundary_back();
-                if start < app.cursor_pos {
-                    app.remember_input_undo_state();
-                }
-                app.input.drain(start..app.cursor_pos);
-                app.cursor_pos = start;
+            KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
+                input::delete_input_word_back(app);
+                return Ok(());
+            }
+            KeyCode::Char('v') => {
+                app.paste_from_clipboard();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    if modifiers.contains(KeyModifiers::SUPER) {
+        match code {
+            KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
+                input::delete_input_to_start(app);
+                return Ok(());
+            }
+            KeyCode::Left | KeyCode::Home | KeyCode::Char('a') => {
+                app.cursor_pos = 0;
+                return Ok(());
+            }
+            KeyCode::Right | KeyCode::End | KeyCode::Char('e') => {
+                app.cursor_pos = app.input.len();
+                return Ok(());
+            }
+            KeyCode::Char('z') => {
+                app.undo_input_change();
+                return Ok(());
+            }
+            KeyCode::Char('x') => {
+                input::cut_input_line_to_clipboard(app);
                 return Ok(());
             }
             KeyCode::Char('v') => {
@@ -434,7 +466,7 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Up | KeyCode::Down) {
+    if modifiers == KeyModifiers::CONTROL && code == KeyCode::Down {
         input::handle_prompt_history_navigation(app, code, modifiers);
         return Ok(());
     }
@@ -472,18 +504,11 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('u') => {
-                if app.cursor_pos > 0 {
-                    app.remember_input_undo_state();
-                }
-                app.input.drain(..app.cursor_pos);
-                app.cursor_pos = 0;
+                input::delete_input_to_start(app);
                 return Ok(());
             }
             KeyCode::Char('k') => {
-                if app.cursor_pos < app.input.len() {
-                    app.remember_input_undo_state();
-                }
-                app.input.truncate(app.cursor_pos);
+                input::delete_input_to_end(app);
                 return Ok(());
             }
             KeyCode::Char('z') => {
@@ -521,13 +546,7 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('w') | KeyCode::Char('\u{8}') | KeyCode::Backspace => {
-                let start = app.find_word_boundary_back();
-                if start < app.cursor_pos {
-                    app.remember_input_undo_state();
-                }
-                app.input.drain(start..app.cursor_pos);
-                app.cursor_pos = start;
-                app.sync_model_picker_preview_from_input();
+                input::delete_input_word_back(app);
                 return Ok(());
             }
             KeyCode::Char('s') => {

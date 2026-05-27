@@ -1,7 +1,7 @@
 use super::{
     ensure_spawn_coordinator_swarm, prepare_visible_spawn_session, register_visible_spawned_member,
     require_coordinator_swarm, resolve_spawn_working_dir, resolve_stop_target_session,
-    swarm_stop_allowed_by_owner,
+    resolve_swarm_spawn_model_and_provider, swarm_stop_allowed_by_owner,
 };
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
@@ -400,6 +400,45 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
     assert_eq!(session.provider_key.as_deref(), Some("ollama"));
 
     crate::env::remove_var("JCODE_HOME");
+}
+
+#[test]
+fn resolve_swarm_spawn_model_prefers_configured_model_over_coordinator_model() {
+    let (model, provider_key) = resolve_swarm_spawn_model_and_provider(
+        Some("openai/gpt-5.4@OpenAI".to_string()),
+        Some("nvidia/llama-3.3-nemotron-super-49b-v1".to_string()),
+        Some("nvidia".to_string()),
+    );
+
+    assert_eq!(model.as_deref(), Some("openai/gpt-5.4@OpenAI"));
+    assert_eq!(provider_key.as_deref(), Some("openrouter"));
+}
+
+#[test]
+fn resolve_swarm_spawn_model_inherits_coordinator_when_unconfigured() {
+    let (model, provider_key) = resolve_swarm_spawn_model_and_provider(
+        None,
+        Some("nvidia/llama-3.3-nemotron-super-49b-v1".to_string()),
+        Some("nvidia".to_string()),
+    );
+
+    assert_eq!(
+        model.as_deref(),
+        Some("nvidia/llama-3.3-nemotron-super-49b-v1")
+    );
+    assert_eq!(provider_key.as_deref(), Some("nvidia"));
+}
+
+#[test]
+fn resolve_swarm_spawn_model_keeps_provider_key_when_config_matches_coordinator() {
+    let (model, provider_key) = resolve_swarm_spawn_model_and_provider(
+        Some("custom-model".to_string()),
+        Some("custom-model".to_string()),
+        Some("custom-provider".to_string()),
+    );
+
+    assert_eq!(model.as_deref(), Some("custom-model"));
+    assert_eq!(provider_key.as_deref(), Some("custom-provider"));
 }
 
 #[tokio::test]

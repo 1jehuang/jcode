@@ -1,5 +1,7 @@
 use super::*;
 use crate::tui::core;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Clone, Copy)]
 pub(super) struct RegisteredCommand {
@@ -49,6 +51,11 @@ pub(super) const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/commands", "Alias for /help"),
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
+    RegisteredCommand::public(
+        "/provider-test-coverage",
+        "Show live-test evidence for the current provider/model",
+    ),
+    RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
     RegisteredCommand::public("/agents", "Configure models for agent roles"),
     RegisteredCommand::public("/subagent", "Launch a subagent manually"),
@@ -1520,7 +1527,7 @@ impl App {
             return Vec::new();
         }
 
-        vec![
+        let mut prompts = vec![
             (
                 "Customize my terminal theme".to_string(),
                 "Find what terminal I'm using, then change its background color to pitch black and make it slightly transparent. Apply the changes for me.".to_string(),
@@ -1529,11 +1536,20 @@ impl App {
                 "Review something I've been working on".to_string(),
                 "Find a recent file or project I've been working on, read through it, and give me concrete suggestions on how I could improve it.".to_string(),
             ),
+        ];
+
+        if let Some(prompt) = latest_external_cli_continuation_prompt() {
+            prompts.push(("Continue my last CLI agent session".to_string(), prompt));
+        } else {
+            prompts.push(
             (
                 "Find my social media and roast me".to_string(),
                 "Find a social media platform I use, look around at my profile and posts, then give me a brutally honest roast based on what you see.".to_string(),
             ),
-        ]
+            );
+        }
+
+        prompts
     }
 
     /// Autocomplete current input - cycles through suggestions on repeated Tab
@@ -2162,4 +2178,198 @@ mod dollar_token_tests {
         let suggestions = suggest_at_path(temp.path(), "@f", 5);
         assert_eq!(suggestions.len(), 5);
     }
+}
+
+#[derive(Clone, Debug)]
+struct ExternalCliSuggestionCandidate {
+    source: &'static str,
+    modified: SystemTime,
+    working_dir: Option<String>,
+    context: Option<String>,
+}
+
+fn latest_external_cli_continuation_prompt() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let mut candidates = Vec::new();
+    candidates.extend(latest_jsonl_suggestion_candidates(
+        &home.join(".codex/sessions"),
+        "Codex",
+        32,
+    ));
+    candidates.extend(latest_jsonl_suggestion_candidates(
+        &home.join(".claude/projects"),
+        "Claude Code",
+        32,
+    ));
+    let candidate = candidates
+        .into_iter()
+        .max_by_key(|candidate| candidate.modified)?;
+    let location = candidate
+        .working_dir
+        .as_deref()
+        .and_then(|dir| Path::new(dir).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| format!(" in {name}"))
+        .unwrap_or_default();
+    let context = candidate
+        .context
+        .as_deref()
+        .map(|context| format!(": {}", compact_suggestion_text(context, 72)))
+        .unwrap_or_default();
+    Some(format!(
+        "continue the latest {source} session{location}{context}",
+        source = candidate.source
+    ))
+}
+
+fn latest_jsonl_suggestion_candidates(
+    root: &Path,
+    source: &'static str,
+    scan_limit: usize,
+) -> Vec<ExternalCliSuggestionCandidate> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    collect_recent_jsonl_suggestion_files(root, &mut files, scan_limit.saturating_mul(8));
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.truncate(scan_limit);
+    files
+        .into_iter()
+        .filter_map(|(path, modified)| suggestion_candidate_from_jsonl(&path, source, modified))
+        .collect()
+}
+
+fn collect_recent_jsonl_suggestion_files(
+    root: &Path,
+    files: &mut Vec<(PathBuf, SystemTime)>,
+    max_files: usize,
+) {
+    if files.len() >= max_files {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if files.len() >= max_files {
+            break;
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            collect_recent_jsonl_suggestion_files(&path, files, max_files);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            files.push((path, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+        }
+    }
+}
+
+fn suggestion_candidate_from_jsonl(
+    path: &Path,
+    source: &'static str,
+    modified: SystemTime,
+) -> Option<ExternalCliSuggestionCandidate> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut working_dir = None;
+    let mut last_user_text = None;
+    let mut summary_text = None;
+    for line in content.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if working_dir.is_none() {
+            working_dir = value
+                .get("cwd")
+                .or_else(|| value.get("payload").and_then(|payload| payload.get("cwd")))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+        }
+        if summary_text.is_none() {
+            summary_text = value
+                .get("summary")
+                .or_else(|| {
+                    value
+                        .get("payload")
+                        .and_then(|payload| payload.get("summary"))
+                })
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string);
+        }
+        if jsonl_suggestion_role(&value) == Some("user")
+            && let Some(text) = jsonl_suggestion_text(&value)
+            && !text.trim().is_empty()
+        {
+            last_user_text = Some(text);
+        }
+    }
+    if working_dir.is_none() && last_user_text.is_none() && summary_text.is_none() {
+        return None;
+    }
+    Some(ExternalCliSuggestionCandidate {
+        source,
+        modified,
+        working_dir,
+        context: last_user_text.or(summary_text),
+    })
+}
+
+fn jsonl_suggestion_role(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("message")
+        .and_then(|message| message.get("role"))
+        .or_else(|| value.get("role"))
+        .or_else(|| value.get("payload").and_then(|payload| payload.get("role")))
+        .and_then(|role| role.as_str())
+}
+
+fn jsonl_suggestion_text(value: &serde_json::Value) -> Option<String> {
+    let content = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .or_else(|| value.get("content"))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("content"))
+        })?;
+    if let Some(text) = content
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    let text = content
+        .as_array()?
+        .iter()
+        .filter_map(|block| {
+            block
+                .get("text")
+                .or_else(|| block.get("content"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+fn compact_suggestion_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut truncated = compact
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }

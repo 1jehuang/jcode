@@ -306,6 +306,22 @@ fn summarize_ws_input(items: &[Value]) -> WsInputStats {
     stats
 }
 
+fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<Value>, usize) {
+    let mut skipped_reasoning_items = 0usize;
+    let incremental_items = input[start_index..]
+        .iter()
+        .filter_map(|item| {
+            if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
+                skipped_reasoning_items += 1;
+                None
+            } else {
+                Some(item.clone())
+            }
+        })
+        .collect();
+    (incremental_items, skipped_reasoning_items)
+}
+
 fn persistent_ws_idle_needs_healthcheck(idle_for: Duration) -> bool {
     idle_for >= Duration::from_secs(WEBSOCKET_PERSISTENT_HEALTHCHECK_IDLE_SECS)
 }

@@ -368,6 +368,40 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     .await?;
             }
         },
+        Some(Command::ProviderTestCoverage {
+            provider_query,
+            model_query,
+            coverage_file,
+            coverage_limit,
+        }) => {
+            let coverage_path = coverage_file.as_deref().map(std::path::Path::new);
+            if let Some(provider) = provider_query {
+                let model = model_query
+                    .or_else(|| args.model.clone())
+                    .unwrap_or_else(|| "*".to_string());
+                print!(
+                    "{}",
+                    crate::live_tests::format_provider_test_coverage_report(
+                        &provider,
+                        &model,
+                        coverage_path,
+                    )
+                );
+            } else {
+                let (coverage, path) = crate::live_tests::load_coverage(coverage_path)?;
+                let summary = crate::live_tests::strict_live_provider_model_coverage_summary(
+                    &coverage,
+                    path.display().to_string(),
+                );
+                print!(
+                    "{}",
+                    crate::live_tests::format_strict_live_provider_model_coverage_summary(
+                        &summary,
+                        coverage_limit,
+                    )
+                );
+            }
+        }
         Some(Command::AuthTest {
             login,
             all_configured,

@@ -210,6 +210,17 @@ pub fn format_background_task_progress_markdown(task: &BackgroundTaskProgressEve
     )
 }
 
+pub fn format_model_refresh_progress_markdown(detail: &str, percent: Option<u8>) -> String {
+    let detail = detail.trim();
+    let progress = percent
+        .map(|percent| format!("{}% · {}", percent.min(100), detail))
+        .unwrap_or_else(|| detail.to_string());
+    format!(
+        "**Background task progress** `refresh-model-list` · `Model list refresh` (`catalog`)\n\n{}",
+        progress
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedBackgroundTaskProgressNotification {
     pub task_id: String,

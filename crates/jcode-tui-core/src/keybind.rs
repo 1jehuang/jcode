@@ -10,9 +10,53 @@ pub struct KeyBinding {
 
 impl KeyBinding {
     pub fn matches(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.matches_for_platform(code, modifiers, cfg!(target_os = "macos"))
+    }
+
+    pub fn matches_for_platform(
+        &self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        is_macos: bool,
+    ) -> bool {
         let (code, modifiers) = normalize_key(code, modifiers);
         let (bind_code, bind_mods) = normalize_key(self.code, self.modifiers);
-        code == bind_code && modifiers == bind_mods
+        if code == bind_code && modifiers == bind_mods {
+            return true;
+        }
+
+        is_macos
+            && modifiers.is_empty()
+            && bind_mods == KeyModifiers::ALT
+            && macos_option_char_to_ascii_key(code)
+                .is_some_and(|ascii| bind_code == KeyCode::Char(ascii))
+    }
+}
+
+pub fn macos_option_char_to_ascii_key(code: KeyCode) -> Option<char> {
+    let KeyCode::Char(ch) = code else {
+        return None;
+    };
+
+    match ch {
+        'å' => Some('a'),
+        '∫' => Some('b'),
+        'ç' => Some('c'),
+        '∂' => Some('d'),
+        '´' => Some('e'),
+        'ƒ' => Some('f'),
+        '˙' => Some('h'),
+        'ˆ' => Some('i'),
+        '∆' => Some('j'),
+        '˚' => Some('k'),
+        '¬' => Some('l'),
+        'µ' => Some('m'),
+        'ß' => Some('s'),
+        '†' => Some('t'),
+        '¨' => Some('u'),
+        '√' => Some('v'),
+        '¥' => Some('y'),
+        _ => None,
     }
 }
 
@@ -643,6 +687,43 @@ mod tests {
         let meta = parse_keybinding("meta+k").expect("meta+k should parse");
         assert_eq!(meta.code, KeyCode::Char('k'));
         assert!(meta.modifiers.contains(KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn key_binding_matches_macos_option_translated_characters() {
+        let binding = parse_keybinding("alt+s").expect("alt+s should parse");
+
+        assert!(binding.matches_for_platform(KeyCode::Char('s'), KeyModifiers::ALT, false,));
+        assert!(binding.matches_for_platform(KeyCode::Char('ß'), KeyModifiers::empty(), true,));
+        assert!(!binding.matches_for_platform(KeyCode::Char('ß'), KeyModifiers::empty(), false,));
+    }
+
+    #[test]
+    fn macos_option_character_map_covers_default_alt_shortcuts() {
+        for (option_char, ascii) in [
+            ('å', 'a'),
+            ('∫', 'b'),
+            ('ç', 'c'),
+            ('∂', 'd'),
+            ('´', 'e'),
+            ('ƒ', 'f'),
+            ('˙', 'h'),
+            ('ˆ', 'i'),
+            ('∆', 'j'),
+            ('˚', 'k'),
+            ('¬', 'l'),
+            ('µ', 'm'),
+            ('ß', 's'),
+            ('†', 't'),
+            ('¨', 'u'),
+            ('√', 'v'),
+            ('¥', 'y'),
+        ] {
+            assert_eq!(
+                macos_option_char_to_ascii_key(KeyCode::Char(option_char)),
+                Some(ascii)
+            );
+        }
     }
 
     #[test]

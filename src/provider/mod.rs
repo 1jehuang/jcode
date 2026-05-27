@@ -32,7 +32,7 @@ use account_failover::{
     same_provider_account_candidates, same_provider_account_failover_enabled,
     set_account_override_for_provider,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
 use jcode_provider_core::FailoverDecision;
@@ -1484,53 +1484,108 @@ impl Provider for MultiProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if let Some(anthropic) = self.anthropic_provider() {
-            anthropic.prefetch_models().await?;
-        }
-        if let Some(claude) = self.claude_provider() {
-            claude.prefetch_models().await?;
-        }
-        if let Some(openai) = self.openai_provider() {
-            openai.prefetch_models().await?;
-        }
+        let anthropic = self.anthropic_provider();
+        let claude = self.claude_provider();
+        let openai = self.openai_provider();
         let openrouter = self.openrouter_provider();
-        if let Some(openrouter) = openrouter {
-            openrouter.prefetch_models().await?;
-        }
-        {
-            let copilot = self
-                .copilot_api
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            if let Some(copilot) = copilot {
-                copilot.prefetch_models().await?;
+        let copilot = self
+            .copilot_api
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let antigravity = self.antigravity_provider();
+        let gemini = self.gemini_provider();
+        let cursor = self.cursor_provider();
+        let bedrock = self.bedrock_provider();
+
+        let (
+            anthropic_result,
+            claude_result,
+            openai_result,
+            openrouter_result,
+            copilot_result,
+            antigravity_result,
+            gemini_result,
+            cursor_result,
+            bedrock_result,
+        ) = tokio::join!(
+            async {
+                match anthropic {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match claude {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match openai {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match openrouter {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match copilot {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match antigravity {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match gemini {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match cursor {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+            async {
+                match bedrock {
+                    Some(provider) => provider.prefetch_models().await,
+                    None => Ok(()),
+                }
+            },
+        );
+
+        let mut errors = Vec::new();
+        for (provider_name, result) in [
+            ("anthropic", anthropic_result),
+            ("claude", claude_result),
+            ("openai", openai_result),
+            ("openrouter", openrouter_result),
+            ("copilot", copilot_result),
+            ("antigravity", antigravity_result),
+            ("gemini", gemini_result),
+            ("cursor", cursor_result),
+            ("bedrock", bedrock_result),
+        ] {
+            if let Err(err) = result {
+                errors.push(format!("{provider_name}: {err}"));
             }
         }
-        {
-            let antigravity = self.antigravity_provider();
-            if let Some(antigravity) = antigravity {
-                antigravity.prefetch_models().await?;
-            }
+
+        if !errors.is_empty() {
+            return Err(anyhow!("{}", errors.join("; ")));
         }
-        {
-            let gemini = self.gemini_provider();
-            if let Some(gemini) = gemini {
-                gemini.prefetch_models().await?;
-            }
-        }
-        {
-            let cursor = self.cursor_provider();
-            if let Some(cursor) = cursor {
-                cursor.prefetch_models().await?;
-            }
-        }
-        {
-            let bedrock = self.bedrock_provider();
-            if let Some(bedrock) = bedrock {
-                bedrock.prefetch_models().await?;
-            }
-        }
+
         Ok(())
     }
 

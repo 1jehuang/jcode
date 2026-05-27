@@ -275,6 +275,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::ClaudeApiKey => {
+                login_anthropic_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAi => login_openai_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -562,6 +565,35 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
         eprintln!("Profile email: {}", email);
     }
     crate::telemetry::record_auth_success("claude", "oauth");
+    Ok(())
+}
+
+fn login_anthropic_api_key_flow() -> Result<()> {
+    eprintln!("Setting up Anthropic API...");
+    eprintln!("Get your API key from: https://console.anthropic.com/settings/keys\n");
+    eprint!("Paste your Anthropic API key: ");
+    io::stdout().flush()?;
+
+    let key = read_secret_line()?;
+
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    if !key.starts_with("sk-ant-") {
+        eprintln!("Warning: Anthropic API keys typically start with 'sk-ant-'. Saving anyway.");
+    }
+
+    save_named_api_key("anthropic.env", "ANTHROPIC_API_KEY", &key)?;
+    eprintln!("\nSuccessfully saved Anthropic API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("anthropic.env")
+            .display()
+    );
+    eprintln!("Provider: claude (native Anthropic Messages API)");
+    crate::telemetry::record_auth_success("anthropic-api", "api_key");
     Ok(())
 }
 

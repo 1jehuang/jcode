@@ -189,19 +189,21 @@ fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
 }
 
 #[test]
-fn test_remote_ctrl_up_browses_prompt_history_instead_of_pending_queue() {
+fn test_remote_ctrl_up_retrieves_pending_queue_before_prompt_history() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.display_messages = vec![DisplayMessage::user("previous remote prompt")];
     app.queued_messages.push("queued followup".to_string());
+    app.pending_queued_dispatch = true;
 
     rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::CONTROL, &mut remote))
         .unwrap();
 
-    assert_eq!(app.input, "previous remote prompt");
-    assert_eq!(app.queued_messages, vec!["queued followup".to_string()]);
+    assert_eq!(app.input, "queued followup");
+    assert!(app.queued_messages.is_empty());
+    assert!(!app.pending_queued_dispatch);
 }
 
 #[test]
@@ -265,6 +267,8 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             },
         ]));
 

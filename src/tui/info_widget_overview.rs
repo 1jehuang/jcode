@@ -268,6 +268,8 @@ mod tests {
                 id: "todo-1".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             }],
             memory_info: Some(MemoryInfo {
                 total_count: 3,

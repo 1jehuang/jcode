@@ -175,6 +175,22 @@ fn test_help_topic_shows_command_details() {
 }
 
 #[test]
+fn test_help_topic_shows_provider_test_coverage_command_details() {
+    let mut app = create_test_app();
+    app.input = "/help provider-test-coverage".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing help response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("`/provider-test-coverage`"));
+    assert!(msg.content.contains("live verification evidence"));
+    assert!(msg.content.contains("readiness gaps"));
+}
+
+#[test]
 fn test_help_topic_shows_btw_command_details() {
     let mut app = create_test_app();
     app.input = "/help btw".to_string();

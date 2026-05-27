@@ -242,9 +242,9 @@ else
 
   if [ "$(uname -s)" = "Darwin" ]; then
     if [ "${mac_hotkey_ready:-false}" = true ]; then
-      info "Global hotkey ready: Alt+; opens jcode in your preferred terminal"
+      info "Global hotkey ready: Cmd+; opens jcode in your preferred terminal"
     else
-      info "Tip: run 'jcode setup-hotkey' to enable Alt+; launch on macOS"
+      info "Tip: run 'jcode setup-hotkey' to enable Cmd+; launch on macOS"
     fi
   fi
 

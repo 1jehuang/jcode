@@ -1379,7 +1379,18 @@ pub(in crate::tui::app) fn handle_server_event(
             }
 
             if let Some(scope) = runtime_activity_scope {
-                if scope == "background_activity" {
+                if scope == "catalog_activity"
+                    && let Some(progress) =
+                        crate::message::parse_background_task_progress_notification_markdown(
+                            &message,
+                        )
+                {
+                    let status_notice = progress.summary.clone();
+                    app.upsert_background_task_progress_message(message.clone());
+                    persist_replay_display_message(app, "background_task", None, &message);
+                    app.set_status_notice(status_notice);
+                    return false;
+                } else if scope == "background_activity" {
                     app.push_display_message(DisplayMessage::background_task(message.clone()));
                     persist_replay_display_message(app, "background_task", None, &message);
                 } else {

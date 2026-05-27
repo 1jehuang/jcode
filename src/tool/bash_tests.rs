@@ -1,6 +1,7 @@
 use super::*;
-use crate::bus::BackgroundTaskStatus;
+use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
 use crate::tool::StdinInputRequest;
+use crate::tool::bash::{BashTool, parse_heuristic_progress};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -621,6 +622,70 @@ async fn test_background_command_respects_timeout() {
         !output.contains("should_not_print"),
         "timed-out command should not complete normally: {output}"
     );
+}
+
+#[tokio::test]
+async fn test_background_command_without_timeout_keeps_running_past_default_foreground_timeout() {
+    let tool = BashTool::new();
+    let ctx = make_ctx(None);
+
+    let result = tool
+        .execute(
+            json!({
+                "command": "sleep 0.25; echo background_no_implicit_timeout_ok",
+                "run_in_background": true,
+                "notify": false,
+                "wake": false,
+            }),
+            ctx,
+        )
+        .await
+        .expect("background command should start");
+
+    let metadata = result.metadata.expect("expected metadata");
+    let task_id = metadata["task_id"]
+        .as_str()
+        .expect("task id should be present")
+        .to_string();
+    let output_file = std::path::PathBuf::from(
+        metadata["output_file"]
+            .as_str()
+            .expect("output_file should be present"),
+    );
+    let status_file = std::path::PathBuf::from(
+        metadata["status_file"]
+            .as_str()
+            .expect("status_file should be present"),
+    );
+
+    let mut final_status = None;
+    for _ in 0..30 {
+        let status = crate::background::global()
+            .status(&task_id)
+            .await
+            .expect("status should exist");
+        if status.status != BackgroundTaskStatus::Running {
+            final_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let status = final_status.expect("background task should finish normally");
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.exit_code, Some(0));
+
+    let output = crate::background::global()
+        .output(&task_id)
+        .await
+        .expect("output should exist");
+    assert!(
+        output.contains("background_no_implicit_timeout_ok"),
+        "output was: {output}"
+    );
+
+    let _ = tokio::fs::remove_file(output_file).await;
+    let _ = tokio::fs::remove_file(status_file).await;
 }
 
 #[test]

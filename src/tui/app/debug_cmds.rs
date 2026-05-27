@@ -188,6 +188,53 @@ impl App {
                 "version": env!("JCODE_VERSION"),
             })
             .to_string()
+        } else if cmd == "expand-badge-fixture" {
+            let old_string = (0..24)
+                .map(|idx| format!("old fixture line {idx}\n"))
+                .collect::<String>();
+            let new_string = (0..24)
+                .map(|idx| format!("new fixture line {idx}\n"))
+                .collect::<String>();
+            self.display_messages = vec![
+                DisplayMessage::user("please edit demo.txt"),
+                DisplayMessage::tool(
+                    "Edited demo.txt".to_string(),
+                    crate::message::ToolCall {
+                        id: "debug_expand_edit_1".to_string(),
+                        name: "edit".to_string(),
+                        input: serde_json::json!({
+                            "file_path": "demo.txt",
+                            "old_string": old_string,
+                            "new_string": new_string,
+                        }),
+                        intent: None,
+                    },
+                ),
+            ];
+            self.bump_display_messages_version();
+            self.diff_mode = crate::config::DiffDisplayMode::Inline;
+            self.scroll_offset = 0;
+            self.auto_scroll_paused = false;
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.set_status_notice("Debug expand badge fixture ready");
+            serde_json::json!({
+                "ok": true,
+                "diff_mode": format!("{:?}", self.diff_mode),
+                "display_edit_tool_message_count": self.display_edit_tool_message_count,
+                "input": self.input,
+            })
+            .to_string()
+        } else if cmd == "expand-badge-state" {
+            serde_json::json!({
+                "diff_mode": format!("{:?}", self.diff_mode),
+                "display_edit_tool_message_count": self.display_edit_tool_message_count,
+                "input": self.input,
+                "cursor_pos": self.cursor_pos,
+                "status_notice": self.status_notice.as_ref().map(|(text, _)| text),
+                "display_messages": self.display_messages.len(),
+            })
+            .to_string()
         } else if cmd == "picker" || cmd == "picker:state" {
             self.debug_picker_state_json(None)
         } else if cmd == "model-picker" || cmd == "model-picker:live" {

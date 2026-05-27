@@ -234,6 +234,7 @@ struct ModelPickerCacheSignature {
     provider_name: String,
     current_model: String,
     config_default_model: Option<String>,
+    config_default_provider: Option<String>,
     reasoning_effort: Option<String>,
     available_efforts: Vec<String>,
     simplified_model_picker: bool,
@@ -849,7 +850,7 @@ pub struct App {
     last_client_focus_session_id: Option<String>,
     // Most recently focused side panel page, used to restore visibility when toggled off.
     last_side_panel_focus_id: Option<String>,
-    // User explicitly hid the side panel with Alt+M. While set, incoming snapshots may update
+    // User explicitly hid the side panel with the side-panel toggle key. While set, incoming snapshots may update
     // pages but must not reopen the panel by restoring focused_page_id.
     side_panel_user_hidden: bool,
     // Pin read images to side pane
@@ -997,6 +998,8 @@ pub struct App {
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,
+    model_status_scroll: Option<usize>,
+    model_status_content: String,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,

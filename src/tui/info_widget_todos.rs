@@ -1,5 +1,83 @@
 use super::*;
 
+fn todo_confidence_weight(priority: &str) -> u32 {
+    match priority {
+        "high" => 3,
+        "medium" => 2,
+        _ => 1,
+    }
+}
+
+fn todo_display_confidence(todo: &crate::todo::TodoItem) -> Option<u8> {
+    if todo.status == "completed" {
+        todo.completion_confidence.or(todo.confidence)
+    } else {
+        todo.confidence
+    }
+}
+
+fn aggregate_todo_confidence(todos: &[crate::todo::TodoItem]) -> Option<u8> {
+    let mut weighted_sum = 0u32;
+    let mut total_weight = 0u32;
+    for todo in todos.iter().filter(|todo| todo.status != "cancelled") {
+        let Some(score) = todo_display_confidence(todo) else {
+            continue;
+        };
+        let weight = todo_confidence_weight(&todo.priority);
+        weighted_sum += u32::from(score) * weight;
+        total_weight += weight;
+    }
+    if total_weight == 0 {
+        None
+    } else {
+        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+    }
+}
+
+fn confidence_style(score: Option<u8>) -> Style {
+    let color = match score {
+        Some(90..=100) => rgb(100, 180, 100),
+        Some(70..=89) => rgb(220, 190, 100),
+        Some(_) => rgb(220, 120, 100),
+        None => rgb(100, 100, 110),
+    };
+    Style::default().fg(color)
+}
+
+fn confidence_label(score: Option<u8>) -> String {
+    score
+        .map(|score| format!("{}%", score))
+        .unwrap_or_else(|| "?%".to_string())
+}
+
+fn todo_confidence_suffix_width(todo: &crate::todo::TodoItem) -> u16 {
+    3 + confidence_label(todo_display_confidence(todo)).len() as u16
+}
+
+fn push_todo_confidence_suffix(spans: &mut Vec<Span<'static>>, todo: &crate::todo::TodoItem) {
+    let score = todo_display_confidence(todo);
+    spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
+    spans.push(Span::styled(
+        confidence_label(score),
+        confidence_style(score),
+    ));
+}
+
+fn push_aggregate_confidence_suffix(spans: &mut Vec<Span<'static>>, data: &InfoWidgetData) {
+    let Some(score) = aggregate_todo_confidence(&data.todos) else {
+        return;
+    };
+    spans.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
+    spans.push(Span::styled(
+        "confidence ",
+        Style::default().fg(rgb(140, 140, 150)),
+    ));
+    spans.push(Span::styled(
+        confidence_label(Some(score)),
+        confidence_style(Some(score)),
+    ));
+}
+
 /// Render todos widget content
 pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     if data.todos.is_empty() {
@@ -20,13 +98,15 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         .count();
 
     // Header with progress
-    lines.push(Line::from(vec![
+    let mut header = vec![
         Span::styled("Todos ", Style::default().fg(rgb(180, 180, 190)).bold()),
         Span::styled(
             format!("{}/{}", completed, total),
             Style::default().fg(rgb(140, 140, 150)),
         ),
-    ]));
+    ];
+    push_aggregate_confidence_suffix(&mut header, data);
+    lines.push(Line::from(header));
 
     // Mini progress bar
     let bar_width = inner.width.saturating_sub(2).min(20) as usize;
@@ -74,7 +154,10 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         } else {
             ""
         };
-        let max_len = inner.width.saturating_sub(3 + suffix.len() as u16) as usize;
+        let max_len = inner
+            .width
+            .saturating_sub(3 + suffix.len() as u16 + todo_confidence_suffix_width(todo))
+            as usize;
         let content = truncate_smart(&todo.content, max_len);
 
         let text_color = if todo.status == "completed" {
@@ -91,6 +174,7 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
             Span::styled(format!("{} ", icon), Style::default().fg(status_color)),
             Span::styled(content, Style::default().fg(text_color)),
         ];
+        push_todo_confidence_suffix(&mut spans, todo);
         if !suffix.is_empty() {
             spans.push(Span::styled(
                 suffix.to_string(),
@@ -133,13 +217,15 @@ pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<L
         .count();
 
     // Header with progress
-    lines.push(Line::from(vec![
+    let mut header = vec![
         Span::styled("Todos ", Style::default().fg(rgb(180, 180, 190)).bold()),
         Span::styled(
             format!("{}/{}", completed, total),
             Style::default().fg(rgb(140, 140, 150)),
         ),
-    ]));
+    ];
+    push_aggregate_confidence_suffix(&mut header, data);
+    lines.push(Line::from(header));
 
     // Mini progress bar
     let bar_width = inner.width.saturating_sub(2).min(20) as usize;
@@ -194,7 +280,10 @@ pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<L
         } else {
             ""
         };
-        let max_len = inner.width.saturating_sub(4 + suffix.len() as u16) as usize;
+        let max_len = inner
+            .width
+            .saturating_sub(4 + suffix.len() as u16 + todo_confidence_suffix_width(todo))
+            as usize;
         let content = truncate_smart(&todo.content, max_len);
 
         // Dim completed and blocked items
@@ -221,6 +310,7 @@ pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<L
         }
 
         spans.push(Span::styled(content, Style::default().fg(text_color)));
+        push_todo_confidence_suffix(&mut spans, todo);
 
         if !suffix.is_empty() {
             spans.push(Span::styled(
@@ -272,26 +362,29 @@ pub(super) fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<L
         }
     }
     let pending = total.saturating_sub(completed);
+    let mut summary = vec![
+        Span::styled(
+            format!("{} total", total),
+            Style::default().fg(rgb(160, 160, 170)),
+        ),
+        Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))),
+        Span::styled(
+            format!("{} active", in_progress),
+            Style::default().fg(rgb(255, 200, 100)),
+        ),
+        Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))),
+        Span::styled(
+            format!("{} open", pending),
+            Style::default().fg(rgb(140, 140, 150)),
+        ),
+    ];
+    push_aggregate_confidence_suffix(&mut summary, data);
+
     vec![
         Line::from(vec![Span::styled(
             "Todos",
             Style::default().fg(rgb(180, 180, 190)).bold(),
         )]),
-        Line::from(vec![
-            Span::styled(
-                format!("{} total", total),
-                Style::default().fg(rgb(160, 160, 170)),
-            ),
-            Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))),
-            Span::styled(
-                format!("{} active", in_progress),
-                Style::default().fg(rgb(255, 200, 100)),
-            ),
-            Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))),
-            Span::styled(
-                format!("{} open", pending),
-                Style::default().fg(rgb(140, 140, 150)),
-            ),
-        ]),
+        Line::from(summary),
     ]
 }

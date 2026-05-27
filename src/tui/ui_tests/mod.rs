@@ -388,6 +388,9 @@ impl crate::tui::TuiState for TestState {
     fn help_scroll(&self) -> Option<usize> {
         self.help_scroll
     }
+    fn model_status_overlay(&self) -> Option<(usize, &str)> {
+        None
+    }
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
         None
     }

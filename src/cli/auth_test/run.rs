@@ -717,7 +717,10 @@ fn persist_auth_test_live_verification_event(
                 ));
             }
             "tool_smoke" => {
-                capabilities.push("real_jcode_tool_smoke");
+                let tool_smoke_skipped = auth_test_step_is_skipped(step);
+                if !tool_smoke_skipped {
+                    capabilities.push("real_jcode_tool_smoke");
+                }
                 expected.push(crate::live_tests::checkpoints::TOOL_CALL_PARSE);
                 expected.push(crate::live_tests::checkpoints::TOOL_EXECUTION_LOOP);
                 expected.push(crate::live_tests::checkpoints::TOOL_RESULT_FOLLOWUP);
@@ -781,7 +784,9 @@ fn auth_test_step_stage(
     checkpoint: &'static str,
     step: &AuthTestStepReport,
 ) -> crate::live_tests::LiveVerificationStage {
-    let status = if step.ok {
+    let status = if auth_test_step_is_skipped(step) {
+        crate::live_tests::LiveVerificationStageStatus::Skipped
+    } else if step.ok {
         crate::live_tests::LiveVerificationStageStatus::Passed
     } else {
         crate::live_tests::LiveVerificationStageStatus::Failed
@@ -789,6 +794,10 @@ fn auth_test_step_stage(
     crate::live_tests::LiveVerificationStage::new(checkpoint, status)
         .with_evidence("auth_test_step", serde_json::json!(step.name))
         .with_evidence("detail", serde_json::json!(step.detail))
+}
+
+fn auth_test_step_is_skipped(step: &AuthTestStepReport) -> bool {
+    step.detail.trim_start().starts_with("Skipped:")
 }
 
 fn auth_test_tool_derived_stage(

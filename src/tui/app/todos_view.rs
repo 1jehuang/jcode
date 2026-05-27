@@ -241,9 +241,19 @@ fn build_todos_view_markdown(session_id: Option<&str>, todos: &[TodoItem]) -> St
         .filter(|todo| todo.status != "completed" && !todo.blocked_by.is_empty())
         .count();
     let percent = ((completed as f64 / total as f64) * 100.0).round() as u64;
+    let weighted_confidence = weighted_todo_confidence(todos);
+    let lowest_completed_confidence = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .filter_map(|todo| todo.completion_confidence)
+        .min();
+    let missing_completion_confidence = todos
+        .iter()
+        .filter(|todo| todo.status == "completed" && todo.completion_confidence.is_none())
+        .count();
 
     let mut markdown = format!(
-        "# Todos\n\nDedicated todo view for {}.\n\n{}- Progress: **{}/{} completed** ({}%)\n- In progress: {}\n- Pending: {}\n- Blocked: {}\n- Cancelled: {}\n",
+        "# Todos\n\nDedicated todo view for {}.\n\n{}- Progress: **{}/{} completed** ({}%)\n- In progress: {}\n- Pending: {}\n- Blocked: {}\n- Cancelled: {}\n- Weighted confidence: **{}**\n- Lowest completed confidence: **{}**\n- Missing completion confidence: {}\n",
         session_label,
         session_id_line.unwrap_or_default(),
         completed,
@@ -253,6 +263,9 @@ fn build_todos_view_markdown(session_id: Option<&str>, todos: &[TodoItem]) -> St
         pending,
         blocked,
         cancelled,
+        format_confidence_value(weighted_confidence),
+        format_confidence_value(lowest_completed_confidence),
+        missing_completion_confidence,
     );
 
     let sections = [
@@ -295,6 +308,16 @@ fn format_todo_markdown(todo: &TodoItem) -> String {
         todo.content
     );
     line.push_str(&format!("  - id: `{}`\n", todo.id));
+    line.push_str(&format!(
+        "  - confidence: `{}`\n",
+        format_confidence_value(todo.confidence)
+    ));
+    if todo.status == "completed" || todo.completion_confidence.is_some() {
+        line.push_str(&format!(
+            "  - completion confidence: `{}`\n",
+            format_confidence_value(todo.completion_confidence)
+        ));
+    }
     if let Some(assigned_to) = todo
         .assigned_to
         .as_deref()
@@ -312,6 +335,46 @@ fn format_todo_markdown(todo: &TodoItem) -> String {
         line.push_str(&format!("  - blocked by: {}\n", deps));
     }
     line
+}
+
+fn todo_confidence_weight(priority: &str) -> u32 {
+    match priority {
+        "high" => 3,
+        "medium" => 2,
+        _ => 1,
+    }
+}
+
+fn todo_effective_confidence(todo: &TodoItem) -> Option<u8> {
+    if todo.status == "completed" {
+        todo.completion_confidence.or(todo.confidence)
+    } else {
+        todo.confidence
+    }
+}
+
+fn weighted_todo_confidence(todos: &[TodoItem]) -> Option<u8> {
+    let mut weighted_sum = 0u32;
+    let mut total_weight = 0u32;
+    for todo in todos.iter().filter(|todo| todo.status != "cancelled") {
+        let Some(score) = todo_effective_confidence(todo) else {
+            continue;
+        };
+        let weight = todo_confidence_weight(&todo.priority);
+        weighted_sum += u32::from(score) * weight;
+        total_weight += weight;
+    }
+    if total_weight == 0 {
+        None
+    } else {
+        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+    }
+}
+
+fn format_confidence_value(score: Option<u8>) -> String {
+    score
+        .map(|score| format!("{}%", score))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn status_badge(status: &str, blocked: bool) -> &'static str {
@@ -342,6 +405,8 @@ fn hash_todos_payload(session_id: Option<&str>, todos: &[TodoItem]) -> u64 {
         todo.content.hash(&mut hasher);
         todo.status.hash(&mut hasher);
         todo.priority.hash(&mut hasher);
+        todo.confidence.hash(&mut hasher);
+        todo.completion_confidence.hash(&mut hasher);
         todo.blocked_by.hash(&mut hasher);
         todo.assigned_to.hash(&mut hasher);
     }
@@ -357,4 +422,77 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|dur| dur.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn todo(
+        id: &str,
+        content: &str,
+        status: &str,
+        priority: &str,
+        confidence: Option<u8>,
+        completion_confidence: Option<u8>,
+    ) -> TodoItem {
+        TodoItem {
+            id: id.to_string(),
+            content: content.to_string(),
+            status: status.to_string(),
+            priority: priority.to_string(),
+            confidence,
+            completion_confidence,
+            blocked_by: Vec::new(),
+            assigned_to: None,
+        }
+    }
+
+    #[test]
+    fn todos_view_markdown_includes_confidence_summary_and_item_fields() {
+        let todos = vec![
+            todo(
+                "todo-1",
+                "Validate confidence side panel",
+                "in_progress",
+                "high",
+                Some(80),
+                None,
+            ),
+            todo(
+                "todo-2",
+                "Finish completed item",
+                "completed",
+                "medium",
+                Some(70),
+                Some(95),
+            ),
+        ];
+
+        let markdown = build_todos_view_markdown(Some("session_test"), &todos);
+
+        assert!(markdown.contains("- Weighted confidence: **86%**"));
+        assert!(markdown.contains("- Lowest completed confidence: **95%**"));
+        assert!(markdown.contains("- Missing completion confidence: 0"));
+        assert!(markdown.contains("  - confidence: `80%`"));
+        assert!(markdown.contains("  - confidence: `70%`"));
+        assert!(markdown.contains("  - completion confidence: `95%`"));
+    }
+
+    #[test]
+    fn todos_view_hash_changes_when_confidence_changes() {
+        let mut todos = vec![todo(
+            "todo-1",
+            "Track confidence hash",
+            "pending",
+            "high",
+            Some(80),
+            None,
+        )];
+        let before = hash_todos_payload(Some("session_test"), &todos);
+        todos[0].confidence = Some(81);
+        let after = hash_todos_payload(Some("session_test"), &todos);
+
+        assert_ne!(before, after);
+    }
 }

@@ -57,7 +57,7 @@ fn normalize_model_picker_provider_label(value: &str) -> String {
 fn model_picker_provider_labels_match(route_provider: &str, current_provider: &str) -> bool {
     let route = normalize_model_picker_provider_label(route_provider);
     let current = normalize_model_picker_provider_label(current_provider);
-    if route == current || route.contains(&current) || current.contains(&route) {
+    if route == current {
         return true;
     }
 
@@ -67,7 +67,10 @@ fn model_picker_provider_labels_match(route_provider: &str, current_provider: &s
             | ("openai", "openai")
             | ("gemini" | "google", "gemini" | "google")
             | ("antigravity", "antigravity")
-            | ("copilot" | "copilotcode", "copilot")
+            | (
+                "copilot" | "copilotcode" | "githubcopilot",
+                "copilot" | "githubcopilot"
+            )
             | ("cursor", "cursor")
             | ("bedrock" | "awsbedrock", "bedrock" | "awsbedrock")
             | ("openrouter", "openrouter" | "auto")
@@ -82,6 +85,145 @@ fn model_picker_route_is_current(
 ) -> bool {
     model_name == current_model
         && model_picker_provider_labels_match(&route.provider, current_provider)
+}
+
+const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-7", "deepseek/deepseek-v4-pro"];
+
+fn model_picker_recommendation_rank(name: &str) -> usize {
+    RECOMMENDED_MODELS
+        .iter()
+        .position(|model| *model == name)
+        .unwrap_or(usize::MAX)
+}
+
+fn model_picker_route_can_be_recommended(model: &str, route: &PickerOption) -> bool {
+    match model {
+        "gpt-5.5" => {
+            route.api_method == "openai-oauth"
+                && model_picker_provider_labels_match(&route.provider, "openai")
+        }
+        "claude-opus-4-7" => {
+            route.api_method == "claude-oauth"
+                && model_picker_provider_labels_match(&route.provider, "anthropic")
+        }
+        "deepseek/deepseek-v4-pro" => {
+            (route.api_method == "openrouter" && route.provider == "auto")
+                || (route.api_method.starts_with("openai-compatible")
+                    && model_picker_provider_labels_match(&route.provider, "deepseek"))
+        }
+        _ => false,
+    }
+}
+
+fn model_picker_route_is_recommended(model_name: &str, route: &PickerOption) -> bool {
+    RECOMMENDED_MODELS.contains(&model_name)
+        && route.available
+        && model_picker_route_can_be_recommended(model_name, route)
+}
+
+fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str, &str)> {
+    let (provider_hint, bare_model) = model_spec.split_once(':')?;
+    let provider_hint = provider_hint.trim();
+    let bare_model = bare_model.trim();
+    if provider_hint.is_empty() || bare_model.is_empty() {
+        return None;
+    }
+
+    let normalized = provider_hint.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "claude"
+            | "anthropic"
+            | "openai"
+            | "copilot"
+            | "cursor"
+            | "antigravity"
+            | "bedrock"
+            | "openrouter"
+            | "gemini"
+    ) || crate::provider_catalog::openai_compatible_profile_by_id(provider_hint).is_some()
+    {
+        Some((provider_hint, bare_model))
+    } else {
+        None
+    }
+}
+
+fn model_picker_route_provider_matches_key(
+    route_provider_key: Option<&str>,
+    route_provider_label: &str,
+    desired_provider: &str,
+) -> bool {
+    let desired_provider = desired_provider.trim();
+    if desired_provider.is_empty() {
+        return false;
+    }
+    if let Some(route_provider_key) = route_provider_key
+        && normalize_model_picker_provider_label(route_provider_key)
+            == normalize_model_picker_provider_label(desired_provider)
+    {
+        return true;
+    }
+    model_picker_provider_labels_match(route_provider_label, desired_provider)
+}
+
+fn model_picker_route_is_default(
+    model_name: &str,
+    route: &PickerOption,
+    config_default_model: Option<&str>,
+    config_default_provider: Option<&str>,
+) -> bool {
+    let Some(default_model) = config_default_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+        model_name,
+        &route.api_method,
+        &route.provider,
+    );
+    let provider_matches = |provider: &str| {
+        model_picker_route_provider_matches_key(
+            selection.provider_key.as_deref(),
+            &route.provider,
+            provider,
+        )
+    };
+
+    let model_matches_bare_or_exact = default_model == selection.model_spec
+        || default_model == model_name
+        || model_picker_provider_hint_from_model_spec(default_model)
+            .map(|(_, bare_model)| bare_model == model_name)
+            .unwrap_or(false);
+
+    if let Some(default_provider) = config_default_provider
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return model_matches_bare_or_exact && provider_matches(default_provider);
+    }
+
+    if default_model == selection.model_spec {
+        return true;
+    }
+
+    if let Some((provider_hint, bare_model)) =
+        model_picker_provider_hint_from_model_spec(default_model)
+    {
+        return bare_model == model_name && provider_matches(provider_hint);
+    }
+
+    if let Some((bare_model, provider_label)) = default_model.rsplit_once('@') {
+        return bare_model == model_name
+            && model_picker_provider_labels_match(&route.provider, provider_label);
+    }
+
+    // Legacy configs may only contain a bare model. In that case the persisted
+    // data cannot identify the route, so keep the previous model-only marker.
+    default_model == model_name
 }
 
 impl App {
@@ -157,6 +299,7 @@ impl App {
         &self,
         current_model: &str,
         config_default_model: Option<String>,
+        config_default_provider: Option<String>,
         current_effort: Option<String>,
         available_efforts: &[&str],
     ) -> ModelPickerCacheSignature {
@@ -171,6 +314,7 @@ impl App {
             },
             current_model: current_model.to_string(),
             config_default_model,
+            config_default_provider,
             reasoning_effort: current_effort,
             available_efforts: available_efforts
                 .iter()
@@ -392,7 +536,9 @@ impl App {
             self.provider.model().to_string()
         };
 
-        let config_default_model = crate::config::config().provider.default_model.clone();
+        let config = crate::config::config();
+        let config_default_model = config.provider.default_model.clone();
+        let config_default_provider = config.provider.default_provider.clone();
 
         let current_effort = if self.is_remote {
             self.remote_reasoning_effort.clone()
@@ -411,6 +557,7 @@ impl App {
         let cache_signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model.clone(),
+            config_default_provider.clone(),
             current_effort.clone(),
             &available_efforts,
         );
@@ -566,7 +713,9 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
-        let config_default_model = crate::config::config().provider.default_model.clone();
+        let config = crate::config::config();
+        let config_default_model = config.provider.default_model.clone();
+        let config_default_provider = config.provider.default_provider.clone();
         let current_effort = if self.is_remote {
             self.remote_reasoning_effort.clone()
         } else {
@@ -583,6 +732,7 @@ impl App {
         let current_signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model,
+            config_default_provider,
             current_effort,
             &available_efforts,
         );
@@ -630,7 +780,9 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
-        let config_default_model = crate::config::config().provider.default_model.clone();
+        let config = crate::config::config();
+        let config_default_model = config.provider.default_model.clone();
+        let config_default_provider = config.provider.default_provider.clone();
         let current_effort = if self.is_remote {
             self.remote_reasoning_effort.clone()
         } else {
@@ -645,17 +797,13 @@ impl App {
             self.provider.available_efforts()
         };
 
-        let is_config_default = |name: &str| -> bool {
-            match &config_default_model {
-                None => false,
-                Some(default) => {
-                    let bare = default.strip_prefix("copilot:").unwrap_or(default);
-                    let bare = bare.strip_prefix("cursor:").unwrap_or(bare);
-                    let bare = bare.strip_prefix("antigravity:").unwrap_or(bare);
-                    let bare = bare.split('@').next().unwrap_or(bare);
-                    name == default || name == bare
-                }
-            }
+        let is_config_default = |name: &str, route: &PickerOption| -> bool {
+            model_picker_route_is_default(
+                name,
+                route,
+                config_default_model.as_deref(),
+                config_default_provider.as_deref(),
+            )
         };
 
         let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
@@ -735,33 +883,6 @@ impl App {
                     | ("cursor", "cursor")
                     | ("openrouter", "openrouter" | "auto")
             )
-        }
-
-        const RECOMMENDED_MODELS: &[&str] =
-            &["gpt-5.5", "claude-opus-4-7", "deepseek/deepseek-v4-pro"];
-
-        const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &["claude-opus-4-7"];
-
-        const OPENAI_OAUTH_ONLY_MODELS: &[&str] =
-            &["gpt-5.5", "gpt-5.4", "gpt-5.4[1m]", "gpt-5.4-pro"];
-        const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.7", "gpt-5.5", "gpt-5.4"];
-        const OPENROUTER_AUTO_ONLY_MODELS: &[&str] = &["deepseek/deepseek-v4-pro"];
-
-        fn recommendation_rank(name: &str, recommended_models: &[&str]) -> usize {
-            recommended_models
-                .iter()
-                .position(|model| *model == name)
-                .unwrap_or(usize::MAX)
-        }
-
-        fn route_can_be_recommended(model: &str, route: &PickerOption) -> bool {
-            if model == "deepseek/deepseek-v4-pro" {
-                return route.api_method == "openrouter" && route.provider == "auto";
-            }
-            matches!(
-                route.api_method.as_str(),
-                "claude-oauth" | "openai-oauth" | "openai-api-key" | "copilot"
-            ) || (route.api_method == "openrouter" && route.provider == "auto")
         }
 
         let timestamp_started = std::time::Instant::now();
@@ -863,19 +984,14 @@ impl App {
                             action: PickerAction::Model,
                             selected_option: 0,
                             is_current: is_this_current,
-                            recommended: RECOMMENDED_MODELS.contains(&name.as_str())
-                                && (*effort == "xhigh" || *effort == "high")
-                                && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                                    || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                                    || COPILOT_OAUTH_MODELS.contains(&name.as_str())
-                                    || OPENROUTER_AUTO_ONLY_MODELS.contains(&name.as_str()))
-                                    || (route_can_be_recommended(name, route) && route.available)),
-                            recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
+                            recommended: (*effort == "xhigh" || *effort == "high")
+                                && model_picker_route_is_recommended(name, route),
+                            recommendation_rank: model_picker_recommendation_rank(name),
                             old: old_threshold_secs > 0
                                 && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                             created_date: or_created.map(format_created),
                             effort: Some(effort.to_string()),
-                            is_default: is_config_default(name),
+                            is_default: is_config_default(name, route),
                         });
                     }
                 }
@@ -884,18 +1000,14 @@ impl App {
                 let is_old = old_threshold_secs > 0
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
                 for route in entry_routes {
-                    let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
-                        && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                            || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                            || COPILOT_OAUTH_MODELS.contains(&name.as_str())
-                            || OPENROUTER_AUTO_ONLY_MODELS.contains(&name.as_str()))
-                            || (route_can_be_recommended(name, &route) && route.available));
+                    let is_recommended = model_picker_route_is_recommended(name, &route);
                     let is_current = model_picker_route_is_current(
                         name,
                         &route,
                         &current_model,
                         &current_provider,
                     );
+                    let is_default = is_config_default(name, &route);
                     entries.push(PickerEntry {
                         name: name.clone(),
                         options: vec![route],
@@ -903,11 +1015,11 @@ impl App {
                         selected_option: 0,
                         is_current,
                         recommended: is_recommended,
-                        recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
+                        recommendation_rank: model_picker_recommendation_rank(name),
                         old: is_old,
                         created_date: or_created.map(format_created),
                         effort: None,
-                        is_default: is_config_default(name),
+                        is_default,
                     });
                 }
             }
@@ -1081,7 +1193,9 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
-        let config_default_model = crate::config::config().provider.default_model.clone();
+        let config = crate::config::config();
+        let config_default_model = config.provider.default_model.clone();
+        let config_default_provider = config.provider.default_provider.clone();
         let current_effort = if self.is_remote {
             self.remote_reasoning_effort.clone()
         } else {
@@ -1098,6 +1212,7 @@ impl App {
         let signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model,
+            config_default_provider,
             current_effort,
             &available_efforts,
         );
@@ -2587,17 +2702,24 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, model_picker_provider_labels_match, model_picker_route_is_current};
+    use super::{
+        App, model_picker_provider_labels_match, model_picker_route_is_current,
+        model_picker_route_is_default, model_picker_route_is_recommended,
+    };
     use crate::tui::PickerOption;
 
-    fn picker_option(provider: &str) -> PickerOption {
+    fn picker_option_with_method(provider: &str, api_method: &str) -> PickerOption {
         PickerOption {
             provider: provider.to_string(),
-            api_method: "test".to_string(),
+            api_method: api_method.to_string(),
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
         }
+    }
+
+    fn picker_option(provider: &str) -> PickerOption {
+        picker_option_with_method(provider, "test")
     }
 
     struct EnvGuard {
@@ -2722,6 +2844,135 @@ mod tests {
     fn model_picker_current_route_allows_provider_aliases() {
         assert!(model_picker_provider_labels_match("Anthropic", "Claude"));
         assert!(model_picker_provider_labels_match("auto", "OpenRouter"));
+        assert!(model_picker_provider_labels_match(
+            "GitHub Copilot",
+            "Copilot"
+        ));
         assert!(model_picker_provider_labels_match("AWS Bedrock", "Bedrock"));
+    }
+
+    #[test]
+    fn model_picker_provider_match_does_not_use_substring_false_positives() {
+        assert!(!model_picker_provider_labels_match(
+            "OpenRouter/OpenAI",
+            "OpenAI"
+        ));
+        assert!(!model_picker_provider_labels_match("OpenAI", "OpenRouter"));
+    }
+
+    #[test]
+    fn model_picker_default_route_requires_matching_provider_when_config_has_provider() {
+        let openai_route = picker_option_with_method("OpenAI", "openai-oauth");
+        let copilot_route = picker_option_with_method("Copilot", "copilot");
+
+        assert!(model_picker_route_is_default(
+            "gpt-5.5",
+            &openai_route,
+            Some("gpt-5.5"),
+            Some("openai"),
+        ));
+        assert!(!model_picker_route_is_default(
+            "gpt-5.5",
+            &copilot_route,
+            Some("gpt-5.5"),
+            Some("openai"),
+        ));
+    }
+
+    #[test]
+    fn model_picker_default_route_honors_provider_prefixed_model_specs() {
+        let openai_route = picker_option_with_method("OpenAI", "openai-oauth");
+        let copilot_route = picker_option_with_method("Copilot", "copilot");
+
+        assert!(model_picker_route_is_default(
+            "gpt-5.5",
+            &copilot_route,
+            Some("copilot:gpt-5.5"),
+            None,
+        ));
+        assert!(!model_picker_route_is_default(
+            "gpt-5.5",
+            &openai_route,
+            Some("copilot:gpt-5.5"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn model_picker_default_route_matches_openrouter_endpoint_specs() {
+        let openrouter_openai_route = picker_option_with_method("OpenAI", "openrouter");
+
+        assert!(model_picker_route_is_default(
+            "gpt-5.5",
+            &openrouter_openai_route,
+            Some("openai/gpt-5.5@OpenAI"),
+            Some("openrouter"),
+        ));
+        assert!(!model_picker_route_is_default(
+            "gpt-5.5",
+            &openrouter_openai_route,
+            Some("anthropic/gpt-5.5@OpenAI"),
+            Some("openrouter"),
+        ));
+    }
+
+    #[test]
+    fn model_picker_recommended_route_is_provider_aware() {
+        let openai_oauth_route = picker_option_with_method("OpenAI", "openai-oauth");
+        let openai_api_key_route = picker_option_with_method("OpenAI", "openai-api-key");
+        let copilot_route = picker_option_with_method("Copilot", "copilot");
+        let claude_oauth_route = picker_option_with_method("Anthropic", "claude-oauth");
+        let claude_openrouter_route = picker_option_with_method("Anthropic", "openrouter");
+        let openrouter_auto_route = picker_option_with_method("auto", "openrouter");
+        let openrouter_provider_route = picker_option_with_method("DeepSeek", "openrouter");
+        let deepseek_direct_route =
+            picker_option_with_method("DeepSeek", "openai-compatible:deepseek");
+        let unavailable_openai_oauth_route = PickerOption {
+            available: false,
+            ..openai_oauth_route.clone()
+        };
+
+        assert!(model_picker_route_is_recommended(
+            "gpt-5.5",
+            &openai_oauth_route
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "gpt-5.5",
+            &openai_api_key_route
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "gpt-5.5",
+            &copilot_route
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "gpt-5.5",
+            &unavailable_openai_oauth_route,
+        ));
+
+        assert!(model_picker_route_is_recommended(
+            "claude-opus-4-7",
+            &claude_oauth_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "claude-opus-4-7",
+            &claude_openrouter_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "claude-opus-4-7",
+            &copilot_route,
+        ));
+
+        assert!(model_picker_route_is_recommended(
+            "deepseek/deepseek-v4-pro",
+            &openrouter_auto_route,
+        ));
+        assert!(model_picker_route_is_recommended(
+            "deepseek/deepseek-v4-pro",
+            &deepseek_direct_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "deepseek/deepseek-v4-pro",
+            &openrouter_provider_route,
+        ));
     }
 }

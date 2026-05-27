@@ -52,6 +52,28 @@ fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {
     false
 }
 
+fn history_provider_name_from_session(session: &crate::session::Session) -> Option<String> {
+    let key = session.provider_key.as_deref()?.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let label = match key.to_ascii_lowercase().as_str() {
+        "openai" => "OpenAI".to_string(),
+        "claude" | "anthropic" => "Anthropic".to_string(),
+        "openrouter" => "OpenRouter".to_string(),
+        "copilot" => "GitHub Copilot".to_string(),
+        "cursor" => "Cursor".to_string(),
+        "gemini" => "Gemini".to_string(),
+        "bedrock" => "Bedrock".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        "jcode" => "Jcode".to_string(),
+        other => other.to_string(),
+    };
+
+    Some(label)
+}
+
 pub(super) async fn handle_get_state(
     id: u64,
     client_session_id: &str,
@@ -463,7 +485,8 @@ async fn send_history_from_persisted_session(
         session_id: session_id.to_string(),
         messages,
         images,
-        provider_name: Some(provider.name().to_string()),
+        provider_name: history_provider_name_from_session(&session)
+            .or_else(|| Some(provider.name().to_string())),
         provider_model: session.model.clone().or_else(|| Some(provider.model())),
         subagent_model: session.subagent_model.clone(),
         autoreview_enabled: session.autoreview_enabled,
@@ -774,6 +797,39 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
     let mut writer = writer.lock().await;
     writer.write_all(json.as_bytes()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_with_provider_key(key: Option<&str>) -> crate::session::Session {
+        let mut session = crate::session::Session::create_with_id(
+            "test_history_provider_name".to_string(),
+            None,
+            None,
+        );
+        session.provider_key = key.map(str::to_string);
+        session
+    }
+
+    #[test]
+    fn history_provider_name_prefers_persisted_openai_key() {
+        let session = session_with_provider_key(Some("openai"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("OpenAI")
+        );
+    }
+
+    #[test]
+    fn history_provider_name_preserves_unknown_runtime_profile() {
+        let session = session_with_provider_key(Some("opencode-go"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("opencode-go")
+        );
+    }
 }
 
 pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Arc<Mutex<Agent>>) {

@@ -505,6 +505,14 @@ pub(super) fn draw_messages(
         }
     }
 
+    let expand_edit_badge_visible = active_inline_edit_context.as_ref().is_some_and(|active| {
+        active.expandable
+            && !app.diff_mode().is_full_inline()
+            && active.start_line >= scroll
+            && active.start_line < visible_end
+    });
+    super::set_visible_expand_edit_badge(expand_edit_badge_visible);
+
     if let Some(active) = &active_inline_edit_context
         && active.expandable
         && !app.diff_mode().is_full_inline()

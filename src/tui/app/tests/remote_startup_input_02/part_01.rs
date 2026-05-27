@@ -348,6 +348,108 @@ fn test_handle_key_ctrl_backspace_csi_u_char_fallback_deletes_word() {
 }
 
 #[test]
+fn test_handle_key_super_backspace_deletes_to_start() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+
+    app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Backspace, KeyModifiers::SUPER)
+        .unwrap();
+
+    assert_eq!(app.input(), "again");
+    assert_eq!(app.cursor_pos(), 0);
+}
+
+#[test]
+fn test_handle_key_super_delete_aliases_delete_to_start() {
+    for code in [KeyCode::Delete, KeyCode::Char('\u{7f}')] {
+        let mut app = create_test_app();
+        app.set_input_for_test("hello world again");
+
+        app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+            .unwrap();
+        app.handle_key(code, KeyModifiers::SUPER).unwrap();
+
+        assert_eq!(app.input(), "again");
+        assert_eq!(app.cursor_pos(), 0);
+    }
+}
+
+#[test]
+fn test_handle_key_alt_delete_aliases_delete_previous_word() {
+    for code in [KeyCode::Backspace, KeyCode::Delete, KeyCode::Char('\u{7f}')] {
+        let mut app = create_test_app();
+        app.set_input_for_test("hello world again");
+
+        app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+            .unwrap();
+        app.handle_key(code, KeyModifiers::ALT).unwrap();
+
+        assert_eq!(app.input(), "hello again");
+        assert_eq!(app.cursor_pos(), "hello ".len());
+    }
+}
+
+#[test]
+fn test_remote_super_backspace_deletes_to_start() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+        .unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Backspace, KeyModifiers::SUPER, &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input(), "again");
+    assert_eq!(app.cursor_pos(), 0);
+}
+
+#[test]
+fn test_handle_key_ctrl_k_deletes_to_end() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+
+    app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Char('k'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world ");
+    assert_eq!(app.cursor_pos(), "hello world ".len());
+}
+
+#[test]
+fn test_handle_key_super_left_right_move_to_edges() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world");
+
+    app.handle_key(KeyCode::Left, KeyModifiers::SUPER).unwrap();
+    assert_eq!(app.cursor_pos(), 0);
+
+    app.handle_key(KeyCode::Right, KeyModifiers::SUPER).unwrap();
+    assert_eq!(app.cursor_pos(), "hello world".len());
+}
+
+#[test]
+fn test_handle_key_super_z_undoes_input_change() {
+    let mut app = create_test_app();
+
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('b'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+
+    assert_eq!(app.input(), "a");
+    assert_eq!(app.cursor_pos(), 1);
+}
+
+#[test]
 fn test_handle_key_ctrl_h_does_not_insert_text() {
     let mut app = create_test_app();
     app.set_input_for_test("hello");
@@ -635,6 +737,8 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             }],
         )
         .expect("save todos");
@@ -768,6 +872,8 @@ fn test_escape_interrupt_disables_auto_poke_while_processing() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
             },
         ]));
 

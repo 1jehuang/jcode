@@ -1,5 +1,38 @@
 use super::*;
 
+fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
+    if tc.name == "selfdev" {
+        return ("Reload initiated. Process restarting...".to_string(), false);
+    }
+
+    let action = tc
+        .input
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let is_wait_like =
+        (tc.name == "bg" && action == "wait") || (tc.name == "swarm" && action == "await_members");
+
+    if is_wait_like {
+        let input = serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_string());
+        return (
+            format!(
+                "[Tool '{}' wait interrupted by server reload after {:.1}s. The underlying operation may still be running. Resume the wait by rerunning the same tool call with input: {}]",
+                tc.name, elapsed_secs, input
+            ),
+            false,
+        );
+    }
+
+    (
+        format!(
+            "[Tool '{}' interrupted by server reload after {:.1}s]",
+            tc.name, elapsed_secs
+        ),
+        true,
+    )
+}
+
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
@@ -1095,28 +1128,20 @@ impl Agent {
                     ));
                     tool_handle.abort();
 
-                    // For selfdev reload, the interruption is intentional -
-                    // the tool triggered the reload and blocked waiting for shutdown.
-                    // Use a non-error message so the conversation history is clean.
-                    let is_selfdev_reload = tc.name == "selfdev";
-                    let interrupted_msg = if is_selfdev_reload {
-                        "Reload initiated. Process restarting...".to_string()
-                    } else {
-                        format!(
-                            "[Tool '{}' interrupted by server reload after {:.1}s]",
-                            tc.name,
-                            tool_elapsed.as_secs_f64()
-                        )
-                    };
+                    // For selfdev reload and wait-like tools, the interruption is expected:
+                    // selfdev initiated the restart, while wait-like tools should be resumed
+                    // after reload rather than treated as failed work.
+                    let (interrupted_msg, is_error) =
+                        reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64());
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: interrupted_msg.clone(),
-                        error: if is_selfdev_reload {
-                            None
-                        } else {
+                        error: if is_error {
                             Some("interrupted by reload".to_string())
+                        } else {
+                            None
                         },
                     });
 
@@ -1125,7 +1150,7 @@ impl Agent {
                         vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
                             content: interrupted_msg,
-                            is_error: Some(!is_selfdev_reload),
+                            is_error: Some(is_error),
                         }],
                         Some(tool_elapsed.as_millis() as u64),
                     );
@@ -1213,5 +1238,44 @@ impl Agent {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_call(name: &str, input: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "toolu_test".to_string(),
+            name: name.to_string(),
+            input,
+            intent: None,
+        }
+    }
+
+    #[test]
+    fn reload_interrupted_bg_wait_is_non_error_and_resumable() {
+        let tc = tool_call(
+            "bg",
+            json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
+        );
+
+        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
+
+        assert!(!is_error);
+        assert!(message.contains("Resume the wait"));
+        assert!(message.contains("\"task_id\":\"bg-123\""));
+    }
+
+    #[test]
+    fn reload_interrupted_non_wait_tool_remains_error() {
+        let tc = tool_call("bash", json!({"command": "sleep 10"}));
+
+        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
+
+        assert!(is_error);
+        assert!(message.contains("interrupted by server reload"));
     }
 }

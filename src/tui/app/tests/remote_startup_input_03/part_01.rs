@@ -508,21 +508,18 @@ fn test_background_rebuild_status_uses_compact_rebuild_card() {
 }
 
 #[test]
-fn test_startup_update_status_uses_compact_update_card() {
+fn test_startup_update_checking_stays_quiet_until_update_work_starts() {
     let mut app = create_test_app();
 
     app.handle_update_status(UpdateStatus::Checking);
 
-    let message = app
-        .display_messages()
-        .last()
-        .expect("expected update display message");
-    assert_eq!(message.title.as_deref(), Some("Update"));
-    assert!(message.content.contains("**Status:** checking for updates"));
-    assert_eq!(
-        app.status_notice(),
-        Some("Checking for updates...".to_string())
+    assert!(
+        app.display_messages()
+            .iter()
+            .all(|message| message.title.as_deref() != Some("Update")),
+        "startup update checks should not show a card unless an update exists"
     );
+    assert_eq!(app.status_notice(), None);
 
     app.handle_update_status(UpdateStatus::Downloading {
         version: "v1.2.3".to_string(),
@@ -569,7 +566,7 @@ fn test_startup_update_up_to_date_removes_transient_card() {
     assert!(
         app.display_messages()
             .iter()
-            .any(|message| message.title.as_deref() == Some("Update"))
+            .all(|message| message.title.as_deref() != Some("Update"))
     );
 
     app.handle_update_status(UpdateStatus::UpToDate);
