@@ -31,6 +31,10 @@ jobs:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # See ci.yml: avoid `if: ${{ secrets.X != '' }}` (Actions validator
+      # rejects `secrets` context in step-level `if:` expressions).
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +64,7 @@ jobs:
           fetch-depth: 0
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
