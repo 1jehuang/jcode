@@ -56,3 +56,35 @@ impl ToolOutput {
         self
     }
 }
+
+/// Resolve tool name aliases to their canonical internal names.
+///
+/// When using OAuth, the API presents tools with Claude Code names
+/// (e.g. `file_grep`, `shell_exec`). The model uses those names in
+/// sub-tool calls (e.g. inside `batch`), but our registry uses internal
+/// names (`grep`, `bash`). This mapping ensures both forms resolve
+/// correctly.
+///
+/// This lives in `jcode-tool-types` (rather than the tool `Registry`) so that
+/// low-level crates such as config can normalize tool names without depending
+/// on the full tool subsystem.
+pub fn resolve_tool_name(name: &str) -> &str {
+    match name {
+        "communicate" => "swarm",
+        "task" | "task_runner" => "subagent",
+        "launch" => "open",
+        "shell" => "bash",
+        "shell_exec" => "bash",
+        "read_file" => "read",
+        "file_read" => "read",
+        "write_file" => "write",
+        "file_write" => "write",
+        "edit_file" => "edit",
+        "file_edit" => "edit",
+        "file_glob" => "glob",
+        "file_grep" => "grep",
+        "skill" | "Skill" => "skill_manage",
+        "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
+        other => other,
+    }
+}

@@ -38,6 +38,7 @@ impl App {
                 is_default: configured.is_some(),
                 recommended: false,
                 recommendation_rank: usize::MAX,
+                usage_score: 0,
                 old: false,
                 created_date: None,
                 effort: None,
@@ -60,6 +61,14 @@ impl App {
     }
 
     pub(crate) fn open_login_picker_inline(&mut self) {
+        self.open_auth_provider_picker_inline(false);
+    }
+
+    pub(crate) fn open_logout_picker_inline(&mut self) {
+        self.open_auth_provider_picker_inline(true);
+    }
+
+    fn open_auth_provider_picker_inline(&mut self, logout: bool) {
         let status = crate::auth::AuthStatus::check_fast();
         let providers = crate::provider_catalog::tui_login_providers();
         let models = providers
@@ -90,12 +99,17 @@ impl App {
                         detail: format!("{} · {}", assessment.method_detail, provider.menu_detail),
                         estimated_reference_cost_micros: None,
                     }],
-                    action: PickerAction::Login(provider),
+                    action: if logout {
+                        PickerAction::Logout(provider)
+                    } else {
+                        PickerAction::Login(provider)
+                    },
                     selected_option: 0,
                     is_current: auth_state == crate::auth::AuthState::Available,
                     is_default: false,
                     recommended: provider.recommended,
                     recommendation_rank: usize::MAX,
+                    usage_score: 0,
                     old: false,
                     created_date: None,
                     effort: None,
@@ -179,6 +193,7 @@ impl App {
                             is_default: false,
                             recommended: false,
                             recommendation_rank: usize::MAX,
+                            usage_score: 0,
                             old: false,
                             created_date: None,
                             effort: None,
@@ -207,6 +222,7 @@ impl App {
                     is_default: false,
                     recommended: false,
                     recommendation_rank: usize::MAX,
+                    usage_score: 0,
                     old: false,
                     created_date: None,
                     effort: None,

@@ -512,13 +512,13 @@ mod tests {
                 "Anthropic/Claude",
                 "Anthropic",
                 "claude-oauth",
-                "api-key",
+                "claude-api",
             ),
             (
                 "claude-api",
                 "Anthropic API",
                 "Anthropic",
-                "api-key",
+                "claude-api",
                 "claude-oauth",
             ),
             (

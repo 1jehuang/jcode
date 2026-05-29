@@ -3,9 +3,11 @@ mod app;
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
-mod generated_image;
-pub mod image;
-mod image_metadata;
+// Terminal image display + metadata helpers now live in the dependency-free
+// `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
+// so existing `crate::tui::image` / `crate::tui::image_metadata` paths keep working.
+pub use jcode_terminal_image::display as image;
+use jcode_terminal_image::metadata as image_metadata;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
@@ -30,7 +32,7 @@ pub use jcode_tui_workspace::workspace_map;
 pub use jcode_tui_workspace::workspace_map_widget;
 
 pub use app::{App, CopyBadgeUiState, ProcessingStatus, RunResult};
-pub use generated_image::{
+pub use crate::generated_image::{
     generated_image_side_panel_markdown, generated_image_side_panel_page_id,
     write_generated_image_side_panel_page,
 };
@@ -381,34 +383,9 @@ pub struct CacheTtlInfo {
     pub cached_tokens: Option<u64>,
 }
 
-/// Get the prompt cache TTL in seconds for a given provider name.
-/// Returns None if the provider doesn't support prompt caching or TTL is unknown.
-pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
-    cache_ttl_for_provider_model(provider, None)
-}
-
-pub fn cache_ttl_for_provider_model(provider: &str, model: Option<&str>) -> Option<u64> {
-    match provider.to_lowercase().as_str() {
-        "anthropic" | "claude" => Some(300),
-        "openai" => {
-            if model
-                .map(crate::provider::openai::OpenAIProvider::supports_extended_prompt_cache_retention)
-                .unwrap_or(false)
-            {
-                Some(24 * 60 * 60)
-            } else {
-                Some(300)
-            }
-        }
-        "openrouter" => Some(300),
-        "jcode subscription" => Some(300),
-        "gemini" => Some(300),
-        "copilot" => None,
-        "cursor" => None,
-        "antigravity" => None,
-        _ => None,
-    }
-}
+/// Prompt cache TTL helpers now live in `crate::provider` (provider
+/// cache-retention policy); re-exported here for existing tui call sites.
+pub use crate::provider::{cache_ttl_for_provider, cache_ttl_for_provider_model};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvCacheProblemKind {
@@ -731,6 +708,7 @@ pub enum PickerAction {
     Model,
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
+    Logout(crate::provider_catalog::LoginProviderDescriptor),
     Usage {
         id: String,
         title: String,
@@ -798,7 +776,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
                 .map(|value| value.capacity())
                 .unwrap_or(0)
         }
-        PickerAction::Login(descriptor) => {
+        PickerAction::Login(descriptor) | PickerAction::Logout(descriptor) => {
             descriptor.id.len()
                 + descriptor.display_name.len()
                 + descriptor
@@ -995,6 +973,7 @@ pub struct PickerEntry {
     pub is_default: bool,
     pub recommended: bool,
     pub recommendation_rank: usize,
+    pub usage_score: u32,
     pub old: bool,
     /// Human-readable created date (e.g. "Jan 2026") for OpenRouter models
     pub created_date: Option<String>,

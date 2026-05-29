@@ -77,7 +77,10 @@ pub(in crate::tui::app) fn handle_server_event(
             true
         }
         ServerEvent::ToolStart { id, name } => {
-            app.pause_streaming_tps(false);
+            // Tool-call JSON is provider-generated output and is included in output-token
+            // usage. Keep the TPS timer running until the server reports ToolExec; actual
+            // tool execution time is excluded after that point.
+            app.resume_streaming_tps();
             app.clear_active_experimental_feature_notice();
             remote.handle_tool_start(&id, &name);
             app.commit_pending_streaming_assistant_message();
@@ -98,7 +101,10 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::ToolExec { id, name } => {
-            app.pause_streaming_tps(false);
+            // Provider output generation for this tool call is complete, but final usage
+            // snapshots often arrive later. Keep collecting deltas while excluding tool
+            // runtime from the elapsed TPS denominator.
+            app.pause_streaming_tps(true);
             let parsed_input = remote.get_current_tool_input();
             let tool_call = ToolCall {
                 id: id.clone(),
@@ -232,6 +238,7 @@ pub(in crate::tui::app) fn handle_server_event(
             ephemeral_chars,
             ephemeral_message_count,
         } => {
+            remote.reset_call_output_tokens_seen();
             app.begin_remote_kv_cache_request(app_mod::KvCacheRequestSignature {
                 system_static_hash,
                 tools_hash,
@@ -271,6 +278,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 _ => crate::message::ConnectionPhase::Connecting,
             };
             app.status = if matches!(cp, crate::message::ConnectionPhase::Streaming) {
+                app.resume_streaming_tps();
                 ProcessingStatus::Streaming
             } else {
                 ProcessingStatus::Connecting(cp)

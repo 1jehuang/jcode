@@ -376,31 +376,31 @@ pub fn import_session(session_id: &str) -> Result<Session> {
 }
 
 pub fn imported_session_id_for_target(
-    target: &crate::tui::session_picker::ResumeTarget,
+    target: &jcode_tui_session_picker::ResumeTarget,
 ) -> Option<String> {
     match target {
-        crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } => {
+        jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } => {
             Some(session_id.clone())
         }
-        crate::tui::session_picker::ResumeTarget::ClaudeCodeSession { session_id, .. } => {
+        jcode_tui_session_picker::ResumeTarget::ClaudeCodeSession { session_id, .. } => {
             Some(imported_claude_code_session_id(session_id))
         }
-        crate::tui::session_picker::ResumeTarget::CodexSession { session_id, .. } => {
+        jcode_tui_session_picker::ResumeTarget::CodexSession { session_id, .. } => {
             Some(imported_codex_session_id(session_id))
         }
-        crate::tui::session_picker::ResumeTarget::PiSession { session_path } => {
+        jcode_tui_session_picker::ResumeTarget::PiSession { session_path } => {
             Some(imported_pi_session_id(session_path))
         }
-        crate::tui::session_picker::ResumeTarget::OpenCodeSession { session_id, .. } => {
+        jcode_tui_session_picker::ResumeTarget::OpenCodeSession { session_id, .. } => {
             Some(imported_opencode_session_id(session_id))
         }
     }
 }
 
 pub fn resolve_resume_target_to_jcode(
-    target: &crate::tui::session_picker::ResumeTarget,
-) -> Result<crate::tui::session_picker::ResumeTarget> {
-    use crate::tui::session_picker::ResumeTarget;
+    target: &jcode_tui_session_picker::ResumeTarget,
+) -> Result<jcode_tui_session_picker::ResumeTarget> {
+    use jcode_tui_session_picker::ResumeTarget;
 
     let session_id = match target {
         ResumeTarget::JcodeSession { session_id } => {

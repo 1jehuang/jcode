@@ -241,6 +241,7 @@ mod tests {
             is_default: false,
             recommended: false,
             recommendation_rank: 0,
+            usage_score: 0,
             old: false,
             created_date: None,
             effort: None,
@@ -277,7 +278,7 @@ mod tests {
             ),
             (
                 "claude-opus-4-6",
-                route("Anthropic", "api-key"),
+                route("Anthropic", "claude-api"),
                 "claude-api:claude-opus-4-6",
             ),
             (

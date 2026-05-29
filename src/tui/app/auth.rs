@@ -169,6 +169,52 @@ impl App {
         self.set_status_notice("Login: choose a provider");
     }
 
+    pub(super) fn show_interactive_logout(&mut self) {
+        self.open_logout_picker_inline();
+        self.set_status_notice("Logout: choose a provider");
+    }
+
+    pub(super) fn start_logout_provider(
+        &mut self,
+        provider: crate::provider_catalog::LoginProviderDescriptor,
+    ) {
+        use crate::provider_catalog::LoginProviderTarget;
+
+        let result: anyhow::Result<String> = (|| match provider.target {
+            LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => {
+                let removed = crate::auth::claude::clear_accounts()?;
+                Ok(format!("Logged out of {} Anthropic account(s).", removed))
+            }
+            LoginProviderTarget::OpenAi | LoginProviderTarget::OpenAiApiKey => {
+                let removed = crate::auth::codex::clear_accounts()?;
+                Ok(format!("Logged out of {} OpenAI account(s).", removed))
+            }
+            LoginProviderTarget::Gemini => {
+                crate::auth::gemini::clear_tokens()?;
+                Ok("Logged out of Gemini.".to_string())
+            }
+            _ => Ok(format!(
+                "Logout for {} is not automated yet. Remove its saved API key or external CLI session from `/account {} settings`.",
+                provider.display_name, provider.id
+            )),
+        })();
+
+        match result {
+            Ok(message) => {
+                crate::auth::AuthStatus::invalidate_cache();
+                self.push_display_message(DisplayMessage::system(message));
+                self.set_status_notice(format!("Logout: {}", provider.display_name));
+            }
+            Err(err) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to log out of {}: {}",
+                    provider.display_name, err
+                )));
+                self.set_status_notice("Logout failed");
+            }
+        }
+    }
+
     pub(super) fn start_login_provider(
         &mut self,
         provider: crate::provider_catalog::LoginProviderDescriptor,
@@ -839,7 +885,7 @@ impl App {
             "https://console.anthropic.com/settings/keys",
             "anthropic.env",
             "ANTHROPIC_API_KEY",
-            Some("claude-sonnet-4-5-20250929"),
+            Some("claude-opus-4-8"),
             Some("https://api.anthropic.com"),
             false,
             None,

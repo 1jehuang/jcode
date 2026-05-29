@@ -1,6 +1,119 @@
 use super::*;
 use crate::tui::ui::{self, WrappedLineMap};
 
+/// Auxiliary render data for an assistant message that is otherwise recomputed
+/// by re-parsing markdown on every body rebuild. Building the body misses its
+/// cache whenever `display_messages_version` changes (e.g. an in-place edit to
+/// the last assistant/tool message or a streaming finalize), and each miss used
+/// to re-render the same markdown two or three additional times just to derive
+/// the raw-line/logical-line map used for text selection. Memoizing it keeps the
+/// common edit-in-place and finalize paths cheap on long transcripts.
+#[derive(Clone)]
+struct AssistantAuxData {
+    /// Number of leading `cached` lines that correspond to rendered markdown
+    /// content (excludes appended tool-call summary lines).
+    content_line_count: usize,
+    /// Plain logical lines used to build the wrapped->raw line map.
+    logical_plain_lines: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct AssistantAuxKey {
+    message_hash: u64,
+    content_len: usize,
+    content_width: u16,
+    centered: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+    cached_len: usize,
+}
+
+const ASSISTANT_AUX_CACHE_LIMIT: usize = 2048;
+
+#[derive(Default)]
+struct AssistantAuxCacheState {
+    entries: std::collections::HashMap<AssistantAuxKey, std::sync::Arc<AssistantAuxData>>,
+    order: std::collections::VecDeque<AssistantAuxKey>,
+}
+
+fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<AssistantAuxCacheState>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
+}
+
+/// Compute (and cache) the auxiliary raw-line-map data for an assistant message.
+/// `cached` is the already-rendered (and possibly cached) display lines for the
+/// message; `align` and `centered` describe the current display mode.
+fn assistant_aux_data(
+    msg: &DisplayMessage,
+    cached: &[Line<'static>],
+    content_width: u16,
+    centered: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+    align: ratatui::layout::Alignment,
+) -> std::sync::Arc<AssistantAuxData> {
+    let build = || {
+        let content_lines =
+            markdown::render_markdown_with_width(&msg.content, Some(content_width as usize));
+        let content_line_count = content_lines.len().min(cached.len());
+        let logical_plain_lines: Vec<String> =
+            if content_prefers_display_as_logical_lines(&msg.content) {
+                cached
+                    .iter()
+                    .take(content_line_count)
+                    .map(ui::line_plain_text)
+                    .collect()
+            } else {
+                markdown::render_markdown(&msg.content)
+                    .into_iter()
+                    .map(|line| ui::line_plain_text(&align_if_unset(line, align)))
+                    .collect()
+            };
+        AssistantAuxData {
+            content_line_count,
+            logical_plain_lines,
+        }
+    };
+
+    if cfg!(test) {
+        return std::sync::Arc::new(build());
+    }
+
+    let key = AssistantAuxKey {
+        message_hash: msg.stable_cache_hash(),
+        content_len: msg.content.len(),
+        content_width,
+        centered,
+        diff_mode,
+        cached_len: cached.len(),
+    };
+
+    {
+        let cache = match assistant_aux_cache().lock() {
+            Ok(c) => c,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(data) = cache.entries.get(&key) {
+            return data.clone();
+        }
+    }
+
+    let data = std::sync::Arc::new(build());
+    let mut cache = match assistant_aux_cache().lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if cache.entries.insert(key.clone(), data.clone()).is_none() {
+        cache.order.push_back(key);
+        while cache.order.len() > ASSISTANT_AUX_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.entries.remove(&oldest);
+            }
+        }
+    }
+    data
+}
+
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
     content.lines().any(|line| {
         let trimmed = line.trim();
@@ -1134,29 +1247,21 @@ pub(super) fn prepare_body(
                 for target in message_copy_targets {
                     copy_targets.push(offset_copy_target(target, lines.len()));
                 }
-                let content_lines = markdown::render_markdown_with_width(
-                    &msg.content,
-                    Some(content_width as usize),
+                let aux = assistant_aux_data(
+                    msg,
+                    &cached,
+                    content_width,
+                    centered,
+                    app.diff_mode(),
+                    align,
                 );
-                let content_line_count = content_lines.len().min(cached.len());
-                let logical_plain_lines: Vec<String> =
-                    if content_prefers_display_as_logical_lines(&msg.content) {
-                        cached
-                            .iter()
-                            .take(content_line_count)
-                            .map(ui::line_plain_text)
-                            .collect()
-                    } else {
-                        markdown::render_markdown(&msg.content)
-                            .into_iter()
-                            .map(|line| ui::line_plain_text(&align_if_unset(line, align)))
-                            .collect()
-                    };
+                let content_line_count = aux.content_line_count;
+                let logical_plain_lines = &aux.logical_plain_lines;
                 let raw_base = raw_plain_lines.len();
                 raw_plain_lines.extend(logical_plain_lines.iter().cloned());
                 let content_maps = map_display_lines_to_logical_lines(
                     &cached[..content_line_count],
-                    &logical_plain_lines,
+                    logical_plain_lines,
                     raw_base,
                 );
 

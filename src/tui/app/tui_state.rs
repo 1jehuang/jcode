@@ -11,6 +11,7 @@ enum WidgetProviderKind {
     OpenAI,
     OpenCode,
     OpenRouter,
+    CostBasedApiKey,
     Copilot,
     Gemini,
     Unknown,
@@ -22,6 +23,15 @@ impl WidgetProviderKind {
             Some(provider) if provider == "openrouter" => Self::OpenRouter,
             Some(provider) if matches!(provider.as_str(), "opencode" | "opencode-go") => {
                 Self::OpenCode
+            }
+            Some(provider)
+                if matches!(
+                    provider.as_str(),
+                    "bedrock" | "aws-bedrock" | "azure-openai"
+                ) || crate::provider_catalog::openai_compatible_profile_by_id(&provider)
+                    .is_some_and(|profile| profile.requires_api_key) =>
+            {
+                Self::CostBasedApiKey
             }
             Some(provider) if provider == "copilot" => Self::Copilot,
             Some(provider) if provider == "gemini" => Self::Gemini,
@@ -128,13 +138,17 @@ impl App {
             Some(self.provider.name())
         };
 
-        let provider = WidgetProviderKind::from_provider_key(
-            model
-                .map(|model| crate::provider::resolve_model_capabilities(model, provider_name))
-                .and_then(|caps| caps.provider)
-                .as_deref()
-                .or(provider_name),
-        );
+        let provider_from_hint = WidgetProviderKind::from_provider_key(provider_name);
+        let provider = if provider_from_hint != WidgetProviderKind::Unknown {
+            provider_from_hint
+        } else {
+            WidgetProviderKind::from_provider_key(
+                model
+                    .map(|model| crate::provider::resolve_model_capabilities(model, provider_name))
+                    .and_then(|caps| caps.provider)
+                    .as_deref(),
+            )
+        };
 
         WidgetRouteInfo {
             provider,
@@ -148,19 +162,32 @@ impl App {
         }
 
         let auth_status = crate::auth::AuthStatus::check_fast();
+        let runtime_provider = active_runtime_provider_key();
 
         match route.provider {
             WidgetProviderKind::Anthropic => {
-                if auth_status.anthropic.has_oauth {
+                if matches!(
+                    runtime_provider.as_deref(),
+                    Some("claude-api" | "anthropic-api")
+                ) {
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                } else if matches!(runtime_provider.as_deref(), Some("claude" | "anthropic")) {
                     crate::tui::info_widget::AuthMethod::AnthropicOAuth
                 } else if auth_status.anthropic.has_api_key {
+                    // AnthropicProvider::Auto tries direct API keys before OAuth.
                     crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                } else if auth_status.anthropic.has_oauth {
+                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
                 } else {
                     crate::tui::info_widget::AuthMethod::Unknown
                 }
             }
             WidgetProviderKind::OpenAI => {
-                if auth_status.openai_has_oauth {
+                if matches!(runtime_provider.as_deref(), Some("openai-api")) {
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                } else if matches!(runtime_provider.as_deref(), Some("openai")) {
+                    crate::tui::info_widget::AuthMethod::OpenAIOAuth
+                } else if auth_status.openai_has_oauth {
                     crate::tui::info_widget::AuthMethod::OpenAIOAuth
                 } else if auth_status.openai_has_api_key {
                     crate::tui::info_widget::AuthMethod::OpenAIApiKey
@@ -169,7 +196,20 @@ impl App {
                 }
             }
             WidgetProviderKind::OpenCode => crate::tui::info_widget::AuthMethod::OpenCodeApiKey,
-            WidgetProviderKind::OpenRouter => crate::tui::info_widget::AuthMethod::OpenRouterApiKey,
+            WidgetProviderKind::OpenRouter => {
+                let transport_state =
+                    crate::provider::openrouter::OpenRouterTransportState::from_current_env(
+                        runtime_provider.as_deref(),
+                    );
+                if transport_state.is_real_openrouter() {
+                    crate::tui::info_widget::AuthMethod::OpenRouterApiKey
+                } else if transport_state.accrues_user_api_key_cost() {
+                    crate::tui::info_widget::AuthMethod::ApiKey
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
+                }
+            }
+            WidgetProviderKind::CostBasedApiKey => crate::tui::info_widget::AuthMethod::ApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
                 if auth_status.gemini == crate::auth::AuthState::Available {
@@ -185,11 +225,29 @@ impl App {
     fn widget_usage_info(
         &self,
         route: WidgetRouteInfo,
+        auth_method: crate::tui::info_widget::AuthMethod,
     ) -> Option<crate::tui::info_widget::UsageInfo> {
         let output_tps = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
         } else {
             None
+        };
+
+        let cost_based_usage = || crate::tui::info_widget::UsageInfo {
+            provider: crate::tui::info_widget::UsageProvider::CostBased,
+            five_hour: 0.0,
+            five_hour_resets_at: None,
+            seven_day: 0.0,
+            seven_day_resets_at: None,
+            spark: None,
+            spark_resets_at: None,
+            total_cost: self.total_cost,
+            input_tokens: self.total_input_tokens,
+            output_tokens: self.total_output_tokens,
+            cache_read_tokens: self.streaming_cache_read_tokens,
+            cache_write_tokens: self.streaming_cache_creation_tokens,
+            output_tps,
+            available: true,
         };
 
         match route.provider {
@@ -210,6 +268,13 @@ impl App {
                 available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
             }),
             WidgetProviderKind::Anthropic => {
+                if matches!(
+                    auth_method,
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                ) {
+                    return Some(cost_based_usage());
+                }
+
                 let usage = crate::usage::get_sync();
                 Some(crate::tui::info_widget::UsageInfo {
                     provider: crate::tui::info_widget::UsageProvider::Anthropic,
@@ -229,6 +294,13 @@ impl App {
                 })
             }
             WidgetProviderKind::OpenAI => {
+                if matches!(
+                    auth_method,
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                ) {
+                    return Some(cost_based_usage());
+                }
+
                 let openai_usage = crate::usage::get_openai_usage_sync();
                 Some(crate::tui::info_widget::UsageInfo {
                     provider: crate::tui::info_widget::UsageProvider::OpenAI,
@@ -265,23 +337,24 @@ impl App {
                 })
             }
             WidgetProviderKind::Gemini => None,
-            WidgetProviderKind::OpenRouter | WidgetProviderKind::OpenCode => {
-                Some(crate::tui::info_widget::UsageInfo {
-                    provider: crate::tui::info_widget::UsageProvider::CostBased,
-                    five_hour: 0.0,
-                    five_hour_resets_at: None,
-                    seven_day: 0.0,
-                    seven_day_resets_at: None,
-                    spark: None,
-                    spark_resets_at: None,
-                    total_cost: self.total_cost,
-                    input_tokens: self.total_input_tokens,
-                    output_tokens: self.total_output_tokens,
-                    cache_read_tokens: self.streaming_cache_read_tokens,
-                    cache_write_tokens: self.streaming_cache_creation_tokens,
-                    output_tps,
-                    available: true,
-                })
+            WidgetProviderKind::OpenRouter => {
+                if route.is_remote {
+                    return Some(cost_based_usage());
+                }
+
+                let runtime_provider = active_runtime_provider_key();
+                let transport_state =
+                    crate::provider::openrouter::OpenRouterTransportState::from_current_env(
+                        runtime_provider.as_deref(),
+                    );
+                if transport_state.accrues_user_api_key_cost() {
+                    Some(cost_based_usage())
+                } else {
+                    None
+                }
+            }
+            WidgetProviderKind::OpenCode | WidgetProviderKind::CostBasedApiKey => {
+                Some(cost_based_usage())
             }
             WidgetProviderKind::Unknown => None,
         }
@@ -1071,7 +1144,8 @@ impl crate::tui::TuiState for App {
         };
 
         let route = self.widget_route_info(model.as_deref());
-        let usage_info = self.widget_usage_info(route);
+        let auth_method = self.widget_auth_method(route);
+        let usage_info = self.widget_usage_info(route, auth_method);
 
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
@@ -1101,8 +1175,6 @@ impl crate::tui::TuiState for App {
                     .collect(),
             }
         });
-
-        let auth_method = self.widget_auth_method(route);
 
         // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
         let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {

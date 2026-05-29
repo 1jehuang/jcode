@@ -1052,6 +1052,18 @@ pub(super) async fn handle_comm_assign_task(
         format!("Task assigned to you by coordinator: {}", content)
     };
     let queued_task_prompt = append_swarm_completion_report_instructions(&notification);
+    let assignment_text = combine_assignment_text(&content, message.as_deref());
+    update_member_status(
+        &target_session,
+        "queued",
+        Some(truncate_detail(&assignment_text, 120)),
+        swarm_members,
+        swarms_by_id,
+        Some(event_history),
+        Some(event_counter),
+        Some(swarm_event_tx),
+    )
+    .await;
 
     let target_agent = {
         let agent_sessions = sessions.read().await;
@@ -1095,7 +1107,6 @@ pub(super) async fn handle_comm_assign_task(
         let event_history_for_run = Arc::clone(event_history);
         let event_counter_for_run = Arc::clone(event_counter);
         let swarm_event_tx_for_run = swarm_event_tx.clone();
-        let assignment_text = combine_assignment_text(&content, message.as_deref());
         spawn_assigned_task_run(
             agent_arc,
             target_session_for_run,

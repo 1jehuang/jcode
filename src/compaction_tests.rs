@@ -262,6 +262,128 @@ async fn test_guard_between_80_and_95_starts_background_only() {
     );
 }
 
+/// Regression: a hard compact that runs while a background (reactive)
+/// compaction is in flight must abort the background task and discard its
+/// stale `pending_cutoff`. Otherwise, when the background task completes,
+/// `check_and_apply_compaction_with` adds the stale cutoff on top of the
+/// already-advanced `compacted_count`, double-compacting and wiping out all
+/// live messages (observed as "kept 0 recent messages").
+#[tokio::test]
+async fn test_hard_compact_aborts_inflight_background_compaction() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} content {}", i, "z".repeat(60)),
+        ));
+        manager.notify_message_added();
+    }
+
+    // Start a background reactive compaction (85% usage, below critical).
+    manager.update_observed_input_tokens(850);
+    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
+    manager.maybe_start_compaction_with(&messages, provider);
+    assert!(
+        manager.is_compacting(),
+        "background compaction should be in flight"
+    );
+    let inflight_cutoff = manager.pending_cutoff;
+    assert!(inflight_cutoff > 0, "background task should have a cutoff");
+
+    // Now pressure spikes to critical and we hard-compact synchronously while
+    // the background task is still pending.
+    let dropped = manager
+        .hard_compact_with(&messages)
+        .expect("hard compact should succeed");
+    assert!(dropped > 0);
+
+    // The in-flight background compaction must have been aborted/discarded.
+    assert!(
+        !manager.is_compacting(),
+        "hard compact must abort the in-flight background compaction"
+    );
+    assert_eq!(
+        manager.pending_cutoff, 0,
+        "stale pending_cutoff must be reset"
+    );
+
+    let compacted_after_hard = manager.compacted_count;
+
+    // Simulate the (now-aborted) background task completion path. With the fix
+    // there is no pending task, so this is a no-op and must NOT advance
+    // compacted_count again.
+    manager.check_and_apply_compaction_with(&messages);
+    assert_eq!(
+        manager.compacted_count, compacted_after_hard,
+        "completing after abort must not double-advance compacted_count"
+    );
+
+    // Live messages must survive: active_messages_count stays positive.
+    assert!(
+        manager.active_messages_count() > 0,
+        "must keep recent messages live, not wipe everything to 0"
+    );
+    let active = manager.active_messages(&messages);
+    assert!(
+        !active.is_empty(),
+        "active message slice must not be empty after hard compact"
+    );
+}
+
+/// Defense-in-depth: if `compacted_count` advances while a background
+/// compaction is in flight (so its `pending_cutoff` becomes stale), applying
+/// the completed result must NOT over-advance `compacted_count` and wipe the
+/// live tail. The stale result should be discarded instead.
+#[tokio::test]
+async fn test_stale_background_result_discarded_when_context_shrinks() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} content {}", i, "q".repeat(60)),
+        ));
+        manager.notify_message_added();
+    }
+
+    manager.update_observed_input_tokens(850);
+    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
+    manager.maybe_start_compaction_with(&messages, provider);
+    assert!(manager.is_compacting());
+    let pending = manager.pending_cutoff;
+    assert!(pending > 0);
+
+    // Simulate an interleaving mutation that advances compacted_count out from
+    // under the in-flight task (e.g. a hard compact via a different path),
+    // leaving only a small active tail.
+    manager.compacted_count = messages.len() - 3;
+
+    // Drain the background task to completion, then apply.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        manager.check_and_apply_compaction_with(&messages);
+        if !manager.is_compacting() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!manager.is_compacting(), "task should have been drained");
+
+    // The stale result must have been discarded: compacted_count stays where
+    // the interleaving mutation left it, and the live tail survives.
+    assert_eq!(
+        manager.compacted_count,
+        messages.len() - 3,
+        "stale pending_cutoff must not advance compacted_count further"
+    );
+    assert!(
+        manager.active_messages(&messages).len() >= 3,
+        "live tail must survive a discarded stale compaction"
+    );
+    assert_eq!(manager.pending_cutoff, 0, "pending_cutoff must be reset");
+}
+
 #[tokio::test]
 async fn test_guard_at_95_triggers_hard_compact() {
     let mut manager = CompactionManager::new().with_budget(1_000);
@@ -629,7 +751,7 @@ fn test_hard_compact_clamps_pathological_compacted_count() {
         covers_up_to_turn: 100,
         original_turn_count: 100,
     });
-    manager.active_message_chars_dirty = true;
+    manager.active_chars.invalidate();
 
     for _ in 0..3 {
         let _ = manager.hard_compact_with(&messages);
@@ -722,7 +844,7 @@ fn test_invalid_compacted_count_does_not_resurrect_full_transcript_after_new_tur
         covers_up_to_turn: 500,
         original_turn_count: 500,
     });
-    manager.active_message_chars_dirty = true;
+    manager.active_chars.invalidate();
 
     let before_new_turn = manager.messages_for_api_with(&messages);
     assert_eq!(before_new_turn.len(), 1);
@@ -871,4 +993,110 @@ fn test_context_usage_after_compaction_resets_observed() {
         "post-compaction usage should be below critical: {}",
         post_usage
     );
+}
+
+#[test]
+fn test_recover_within_budget_drops_messages_without_truncation() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("msg {} pad {}", i, "x".repeat(40)),
+        ));
+        manager.notify_message_added();
+    }
+    // Push well over budget so recovery triggers.
+    manager.update_observed_input_tokens(2_000);
+
+    let recovery = manager.recover_within_budget(&mut messages);
+    assert!(
+        recovery.dropped.unwrap_or(0) > 0,
+        "should drop old messages"
+    );
+    // Dropping turns alone should fit the small remaining tail, so no
+    // truncation escalation is needed.
+    assert_eq!(
+        recovery.truncated, 0,
+        "should not truncate when dropping turns fits the budget"
+    );
+    assert!(recovery.did_anything());
+    assert!(
+        manager.context_usage_with(&messages) <= 1.0,
+        "context should be back under budget after recovery"
+    );
+}
+
+#[test]
+fn test_recover_within_budget_truncates_when_tail_still_too_large() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    // Build tool-use/tool-result pairs whose results are each individually
+    // larger than the whole budget. After hard compaction drops down to the
+    // minimum kept tail, the surviving tool result is still far over budget, so
+    // recovery must escalate to truncation (which only acts on tool results).
+    for i in 0..10 {
+        let id = format!("tool_{i}");
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.clone(),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "command": "cat big.log" }),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        manager.notify_message_added();
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: format!("huge {} {}", i, "y".repeat(20_000)),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(50_000);
+
+    let recovery = manager.recover_within_budget(&mut messages);
+    assert!(recovery.did_anything());
+    assert!(
+        recovery.truncated > 0,
+        "should escalate to truncation when the remaining tail is still too large"
+    );
+}
+
+#[test]
+fn test_recover_within_budget_summary_line_variants() {
+    let dropped_only = EmergencyRecovery {
+        pre_usage: 1.6,
+        dropped: Some(7),
+        truncated: 0,
+    };
+    let line = dropped_only.summary_line(dropped_only.pre_usage);
+    assert!(line.contains("dropped 7 old messages"));
+    assert!(line.contains("160%"));
+    assert!(!line.contains("truncated"));
+
+    let dropped_and_truncated = EmergencyRecovery {
+        pre_usage: 2.0,
+        dropped: Some(3),
+        truncated: 2,
+    };
+    let line = dropped_and_truncated.summary_line(dropped_and_truncated.pre_usage);
+    assert!(line.contains("dropped 3 old messages"));
+    assert!(line.contains("truncated 2 tool result(s)"));
+
+    let truncate_only = EmergencyRecovery {
+        pre_usage: 1.2,
+        dropped: None,
+        truncated: 5,
+    };
+    let line = truncate_only.summary_line(truncate_only.pre_usage);
+    assert!(line.contains("shortened 5 large tool result(s)"));
+    assert!(!line.contains("dropped"));
 }

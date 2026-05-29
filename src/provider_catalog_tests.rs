@@ -288,6 +288,7 @@ fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_NAMED_PROVIDER_PROFILE",
@@ -314,6 +315,7 @@ fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_MODEL",
@@ -333,6 +335,7 @@ fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", "openrouter.env");
     crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "openrouter");
     crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "1");
+    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "stale");
     crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
     crate::env::set_var(
         "JCODE_OPENROUTER_MODEL_CATALOG",
@@ -373,6 +376,10 @@ fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_PROVIDER_FEATURES").as_deref(),
         Ok("0")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_TRANSPORT_STATE").as_deref(),
+        Ok("direct-api-key")
     );
     assert!(std::env::var_os("JCODE_OPENROUTER_ALLOW_NO_AUTH").is_none());
     assert!(std::env::var_os("JCODE_OPENROUTER_MODEL_CATALOG").is_none());
@@ -628,6 +635,7 @@ fn named_provider_profile_maps_to_openai_compatible_runtime_env() {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_MODEL",
@@ -677,6 +685,12 @@ fn named_provider_profile_maps_to_openai_compatible_runtime_env() {
         Some("0")
     );
     assert_eq!(
+        std::env::var("JCODE_OPENROUTER_TRANSPORT_STATE")
+            .ok()
+            .as_deref(),
+        Some("direct-api-key")
+    );
+    assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL_CATALOG")
             .ok()
             .as_deref(),
@@ -720,6 +734,7 @@ fn named_provider_inline_api_key_is_private_runtime_fallback() {
         "JCODE_OPENROUTER_API_KEY_NAME",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_MY_GATEWAY_API_KEY",

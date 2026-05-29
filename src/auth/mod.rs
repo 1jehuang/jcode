@@ -764,7 +764,7 @@ fn probe_anthropic_status(status: &mut AuthStatus) {
     }
 
     // API key overrides expired OAuth.
-    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+    if crate::provider::anthropic::has_anthropic_api_key() {
         anthropic.has_api_key = true;
         anthropic.state = AuthState::Available;
     }

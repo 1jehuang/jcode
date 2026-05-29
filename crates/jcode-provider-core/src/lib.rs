@@ -626,14 +626,11 @@ pub fn model_route_metadata_is_recommended(
             matches!(&api_method, ModelRouteApiMethod::OpenAIOAuth)
                 && model_route_provider_labels_match(provider, "openai")
         }
-        "claude-opus-4-7" => {
-            matches!(&api_method, ModelRouteApiMethod::ClaudeOAuth)
-                && model_route_provider_labels_match(provider, "anthropic")
-        }
-        "deepseek/deepseek-v4-pro" => {
-            (matches!(&api_method, ModelRouteApiMethod::OpenRouter) && provider == "auto")
-                || (api_method.is_openai_compatible()
-                    && model_route_provider_labels_match(provider, "deepseek"))
+        "claude-opus-4-8" => {
+            matches!(
+                &api_method,
+                ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey
+            ) && model_route_provider_labels_match(provider, "anthropic")
         }
         _ => false,
     }
@@ -950,32 +947,26 @@ mod tests {
             false
         ));
         assert!(model_route_metadata_is_recommended(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             "Anthropic",
             "claude-oauth",
             true
         ));
+        assert!(model_route_metadata_is_recommended(
+            "claude-opus-4-8",
+            "Anthropic",
+            "claude-api",
+            true
+        ));
         assert!(!model_route_metadata_is_recommended(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             "Anthropic",
             "openrouter",
             true
         ));
-        assert!(model_route_metadata_is_recommended(
-            "deepseek/deepseek-v4-pro",
-            "auto",
-            "openrouter",
-            true
-        ));
-        assert!(model_route_metadata_is_recommended(
-            "deepseek/deepseek-v4-pro",
-            "DeepSeek",
-            "openai-compatible:deepseek",
-            true
-        ));
         assert!(!model_route_metadata_is_recommended(
             "deepseek/deepseek-v4-pro",
-            "DeepSeek",
+            "auto",
             "openrouter",
             true
         ));

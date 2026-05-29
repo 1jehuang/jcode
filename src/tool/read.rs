@@ -2,9 +2,9 @@
 
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
-use crate::tui::image::{ImageDisplayParams, ImageProtocol, display_image};
 use anyhow::Result;
 use async_trait::async_trait;
+use jcode_terminal_image::{ImageDisplayParams, ImageProtocol, display_image};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;

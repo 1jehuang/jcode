@@ -166,7 +166,10 @@ fn test_rewind_autocomplete_uses_visible_message_count() {
 
     app.input = "/rewind ".to_string();
     let suggestions = app.get_suggestions_for(&app.input);
-    assert_eq!(suggestions, vec![("/rewind 1".to_string(), "Rewind to this message")]);
+    assert_eq!(
+        suggestions,
+        vec![("/rewind 1".to_string(), "Rewind to this message")]
+    );
 }
 
 #[test]
@@ -282,6 +285,147 @@ fn test_compute_streaming_tps_bursty_stream_simulation_stays_constant_between_re
         (tps_after_second_idle_gap - tps_after_second_burst).abs() < 0.01,
         "tps changed without new tokens: second={tps_after_second_burst} idle={tps_after_second_idle_gap}"
     );
+}
+
+#[test]
+fn test_streaming_tps_timer_resume_pause_reset_lifecycle() {
+    let mut app = create_test_app();
+
+    assert_eq!(app.current_streaming_tps_elapsed(), Duration::ZERO);
+    assert!(!app.streaming_tps_collect_output);
+
+    app.resume_streaming_tps();
+    assert!(app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_some());
+
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(2));
+    app.pause_streaming_tps(true);
+    assert!(app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_none());
+    assert!(app.streaming_tps_elapsed >= Duration::from_secs(2));
+
+    let elapsed_after_pause = app.streaming_tps_elapsed;
+    app.pause_streaming_tps(false);
+    assert!(!app.streaming_tps_collect_output);
+    assert_eq!(app.streaming_tps_elapsed, elapsed_after_pause);
+
+    app.streaming_total_output_tokens = 42;
+    app.streaming_tps_observed_output_tokens = 42;
+    app.streaming_tps_observed_elapsed = elapsed_after_pause;
+    app.reset_streaming_tps();
+
+    assert_eq!(app.streaming_tps_elapsed, Duration::ZERO);
+    assert_eq!(app.streaming_total_output_tokens, 0);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 0);
+    assert_eq!(app.streaming_tps_observed_elapsed, Duration::ZERO);
+    assert!(!app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_none());
+}
+
+#[test]
+fn test_compute_streaming_tps_requires_tokens_and_minimum_elapsed() {
+    let mut app = create_test_app();
+
+    app.streaming_tps_observed_elapsed = Duration::from_secs(10);
+    assert!(app.compute_streaming_tps().is_none());
+
+    app.streaming_tps_observed_output_tokens = 10;
+    app.streaming_tps_observed_elapsed = Duration::from_millis(100);
+    assert!(app.compute_streaming_tps().is_none());
+
+    app.streaming_tps_observed_elapsed = Duration::from_millis(250);
+    let tps = app.compute_streaming_tps().expect("tps above threshold");
+    assert!(tps > 35.0 && tps <= 40.0, "unexpected tps: {tps}");
+}
+
+#[test]
+fn test_accumulate_streaming_output_tokens_counts_provider_usage_reset_once() {
+    let mut app = create_test_app();
+    let mut seen = 80;
+
+    app.streaming_tps_collect_output = true;
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(10));
+
+    app.accumulate_streaming_output_tokens(20, &mut seen);
+    assert_eq!(app.streaming_total_output_tokens, 20);
+    assert_eq!(seen, 20);
+
+    app.accumulate_streaming_output_tokens(25, &mut seen);
+    assert_eq!(app.streaming_total_output_tokens, 25);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 25);
+    assert_eq!(seen, 25);
+}
+
+#[test]
+fn test_streaming_tps_late_final_usage_after_pause_uses_paused_elapsed() {
+    let mut app = create_test_app();
+    let mut seen = 0;
+
+    app.streaming_tps_collect_output = true;
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(10));
+    app.pause_streaming_tps(true);
+
+    assert!(app.streaming_tps_start.is_none());
+    assert!(app.streaming_tps_elapsed >= Duration::from_secs(10));
+
+    app.accumulate_streaming_output_tokens(40, &mut seen);
+
+    assert_eq!(app.streaming_total_output_tokens, 40);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 40);
+    assert!(app.streaming_tps_observed_elapsed >= Duration::from_secs(10));
+    let tps = app.compute_streaming_tps().expect("late tps");
+    assert!(tps > 3.0 && tps <= 4.0, "unexpected late tps: {tps}");
+}
+
+#[test]
+fn test_begin_kv_cache_request_stops_tps_collection_until_output_resumes() {
+    let mut app = create_test_app();
+    let mut seen = 0;
+
+    app.streaming_tps_collect_output = true;
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(3));
+
+    app.begin_kv_cache_request(&[Message::user("next")], &[], "system", "dynamic");
+
+    assert!(!app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_none());
+    assert!(app.streaming_tps_elapsed >= Duration::from_secs(3));
+
+    app.accumulate_streaming_output_tokens(20, &mut seen);
+    assert_eq!(app.streaming_total_output_tokens, 0);
+    assert_eq!(seen, 20);
+
+    app.resume_streaming_tps();
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(2));
+    app.accumulate_streaming_output_tokens(50, &mut seen);
+
+    assert_eq!(app.streaming_total_output_tokens, 30);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 30);
+    assert!(app.streaming_tps_observed_elapsed >= Duration::from_secs(5));
+}
+
+#[test]
+fn test_streaming_tps_accumulates_multiple_generation_segments_excluding_paused_gap() {
+    let mut app = create_test_app();
+    let mut seen = 0;
+
+    app.resume_streaming_tps();
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(2));
+    app.accumulate_streaming_output_tokens(10, &mut seen);
+
+    app.pause_streaming_tps(true);
+    let elapsed_after_first_segment = app.streaming_tps_elapsed;
+    assert!(elapsed_after_first_segment >= Duration::from_secs(2));
+
+    app.resume_streaming_tps();
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(3));
+    app.accumulate_streaming_output_tokens(30, &mut seen);
+
+    assert_eq!(app.streaming_total_output_tokens, 30);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 30);
+    assert!(app.streaming_tps_observed_elapsed >= Duration::from_secs(5));
+    let tps = app.compute_streaming_tps().expect("segmented tps");
+    assert!(tps > 5.0 && tps <= 6.0, "unexpected segmented tps: {tps}");
 }
 
 #[test]

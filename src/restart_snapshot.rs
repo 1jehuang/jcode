@@ -137,7 +137,7 @@ pub fn capture_current_snapshot() -> Result<RestartSnapshot> {
     let mut unique_ids = HashSet::new();
     let mut captured: Vec<(DateTime<Utc>, RestartSnapshotSession)> = Vec::new();
 
-    for session_id in crate::session::active_session_ids() {
+    for session_id in crate::storage::active_session_ids() {
         if !unique_ids.insert(session_id.clone()) {
             continue;
         }

@@ -257,22 +257,7 @@ pub(super) async fn handle_comm_await_members(
             &target_status,
             mode.as_deref(),
         );
-        let persisted = load_state(&key);
-
-        if let Some(final_response) = persisted
-            .as_ref()
-            .and_then(|state| state.final_response.clone())
-        {
-            let _ = ctx
-                .client_event_tx
-                .send(ServerEvent::CommAwaitMembersResponse {
-                    id,
-                    completed: final_response.completed,
-                    members: final_response.members,
-                    summary: final_response.summary,
-                });
-            return;
-        }
+        let mut persisted = load_state(&key);
 
         let initial_statuses = awaited_member_statuses(
             &req_session_id,
@@ -283,6 +268,27 @@ pub(super) async fn handle_comm_await_members(
             ctx.swarms_by_id,
         )
         .await;
+
+        if let Some(final_response) = persisted
+            .as_ref()
+            .and_then(|state| state.final_response.clone())
+        {
+            let current_still_satisfies =
+                initial_statuses.is_empty() || mode_satisfied(&initial_statuses, mode.as_deref());
+            if current_still_satisfies {
+                let _ = ctx
+                    .client_event_tx
+                    .send(ServerEvent::CommAwaitMembersResponse {
+                        id,
+                        completed: final_response.completed,
+                        members: final_response.members,
+                        summary: final_response.summary,
+                    });
+                return;
+            }
+
+            persisted = None;
+        }
 
         if initial_statuses.is_empty() {
             let _ = ctx

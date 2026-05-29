@@ -37,6 +37,7 @@ pub mod export;
 pub mod extension_policy;
 pub mod floating_diagram;
 pub mod gateway;
+pub mod generated_image;
 pub mod gmail;
 pub mod goal;
 pub mod id;

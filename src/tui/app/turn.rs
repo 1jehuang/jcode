@@ -246,10 +246,15 @@ impl App {
 
             // Stream with input handling
             loop {
+                let desired_redraw = crate::tui::redraw_interval(self);
+                if desired_redraw != redraw_period {
+                    redraw_period = desired_redraw;
+                    redraw_interval = interval(redraw_period);
+                }
                 tokio::select! {
                     // Redraw periodically
                     _ = redraw_interval.tick() => {
-                        if let Some(chunk) = self.stream_buffer.flush() {
+                        if let Some(chunk) = self.stream_buffer.flush_smooth_frame() {
                             self.append_streaming_text(&chunk);
                         }
                         // Poll for background compaction completion during streaming
@@ -465,7 +470,11 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
-                                        self.pause_streaming_tps(false);
+                                        // Tool input JSON is still provider-generated output and is
+                                        // included in provider output-token usage. Keep the TPS timer
+                                        // running until the tool call has finished streaming; actual
+                                        // tool execution is excluded below at ToolUseEnd.
+                                        self.resume_streaming_tps();
                                         self.clear_active_experimental_feature_notice();
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ToolStart {
                                             id: id.clone(),
@@ -503,7 +512,10 @@ impl App {
                                         current_tool_input.push_str(&delta);
                                     }
                                     StreamEvent::ToolUseEnd => {
-                                        self.pause_streaming_tps(false);
+                                        // Provider output generation for this tool call is complete,
+                                        // but final usage often arrives after MessageEnd. Keep
+                                        // collecting output-token deltas while excluding tool runtime.
+                                        self.pause_streaming_tps(true);
                                         if let Some(mut tool) = current_tool.take() {
                                             tool.input = crate::message::ToolCall::parse_streamed_input_to_object(
                                                 &current_tool_input,
@@ -646,6 +658,7 @@ impl App {
                                     }
                                     StreamEvent::ThinkingStart => {
                                         let start = Instant::now();
+                                        self.resume_streaming_tps();
                                         self.thinking_start = Some(start);
                                         self.thinking_buffer.clear();
                                         self.thinking_prefix_emitted = false;
@@ -662,6 +675,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
+                                        self.resume_streaming_tps();
                                         // Buffer thinking content and emit with prefix only once
                                         self.thinking_buffer.push_str(&thinking_text);
                                         // Display reasoning/thinking content from OpenAI
@@ -685,6 +699,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingEnd => {
+                                        self.pause_streaming_tps(true);
                                         self.thinking_start = None;
                                         self.thinking_buffer.clear();
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ThinkingEnd);

@@ -28,6 +28,12 @@ pub(super) fn cleanup_reload_context_file(session_id: &str) {
 struct MockProvider;
 
 #[derive(Clone)]
+struct NamedMockProvider {
+    name: &'static str,
+    model: &'static str,
+}
+
+#[derive(Clone)]
 struct RefreshSummaryProvider {
     summary: crate::provider::ModelCatalogRefreshSummary,
 }
@@ -55,6 +61,31 @@ impl Provider for MockProvider {
 
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(MockProvider)
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for NamedMockProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("NamedMockProvider")
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn model(&self) -> String {
+        self.model.to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
     }
 }
 
@@ -150,6 +181,20 @@ fn create_test_app() -> App {
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app
+}
+
+fn create_named_provider_test_app(name: &'static str, model: &'static str) -> App {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(NamedMockProvider { name, model });
     let rt = tokio::runtime::Runtime::new().unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);

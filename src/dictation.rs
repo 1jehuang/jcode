@@ -109,7 +109,7 @@ pub fn last_focused_session() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    if crate::session::active_session_ids()
+    if crate::storage::active_session_ids()
         .iter()
         .any(|id| id == &session_id)
     {
@@ -201,7 +201,7 @@ fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
 
 fn resolve_session_from_window_title(title: &str) -> Option<String> {
     let short_name = extract_session_short_name_from_window_title(title)?;
-    let mut matching: Vec<String> = crate::session::active_session_ids()
+    let mut matching: Vec<String> = crate::storage::active_session_ids()
         .into_iter()
         .filter(|session_id| {
             crate::id::extract_session_name(session_id)
@@ -307,7 +307,7 @@ fn resolve_candidate_session_id(candidate: &ClientCandidate) -> Option<String> {
         return Some(session_id.clone());
     }
 
-    let mut matching: Vec<String> = crate::session::active_session_ids()
+    let mut matching: Vec<String> = crate::storage::active_session_ids()
         .into_iter()
         .filter(|session_id| {
             crate::id::extract_session_name(session_id)

@@ -322,8 +322,34 @@ pub fn invalidate_config_cache() {
 }
 
 fn notify_config_reloaded() {
-    crate::auth::AuthStatus::invalidate_cache();
-    crate::bus::Bus::global().publish_models_updated();
+    for listener in CONFIG_RELOAD_LISTENERS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+    {
+        listener();
+    }
+}
+
+/// Listeners invoked after the config cache reloads.
+///
+/// Config is a foundational module, so instead of reaching up into higher-level
+/// subsystems (auth cache, event bus) on reload, those subsystems register a
+/// reaction here at startup. This keeps config free of upward dependencies and
+/// breaks the config -> auth / config -> bus cycle edges.
+static CONFIG_RELOAD_LISTENERS: LazyLock<RwLock<Vec<fn()>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// Register a callback to run after the config cache reloads.
+///
+/// Callbacks must be cheap and non-blocking; they run on whichever thread
+/// triggers the reload. Intended to be called once per subsystem during
+/// process startup.
+pub fn on_config_reloaded(listener: fn()) {
+    CONFIG_RELOAD_LISTENERS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(listener);
 }
 
 /// Main configuration struct
@@ -554,7 +580,7 @@ impl ToolConfig {
 
 fn normalize_tool_name(name: &str) -> String {
     let trimmed = name.trim().trim_matches('"');
-    crate::tool::Registry::resolve_tool_name(trimmed).to_string()
+    jcode_tool_types::resolve_tool_name(trimmed).to_string()
 }
 
 /// External dictation / speech-to-text integration.

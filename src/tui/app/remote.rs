@@ -496,27 +496,58 @@ pub(super) async fn handle_bus_event(
     }
 }
 
+/// Resolve the canonical auth provider id the server uses to attribute an
+/// auth-change refresh for a completed login.
+///
+/// `LoginCompleted.provider` is the login descriptor's display label (e.g.
+/// "Anthropic API"), id, or alias - not the canonical server provider id. This
+/// used to only map Azure and OpenAI-compatible logins, so direct logins
+/// (Claude OAuth/API key, OpenAI, OpenRouter, Bedrock, ...) sent no hint. With
+/// no hint the server fell back to the session's currently active provider,
+/// mislabeling the catalog-refresh message ("OpenAI credentials are active"
+/// after an Anthropic API-key login) and skipping the post-login model switch.
 fn auth_provider_hint_for_login_provider(provider: &str) -> Option<&'static str> {
     let provider = provider.trim();
+    // Azure's runtime id ("azure-openai") differs from its login descriptor id
+    // ("azure"); keep the dedicated mapping used across the auth lifecycle.
     if provider.eq_ignore_ascii_case("azure")
         || provider.eq_ignore_ascii_case("azure-openai")
         || provider.eq_ignore_ascii_case("azure openai")
     {
-        Some("azure-openai")
-    } else if let Some(profile) =
-        crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
-    {
-        Some(profile.id)
-    } else {
-        None
+        return Some("azure-openai");
+    }
+
+    use crate::provider_catalog::LoginProviderTarget;
+    let descriptor = crate::provider_catalog::resolve_login_provider_loose(provider)?;
+    match descriptor.target {
+        LoginProviderTarget::Azure => Some("azure-openai"),
+        // OpenAI-compatible profiles carry their own catalog namespace id.
+        LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
+        // Auto-import has no single runtime to attribute the refresh to.
+        LoginProviderTarget::AutoImport => None,
+        _ => Some(descriptor.id),
     }
 }
 
 fn auth_changed_event_for_login_provider(provider: &str) -> Option<crate::protocol::AuthChanged> {
     let provider_id = auth_provider_hint_for_login_provider(provider)?;
     let mut auth = crate::protocol::AuthChanged::new(provider_id);
-    auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
-    auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    // These fields are informational; the server routes off `provider` and the
+    // `expected_*` hints. Reflect the descriptor's auth kind so OAuth logins are
+    // not recorded as API-key pastes.
+    let api_key_login = crate::provider_catalog::resolve_login_provider_loose(provider)
+        .map(|descriptor| {
+            use crate::provider_catalog::LoginProviderAuthKind;
+            matches!(
+                descriptor.auth_kind,
+                LoginProviderAuthKind::ApiKey | LoginProviderAuthKind::Hybrid
+            )
+        })
+        .unwrap_or(true);
+    if api_key_login {
+        auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
+        auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    }
     if provider_id == "azure-openai" {
         auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new("azure-openai"));
         auth.expected_catalog_namespace =

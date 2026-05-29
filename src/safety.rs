@@ -1,10 +1,32 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use crate::notifications::NotificationDispatcher;
 use crate::storage;
+
+/// Hook invoked to deliver a permission-request notification.
+///
+/// Args: `(action, description, request_id)`.
+type PermissionNotifier = fn(&str, &str, &str);
+
+static PERMISSION_NOTIFIER: OnceLock<PermissionNotifier> = OnceLock::new();
+
+/// Register the permission-request notification dispatcher.
+///
+/// This inverts the historical `safety -> notifications` dependency: the
+/// `notifications` layer (which already depends on `safety` types like
+/// [`AmbientTranscript`]) registers its dispatcher here at startup, so
+/// `safety` no longer needs to construct a `NotificationDispatcher`.
+pub fn register_permission_notifier(notifier: PermissionNotifier) {
+    let _ = PERMISSION_NOTIFIER.set(notifier);
+}
+
+fn dispatch_permission_notification(action: &str, description: &str, request_id: &str) {
+    if let Some(notifier) = PERMISSION_NOTIFIER.get() {
+        notifier(action, description, request_id);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Action classification
@@ -129,7 +151,6 @@ pub struct SafetySystem {
     queue: Mutex<Vec<PermissionRequest>>,
     history: Mutex<Vec<Decision>>,
     actions: Mutex<Vec<ActionLog>>,
-    notifier: NotificationDispatcher,
 }
 
 impl SafetySystem {
@@ -149,7 +170,6 @@ impl SafetySystem {
             queue: Mutex::new(queue),
             history: Mutex::new(history),
             actions: Mutex::new(Vec::new()),
-            notifier: NotificationDispatcher::new(),
         }
     }
 
@@ -172,9 +192,9 @@ impl SafetySystem {
             q.push(request);
             let _ = persist_queue(&q);
         }
-        // Send high-priority notification for permission request
-        self.notifier
-            .dispatch_permission_request(&action, &description, &request_id);
+        // Send high-priority notification for permission request via the
+        // registered dispatcher (inverts the safety -> notifications edge).
+        dispatch_permission_notification(&action, &description, &request_id);
         PermissionResult::Queued { request_id }
     }
 

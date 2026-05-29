@@ -845,7 +845,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
         None => return false,
     };
     let client = match reqwest::blocking::Client::builder()
-        .user_agent(crate::provider::JCODE_USER_AGENT)
+        .user_agent(jcode_provider_core::JCODE_USER_AGENT)
         .timeout(timeout)
         .build()
     {

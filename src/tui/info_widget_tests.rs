@@ -4,7 +4,7 @@ use super::{
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     occasional_status_tip, render_kv_cache_widget, render_memory_compact, render_memory_widget,
     render_model_widget, render_todos_compact, render_todos_expanded, render_todos_widget,
-    truncate_smart,
+    render_usage_compact, render_usage_widget, truncate_smart,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -107,6 +107,32 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
 
     let compact_text = lines_text(&render_todos_compact(&data, Rect::new(0, 0, 80, 2)));
     assert!(compact_text.contains("86%"));
+}
+
+#[test]
+fn cost_based_usage_widgets_show_price_and_tokens() {
+    let usage = UsageInfo {
+        provider: UsageProvider::CostBased,
+        total_cost: 0.01234,
+        input_tokens: 12_345,
+        output_tokens: 678,
+        available: true,
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        usage_info: Some(usage.clone()),
+        ..Default::default()
+    };
+
+    assert!(data.has_data_for(WidgetKind::UsageLimits));
+
+    let expanded_text = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)));
+    assert!(expanded_text.contains("$0.0123"));
+    assert!(expanded_text.contains("12.3K in + 678 out"));
+
+    let compact_text = lines_text(&render_usage_compact(&usage, 40));
+    assert!(compact_text.contains("$0.0123"));
+    assert!(compact_text.contains("12.3K in + 678 out"));
 }
 
 fn node(kind: &str, label: &str, degree: usize) -> GraphNode {

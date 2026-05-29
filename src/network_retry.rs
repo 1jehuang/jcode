@@ -96,7 +96,7 @@ pub async fn is_probably_online() -> bool {
 }
 
 async fn probe_connectivity() -> bool {
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
     let request = client
         .head("https://www.gstatic.com/generate_204")
         .timeout(Duration::from_secs(5));

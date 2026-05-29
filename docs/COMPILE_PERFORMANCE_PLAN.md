@@ -542,6 +542,66 @@ Current TUI-boundary stance:
 - **Reason:** the remaining high-value TUI files are larger but still more tightly coupled to `App`, config, images,
   side-panel state, and rendering orchestration, so they need staged extraction rather than a rushed top-level split.
 
+## Root-Crate Decomposition Strategy (2026-05-29)
+
+The previous splits created many `*-types` / `*-core` crates that the root re-exports from, but
+`scripts/analyze_root_crate.py` shows **334K of 336K root-crate lines are still genuinely in-root**:
+the heavy logic stayed behind thin facades. The analyzer (committed alongside this section) gives the
+objective map needed to finish the job. Run it any time:
+
+```bash
+python3 scripts/analyze_root_crate.py          # ranked modules + blockers + cycles + feedback arcs
+python3 scripts/analyze_root_crate.py --full    # full feedback-arc-set listing
+python3 scripts/analyze_root_crate.py --json     # machine-readable
+```
+
+### The core problem: one giant dependency cycle
+
+The library-only module graph (test code excluded) has a single **strongly-connected component of 42
+modules / ~310K lines (92% of the crate)**: `tui, server, provider, tool, cli, auth, agent, session, …`.
+You cannot peel `tui`/`server`/`provider` into independent crates while they mutually reference each
+other. This is *the* structural blocker, and it is why "just move the big dirs out" never works.
+
+### The good news: the cycle is shallow
+
+The 42-module cycle is held together by only **46 back-edges totaling 178 references**, and most are
+single-reference "accidental" couplings. Breaking this small feedback arc set turns the graph into a
+DAG, after which modules peel off bottom-up. Cheapest-first (from the analyzer):
+
+- **1-ref edges (≈24 of them):** e.g. `agent -> tui` (one `write_generated_image_side_panel_page` call),
+  `tool -> tui` (one `tui::image::display_image` import), `config -> auth`, `config -> tool`,
+  `telemetry -> cli`, `bus -> provider`, `browser -> provider`. Each is a single call/import that can move
+  to a shared lower-level crate or be inverted behind a trait/callback.
+- **Mid-weight edges:** `usage -> auth` (4), `tool -> provider` (5), `tool -> server` (5),
+  `sidecar -> provider` (7), `agent -> tool` (9), `import -> tui` (9), `usage -> provider` (9).
+- **Heavy structural seams (design carefully):** `agent -> provider` (20), `cli -> tui` (21),
+  `auth -> provider` (39). These are the genuine architectural couplings worth a trait seam.
+
+### Execution order (bottom-up, DAG-first)
+
+1. **Baseline metrics.** Record peak rustc RSS for the largest current unit and full-build wall time
+   (`scripts/bench_compile.sh`), so each extraction's memory/compile win is measurable.
+2. **Break the cheap back-edges first.** Eliminate the 1-2 ref couplings (image helpers, single config
+   lookups, telemetry/cli) by moving shared primitives down into existing low-level crates
+   (`jcode-core`, `jcode-tui-*`) or inverting them behind small traits. Re-run the analyzer; watch the
+   SCC shrink.
+3. **Extract already-clean leaves.** Modules the analyzer marks "extractable now" (no in-root blockers):
+   `background`, `prompt`, `safety`, `transport`, `replay`, `browser`, `perf`, plus the many <400 loc
+   leaves. These need no cycle-breaking and immediately shrink the root crate.
+4. **Address the heavy seams** (`auth↔provider`, `cli↔tui`, `agent↔provider`) with deliberate trait
+   boundaries once the cheap edges are gone.
+5. **Lift the big subsystems** (`tool` 29K, `provider` 35K, `server` 38K, then `tui` 125K) once they are
+   no longer in the cycle. `tui` goes last: almost nothing depends on it (sink of the DAG), so once its
+   own outbound deps are crates it lifts cleanly and removes the single largest compilation unit.
+
+### Why this directly reduces compile memory
+
+rustc holds an entire crate's IR in memory at its codegen peak, so peak RSS scales with the size of the
+largest compilation unit. Today that unit is the 336K-line root crate (~2.5-3 GiB/process). Every module
+moved into its own crate shrinks the largest unit, lowering peak per-process RSS, which is exactly what
+lets more parallel jobs run without OOM (complementing the memory-adaptive job count above). It also
+sharpens incremental caching: editing one file rebuilds one small crate instead of the whole monolith.
+
 ## Developer Workflow Guidance
 
 ### Fast local cargo wrapper
@@ -580,7 +640,7 @@ cargo check --all-targets -p jcode --features dev-bins --quiet
 
 The wrapper:
 
-- uses `sccache` automatically when available
+- uses `sccache` automatically when available **for non-incremental builds only**
 - prefers `lld` locally on Linux x86_64
 - uses the fast `selfdev` Cargo profile for self-dev build/reload workflows
 - can inject a named feature profile via `JCODE_DEV_FEATURE_PROFILE` unless explicit feature args are present
@@ -594,6 +654,133 @@ JCODE_FAST_LINKER=lld scripts/dev_cargo.sh build --release -p jcode --bin jcode
 JCODE_FAST_LINKER=mold scripts/dev_cargo.sh build --release -p jcode --bin jcode
 JCODE_FAST_LINKER=system scripts/dev_cargo.sh build --release -p jcode --bin jcode
 ```
+
+### sccache: non-incremental only
+
+`sccache` cannot cache incremental compilation units. All of jcode's common
+profiles (`selfdev`, `dev`, `release`, `test`) set `incremental = true`, so on
+the inner loop sccache produced a **0% hit rate** (measured across 272 real
+compilations and clean workspace/dep rebuilds) while still adding per-rustc
+wrapper overhead and a misleading "enabled" status.
+
+`dev_cargo.sh` now decides automatically:
+
+- **Incremental builds** (selfdev/dev/release/test, or `CARGO_INCREMENTAL=1`):
+  sccache is skipped (`sccache_status=skipped-incremental`), since it can never hit.
+- **Non-incremental builds** (`release-lto`, or `CARGO_INCREMENTAL=0`): sccache is
+  enabled, where it genuinely produces cache hits (CI, distribution builds).
+
+Overrides:
+
+```bash
+JCODE_SCCACHE=on   scripts/dev_cargo.sh build --profile selfdev ...   # force-enable
+JCODE_SCCACHE=off  scripts/dev_cargo.sh build --profile release-lto ... # force-disable
+CARGO_INCREMENTAL=0 scripts/dev_cargo.sh build --profile selfdev ...   # makes it cacheable
+```
+
+- 2026-05-29: made sccache incremental-aware. Validation on this machine:
+  `--print-setup` reports `skipped-incremental` for `--profile selfdev` and `enabled`
+  for `--profile release-lto`; `JCODE_SCCACHE=on` and `CARGO_INCREMENTAL=0` both
+  re-enable it for selfdev. A clean `jcode-azure-auth` rebuild under the old
+  always-on sccache showed `0/54` cache hits, confirming the prior wasted overhead.
+
+### Remote build host fast-fail / fast-recovery
+
+When `JCODE_REMOTE_CARGO=1` (commonly set in `~/.config/jcode/remote-build.env`),
+`dev_cargo.sh` offloads builds to `JCODE_REMOTE_HOST` via `scripts/remote_build.sh`.
+The preflight is designed so that remote builds "just work" when the host is up,
+without paying a slow timeout when it is down:
+
+- A cheap `bash` `/dev/tcp` reachability probe runs before the SSH preflight, so an
+  offline host fails over to local cargo in about **1s** instead of waiting for the
+  full SSH `ConnectTimeout` (previously ~5s on every build).
+- After a recent failure, subsequent builds use a shorter recovery probe timeout
+  (default **0.3s**) so repeated builds during an outage stay cheap.
+- Recovery is detected on the **very next build**: an up host answers the TCP probe
+  in a few milliseconds, so it immediately reverts to remote builds with no cooldown.
+- The probe is skipped automatically when the SSH config uses `ProxyJump`/`ProxyCommand`
+  (where a direct TCP probe to the final host would be misleading), falling back to the
+  normal SSH preflight.
+
+Tunables (all optional):
+
+```bash
+JCODE_REMOTE_TCP_TIMEOUT=1            # first-probe TCP timeout (seconds, fractional ok)
+JCODE_REMOTE_RECOVERY_TCP_TIMEOUT=0.3 # probe timeout while host was recently down
+JCODE_REMOTE_DOWN_TTL=300             # how long to keep using the recovery timeout
+JCODE_REMOTE_TCP_PROBE=0              # disable the pre-probe; use SSH preflight only
+JCODE_REMOTE_CARGO=0                  # disable remote builds entirely for one command
+```
+
+- 2026-05-29: added the TCP pre-probe + recovery-timeout logic above. Validation on this
+  machine (remote host offline): warm self-dev edit-build preflight dropped from about
+  **5.0s** to about **1.0s** on the first build and about **0.3s** on subsequent builds,
+  while an up host still reconnects on the next build (TCP probe answered in ~10ms in
+  unit tests). Function-level unit tests covered reachable/unreachable probes, the
+  recent-failure window, and `desktop-tailscale` endpoint resolution.
+
+### Target dir cleanup (`scripts/clean_target.sh`)
+
+The `target/` directory grows without bound across profiles (dev/selfdev/release)
+and cross-compile caches (`*-apple-darwin`, `*-pc-windows-*`, `linux-compat`). On
+this machine it reached ~84GB. A bloated target dir does not slow compilation
+directly, but it can exhaust disk and force full rebuilds when space runs out.
+
+`scripts/clean_target.sh` reclaims space **safely while parallel builds are running**:
+
+- It never touches a `target/<profile>` dir that has an active `rustc`/`cargo`
+  process (scanned via `/proc/<pid>/cmdline`) or that was written to within a recent
+  activity window (default 20min, `JCODE_CLEAN_ACTIVE_WINDOW_MIN`).
+- Default mode removes only cross-compile/compat caches (regenerated on demand) and
+  reports what it would free.
+- `--aggressive` additionally runs `cargo clean --profile <p>` on stale profiles
+  (still subject to the active-process / recent-write guards).
+
+```bash
+scripts/clean_target.sh                        # dry-run: report reclaimable space
+scripts/clean_target.sh --apply                # remove cross-compile/compat caches
+scripts/clean_target.sh --apply --aggressive   # also cargo-clean stale profiles
+```
+
+- 2026-05-29: reclaimed a stale `target/aarch64-apple-darwin` (2.5G) and added this
+  script. Dry-runs verified it correctly SKIPs profiles with recent writes / active
+  rustc while a parallel agent was building on `debug`/`selfdev`.
+
+### Memory-adaptive cargo job count
+
+The biggest day-to-day pain on the 8-core/15 GiB dev machine was **memory
+pressure**: several self-dev agents build at once, and `.cargo/config.toml` pinned
+a static `jobs = 6`. rustc on the large root `jcode` crate peaks around 2.5-3 GiB
+RSS, so 6 concurrent rustc processes (across one or several builds) overshoot RAM
+on a no-swap box and `earlyoom` kills the build. A static job count is wrong in both
+directions: it wastes cores when the machine is idle and oversubscribes memory when
+it is busy.
+
+`scripts/dev_cargo.sh` (the path `selfdev build` uses) now sizes the job count from
+**currently-available** memory each time it runs:
+
+- `select_build_jobs()` reads `MemAvailable` and divides by a per-job memory budget
+  (default **2048 MiB**, `JCODE_BUILD_MIB_PER_JOB`), then clamps into `[1, nproc]`.
+- It exports `CARGO_BUILD_JOBS`, which overrides `build.jobs` from `.cargo/config.toml`.
+- An idle machine still uses every core; under pressure a fresh build self-throttles
+  (e.g. it picked **2 jobs** at ~5.9 GiB available during a parallel-agent build).
+- Explicit `JCODE_BUILD_JOBS` / `CARGO_BUILD_JOBS` always win; invalid values warn and
+  fall back to adaptive sizing. Non-Linux hosts keep the cargo/`.cargo` default.
+
+The committed static fallback in `.cargo/config.toml` was also lowered from `6` to
+`4` for direct `cargo` invocations that bypass the wrapper (still memory-safe for a
+single build on ~15 GiB, but no longer assuming a near-full core count).
+
+```bash
+JCODE_BUILD_JOBS=2            # hard override the job count for one command
+JCODE_BUILD_MIB_PER_JOB=2048  # memory budget per rustc job (default)
+scripts/dev_cargo.sh --print-setup   # shows build_jobs_status + cargo_build_jobs
+```
+
+- 2026-05-29: added adaptive sizing. Verified via `--print-setup` and a stubbed-cargo
+  harness that overrides win, invalid input falls through to adaptive, budget extremes
+  clamp to `[1, nproc]`, and the chosen `CARGO_BUILD_JOBS` is exported to the child
+  cargo process. A real `dev_cargo.sh check -p jcode-logging` build succeeded.
 
 For compile timing, prefer repeatable touched-file measurements over no-op hot-cache reruns:
 

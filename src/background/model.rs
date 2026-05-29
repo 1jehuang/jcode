@@ -1,7 +1,4 @@
-use crate::bus::{
-    BackgroundTaskProgress, BackgroundTaskProgressEvent, BackgroundTaskProgressKind,
-    BackgroundTaskProgressSource, BackgroundTaskStatus,
-};
+use crate::bus::{BackgroundTaskProgress, BackgroundTaskProgressEvent, BackgroundTaskStatus};
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -141,64 +138,11 @@ pub(super) fn progress_wait_reason(
     }
 }
 
-pub fn format_progress_summary(progress: &BackgroundTaskProgress) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(percent) = progress.percent {
-        parts.push(format!("{:.0}%", percent));
-    } else if let (Some(current), Some(total)) = (progress.current, progress.total) {
-        let mut counts = format!("{}/{}", current, total);
-        if let Some(unit) = progress.unit.as_deref() {
-            counts.push(' ');
-            counts.push_str(unit);
-        }
-        parts.push(counts);
-    } else if let Some(unit) = progress.unit.as_deref() {
-        parts.push(unit.to_string());
-    }
-
-    if let Some(message) = progress.message.as_deref() {
-        parts.push(message.to_string());
-    }
-
-    if parts.is_empty() {
-        match progress.kind {
-            BackgroundTaskProgressKind::Determinate => "progress reported".to_string(),
-            BackgroundTaskProgressKind::Indeterminate => "working".to_string(),
-        }
-    } else {
-        parts.join(" · ")
-    }
-}
-
-pub fn render_progress_bar(progress: &BackgroundTaskProgress, width: usize) -> Option<String> {
-    let percent = progress.percent?;
-    let width = width.max(4);
-    let filled = ((percent / 100.0) * width as f32).round() as usize;
-    let filled = filled.min(width);
-    Some(format!(
-        "[{}{}]",
-        "#".repeat(filled),
-        "-".repeat(width.saturating_sub(filled))
-    ))
-}
-
-fn progress_source_label(source: &BackgroundTaskProgressSource) -> &'static str {
-    match source {
-        BackgroundTaskProgressSource::Reported => "reported",
-        BackgroundTaskProgressSource::ParsedOutput => "parsed",
-        BackgroundTaskProgressSource::Heuristic => "estimated",
-    }
-}
-
-pub fn format_progress_display(progress: &BackgroundTaskProgress, width: usize) -> String {
-    let summary = format_progress_summary(progress);
-    let source = progress_source_label(&progress.source);
-    match render_progress_bar(progress, width) {
-        Some(bar) => format!("{} {} ({})", bar, summary, source),
-        None => format!("{} ({})", summary, source),
-    }
-}
+// Progress-display formatting now lives in `jcode-background-types` (pure
+// functions over BackgroundTaskProgress); re-export for existing callers.
+pub use jcode_background_types::{
+    format_progress_display, format_progress_summary, render_progress_bar,
+};
 
 pub(super) fn progress_equivalent(a: &BackgroundTaskProgress, b: &BackgroundTaskProgress) -> bool {
     a.kind == b.kind

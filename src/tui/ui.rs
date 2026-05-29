@@ -232,6 +232,21 @@ fn set_last_chat_scrollbar_visible(visible: bool) {
     }
 }
 
+/// Whether the chat native scrollbar was visible on the most recent render frame.
+/// Used as hysteresis so steady-state frames only prepare a single chat width
+/// instead of both the wide and narrow variants (which thrashes the prep caches
+/// on long transcripts during streaming).
+fn last_chat_scrollbar_visible() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_LAST_CHAT_SCROLLBAR_VISIBLE.with(Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        LAST_CHAT_SCROLLBAR_VISIBLE.load(Ordering::Relaxed) != 0
+    }
+}
+
 /// Get the total line count from the pinned diff/content pane (set during render).
 pub fn pinned_pane_total_lines() -> usize {
     #[cfg(test)]
@@ -1995,11 +2010,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let prep_start = Instant::now();
     let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
     let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
+    let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
         diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
-    let prepared_wide = mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
-        prepare::prepare_messages(app, wide_prepare_width, chat_area.height)
-    });
+    let prepare_at = |width: u16| {
+        mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
+            prepare::prepare_messages(app, width, chat_area.height)
+        })
+    };
+
     let show_donut = super::idle_donut_active(app);
     let donut_height: u16 = if show_donut { 14 } else { 0 };
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
@@ -2011,28 +2030,54 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + input_height
         + donut_height; // status + queued + notification + inline UI + gap + input + donut
     let available_height = chat_area.height;
+    let overflows = |prepared: &PreparedChatFrame| {
+        (prepared.total_wrapped_lines().max(1) as u16) + fixed_height > available_height
+    };
 
-    let initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
-    let wide_overflows = app.chat_native_scrollbar()
-        && chat_area.width > 1
-        && initial_content_height + fixed_height > available_height;
-    let (prepared, chat_scrollbar_visible) = if !wide_overflows {
+    // Resolving native-scrollbar overflow can require wrapping the transcript at
+    // two different widths (the wide layout, and one column narrower to reserve a
+    // scrollbar column). Preparing both every frame doubles the most expensive work
+    // and thrashes the prep caches on long transcripts during streaming. Use the
+    // previous frame's scrollbar decision as hysteresis so the steady state only
+    // prepares a single width; the second width is only built at a visibility
+    // transition. This is safe because narrow wraps at least as much as wide, so
+    // "narrow fits" implies "wide fits".
+    let scrollbar_enabled = app.chat_native_scrollbar() && chat_area.width > 1;
+    let initial_content_height;
+    let (prepared, chat_scrollbar_visible) = if !scrollbar_enabled {
+        let prepared_wide = prepare_at(wide_prepare_width);
+        initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
         (prepared_wide, false)
-    } else {
-        let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
-        let prepared_narrow =
-            mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
-                prepare::prepare_messages(app, narrow_prepare_width, chat_area.height)
-            });
-        let narrow_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
-        let narrow_overflows = narrow_content_height + fixed_height > available_height;
-        if narrow_overflows {
+    } else if last_chat_scrollbar_visible() {
+        // Scrollbar was visible last frame: prepare the narrow (reserved-column)
+        // layout first. If it still overflows we keep it without touching wide.
+        let prepared_narrow = prepare_at(narrow_prepare_width);
+        initial_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
+        if overflows(&prepared_narrow) {
             (prepared_narrow, true)
         } else {
-            // Reserving a scrollbar column changed the wrapped content enough to make it fit.
-            // Prefer the wide layout without the native scrollbar so the UI does not oscillate
-            // between two self-contradictory states across consecutive frames.
+            // Content shrank enough to fit even at the narrower width, so the wide
+            // layout (which wraps no more) also fits: drop the scrollbar.
+            (prepare_at(wide_prepare_width), false)
+        }
+    } else {
+        // No scrollbar last frame: prepare the wide layout first. Only when it
+        // overflows do we evaluate the narrow layout to decide on the scrollbar.
+        let prepared_wide = prepare_at(wide_prepare_width);
+        initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
+        if !overflows(&prepared_wide) {
             (prepared_wide, false)
+        } else {
+            let prepared_narrow = prepare_at(narrow_prepare_width);
+            if overflows(&prepared_narrow) {
+                (prepared_narrow, true)
+            } else {
+                // Reserving a scrollbar column changed the wrapped content enough to
+                // make it fit. Prefer the wide layout without the native scrollbar so
+                // the UI does not oscillate between two self-contradictory states
+                // across consecutive frames.
+                (prepared_wide, false)
+            }
         }
     };
     set_last_chat_scrollbar_visible(chat_scrollbar_visible);

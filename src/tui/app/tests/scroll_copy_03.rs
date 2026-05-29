@@ -89,6 +89,11 @@ fn test_scroll_render_bottom() {
 fn test_scroll_render_scrolled_up() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 8);
+    // The ↓ overflow counter is only rendered when the native scrollbar is off;
+    // with the native scrollbar visible the scrollbar thumb replaces it (see
+    // test_chat_native_scrollbar_hides_scroll_counters). Exercise the legacy
+    // counter path this test was written for.
+    app.chat_native_scrollbar = false;
 
     // Seed scroll metrics, then enter paused/scrolled mode via the real key path.
     let _ = render_and_snap(&app, &mut terminal);

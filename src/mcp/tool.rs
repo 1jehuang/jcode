@@ -2,7 +2,8 @@
 
 use super::manager::McpManager;
 use super::protocol::{ContentBlock, McpToolDef};
-use crate::tool::{Tool, ToolContext, ToolOutput};
+use jcode_tool_core::{Tool, ToolContext};
+use jcode_tool_types::ToolOutput;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;

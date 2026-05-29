@@ -693,7 +693,12 @@ impl MultiProvider {
             }
         } else if self.anthropic_provider().is_none()
             && (crate::auth::claude::load_credentials().is_ok()
-                || anthropic::anthropic_api_key_env_configured())
+                || anthropic::anthropic_api_key_env_configured()
+                || crate::provider_catalog::load_api_key_from_env_or_config(
+                    "ANTHROPIC_API_KEY",
+                    "anthropic.env",
+                )
+                .is_some())
         {
             crate::logging::info("Hot-initialized Anthropic provider after auth change");
             *self
@@ -1328,6 +1333,7 @@ impl Provider for MultiProvider {
         );
 
         let mut errors = Vec::new();
+        let mut optional_errors = Vec::new();
         for (provider_name, result) in [
             ("anthropic", anthropic_result),
             ("claude", claude_result),
@@ -1340,8 +1346,19 @@ impl Provider for MultiProvider {
             ("bedrock", bedrock_result),
         ] {
             if let Err(err) = result {
-                errors.push(format!("{provider_name}: {err}"));
+                if matches!(provider_name, "bedrock") {
+                    optional_errors.push(format!("{provider_name}: {err}"));
+                } else {
+                    errors.push(format!("{provider_name}: {err}"));
+                }
             }
+        }
+
+        if !optional_errors.is_empty() {
+            crate::logging::warn(&format!(
+                "Optional model catalog refresh failed: {}",
+                optional_errors.join("; ")
+            ));
         }
 
         if !errors.is_empty() {
@@ -1465,6 +1482,9 @@ impl Provider for MultiProvider {
 
     fn service_tier(&self) -> Option<String> {
         match self.active_provider() {
+            ActiveProvider::Claude if !self.use_claude_cli => {
+                self.anthropic_provider().and_then(|a| a.service_tier())
+            }
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.service_tier()),
             _ => None,
         }
@@ -1472,18 +1492,26 @@ impl Provider for MultiProvider {
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
         match self.active_provider() {
+            ActiveProvider::Claude if !self.use_claude_cli => self
+                .anthropic_provider()
+                .ok_or_else(|| anyhow::anyhow!("Anthropic provider not available"))?
+                .set_service_tier(service_tier),
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
                 .set_service_tier(service_tier),
             _ => Err(anyhow::anyhow!(
-                "Service tier switching is only supported for OpenAI models"
+                "Service tier switching is only supported for OpenAI models and Claude Opus 4.8"
             )),
         }
     }
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
         match self.active_provider() {
+            ActiveProvider::Claude if !self.use_claude_cli => self
+                .anthropic_provider()
+                .map(|a| a.available_service_tiers())
+                .unwrap_or_default(),
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .map(|o| o.available_service_tiers())
@@ -1913,6 +1941,44 @@ impl Provider for MultiProvider {
         self.set_active_provider(target);
         self.auto_select_multi_account_for_provider(target);
         Ok(())
+    }
+}
+
+/// Get the prompt cache TTL in seconds for a given provider name.
+/// Returns None if the provider doesn't support prompt caching or TTL is unknown.
+pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
+    cache_ttl_for_provider_model(provider, None)
+}
+
+/// Get the prompt cache TTL in seconds for a given provider/model pair.
+///
+/// This is provider cache-retention policy: it depends only on provider
+/// families (anthropic/openai/...) and their model capabilities, so it lives
+/// in `provider` rather than the UI layer.
+pub fn cache_ttl_for_provider_model(provider: &str, model: Option<&str>) -> Option<u64> {
+    match provider.to_lowercase().as_str() {
+        "anthropic" | "claude" => Some(if anthropic::is_cache_ttl_1h() {
+            60 * 60
+        } else {
+            300
+        }),
+        "openai" => {
+            if model
+                .map(openai::OpenAIProvider::supports_extended_prompt_cache_retention)
+                .unwrap_or(false)
+            {
+                Some(24 * 60 * 60)
+            } else {
+                Some(300)
+            }
+        }
+        "openrouter" => Some(300),
+        "jcode subscription" => Some(300),
+        "gemini" => Some(300),
+        "copilot" => None,
+        "cursor" => None,
+        "antigravity" => None,
+        _ => None,
     }
 }
 

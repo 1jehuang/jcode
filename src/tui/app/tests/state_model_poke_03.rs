@@ -1636,8 +1636,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
         .unwrap_or("");
     assert!(
-        deepseek_auto_row.contains('★'),
-        "OpenRouter auto route should carry the recommended marker, got row `{}` in:\n{}",
+        !deepseek_auto_row.contains('★'),
+        "OpenRouter auto route should not carry the recommended marker, got row `{}` in:\n{}",
         deepseek_auto_row,
         text
     );
@@ -1686,6 +1686,7 @@ fn test_model_picker_filter_text_includes_provider_and_method() {
         is_default: false,
         recommended: false,
         recommendation_rank: usize::MAX,
+            usage_score: 0,
         old: false,
         created_date: None,
         effort: None,

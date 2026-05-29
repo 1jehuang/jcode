@@ -17,6 +17,7 @@ selected_linker_desc=""
 sccache_status="disabled"
 selfdev_low_memory_status="disabled"
 feature_profile_status="default"
+build_jobs_status="cargo-default"
 
 append_rustflags() {
   local new_flag="$1"
@@ -25,6 +26,43 @@ append_rustflags() {
   else
     export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS} ${new_flag}"
   fi
+}
+
+selected_profile() {
+  # Print the Cargo profile selected by the args, defaulting to "dev" (cargo's
+  # default for build/check) when no --profile/--release is present.
+  local expect_profile_name="false"
+  local profile="dev"
+  for arg in "$@"; do
+    if [[ "$expect_profile_name" == "true" ]]; then
+      profile="$arg"
+      expect_profile_name="false"
+      continue
+    fi
+    case "$arg" in
+      --release|-r) profile="release" ;;
+      --profile=*) profile="${arg#--profile=}" ;;
+      --profile) expect_profile_name="true" ;;
+    esac
+  done
+  printf '%s\n' "$profile"
+}
+
+# Determine whether the effective build will use incremental compilation.
+# sccache cannot cache incremental units, so this gates whether sccache is
+# useful at all. CARGO_INCREMENTAL (if set) wins; otherwise infer from the
+# profile's incremental setting in Cargo.toml.
+build_is_incremental() {
+  case "${CARGO_INCREMENTAL:-}" in
+    0|false|no|off) return 1 ;;
+    1|true|yes|on) return 0 ;;
+  esac
+  case "$(selected_profile "$@")" in
+    # Non-incremental profiles (see Cargo.toml): sccache can produce hits here.
+    release-lto) return 1 ;;
+    # selfdev/dev/release/test and unknown profiles default to incremental.
+    *) return 0 ;;
+  esac
 }
 
 maybe_enable_sccache() {
@@ -44,6 +82,27 @@ maybe_enable_sccache() {
     log "keeping existing RUSTC_WRAPPER=${RUSTC_WRAPPER}"
     return
   fi
+
+  # sccache cannot cache incremental compilations, so for our default
+  # incremental profiles it produces 0% hits while adding wrapper overhead and
+  # misleading "enabled" status. Skip it for incremental builds unless the
+  # caller explicitly forces it via JCODE_SCCACHE=1/on/force.
+  local force_sccache="${JCODE_SCCACHE:-auto}"
+  case "$force_sccache" in
+    1|true|yes|on|force) force_sccache="1" ;;
+    0|false|no|off|never)
+      sccache_status="disabled-by-jcode-sccache"
+      log "sccache disabled by JCODE_SCCACHE"
+      return
+      ;;
+    *) force_sccache="auto" ;;
+  esac
+  if [[ "$force_sccache" != "1" ]] && build_is_incremental "$@"; then
+    sccache_status="skipped-incremental"
+    log "sccache skipped for incremental build (it cannot cache incremental units; set JCODE_SCCACHE=on to force, or use a non-incremental profile)"
+    return
+  fi
+
   if command -v sccache >/dev/null 2>&1; then
     sccache --start-server >/dev/null 2>&1 || true
     export RUSTC_WRAPPER=sccache
@@ -192,6 +251,70 @@ selfdev_low_memory_default_needed() {
   (( swap_total_kib == 0 && mem_total_kib < 24576 * 1024 && mem_available_kib < 8192 * 1024 ))
 }
 
+cpu_count() {
+  local n
+  n=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+  [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] || n=1
+  printf '%s\n' "$n"
+}
+
+# Choose a Cargo job count from *currently available* memory so concurrent
+# builds (e.g. several self-dev agents on one machine) self-throttle instead of
+# all assuming the full core count and tripping earlyoom/OOM.
+#
+# rustc on the large root jcode crate peaks around 2.5-3 GiB RSS, so we budget
+# ~2 GiB of currently-available memory per job and clamp into [1, cpus]. When
+# the machine is idle this still uses every core; under memory pressure a fresh
+# build backs off to 1-2 jobs. An explicit CARGO_BUILD_JOBS / JCODE_BUILD_JOBS
+# always wins, and non-Linux hosts fall back to the cargo/.cargo default.
+select_build_jobs() {
+  # Respect an explicit override from either env var.
+  local override="${JCODE_BUILD_JOBS:-${CARGO_BUILD_JOBS:-}}"
+  if [[ -n "$override" ]]; then
+    if [[ "$override" =~ ^[0-9]+$ && "$override" -ge 1 ]]; then
+      export CARGO_BUILD_JOBS="$override"
+      build_jobs_status="override:$override"
+      return
+    fi
+    # Invalid override: warn and fall through to adaptive sizing.
+    log "ignoring invalid job override '$override' (expected a positive integer); using adaptive sizing"
+    unset CARGO_BUILD_JOBS
+  fi
+
+  # Adaptive sizing only on Linux where /proc/meminfo is available; elsewhere we
+  # leave cargo to honor the .cargo/config.toml default.
+  if [[ "$(uname -s)" != "Linux" || ! -r /proc/meminfo ]]; then
+    build_jobs_status="cargo-default"
+    return
+  fi
+
+  local cpus mem_available_kib mib_per_job_default mib_per_job
+  cpus=$(cpu_count)
+  mem_available_kib=$(meminfo_kib MemAvailable)
+  [[ -n "$mem_available_kib" && "$mem_available_kib" =~ ^[0-9]+$ ]] || mem_available_kib=0
+
+  # Per-job memory budget (MiB). Tunable for hosts with heavier/lighter crates.
+  mib_per_job_default=2048
+  mib_per_job="${JCODE_BUILD_MIB_PER_JOB:-$mib_per_job_default}"
+  [[ "$mib_per_job" =~ ^[0-9]+$ && "$mib_per_job" -ge 256 ]] || mib_per_job="$mib_per_job_default"
+
+  local mem_available_mib jobs_by_mem jobs
+  mem_available_mib=$(( mem_available_kib / 1024 ))
+  jobs_by_mem=$(( mem_available_mib / mib_per_job ))
+  (( jobs_by_mem < 1 )) && jobs_by_mem=1
+
+  # Final job count is the smaller of "fits in memory" and core count.
+  jobs="$jobs_by_mem"
+  (( jobs > cpus )) && jobs="$cpus"
+  (( jobs < 1 )) && jobs=1
+
+  export CARGO_BUILD_JOBS="$jobs"
+  build_jobs_status="adaptive:${jobs} (cpus=${cpus}, mem_avail=${mem_available_mib}MiB, budget=${mib_per_job}MiB/job)"
+  if (( jobs < cpus )); then
+    log "limiting cargo to ${jobs} job(s) under memory pressure (${mem_available_mib}MiB available, ~${mib_per_job}MiB/job); override with JCODE_BUILD_JOBS"
+  fi
+}
+
 maybe_configure_low_memory_selfdev() {
   if ! uses_selfdev_profile "$@"; then
     selfdev_low_memory_status="not-selfdev"
@@ -287,6 +410,8 @@ os=$(uname -s)
 arch=$(uname -m)
 sccache_status=$sccache_status
 selfdev_low_memory_status=$selfdev_low_memory_status
+build_jobs_status=$build_jobs_status
+cargo_build_jobs=${CARGO_BUILD_JOBS:-<unset>}
 feature_profile_status=$feature_profile_status
 rustc_wrapper=${RUSTC_WRAPPER:-<unset>}
 linker_mode=$selected_linker_mode
@@ -304,6 +429,112 @@ remote_connect_timeout() {
   printf '%s\n' "$value"
 }
 
+remote_tcp_timeout() {
+  # Bounded probe used the first time we contact a host (or after the recovery
+  # window expires) so an unreachable host fails fast instead of waiting for
+  # the full SSH ConnectTimeout. Accepts fractional seconds (GNU timeout).
+  local value="${JCODE_REMOTE_TCP_TIMEOUT:-1}"
+  if [[ ! "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    value=1
+  fi
+  printf '%s\n' "$value"
+}
+
+remote_recovery_tcp_timeout() {
+  # Shorter probe used while a host was recently seen down. An up host always
+  # answers in a few ms, so this still detects recovery on the next build while
+  # keeping per-build cost low during an outage.
+  local value="${JCODE_REMOTE_RECOVERY_TCP_TIMEOUT:-0.3}"
+  if [[ ! "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    value=0.3
+  fi
+  printf '%s\n' "$value"
+}
+
+remote_down_cache_ttl() {
+  # How long (seconds) a recent failure keeps using the shorter recovery probe
+  # timeout. Recovery is still detected on the very next build; this only
+  # controls how long downtime builds stay cheap before reverting to the full
+  # probe timeout. Set to 0 to always use the full timeout.
+  local value="${JCODE_REMOTE_DOWN_TTL:-300}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    value=300
+  fi
+  printf '%s\n' "$value"
+}
+
+remote_down_cache_path() {
+  local remote="${JCODE_REMOTE_HOST:-}"
+  local key
+  if command -v cksum >/dev/null 2>&1; then
+    key="$(printf '%s' "$remote" | cksum | awk '{print $1}')"
+  else
+    key="${remote//[^A-Za-z0-9_-]/_}"
+  fi
+  printf '%s/jcode-remote-down-%s\n' "${TMPDIR:-/tmp}" "$key"
+}
+
+remote_down_cache_fresh() {
+  local ttl
+  ttl="$(remote_down_cache_ttl)"
+  [[ "$ttl" -gt 0 ]] || return 1
+  local cache
+  cache="$(remote_down_cache_path)"
+  [[ -f "$cache" ]] || return 1
+  local recorded now age
+  recorded="$(cat "$cache" 2>/dev/null || printf '0')"
+  [[ "$recorded" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  age=$((now - recorded))
+  (( age >= 0 && age < ttl ))
+}
+
+record_remote_down() {
+  local ttl
+  ttl="$(remote_down_cache_ttl)"
+  [[ "$ttl" -gt 0 ]] || return 0
+  local cache
+  cache="$(remote_down_cache_path)"
+  date +%s >"$cache" 2>/dev/null || true
+}
+
+clear_remote_down() {
+  local cache
+  cache="$(remote_down_cache_path)"
+  rm -f "$cache" 2>/dev/null || true
+}
+
+# Resolve the effective hostname/port for the remote alias and report whether
+# the connection goes through a ProxyJump/ProxyCommand (where a direct TCP
+# probe to the final hostname would be misleading).
+remote_resolve_endpoint() {
+  local ssh_bin="$1" remote="$2"
+  local hostname="$remote" port=22 uses_proxy="false"
+  local config line key value
+  if config="$("$ssh_bin" -G "$remote" 2>/dev/null)"; then
+    while IFS=' ' read -r key value; do
+      case "$key" in
+        hostname) [[ -n "$value" ]] && hostname="$value" ;;
+        port) [[ "$value" =~ ^[0-9]+$ ]] && port="$value" ;;
+        proxyjump|proxycommand)
+          [[ -n "$value" && "$value" != "none" ]] && uses_proxy="true"
+          ;;
+      esac
+    done <<<"$config"
+  fi
+  printf '%s\t%s\t%s\n' "$hostname" "$port" "$uses_proxy"
+}
+
+# Fast TCP reachability check using bash /dev/tcp with a hard timeout.
+remote_tcp_reachable() {
+  local hostname="$1" port="$2"
+  local tcp_timeout="${3:-}"
+  if [[ -z "$tcp_timeout" ]]; then
+    tcp_timeout="$(remote_tcp_timeout)"
+  fi
+  timeout "$tcp_timeout" bash -c "exec 3<>/dev/tcp/$hostname/$port" 2>/dev/null
+}
+
 remote_cargo_preflight() {
   local remote="${JCODE_REMOTE_HOST:-}"
   if [[ -z "$remote" ]]; then
@@ -315,6 +546,37 @@ remote_cargo_preflight() {
   if ! command -v "$ssh_bin" >/dev/null 2>&1; then
     log "remote cargo requested but ssh binary is unavailable: $ssh_bin"
     return 1
+  fi
+
+  # Choose probe timeout: while a host was recently seen down, use a short
+  # recovery timeout so downtime builds stay cheap. An up host answers in a few
+  # ms regardless, so recovery is still detected on the very next build.
+  local tcp_timeout
+  if remote_down_cache_fresh; then
+    tcp_timeout="$(remote_recovery_tcp_timeout)"
+  else
+    tcp_timeout="$(remote_tcp_timeout)"
+  fi
+
+  # Fast TCP pre-probe to fail fast when the host is offline, unless the
+  # connection is proxied (where a direct probe would be wrong) or explicitly
+  # disabled via JCODE_REMOTE_TCP_PROBE=0.
+  local tcp_probe="${JCODE_REMOTE_TCP_PROBE:-1}"
+  case "$tcp_probe" in
+    0|false|no|off) tcp_probe="0" ;;
+    *) tcp_probe="1" ;;
+  esac
+  if [[ "$tcp_probe" == "1" ]]; then
+    local endpoint hostname port uses_proxy
+    endpoint="$(remote_resolve_endpoint "$ssh_bin" "$remote")"
+    IFS=$'\t' read -r hostname port uses_proxy <<<"$endpoint"
+    if [[ "$uses_proxy" != "true" ]]; then
+      if ! remote_tcp_reachable "$hostname" "$port" "$tcp_timeout"; then
+        log "remote host $remote ($hostname:$port) unreachable within ${tcp_timeout}s TCP probe; using local cargo"
+        record_remote_down
+        return 1
+      fi
+    fi
   fi
 
   local connect_timeout
@@ -329,8 +591,10 @@ remote_cargo_preflight() {
     -o ServerAliveCountMax="$server_alive_count" \
     "$remote" "printf 'jcode-remote-ok\\n'" 2>&1); then
     log "remote cargo preflight failed for $remote after ~${connect_timeout}s: $output"
+    record_remote_down
     return 1
   fi
+  clear_remote_down
   return 0
 }
 
@@ -404,7 +668,8 @@ run_local_cargo() {
 
 validate_feature_profile
 maybe_configure_low_memory_selfdev "$@"
-maybe_enable_sccache
+maybe_enable_sccache "$@"
+select_build_jobs
 
 if [[ "$(uname -s)" == "Linux" ]] && [[ "$(uname -m)" == "x86_64" ]]; then
   configure_linux_linker

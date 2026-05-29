@@ -16,6 +16,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_MODEL",
@@ -29,6 +30,9 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+        "JCODE_OPENAI_MODEL",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",
@@ -157,6 +161,238 @@ fn clear_openai_compatible_runtime_env() {
     ] {
         crate::env::remove_var(key);
     }
+}
+
+fn save_test_openai_oauth_credentials() {
+    crate::auth::codex::upsert_account_from_tokens(
+        &crate::auth::codex::primary_account_label(),
+        "test-oauth-access-token",
+        "test-oauth-refresh-token",
+        None,
+        Some(chrono::Utc::now().timestamp_millis() + 86_400_000),
+    )
+    .expect("save test OpenAI OAuth credentials");
+}
+
+fn test_multi_provider_with_openai() -> MultiProvider {
+    save_test_openai_oauth_credentials();
+    crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-api-key");
+    let credentials = crate::auth::codex::load_credentials().expect("OpenAI credentials");
+    MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(Some(Arc::new(openai::OpenAIProvider::new(credentials)))),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenAI),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        forced_provider: None,
+    }
+}
+
+#[test]
+fn openai_model_switch_prefixes_preserve_oauth_vs_api_state_space() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let provider = test_multi_provider_with_openai();
+        let models = known_openai_model_ids();
+        let primary = models.first().expect("at least one OpenAI model").as_str();
+        let alternate = models.get(1).map(String::as_str).unwrap_or(primary);
+
+        let cases = [
+            vec![
+                (
+                    format!("openai-api:{primary}"),
+                    openai::OpenAICredentialMode::ApiKey,
+                    primary,
+                ),
+                (
+                    format!("openai-oauth:{alternate}"),
+                    openai::OpenAICredentialMode::OAuth,
+                    alternate,
+                ),
+            ],
+            vec![
+                (
+                    format!("openai-oauth:{primary}"),
+                    openai::OpenAICredentialMode::OAuth,
+                    primary,
+                ),
+                (
+                    format!("openai-api:{alternate}"),
+                    openai::OpenAICredentialMode::ApiKey,
+                    alternate,
+                ),
+                (
+                    format!("openai-oauth:{primary}"),
+                    openai::OpenAICredentialMode::OAuth,
+                    primary,
+                ),
+            ],
+        ];
+
+        for sequence in cases {
+            for (request, expected_mode, expected_model) in sequence {
+                provider
+                    .set_model(&request)
+                    .unwrap_or_else(|err| panic!("switch {request} should succeed: {err}"));
+                assert_eq!(
+                    provider.active_provider(),
+                    ActiveProvider::OpenAI,
+                    "{request}"
+                );
+                assert_eq!(provider.model(), expected_model, "{request}");
+                assert_eq!(
+                    provider
+                        .openai_provider()
+                        .expect("OpenAI provider")
+                        .credential_mode_snapshot(),
+                    expected_mode,
+                    "{request}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn openai_model_route_roundtrip_preserves_auth_method_for_model_switches() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let provider = test_multi_provider_with_openai();
+        let models = known_openai_model_ids();
+        let primary = models.first().expect("at least one OpenAI model").as_str();
+        let alternate = models.get(1).map(String::as_str).unwrap_or(primary);
+
+        // This mirrors the /model picker path: the selected ModelRoute becomes a
+        // default/session model + provider key, then a future /model switch uses
+        // that persisted provider key to reconstruct the provider-prefixed
+        // request. The important invariant is that OpenAI OAuth and API key are
+        // distinct states even though both execute in ActiveProvider::OpenAI.
+        let route_cases = [
+            (
+                primary,
+                "openai-oauth",
+                "openai",
+                "openai-oauth",
+                openai::OpenAICredentialMode::OAuth,
+            ),
+            (
+                alternate,
+                "openai-api-key",
+                "openai-api",
+                "openai-api",
+                openai::OpenAICredentialMode::ApiKey,
+            ),
+            (
+                primary,
+                "openai-api",
+                "openai-api",
+                "openai-api",
+                openai::OpenAICredentialMode::ApiKey,
+            ),
+        ];
+
+        for (bare_model, api_method, expected_provider_key, expected_prefix, expected_mode) in
+            route_cases
+        {
+            let selection =
+                MultiProvider::default_model_selection_from_route(bare_model, api_method, "OpenAI");
+            assert_eq!(
+                selection.model_spec,
+                format!("{expected_prefix}:{bare_model}")
+            );
+            assert_eq!(
+                selection.provider_key.as_deref(),
+                Some(expected_provider_key)
+            );
+
+            let request = MultiProvider::model_switch_request_for_session_model(
+                bare_model,
+                selection.provider_key.as_deref(),
+            );
+            assert_eq!(request, format!("{expected_prefix}:{bare_model}"));
+
+            provider
+                .set_model(&request)
+                .unwrap_or_else(|err| panic!("/model switch {request} should succeed: {err}"));
+            assert_eq!(
+                provider.active_provider(),
+                ActiveProvider::OpenAI,
+                "{request}"
+            );
+            assert_eq!(provider.model(), bare_model, "{request}");
+            assert_eq!(
+                provider
+                    .openai_provider()
+                    .expect("OpenAI provider")
+                    .credential_mode_snapshot(),
+                expected_mode,
+                "{request}"
+            );
+        }
+    });
+}
+
+#[test]
+fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        let model = known_openai_model_ids()
+            .first()
+            .expect("at least one OpenAI model")
+            .clone();
+
+        let provider = test_multi_provider_with_openai();
+        let routes = provider.model_routes();
+        let methods = routes
+            .iter()
+            .filter(|route| route.provider == "OpenAI" && route.model == model)
+            .map(|route| (route.api_method.as_str(), route.available))
+            .collect::<Vec<_>>();
+        assert!(
+            methods.contains(&("openai-oauth", true)),
+            "routes: {methods:?}"
+        );
+        assert!(
+            methods.contains(&("openai-api-key", true)),
+            "routes: {methods:?}"
+        );
+
+        crate::env::remove_var("OPENAI_API_KEY");
+        crate::auth::AuthStatus::invalidate_cache();
+        let oauth_only = provider.model_routes();
+        let oauth_only_methods = oauth_only
+            .iter()
+            .filter(|route| route.provider == "OpenAI" && route.model == model)
+            .map(|route| route.api_method.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(oauth_only_methods, vec!["openai-oauth"]);
+
+        crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-api-key");
+        std::fs::remove_file(
+            crate::storage::jcode_dir()
+                .unwrap()
+                .join("openai-auth.json"),
+        )
+        .expect("remove oauth credentials");
+        crate::auth::AuthStatus::invalidate_cache();
+        let api_only = provider.model_routes();
+        let api_only_methods = api_only
+            .iter()
+            .filter(|route| route.provider == "OpenAI" && route.model == model)
+            .map(|route| route.api_method.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(api_only_methods, vec!["openai-api-key"]);
+    });
 }
 
 fn assert_openai_compatible_route_available(provider: &MultiProvider, model: &str) {

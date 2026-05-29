@@ -158,7 +158,7 @@ const SCROLL_MOMENTUM_DECAY_PER_SECOND: f32 = 7.0;
 const SCROLL_MOMENTUM_MAX_VELOCITY: f32 = 72.0;
 const SCROLL_MOMENTUM_STOP_VELOCITY: f32 = 0.08;
 const SCROLL_FRAME_MAX_DT_SECONDS: f32 = 0.050;
-const SINGLE_SESSION_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(150);
+const SINGLE_SESSION_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(90);
 const SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 8;
 const SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES: usize = 16;
 const SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 2;
@@ -8820,7 +8820,13 @@ impl Canvas {
             .copied()
             .find(|format| format.is_srgb())
             .unwrap_or(capabilities.formats[0]);
-        let present_mode = if capabilities.present_modes.contains(&PresentMode::Fifo) {
+        // Prefer Mailbox for low-latency presentation (latest frame replaces any
+        // queued frame, so scroll/redraw updates show up on the very next vblank
+        // without tearing). Fall back to Fifo (hard vsync) and finally to whatever
+        // the surface advertises first.
+        let present_mode = if capabilities.present_modes.contains(&PresentMode::Mailbox) {
+            PresentMode::Mailbox
+        } else if capabilities.present_modes.contains(&PresentMode::Fifo) {
             PresentMode::Fifo
         } else {
             capabilities.present_modes[0]
@@ -8841,7 +8847,10 @@ impl Canvas {
             present_mode,
             alpha_mode,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // One in-flight frame keeps input-to-photon latency low. With 2+ the
+            // GPU/compositor can queue an extra frame, adding ~16ms of perceived
+            // scroll lag on a 60Hz display.
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
         startup_trace.mark("surface configured");

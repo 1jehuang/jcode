@@ -1,8 +1,8 @@
 use super::{
-    CommunicateInput, CommunicateTool, cleanup_candidate_session_ids,
+    CommunicateInput, CommunicateTool, cleanup_candidate_session_ids, coordination_in_flight_count,
     default_await_target_statuses, default_cleanup_target_statuses, format_awaited_members,
     format_awaited_members_with_reports, format_members, format_plan_status,
-    latest_assistant_report, resolve_optional_target_session,
+    latest_assistant_report, resolve_optional_target_session, swarm_member_is_in_flight,
 };
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::protocol::{
@@ -48,6 +48,68 @@ fn format_plan_status_includes_next_ready() {
     assert!(text.contains("Next up: task-2"));
     assert!(text.contains("Newly ready: task-3"));
     assert!(text.contains("Blocked: task-4"));
+}
+
+#[test]
+fn in_flight_slot_accounting_counts_queued_workers_not_coordinator() {
+    let summary = crate::protocol::PlanGraphStatus {
+        swarm_id: Some("swarm-a".to_string()),
+        version: 3,
+        item_count: 4,
+        ready_ids: vec!["queued-assigned".to_string()],
+        blocked_ids: Vec::new(),
+        active_ids: vec!["running-plan-task".to_string()],
+        completed_ids: Vec::new(),
+        cycle_ids: Vec::new(),
+        unresolved_dependency_ids: Vec::new(),
+        next_ready_ids: vec!["queued-assigned".to_string()],
+        newly_ready_ids: Vec::new(),
+    };
+    let members = vec![
+        AgentInfo {
+            session_id: "coord".to_string(),
+            friendly_name: None,
+            files_touched: Vec::new(),
+            status: Some("running".to_string()),
+            detail: None,
+            role: Some("coordinator".to_string()),
+            is_headless: Some(false),
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: None,
+        },
+        AgentInfo {
+            session_id: "worker-queued".to_string(),
+            friendly_name: None,
+            files_touched: Vec::new(),
+            status: Some("queued".to_string()),
+            detail: None,
+            role: Some("agent".to_string()),
+            is_headless: Some(true),
+            report_back_to_session_id: Some("coord".to_string()),
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: None,
+        },
+        AgentInfo {
+            session_id: "worker-ready".to_string(),
+            friendly_name: None,
+            files_touched: Vec::new(),
+            status: Some("ready".to_string()),
+            detail: None,
+            role: Some("agent".to_string()),
+            is_headless: Some(true),
+            report_back_to_session_id: Some("coord".to_string()),
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: None,
+        },
+    ];
+
+    assert!(swarm_member_is_in_flight(&members[1]));
+    assert!(!swarm_member_is_in_flight(&members[2]));
+    assert_eq!(coordination_in_flight_count(&summary, &members, "coord"), 1);
 }
 
 #[test]

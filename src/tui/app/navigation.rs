@@ -236,11 +236,32 @@ impl App {
                 .max(1)
         }
 
-        let message_lines = self
-            .display_messages
-            .iter()
-            .map(|message| wrapped_text_lines(&message.content, width))
-            .sum::<usize>();
+        // Summing wrapped lines across the whole transcript on every scroll input
+        // is O(messages) and noticeable on long sessions while streaming (when the
+        // renderer's exact LAST_MAX_SCROLL can be momentarily stale). The history
+        // portion only changes when `display_messages_version` changes, so memoize
+        // it per (version, width) and add only the live streaming delta each call.
+        thread_local! {
+            static MESSAGE_LINES_CACHE: std::cell::Cell<Option<(u64, usize, usize)>> =
+                const { std::cell::Cell::new(None) };
+        }
+
+        let message_lines = MESSAGE_LINES_CACHE.with(|cache| {
+            if let Some((version, cached_width, lines)) = cache.get()
+                && version == self.display_messages_version
+                && cached_width == width
+            {
+                return lines;
+            }
+            let lines = self
+                .display_messages
+                .iter()
+                .map(|message| wrapped_text_lines(&message.content, width))
+                .sum::<usize>();
+            cache.set(Some((self.display_messages_version, width, lines)));
+            lines
+        });
+
         message_lines.saturating_add(wrapped_text_lines(&self.streaming_text, width))
     }
 

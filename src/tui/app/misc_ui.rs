@@ -76,19 +76,42 @@ impl App {
 
     pub(super) fn update_cost_impl(&mut self) {
         let provider_name = self.provider.name().to_lowercase();
+        let runtime_provider = active_runtime_provider_key();
+        let auth_status = crate::auth::AuthStatus::check_fast();
 
-        // Only calculate cost for API-key providers
-        if !provider_name.contains("openrouter")
-            && !provider_name.contains("anthropic")
-            && !provider_name.contains("openai")
+        let is_explicit_anthropic_api = matches!(
+            runtime_provider.as_deref(),
+            Some("claude-api" | "anthropic-api")
+        );
+        let is_explicit_anthropic_oauth =
+            matches!(runtime_provider.as_deref(), Some("claude" | "anthropic"));
+        let is_explicit_openai_api = matches!(runtime_provider.as_deref(), Some("openai-api"));
+        let is_explicit_openai_oauth = matches!(runtime_provider.as_deref(), Some("openai"));
+
+        let should_calculate_cost = if provider_name.contains("openrouter") {
+            crate::provider::openrouter::OpenRouterTransportState::from_current_env(
+                runtime_provider.as_deref(),
+            )
+            .accrues_user_api_key_cost()
+        } else if provider_name.contains("anthropic") || provider_name.contains("claude") {
+            is_explicit_anthropic_api
+                || (!is_explicit_anthropic_oauth && auth_status.anthropic.has_api_key)
+        } else if provider_name.contains("openai") {
+            is_explicit_openai_api
+                || (!is_explicit_openai_oauth
+                    && auth_status.openai_has_api_key
+                    && !auth_status.openai_has_oauth)
+        } else if provider_name.contains("bedrock")
+            || provider_name.contains("azure-openai")
+            || crate::provider_catalog::openai_compatible_profile_by_id(provider_name.trim())
+                .is_some_and(|profile| profile.requires_api_key)
         {
-            return;
-        }
+            true
+        } else {
+            false
+        };
 
-        // For OAuth providers, cost is already tracked in subscription
-        let is_oauth = (provider_name.contains("anthropic") || provider_name.contains("claude"))
-            && std::env::var("ANTHROPIC_API_KEY").is_err();
-        if is_oauth {
+        if !should_calculate_cost {
             return;
         }
 

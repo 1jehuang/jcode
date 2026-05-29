@@ -68,6 +68,8 @@ fn test_parse_sse_event() {
 async fn test_available_models() {
     let provider = AnthropicProvider::new();
     let models = provider.available_models();
+    assert!(models.contains(&"claude-opus-4-8"));
+    assert!(models.contains(&"claude-opus-4-8[1m]"));
     assert!(models.contains(&"claude-opus-4-6"));
     assert!(models.contains(&"claude-opus-4-6[1m]"));
     assert!(models.contains(&"claude-sonnet-4-6"));
@@ -135,6 +137,57 @@ fn test_anthropic_max_alias_uses_strongest_real_effort() {
         AnthropicProvider::actual_effort_for_model("claude-opus-4-7", "max"),
         "xhigh"
     );
+    assert_eq!(
+        AnthropicProvider::actual_effort_for_model("claude-opus-4-8", "max"),
+        "xhigh"
+    );
+}
+
+#[test]
+fn test_anthropic_opus_48_fast_mode_service_tier_serializes_priority() {
+    let provider = AnthropicProvider::new();
+    provider.set_model("claude-opus-4-8").unwrap();
+
+    assert_eq!(provider.available_service_tiers(), vec!["off", "priority"]);
+    assert_eq!(provider.service_tier(), None);
+
+    provider.set_service_tier("priority").unwrap();
+    assert_eq!(provider.service_tier().as_deref(), Some("priority"));
+
+    let request = ApiRequest {
+        model: strip_1m_suffix(&provider.model()).to_string(),
+        max_tokens: 1024,
+        system: None,
+        messages: vec![],
+        tools: None,
+        metadata: None,
+        thinking: None,
+        output_config: None,
+        temperature: None,
+        service_tier: provider.current_service_tier_for_model(&provider.model()),
+        stream: true,
+    };
+    let value = serde_json::to_value(&request).unwrap();
+
+    assert_eq!(value["model"], "claude-opus-4-8");
+    assert_eq!(value["service_tier"], "auto");
+}
+
+#[test]
+fn test_anthropic_fast_mode_is_limited_to_opus_48() {
+    let provider = AnthropicProvider::new();
+    provider.set_model("claude-opus-4-6").unwrap();
+
+    assert!(provider.available_service_tiers().is_empty());
+    assert!(provider.set_service_tier("priority").is_err());
+    assert_eq!(provider.service_tier(), None);
+
+    provider.set_model("claude-opus-4-8[1m]").unwrap();
+    provider.set_service_tier("priority").unwrap();
+    assert_eq!(provider.service_tier().as_deref(), Some("priority"));
+
+    provider.set_service_tier("off").unwrap();
+    assert_eq!(provider.service_tier(), None);
 }
 
 #[test]

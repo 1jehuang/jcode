@@ -99,6 +99,13 @@ pub(crate) fn extract_input_shell_command(input: &str) -> Option<&str> {
 
 pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
 
+fn active_runtime_provider_key() -> Option<String> {
+    std::env::var("JCODE_RUNTIME_PROVIDER")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
     content: String,
@@ -607,24 +614,24 @@ pub struct App {
     remote_resume_activity: Option<RemoteResumeActivity>,
     // Reload reconnect is waiting for server history before deciding whether to continue.
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
-    // Accurate TPS tracking: only counts actual token streaming time, not tool execution
-    /// Set when first TextDelta arrives in a streaming response
+    // Accurate TPS tracking: counts model output generation time, not tool execution.
+    /// Set while the provider is generating output tokens (text, reasoning, or tool-call JSON).
     streaming_tps_start: Option<Instant>,
-    /// Accumulated streaming-only time across agentic loop iterations
+    /// Accumulated model-output generation time across agentic loop iterations.
     streaming_tps_elapsed: Duration,
-    /// Whether incoming output-token deltas should contribute to TPS.
+    /// Whether incoming provider output-token deltas should contribute to TPS.
     ///
-    /// This is enabled only while user-visible assistant text is streaming, and stays
-    /// enabled briefly after message end so late final usage snapshots still count.
+    /// This is enabled while an API call has generated model output, and can stay enabled
+    /// briefly after generation ends so late final usage snapshots still count.
     streaming_tps_collect_output: bool,
     /// Accumulated output tokens across all API calls in a turn.
     ///
     /// Providers may emit repeated cumulative usage snapshots for a single API call,
     /// so we accumulate per-call deltas to avoid double counting.
     streaming_total_output_tokens: u64,
-    /// Latest visible-output token snapshot used for TPS display.
+    /// Latest provider output-token snapshot used for TPS display.
     ///
-    /// We update this only when newly visible output tokens are observed. That keeps the
+    /// We update this only when newly generated output tokens are observed. That keeps the
     /// displayed TPS anchored to the latest real token sample instead of decaying on every
     /// redraw while no new usage data has arrived.
     streaming_tps_observed_output_tokens: u64,
@@ -1120,6 +1127,7 @@ impl App {
             self.kv_cache_turn_call_index,
             baseline.as_ref(),
         );
+        self.pause_streaming_tps(false);
         self.current_api_usage_recorded = false;
 
         self.pending_kv_cache_request = Some(PendingKvCacheRequest {
@@ -1161,6 +1169,7 @@ impl App {
             self.kv_cache_turn_call_index,
             baseline.as_ref(),
         );
+        self.pause_streaming_tps(false);
         self.current_api_usage_recorded = false;
         self.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
@@ -1196,6 +1205,7 @@ impl App {
             return;
         }
 
+        let expired_ago_secs = age_secs.saturating_sub(ttl_secs);
         let tokens = baseline.input_tokens;
         let token_label = if tokens >= 1_000_000 {
             format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -1205,8 +1215,8 @@ impl App {
             tokens.to_string()
         };
         self.push_display_message(DisplayMessage::system(format!(
-            "🧊 Prompt cache is cold: ~{} input tokens may be resent on this request ({}s TTL expired after {}s). Use /cache to extend the timer before long breaks, or start a fresh/compacted session for very large histories.",
-            token_label, ttl_secs, age_secs
+            "🧊 Prompt cache is cold: ~{} input tokens may be resent on this request ({}s TTL expired {}s ago; last cache write was {}s ago). Use /cache to extend the timer before long breaks, or start a fresh/compacted session for very large histories.",
+            token_label, ttl_secs, expired_ago_secs, age_secs
         )));
     }
 

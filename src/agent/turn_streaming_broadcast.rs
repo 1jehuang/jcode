@@ -302,7 +302,15 @@ impl Agent {
                 };
 
                 match event {
-                    StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingStart => {
+                        // Reasoning tokens are counted in provider output usage even when
+                        // `display.show_thinking` hides the text. Let remote clients start
+                        // their TPS timer without forcing hidden reasoning into the transcript.
+                        let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                            phase: crate::message::ConnectionPhase::Streaming.to_string(),
+                        });
+                    }
+                    StreamEvent::ThinkingEnd => {}
                     StreamEvent::ThinkingSignatureDelta(signature) => {
                         if store_reasoning_content {
                             reasoning_signature.push_str(&signature);

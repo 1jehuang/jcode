@@ -1,4 +1,4 @@
-pub(super) fn compact_path_label(path: &str) -> String {
+pub fn compact_path_label(path: &str) -> String {
     let trimmed = path.trim();
     std::path::Path::new(trimmed)
         .file_name()
@@ -8,7 +8,7 @@ pub(super) fn compact_path_label(path: &str) -> String {
         .unwrap_or_else(|| trimmed.to_string())
 }
 
-pub(super) fn compact_image_format(value: &str) -> String {
+pub fn compact_image_format(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return "image".to_string();
@@ -30,11 +30,11 @@ pub(super) fn compact_image_format(value: &str) -> String {
     }
 }
 
-pub(super) fn format_dimensions(width: u32, height: u32) -> String {
+pub fn format_dimensions(width: u32, height: u32) -> String {
     format!("{width}×{height}")
 }
 
-pub(super) fn aspect_ratio(width: u32, height: u32) -> Option<String> {
+pub fn aspect_ratio(width: u32, height: u32) -> Option<String> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -42,7 +42,7 @@ pub(super) fn aspect_ratio(width: u32, height: u32) -> Option<String> {
     Some(format!("{}:{}", width / divisor, height / divisor))
 }
 
-pub(super) fn format_byte_count(bytes: u64) -> String {
+pub fn format_byte_count(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
@@ -72,7 +72,7 @@ pub(super) fn format_byte_count(bytes: u64) -> String {
     format!("{formatted} {unit}")
 }
 
-pub(super) fn estimate_base64_decoded_len(data: &str) -> Option<u64> {
+pub fn estimate_base64_decoded_len(data: &str) -> Option<u64> {
     let trimmed = data.trim();
     let payload = if trimmed.starts_with("data:") {
         trimmed.split_once(',').map(|(_, payload)| payload)?

@@ -453,7 +453,7 @@ mod tests {
             ),
             (
                 "claude-opus-4-6",
-                "api-key",
+                "claude-api",
                 "Anthropic",
                 "claude-api:claude-opus-4-6",
                 Some("claude-api"),

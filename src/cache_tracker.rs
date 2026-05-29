@@ -7,7 +7,7 @@
 //! This is a fallback mechanism for providers like Fireworks (via OpenRouter) that
 //! have automatic caching but don't report cache hit/miss metrics.
 
-use crate::message::{Message, stable_message_hash};
+use jcode_message_types::{Message, stable_message_hash};
 use std::collections::VecDeque;
 
 /// Maximum number of prefix hashes to remember (for detecting intermittent violations)
@@ -59,7 +59,7 @@ impl CacheTracker {
             let prefix_hash = prefix_hashes
                 .last()
                 .copied()
-                .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
+                .map(|prev| jcode_message_types::extend_stable_hash(prev, message_hash))
                 .unwrap_or(message_hash);
             prefix_hashes.push(prefix_hash);
         }
@@ -212,7 +212,7 @@ impl CacheTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ContentBlock, Role};
+    use jcode_message_types::{ContentBlock, Role};
 
     fn make_message(role: Role, text: &str) -> Message {
         Message {

@@ -366,7 +366,7 @@ pub async fn ensure_browser_setup() -> Result<String> {
 
 async fn download_browser_binary() -> Result<()> {
     let asset_name = get_platform_asset_name();
-    let client = crate::provider::shared_http_client();
+    let client = jcode_provider_core::shared_http_client();
 
     let release_info: serde_json::Value = client
         .get(GITHUB_API_LATEST)

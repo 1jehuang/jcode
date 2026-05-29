@@ -206,7 +206,7 @@ pub fn format_background_task_progress_markdown(task: &BackgroundTaskProgressEve
         "**Background task progress** `{}` · {}\n\n{}",
         task.task_id,
         background_task_header_label(&task.tool_name, task.display_name.as_deref()),
-        crate::background::format_progress_display(&task.progress, 12)
+        jcode_background_types::format_progress_display(&task.progress, 12)
     )
 }
 

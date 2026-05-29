@@ -113,6 +113,37 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
     }
 }
 
+fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
+    matches!(
+        member.status.as_deref(),
+        Some("queued" | "running" | "running_stale")
+    )
+}
+
+fn coordination_in_flight_count(
+    summary: &PlanGraphStatus,
+    members: &[AgentInfo],
+    current_session_id: &str,
+) -> usize {
+    summary.active_ids.len().max(
+        members
+            .iter()
+            .filter(|member| member.session_id != current_session_id)
+            .filter(|member| swarm_member_is_in_flight(member))
+            .count(),
+    )
+}
+
+async fn fetch_in_flight_swarm_sessions(session_id: &str) -> Result<Vec<String>> {
+    let members = fetch_swarm_members(session_id).await?;
+    Ok(members
+        .into_iter()
+        .filter(|member| member.session_id != session_id)
+        .filter(swarm_member_is_in_flight)
+        .map(|member| member.session_id)
+        .collect())
+}
+
 async fn cleanup_swarm_workers(ctx: &ToolContext, params: &CommunicateInput) -> Result<String> {
     let members = fetch_swarm_members(&ctx.session_id).await?;
     let target_status = params
@@ -189,6 +220,18 @@ async fn await_swarm_progress(
     };
     let socket_timeout = std::time::Duration::from_secs(timeout_minutes.max(1) * 60 + 30);
     match send_request_with_timeout(request, Some(socket_timeout)).await {
+        Ok(ServerEvent::CommAwaitMembersResponse {
+            completed, summary, ..
+        }) => {
+            if completed {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "Timed out waiting for swarm progress: {}",
+                    summary
+                ))
+            }
+        }
         Ok(response) => ensure_success(&response),
         Err(e) => Err(anyhow::anyhow!(
             "Failed while awaiting swarm progress: {}",
@@ -223,9 +266,13 @@ async fn run_swarm_plan_to_terminal(
             return Ok(ToolOutput::new("No swarm plan items to run."));
         }
 
+        let in_flight_sessions = fetch_in_flight_swarm_sessions(&ctx.session_id).await?;
+
         let terminal_count =
             summary.completed_ids.len() + summary.blocked_ids.len() + summary.cycle_ids.len();
-        let no_more_runnable = summary.active_ids.is_empty() && summary.next_ready_ids.is_empty();
+        let no_more_runnable = summary.active_ids.is_empty()
+            && summary.next_ready_ids.is_empty()
+            && in_flight_sessions.is_empty();
         if no_more_runnable || terminal_count >= summary.item_count {
             let mut output = format!(
                 "Swarm plan reached terminal/blocked state after {} loop(s). completed={} blocked={} cycles={} active={} assignments={}",
@@ -245,7 +292,7 @@ async fn run_swarm_plan_to_terminal(
             return Ok(ToolOutput::new(output));
         }
 
-        let active_count = summary.active_ids.len();
+        let active_count = summary.active_ids.len().max(in_flight_sessions.len());
         let available_slots = concurrency_limit.saturating_sub(active_count);
         let mut assigned_sessions = Vec::new();
         for _ in 0..available_slots {
@@ -275,13 +322,7 @@ async fn run_swarm_plan_to_terminal(
         }
 
         let await_sessions = if assigned_sessions.is_empty() {
-            let members = fetch_swarm_members(&ctx.session_id).await?;
-            members
-                .into_iter()
-                .filter(|member| member.session_id != ctx.session_id)
-                .filter(|member| member.status.as_deref() == Some("running"))
-                .map(|member| member.session_id)
-                .collect::<Vec<_>>()
+            in_flight_sessions
         } else {
             assigned_sessions
         };
@@ -1272,11 +1313,13 @@ impl Tool for CommunicateTool {
                 })?;
 
                 let summary = fetch_plan_status(&ctx.session_id).await?;
+                let members = fetch_swarm_members(&ctx.session_id).await?;
 
-                let active_count = summary.active_ids.len();
+                let active_count =
+                    coordination_in_flight_count(&summary, &members, &ctx.session_id);
                 if active_count >= concurrency_limit {
                     return Ok(ToolOutput::new(format!(
-                        "Window already full: {} active task(s) >= limit {}",
+                        "Window already full: {} active/in-flight task(s) >= limit {}",
                         active_count, concurrency_limit
                     )));
                 }

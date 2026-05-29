@@ -699,7 +699,7 @@ impl Default for WebSearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Default model to use (e.g. "claude-opus-4-6", "copilot:claude-opus-4.6")
+    /// Default model to use (e.g. "claude-opus-4-8", "copilot:claude-opus-4.6")
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,

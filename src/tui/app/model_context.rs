@@ -395,40 +395,11 @@ impl App {
 
         let usage = manager.context_usage_with(&provider_messages);
         if usage > 1.5 {
-            match manager.hard_compact_with(&provider_messages) {
-                Ok(dropped) => {
-                    self.sync_session_compaction_state_from_manager(&manager);
-                    let post_usage = manager.context_usage_with(&provider_messages);
-                    if post_usage <= 1.0 {
-                        return Some(format!(
-                            "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%). You can continue.",
-                            dropped,
-                            usage * 100.0
-                        ));
-                    }
-                    let truncated = manager.emergency_truncate_with(&mut provider_messages);
-                    self.messages = provider_messages;
-                    return Some(format!(
-                        "⚡ Emergency compaction: dropped {} old messages and truncated {} tool result(s) (context was at {:.0}%). You can continue.",
-                        dropped,
-                        truncated,
-                        usage * 100.0
-                    ));
-                }
-                Err(reason) => {
-                    crate::logging::error(&format!(
-                        "[auto_recover] hard_compact failed: {}",
-                        reason
-                    ));
-                    let truncated = manager.emergency_truncate_with(&mut provider_messages);
-                    if truncated > 0 {
-                        self.messages = provider_messages;
-                        return Some(format!(
-                            "⚡ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
-                            truncated
-                        ));
-                    }
-                }
+            let recovery = manager.recover_within_budget(&mut provider_messages);
+            if recovery.did_anything() {
+                self.messages = provider_messages.clone();
+                self.sync_session_compaction_state_from_manager(&manager);
+                return Some(format!("{} You can continue.", recovery.summary_line(usage)));
             }
         }
 
@@ -472,6 +443,55 @@ impl App {
         }
     }
 
+    /// Reset session and streaming state so a turn can be safely retried after
+    /// an emergency compaction or truncation changed the context.
+    ///
+    /// Every auto-recovery path used to inline this same ~15-line block; keeping
+    /// it in one place means they can no longer drift apart (e.g. one path
+    /// forgetting to clear `streaming_cache_creation_tokens`). Callers that hold
+    /// the compaction manager lock must `drop` it before calling this.
+    fn reset_state_for_compaction_retry(&mut self) {
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.context_warning_shown = false;
+        self.clear_streaming_render_state();
+        self.stream_buffer.clear();
+        self.streaming_tool_calls.clear();
+        self.streaming_input_tokens = 0;
+        self.streaming_output_tokens = 0;
+        self.streaming_cache_read_tokens = None;
+        self.streaming_cache_creation_tokens = None;
+        self.current_api_usage_recorded = false;
+        self.thought_line_inserted = false;
+        self.thinking_prefix_emitted = false;
+        self.thinking_buffer.clear();
+        self.status = ProcessingStatus::Sending;
+    }
+
+    /// Run a retry turn after compaction and report whether it succeeded,
+    /// clearing the materialized message scratch buffer and recording/handling
+    /// any turn error. Shared by every compaction auto-retry path.
+    async fn run_compaction_retry_turn(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+    ) -> bool {
+        let retry_result = self
+            .run_turn_interactive(terminal, event_stream, None)
+            .await;
+        self.messages.clear();
+        match retry_result {
+            Ok(()) => {
+                self.last_stream_error = None;
+                true
+            }
+            Err(e) => {
+                self.handle_turn_error(crate::util::format_error_chain(&e));
+                false
+            }
+        }
+    }
+
     /// Attempt automatic compaction and retry when context limit is exceeded.
     /// Returns true if the retry succeeded.
     pub(super) async fn try_auto_compact_and_retry(
@@ -495,93 +515,20 @@ impl App {
                 manager.update_observed_input_tokens(self.context_limit);
                 let usage = manager.context_usage_with(&provider_messages);
                 if usage > 1.5 {
-                    match manager.hard_compact_with(&provider_messages) {
-                        Ok(dropped) => {
-                            self.sync_session_compaction_state_from_manager(&manager);
-                            self.push_display_message(DisplayMessage::system(
-                                format!(
-                                    "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%).",
-                                    dropped,
-                                    usage * 100.0
-                                ),
-                            ));
-                            drop(manager);
-                            self.provider_session_id = None;
-                            self.session.provider_session_id = None;
-                            self.context_warning_shown = false;
-                            self.clear_streaming_render_state();
-                            self.stream_buffer.clear();
-                            self.streaming_tool_calls.clear();
-                            self.streaming_input_tokens = 0;
-                            self.streaming_output_tokens = 0;
-                            self.streaming_cache_read_tokens = None;
-                            self.streaming_cache_creation_tokens = None;
-                            self.current_api_usage_recorded = false;
-                            self.thought_line_inserted = false;
-                            self.thinking_prefix_emitted = false;
-                            self.thinking_buffer.clear();
-                            self.status = ProcessingStatus::Sending;
+                    let recovery = manager.recover_within_budget(&mut provider_messages);
+                    if recovery.did_anything() {
+                        self.messages = provider_messages;
+                        self.sync_session_compaction_state_from_manager(&manager);
+                        drop(manager);
+                        self.reset_state_for_compaction_retry();
 
-                            self.push_display_message(DisplayMessage::system(
-                                "✓ Context compacted. Retrying...".to_string(),
-                            ));
-                            let retry_result = self
-                                .run_turn_interactive(terminal, event_stream, None)
-                                .await;
-                            self.messages.clear();
-                            return match retry_result {
-                                Ok(()) => {
-                                    self.last_stream_error = None;
-                                    true
-                                }
-                                Err(e) => {
-                                    self.handle_turn_error(crate::util::format_error_chain(&e));
-                                    false
-                                }
-                            };
-                        }
-                        Err(_) => {
-                            let truncated = manager.emergency_truncate_with(&mut provider_messages);
-                            if truncated > 0 {
-                                self.messages = provider_messages;
-                                drop(manager);
-                                self.provider_session_id = None;
-                                self.session.provider_session_id = None;
-                                self.context_warning_shown = false;
-                                self.clear_streaming_render_state();
-                                self.stream_buffer.clear();
-                                self.streaming_tool_calls.clear();
-                                self.streaming_input_tokens = 0;
-                                self.streaming_output_tokens = 0;
-                                self.streaming_cache_read_tokens = None;
-                                self.streaming_cache_creation_tokens = None;
-                                self.current_api_usage_recorded = false;
-                                self.thought_line_inserted = false;
-                                self.thinking_prefix_emitted = false;
-                                self.thinking_buffer.clear();
-                                self.status = ProcessingStatus::Sending;
-
-                                self.push_display_message(DisplayMessage::system(
-                                    format!("⚡ Emergency truncation: shortened {} large tool result(s). Retrying...", truncated),
-                                ));
-                                let retry_result = self
-                                    .run_turn_interactive(terminal, event_stream, None)
-                                    .await;
-                                self.messages.clear();
-                                return match retry_result {
-                                    Ok(()) => {
-                                        self.last_stream_error = None;
-                                        true
-                                    }
-                                    Err(e) => {
-                                        self.handle_turn_error(crate::util::format_error_chain(&e));
-                                        false
-                                    }
-                                };
-                            }
-                            false
-                        }
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "{} Retrying...",
+                            recovery.summary_line(usage)
+                        )));
+                        return self.run_compaction_retry_turn(terminal, event_stream).await;
                     }
+                    false
                 } else {
                     match manager.force_compact_with(&provider_messages, self.provider.clone()) {
                         Ok(()) => true,
@@ -589,39 +536,14 @@ impl App {
                             Ok(_) => {
                                 self.sync_session_compaction_state_from_manager(&manager);
                                 drop(manager);
-                                self.provider_session_id = None;
-                                self.session.provider_session_id = None;
-                                self.context_warning_shown = false;
-                                self.clear_streaming_render_state();
-                                self.stream_buffer.clear();
-                                self.streaming_tool_calls.clear();
-                                self.streaming_input_tokens = 0;
-                                self.streaming_output_tokens = 0;
-                                self.streaming_cache_read_tokens = None;
-                                self.streaming_cache_creation_tokens = None;
-                                self.current_api_usage_recorded = false;
-                                self.thought_line_inserted = false;
-                                self.thinking_prefix_emitted = false;
-                                self.thinking_buffer.clear();
-                                self.status = ProcessingStatus::Sending;
+                                self.reset_state_for_compaction_retry();
 
                                 self.push_display_message(DisplayMessage::system(
                                     "✓ Context compacted (emergency). Retrying...".to_string(),
                                 ));
-                                let retry_result = self
-                                    .run_turn_interactive(terminal, event_stream, None)
+                                return self
+                                    .run_compaction_retry_turn(terminal, event_stream)
                                     .await;
-                                self.messages.clear();
-                                return match retry_result {
-                                    Ok(()) => {
-                                        self.last_stream_error = None;
-                                        true
-                                    }
-                                    Err(e) => {
-                                        self.handle_turn_error(crate::util::format_error_chain(&e));
-                                        false
-                                    }
-                                };
                             }
                             Err(_) => false,
                         },
@@ -681,40 +603,10 @@ impl App {
             "✓ Context compacted. Retrying...".to_string(),
         ));
 
-        // Reset provider session since context changed
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.context_warning_shown = false;
-
-        // Clear streaming state for the retry
-        self.clear_streaming_render_state();
-        self.stream_buffer.clear();
-        self.streaming_tool_calls.clear();
-        self.streaming_input_tokens = 0;
-        self.streaming_output_tokens = 0;
-        self.streaming_cache_read_tokens = None;
-        self.streaming_cache_creation_tokens = None;
-        self.current_api_usage_recorded = false;
-        self.thought_line_inserted = false;
-        self.thinking_prefix_emitted = false;
-        self.thinking_buffer.clear();
-        self.status = ProcessingStatus::Sending;
+        self.reset_state_for_compaction_retry();
 
         // Retry the turn
-        let result = self
-            .run_turn_interactive(terminal, event_stream, None)
-            .await;
-        self.messages.clear();
-        match result {
-            Ok(()) => {
-                self.last_stream_error = None;
-                true
-            }
-            Err(e) => {
-                self.handle_turn_error(crate::util::format_error_chain(&e));
-                false
-            }
-        }
+        self.run_compaction_retry_turn(terminal, event_stream).await
     }
 
     pub(super) fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
@@ -945,8 +837,9 @@ impl App {
                     }
                     let usage = manager.context_usage_with(&provider_messages);
                     if usage > 1.5 {
-                        match manager.hard_compact_with(&provider_messages) {
-                            Ok(dropped) => {
+                        let recovery = manager.recover_within_budget(&mut provider_messages);
+                        match recovery.dropped {
+                            Some(dropped) if dropped > 0 => {
                                 self.sync_session_compaction_state_from_manager(&manager);
                                 actions.push(format!(
                                     "Emergency compaction: dropped {} old messages (context was at {:.0}%).",
@@ -954,20 +847,17 @@ impl App {
                                     usage * 100.0
                                 ));
                             }
-                            Err(reason) => {
-                                notes.push(format!("Hard compaction failed: {}", reason));
+                            Some(_) => {}
+                            None => {
+                                notes.push("Hard compaction failed.".to_string());
                             }
                         }
-                        let post_usage = manager.context_usage_with(&provider_messages);
-                        if post_usage > 1.0 {
-                            let truncated = manager.emergency_truncate_with(&mut provider_messages);
-                            if truncated > 0 {
-                                self.messages = provider_messages.clone();
-                                actions.push(format!(
-                                    "Emergency truncation: shortened {} large tool result(s) to fit context.",
-                                    truncated
-                                ));
-                            }
+                        if recovery.truncated > 0 {
+                            self.messages = provider_messages.clone();
+                            actions.push(format!(
+                                "Emergency truncation: shortened {} large tool result(s) to fit context.",
+                                recovery.truncated
+                            ));
                         }
                     } else {
                         match manager.force_compact_with(&provider_messages, self.provider.clone())
@@ -1373,12 +1263,13 @@ async fn refresh_model_catalog_with_progress(
             _ = heartbeat.tick() => {
                 let elapsed_secs = started.elapsed().as_secs();
                 if elapsed_secs > 0 {
+                    let percent = (10 + elapsed_secs.saturating_mul(5)).min(95) as u8;
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
                         crate::bus::UiActivity::catalog(
                             Some(session_id.clone()),
                             crate::message::format_model_refresh_progress_markdown(
                                 &format!("Waiting on provider APIs ({elapsed_secs}s elapsed)"),
-                                None,
+                                Some(percent),
                             ),
                             Some("Refreshing model list..."),
                         ),
@@ -1394,7 +1285,10 @@ impl App {
         &mut self,
         completed: crate::bus::ModelRefreshCompleted,
     ) {
-        if self.active_client_session_id() != Some(completed.session_id.as_str()) {
+        let completion_matches_active =
+            self.active_client_session_id() == Some(completed.session_id.as_str());
+        let completion_matches_local = completed.session_id == self.session.id;
+        if !completion_matches_active && !completion_matches_local {
             return;
         }
         match completed.result {

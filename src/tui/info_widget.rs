@@ -312,6 +312,8 @@ impl UsageProvider {
 pub enum AuthMethod {
     #[default]
     Unknown,
+    /// Generic API key auth for API-backed providers without a provider-specific auth widget variant
+    ApiKey,
     /// Anthropic OAuth (Claude Code CLI style)
     AnthropicOAuth,
     /// Anthropic API key

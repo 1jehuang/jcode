@@ -160,7 +160,7 @@ pub fn append_simplified_anthropic_model_routes(
         routes.push(ModelRoute {
             model: model.clone(),
             provider: "Anthropic".to_string(),
-            api_method: "api-key".to_string(),
+            api_method: "claude-api".to_string(),
             available: true,
             detail: String::new(),
             cheapness: None,
@@ -189,7 +189,11 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     let mut openrouter_endpoint_routes = 0usize;
     let mut openrouter_scheduled_endpoint_refreshes = 0usize;
     let has_oauth = provider.has_claude_runtime();
-    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+    let has_api_key = crate::provider_catalog::load_api_key_from_env_or_config(
+        "ANTHROPIC_API_KEY",
+        "anthropic.env",
+    )
+    .is_some();
     let anthropic_models = if let Some(anthropic) = provider.anthropic_provider() {
         anthropic.available_models_for_switching()
     } else if let Some(claude) = provider.claude_provider() {
@@ -223,10 +227,10 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             routes.push(ModelRoute {
                 model: model.to_string(),
                 provider: "Anthropic".to_string(),
-                api_method: "api-key".to_string(),
+                api_method: "claude-api".to_string(),
                 available: ak_available,
                 detail: ak_detail,
-                cheapness: cheapness_for_route(&model, "Anthropic", "api-key"),
+                cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
             });
         }
         if !has_oauth && !has_api_key {
@@ -943,8 +947,8 @@ mod tests {
     fn simplified_anthropic_routes_preserve_oauth_vs_api_key_state_space() {
         for (has_oauth, has_api_key, expected_methods) in [
             (true, false, vec!["claude-oauth"]),
-            (false, true, vec!["api-key"]),
-            (true, true, vec!["claude-oauth", "api-key"]),
+            (false, true, vec!["claude-api"]),
+            (true, true, vec!["claude-oauth", "claude-api"]),
             (false, false, vec!["claude-oauth"]),
         ] {
             let auth = AuthStatus {

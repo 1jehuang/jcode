@@ -101,6 +101,7 @@ impl MultiProvider {
         // path. Treat it as a configured credential source so the
         // Anthropic provider gets instantiated.
         let has_anthropic_api_key = anthropic::anthropic_api_key_env_configured();
+        let has_claude_creds = has_claude_creds || anthropic::has_anthropic_api_key();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_copilot_api = provider_state.auth_status().copilot_has_api_token;
         let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();

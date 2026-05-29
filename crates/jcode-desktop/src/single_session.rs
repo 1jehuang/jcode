@@ -6895,7 +6895,7 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
     let mut lines = vec![
         styled_line(
             format!(
-                "Model picker    current {}",
+                "Choose model  ·  current {}",
                 model_picker_current_label(
                     picker.provider_name.as_deref(),
                     picker.current_model.as_deref(),
@@ -6904,7 +6904,7 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
             SingleSessionLineStyle::OverlayTitle,
         ),
         styled_line(
-            format!("{filter}    {count}"),
+            format!("{filter}  ·  {count}"),
             SingleSessionLineStyle::Overlay,
         ),
     ];
@@ -6965,12 +6965,16 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
             SingleSessionLineStyle::Overlay
         };
         lines.push(styled_line(
-            format!("{}{}", truncate_chars(&choice.model, 54), current_badge,),
+            format!(
+                "     {}{}",
+                truncate_chars(&choice.model, 49),
+                current_badge,
+            ),
             row_style,
         ));
         lines.push(styled_line(
             format!(
-                "  {} · {} · {}",
+                "       {} · {} · {}",
                 truncate_chars(provider, 22),
                 truncate_chars(method, 18),
                 truncate_chars(detail, 42),
@@ -6988,9 +6992,9 @@ fn model_picker_inline_styled_lines(picker: &ModelPickerState) -> Vec<SingleSess
         ));
     }
     let footer = if picker.preview {
-        "Up/Down/PageUp/PageDown select   Home/End top/bottom   Enter use model   Esc clear /model"
+        "↑↓ select  ·  PgUp/PgDn jump  ·  Enter use model  ·  Esc clear /model"
     } else {
-        "Up/Down/PageUp/PageDown select   Home/End top/bottom   Type filter   Enter use   Esc close"
+        "↑↓ select  ·  type to filter  ·  Enter use model  ·  Esc close"
     };
     lines.push(styled_line(footer, SingleSessionLineStyle::Overlay));
 

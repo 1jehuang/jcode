@@ -5,6 +5,7 @@ use crate::tui::{
     PickerOption,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "inline_interactive/helpers.rs"]
@@ -23,6 +24,8 @@ use helpers::{
 
 const REMOTE_MODEL_CATALOG_CACHE_FILE: &str = "remote_model_catalog_cache.json";
 const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 1;
+const MODEL_PICKER_USAGE_FILE: &str = "model_picker_usage.json";
+const MODEL_PICKER_USAGE_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteModelCatalogCache {
@@ -30,6 +33,86 @@ struct RemoteModelCatalogCache {
     #[serde(flatten)]
     snapshot: jcode_provider_core::ModelCatalogSnapshot,
     observed_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ModelPickerUsageEntry {
+    count: u32,
+    last_selected_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ModelPickerUsageStore {
+    version: u8,
+    selections: HashMap<String, ModelPickerUsageEntry>,
+}
+
+fn model_picker_usage_path() -> Option<std::path::PathBuf> {
+    crate::storage::app_config_dir()
+        .ok()
+        .map(|dir| dir.join(MODEL_PICKER_USAGE_FILE))
+}
+
+fn model_picker_usage_key(model_name: &str, route: &PickerOption, effort: Option<&str>) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        model_name,
+        route.provider,
+        route.api_method,
+        effort.unwrap_or("")
+    )
+}
+
+fn load_model_picker_usage_store() -> ModelPickerUsageStore {
+    let Some(path) = model_picker_usage_path() else {
+        return ModelPickerUsageStore::default();
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return ModelPickerUsageStore::default();
+    };
+    let Ok(mut store) = serde_json::from_slice::<ModelPickerUsageStore>(&bytes) else {
+        return ModelPickerUsageStore::default();
+    };
+    if store.version != MODEL_PICKER_USAGE_VERSION {
+        return ModelPickerUsageStore::default();
+    }
+    store.selections.retain(|_, entry| entry.count > 0);
+    store
+}
+
+fn save_model_picker_usage_store(store: &ModelPickerUsageStore) {
+    let Some(path) = model_picker_usage_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_vec_pretty(store) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn model_picker_usage_score(
+    store: &ModelPickerUsageStore,
+    model_name: &str,
+    route: &PickerOption,
+    effort: Option<&str>,
+) -> u32 {
+    store
+        .selections
+        .get(&model_picker_usage_key(model_name, route, effort))
+        .map(|entry| entry.count.saturating_mul(100).saturating_add(50))
+        .unwrap_or(0)
+}
+
+fn record_model_picker_selection(model_name: &str, route: &PickerOption, effort: Option<&str>) {
+    let mut store = load_model_picker_usage_store();
+    store.version = MODEL_PICKER_USAGE_VERSION;
+    let key = model_picker_usage_key(model_name, route, effort);
+    let entry = store.selections.entry(key).or_default();
+    entry.count = entry.count.saturating_add(1);
+    entry.last_selected_unix_secs = remote_model_catalog_observed_at_unix_secs();
+    save_model_picker_usage_store(&store);
 }
 
 fn remote_model_catalog_cache_path() -> Option<std::path::PathBuf> {
@@ -55,7 +138,7 @@ fn model_picker_route_is_current(
         && jcode_provider_core::model_route_provider_labels_match(&route.provider, current_provider)
 }
 
-const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-7", "deepseek/deepseek-v4-pro"];
+const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
 
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
@@ -523,6 +606,7 @@ impl App {
                 is_default: false,
                 recommended: false,
                 recommendation_rank: usize::MAX,
+                usage_score: 0,
                 old: false,
                 created_date: None,
                 effort: None,
@@ -796,6 +880,7 @@ impl App {
             .map(|(provider, _)| provider.as_str());
 
         let entries_started = std::time::Instant::now();
+        let usage_store = load_model_picker_usage_store();
         let mut entries: Vec<PickerEntry> = Vec::new();
         for name in &model_order {
             let mut entry_routes = model_options.remove(name).unwrap_or_default();
@@ -853,9 +938,15 @@ impl App {
                             action: PickerAction::Model,
                             selected_option: 0,
                             is_current: is_this_current,
-                            recommended: (*effort == "xhigh" || *effort == "high")
+                            recommended: *effort == "high"
                                 && model_picker_route_is_recommended(name, route),
                             recommendation_rank: model_picker_recommendation_rank(name),
+                            usage_score: model_picker_usage_score(
+                                &usage_store,
+                                name,
+                                route,
+                                Some(effort),
+                            ),
                             old: old_threshold_secs > 0
                                 && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                             created_date: or_created.map(format_created),
@@ -879,12 +970,13 @@ impl App {
                     let is_default = is_config_default(name, &route);
                     entries.push(PickerEntry {
                         name: name.clone(),
-                        options: vec![route],
+                        options: vec![route.clone()],
                         action: PickerAction::Model,
                         selected_option: 0,
                         is_current,
                         recommended: is_recommended,
                         recommendation_rank: model_picker_recommendation_rank(name),
+                        usage_score: model_picker_usage_score(&usage_store, name, &route, None),
                         old: is_old,
                         created_date: or_created.map(format_created),
                         effort: None,
@@ -917,6 +1009,8 @@ impl App {
             };
             let a_rec = if a.recommended { 0u8 } else { 1 };
             let b_rec = if b.recommended { 0u8 } else { 1 };
+            let a_usage = std::cmp::Reverse(a.usage_score);
+            let b_usage = std::cmp::Reverse(b.usage_score);
             let a_rec_rank = if a.recommended {
                 a.recommendation_rank
             } else {
@@ -942,6 +1036,7 @@ impl App {
             a_current
                 .cmp(&b_current)
                 .then(a_recent.cmp(&b_recent))
+                .then(a_usage.cmp(&b_usage))
                 .then(a_rec.cmp(&b_rec))
                 .then(a_rec_rank.cmp(&b_rec_rank))
                 .then(a_avail.cmp(&b_avail))
@@ -1915,11 +2010,23 @@ impl App {
                     ) {
                         Ok(()) => {
                             self.invalidate_model_picker_cache();
+                            if let Some(ref mut picker) = self.inline_interactive_state {
+                                for entry in &mut picker.entries {
+                                    entry.is_default = false;
+                                }
+                                if let Some(entry) = picker.entries.get_mut(idx) {
+                                    entry.is_default = true;
+                                }
+                            }
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Saved default model: **{}** via **{}**. This affects future sessions.",
+                                model_spec,
+                                provider_key.as_deref().unwrap_or("auto")
+                            )));
                             self.set_status_notice(notice)
                         }
                         Err(e) => self.set_status_notice(format!("Failed to save default: {}", e)),
                     }
-                    self.inline_interactive_state = None;
                 }
             }
             KeyCode::Enter => {
@@ -1964,6 +2071,10 @@ impl App {
                     PickerAction::Login(provider) => {
                         self.inline_interactive_state = None;
                         self.start_login_provider(provider);
+                    }
+                    PickerAction::Logout(provider) => {
+                        self.inline_interactive_state = None;
+                        self.start_logout_provider(provider);
                     }
                     PickerAction::Usage {
                         title,
@@ -2047,6 +2158,7 @@ impl App {
                         };
 
                         let effort = entry.effort.clone();
+                        record_model_picker_selection(&bare_name, route, effort.as_deref());
                         let notice = format!(
                             "Model → {} via {} ({})",
                             entry.name, route.provider, route.api_method
@@ -2184,7 +2296,8 @@ impl App {
                 .filter_map(|(i, m)| {
                     let filter_text = picker.filter_text(m);
                     Self::picker_fuzzy_score(&picker.filter, &filter_text).map(|s| {
-                        let bonus = if m.recommended { 5 } else { 0 };
+                        let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;
+                        let bonus = usage_bonus + if m.recommended { 5 } else { 0 };
                         (i, s + bonus)
                     })
                 })
@@ -2252,7 +2365,26 @@ mod tests {
         RemoteModelCatalogCache, model_picker_route_is_current, model_picker_route_is_default,
         model_picker_route_is_recommended,
     };
-    use crate::tui::PickerOption;
+    use crate::tui::{
+        App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind, PickerOption,
+    };
+
+    fn picker_entry(name: &str, provider: &str, usage_score: u32) -> PickerEntry {
+        PickerEntry {
+            name: name.to_string(),
+            options: vec![picker_option(provider)],
+            action: PickerAction::Model,
+            selected_option: 0,
+            is_current: false,
+            is_default: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            usage_score,
+            old: false,
+            created_date: None,
+            effort: None,
+        }
+    }
 
     fn picker_option_with_method(provider: &str, api_method: &str) -> PickerOption {
         PickerOption {
@@ -2266,6 +2398,26 @@ mod tests {
 
     fn picker_option(provider: &str) -> PickerOption {
         picker_option_with_method(provider, "test")
+    }
+
+    #[test]
+    fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
+        let mut picker = InlineInteractiveState {
+            kind: PickerKind::Model,
+            filtered: vec![0, 1],
+            entries: vec![
+                picker_entry("claude-opus-4.6", "Cursor", 0),
+                picker_entry("claude-opus-4.5", "Anthropic", 150),
+            ],
+            selected: 0,
+            column: 0,
+            filter: "opus".to_string(),
+            preview: false,
+        };
+
+        App::apply_inline_interactive_filter(&mut picker);
+
+        assert_eq!(picker.filtered, vec![1, 0]);
     }
 
     #[test]

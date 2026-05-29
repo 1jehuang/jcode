@@ -190,6 +190,24 @@ pub fn resolve_login_provider(input: &str) -> Option<LoginProviderDescriptor> {
     })
 }
 
+/// Resolve a login provider by id, alias, or display name.
+///
+/// Login completion events carry the human-readable provider label (e.g.
+/// "Anthropic API") rather than the canonical id/alias, so the stricter
+/// [`resolve_login_provider`] (id/alias only) misses them. Auth-change routing
+/// needs to map those labels back to a provider id; matching the display name
+/// here keeps the post-login model refresh attributed to the correct provider.
+pub fn resolve_login_provider_loose(input: &str) -> Option<LoginProviderDescriptor> {
+    if let Some(provider) = resolve_login_provider(input) {
+        return Some(provider);
+    }
+    let normalized = normalize_provider_input(input)?;
+    login_providers()
+        .iter()
+        .copied()
+        .find(|provider| provider.display_name.to_ascii_lowercase() == normalized)
+}
+
 pub fn resolve_login_selection(
     input: &str,
     providers: &[LoginProviderDescriptor],
@@ -348,6 +366,56 @@ mod tests {
             ALIBABA_CODING_PLAN_PROFILE.api_base,
             "https://coding-intl.dashscope.aliyuncs.com/v1"
         );
+    }
+
+    #[test]
+    fn resolve_login_provider_loose_matches_id_alias_and_display_name() {
+        // id
+        assert_eq!(
+            resolve_login_provider_loose("anthropic-api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // alias
+        assert_eq!(
+            resolve_login_provider_loose("claude-api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // display name (the form LoginCompleted carries for API-key paste logins)
+        assert_eq!(
+            resolve_login_provider_loose("Anthropic API").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // display name is matched case-insensitively
+        assert_eq!(
+            resolve_login_provider_loose("anthropic api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // unknown input stays unresolved
+        assert_eq!(resolve_login_provider_loose("not-a-provider"), None);
+    }
+
+    #[test]
+    fn resolve_login_provider_loose_resolves_every_descriptor_by_id_and_display_name() {
+        // Guards the LoginCompleted attribution path: the TUI publishes either a
+        // descriptor id (OAuth logins) or a display label (API-key paste logins),
+        // and both must resolve so the post-login auth-change refresh is
+        // attributed to the right provider instead of falling back to the
+        // session's active provider.
+        for descriptor in login_providers() {
+            assert_eq!(
+                resolve_login_provider_loose(descriptor.id).map(|d| d.id),
+                Some(descriptor.id),
+                "descriptor id {:?} should resolve",
+                descriptor.id
+            );
+            assert_eq!(
+                resolve_login_provider_loose(descriptor.display_name).map(|d| d.id),
+                Some(descriptor.id),
+                "display name {:?} (id {:?}) should resolve",
+                descriptor.display_name,
+                descriptor.id
+            );
+        }
     }
 
     #[test]

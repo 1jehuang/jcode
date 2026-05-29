@@ -96,6 +96,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
 
     if data.auth_method != AuthMethod::Unknown {
         let (icon, label, color) = match data.auth_method {
+            AuthMethod::ApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
             AuthMethod::AnthropicOAuth => ("🔐", "OAuth", rgb(255, 160, 100)),
             AuthMethod::AnthropicApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
             AuthMethod::OpenAIOAuth => ("🔐", "OAuth", rgb(100, 200, 180)),
@@ -197,6 +198,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
 
         if has_auth {
             let (icon, label, _color) = match data.auth_method {
+                AuthMethod::ApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
                 AuthMethod::AnthropicOAuth => ("🔐", "OAuth", rgb(255, 160, 100)),
                 AuthMethod::AnthropicApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
                 AuthMethod::OpenAIOAuth => ("🔐", "OAuth", rgb(100, 200, 180)),

@@ -105,6 +105,18 @@ pub(super) fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'st
         return Vec::new();
     }
 
+    if matches!(info.provider, UsageProvider::CostBased) {
+        return vec![Line::from(vec![Span::styled(
+            format!(
+                "${:.4} · {} in + {} out",
+                info.total_cost,
+                format_tokens(info.input_tokens),
+                format_tokens(info.output_tokens)
+            ),
+            Style::default().fg(rgb(140, 140, 150)),
+        )])];
+    }
+
     let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
     let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
     let five_hr_left = 100u8.saturating_sub(five_hr_used);

@@ -110,7 +110,7 @@ async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
 
     let mut cmd = tokio::process::Command::new(&binary_path);
     cmd.current_dir(cwd);
-    cmd.env(crate::cli::selfdev::CLIENT_SELFDEV_ENV, "1");
+    cmd.env(jcode_selfdev_types::CLIENT_SELFDEV_ENV, "1");
     cmd.env(
         "JCODE_DEBUG_CMD_PATH",
         debug_cmd.to_string_lossy().to_string(),

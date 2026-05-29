@@ -394,25 +394,12 @@ impl Registry {
     /// sub-tool calls (e.g. inside `batch`), but our registry uses internal
     /// names (`grep`, `bash`). This mapping ensures both forms resolve
     /// correctly.
+    ///
+    /// The canonical mapping lives in `jcode-tool-types::resolve_tool_name` so
+    /// lower-level crates (e.g. config) can normalize tool names without
+    /// depending on the tool subsystem; this method delegates to it.
     pub(crate) fn resolve_tool_name(name: &str) -> &str {
-        match name {
-            "communicate" => "swarm",
-            "task" | "task_runner" => "subagent",
-            "launch" => "open",
-            "shell" => "bash",
-            "shell_exec" => "bash",
-            "read_file" => "read",
-            "file_read" => "read",
-            "write_file" => "write",
-            "file_write" => "write",
-            "edit_file" => "edit",
-            "file_edit" => "edit",
-            "file_glob" => "glob",
-            "file_grep" => "grep",
-            "skill" | "Skill" => "skill_manage",
-            "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
-            other => other,
-        }
+        jcode_tool_types::resolve_tool_name(name)
     }
 
     /// Estimate token count for a string (chars / 4, matching compaction heuristic)

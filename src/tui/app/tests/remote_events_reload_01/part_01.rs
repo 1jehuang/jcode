@@ -574,14 +574,13 @@ fn test_handle_server_event_token_usage_uses_per_call_deltas() {
 }
 
 #[test]
-fn test_handle_server_event_tool_start_pauses_tps_and_excludes_hidden_output_tokens() {
+fn test_handle_server_event_tool_exec_pauses_tps_but_collects_final_tool_usage() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.streaming_tps_collect_output = true;
-    app.streaming_tps_start = Some(Instant::now());
+    app.streaming_tps_elapsed = Duration::from_secs(2);
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolStart {
@@ -591,8 +590,22 @@ fn test_handle_server_event_tool_start_pauses_tps_and_excludes_hidden_output_tok
         &mut remote,
     );
 
-    assert!(!app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_some());
+
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(3));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolExec {
+            id: "tool-1".to_string(),
+            name: "read".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(app.streaming_tps_collect_output);
     assert!(app.streaming_tps_start.is_none());
+    assert!(app.streaming_tps_elapsed >= Duration::from_secs(5));
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
@@ -604,7 +617,8 @@ fn test_handle_server_event_tool_start_pauses_tps_and_excludes_hidden_output_tok
         &mut remote,
     );
 
-    assert_eq!(app.streaming_total_output_tokens, 0);
+    assert_eq!(app.streaming_total_output_tokens, 25);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 25);
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TextDelta {
@@ -615,6 +629,68 @@ fn test_handle_server_event_tool_start_pauses_tps_and_excludes_hidden_output_tok
 
     assert!(app.streaming_tps_collect_output);
     assert!(app.streaming_tps_start.is_some());
+}
+
+#[test]
+fn test_handle_server_event_kv_cache_request_resets_tps_output_watermark_for_next_api_call() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.streaming_tps_collect_output = true;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 40,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::KvCacheRequest {
+            system_static_hash: 1,
+            tools_hash: 2,
+            messages_hash: 3,
+            message_hashes: vec![11, 22],
+            message_count: 2,
+            tool_count: 1,
+            system_static_chars: 10,
+            tools_json_chars: 20,
+            messages_json_chars: 30,
+            ephemeral_hash: None,
+            ephemeral_chars: 0,
+            ephemeral_message_count: 0,
+        },
+        &mut remote,
+    );
+
+    assert!(!app.streaming_tps_collect_output);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: "streaming".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(app.streaming_tps_collect_output);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 120,
+            output: 15,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.streaming_total_output_tokens, 55);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 55);
 }
 
 #[test]
@@ -635,6 +711,121 @@ fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall
     assert!(app.stream_message_ended);
     assert!(matches!(app.status, ProcessingStatus::Streaming));
     assert!(app.streaming_tps_collect_output);
+}
+
+#[test]
+fn test_handle_server_event_tps_connection_phase_streaming_starts_collection_only_for_streaming() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: "waiting for response".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(!app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_none());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: "streaming".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_some());
+    assert!(matches!(app.status, ProcessingStatus::Streaming));
+}
+
+#[test]
+fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_running() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: "streaming".to_string(),
+        },
+        &mut remote,
+    );
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(4));
+
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+
+    assert!(app.streaming_tps_collect_output);
+    assert!(app.streaming_tps_start.is_none());
+    assert!(app.streaming_tps_elapsed >= Duration::from_secs(4));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 20,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.streaming_total_output_tokens, 20);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 20);
+    assert!(app.streaming_tps_observed_elapsed >= Duration::from_secs(4));
+    assert!(app.streaming_tps_start.is_none());
+}
+
+#[test]
+fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_double_count() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: "streaming".to_string(),
+        },
+        &mut remote,
+    );
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(5));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 10,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 30,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 30,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.streaming_total_output_tokens, 30);
+    assert_eq!(app.streaming_tps_observed_output_tokens, 30);
+    assert_eq!(*remote.call_output_tokens_seen(), 30);
 }
 
 #[test]

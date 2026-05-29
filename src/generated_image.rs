@@ -60,7 +60,7 @@ impl GeneratedImagePanelInfo {
 
         Self {
             path: path.to_string(),
-            file_label: crate::tui::image_metadata::compact_path_label(path),
+            file_label: jcode_terminal_image::metadata::compact_path_label(path),
             metadata_path: metadata_path
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -77,7 +77,7 @@ impl GeneratedImagePanelInfo {
         let mut title = format!("Image · {}", self.file_label);
         if let Some((width, height)) = self.dimensions {
             title.push_str(" · ");
-            title.push_str(&crate::tui::image_metadata::format_dimensions(
+            title.push_str(&jcode_terminal_image::metadata::format_dimensions(
                 width, height,
             ));
         }
@@ -87,13 +87,13 @@ impl GeneratedImagePanelInfo {
     fn summary_parts(&self) -> Vec<String> {
         let mut parts = Vec::new();
         if let Some((width, height)) = self.dimensions {
-            parts.push(crate::tui::image_metadata::format_dimensions(width, height));
+            parts.push(jcode_terminal_image::metadata::format_dimensions(width, height));
         }
-        parts.push(crate::tui::image_metadata::compact_image_format(
+        parts.push(jcode_terminal_image::metadata::compact_image_format(
             &self.output_format,
         ));
         if let Some(byte_count) = self.byte_count {
-            parts.push(crate::tui::image_metadata::format_byte_count(byte_count));
+            parts.push(jcode_terminal_image::metadata::format_byte_count(byte_count));
         }
         if let Some(source) = self.source_summary() {
             parts.push(source);
@@ -133,22 +133,22 @@ impl GeneratedImagePanelInfo {
         markdown.push_str("## Details\n\n");
         markdown.push_str(&format!("- File: {}\n", markdown_code(&self.path)));
         if let Some((width, height)) = self.dimensions {
-            let mut dimensions = crate::tui::image_metadata::format_dimensions(width, height);
-            if let Some(ratio) = crate::tui::image_metadata::aspect_ratio(width, height) {
+            let mut dimensions = jcode_terminal_image::metadata::format_dimensions(width, height);
+            if let Some(ratio) = jcode_terminal_image::metadata::aspect_ratio(width, height) {
                 dimensions.push_str(&format!(" ({ratio})"));
             }
             markdown.push_str(&format!("- Dimensions: {}\n", markdown_code(&dimensions)));
         }
         markdown.push_str(&format!(
             "- Format: {}\n",
-            markdown_code(&crate::tui::image_metadata::compact_image_format(
+            markdown_code(&jcode_terminal_image::metadata::compact_image_format(
                 &self.output_format,
             ))
         ));
         if let Some(byte_count) = self.byte_count {
             markdown.push_str(&format!(
                 "- Bytes: {}\n",
-                markdown_code(&crate::tui::image_metadata::format_byte_count(byte_count))
+                markdown_code(&jcode_terminal_image::metadata::format_byte_count(byte_count))
             ));
         }
         if let Some(metadata_path) = self.metadata_path.as_deref() {

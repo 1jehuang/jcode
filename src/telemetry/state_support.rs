@@ -264,7 +264,7 @@ pub(super) fn new_event_id() -> String {
 }
 
 pub(super) fn build_channel() -> String {
-    if std::env::var(crate::cli::selfdev::CLIENT_SELFDEV_ENV).is_ok() {
+    if std::env::var(jcode_selfdev_types::CLIENT_SELFDEV_ENV).is_ok() {
         return "selfdev".to_string();
     }
     if let Ok(exe) = std::env::current_exe() {

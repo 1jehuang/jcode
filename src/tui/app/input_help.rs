@@ -83,7 +83,7 @@ impl App {
                 "`/effort`\nShow current reasoning effort.\n\n`/effort <level>`\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: Alt+←/→ to cycle."
             }
             "fast" => {
-                "`/fast`\nShow whether OpenAI/Codex fast mode is enabled, plus the saved default.\n\n`/fast on`\nEnable fast mode (`service_tier = \"priority\"`) for the current session.\n\n`/fast off`\nDisable fast mode for the current session.\n\n`/fast status`\nShow current fast-mode status.\n\n`/fast default on`\nSave fast mode as the default on startup.\n\n`/fast default off`\nSave fast mode as the default off on startup.\n\n`/fast default status`\nShow the saved fast-mode default."
+                "`/fast`\nShow whether fast mode is enabled, plus the saved default.\n\n`/fast on`\nEnable fast mode (`service_tier = \"priority\"`) for the current session.\n\n`/fast off`\nDisable fast mode for the current session.\n\n`/fast status`\nShow current fast-mode status.\n\n`/fast default on`\nSave fast mode as the default on startup.\n\n`/fast default off`\nSave fast mode as the default off on startup.\n\n`/fast default status`\nShow the saved fast-mode default."
             }
             "memory" => "`/memory [on|off|status]`\nToggle memory features for this session.",
             "goals" => {

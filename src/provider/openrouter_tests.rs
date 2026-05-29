@@ -78,6 +78,10 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
         EnvVarGuard::remove("JCODE_OPENROUTER_MODEL"),
         EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE"),
         EnvVarGuard::remove("JCODE_OPENROUTER_ALLOW_NO_AUTH"),
+        EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER"),
+        EnvVarGuard::remove("JCODE_NAMED_PROVIDER_PROFILE"),
+        EnvVarGuard::remove("JCODE_PROVIDER_PROFILE_NAME"),
+        EnvVarGuard::remove("JCODE_PROVIDER_PROFILE_ACTIVE"),
         EnvVarGuard::remove("JCODE_OPENAI_COMPAT_API_BASE"),
         EnvVarGuard::remove("JCODE_OPENAI_COMPAT_API_KEY_NAME"),
         EnvVarGuard::remove("JCODE_OPENAI_COMPAT_ENV_FILE"),
@@ -471,6 +475,57 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     assert_eq!(configured_env_file_name(), lmstudio.env_file);
     assert!(configured_allow_no_auth());
     assert!(OpenRouterProvider::has_credentials());
+}
+
+#[test]
+fn openrouter_transport_state_distinguishes_runtime_identities() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _env = isolate_openrouter_autodetect_env();
+
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(None),
+        OpenRouterTransportState::OpenRouterApiKey
+    );
+    assert!(OpenRouterTransportState::from_current_env(None).accrues_user_api_key_cost());
+    assert!(OpenRouterTransportState::from_current_env(None).is_real_openrouter());
+
+    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(None),
+        OpenRouterTransportState::DirectApiKey
+    );
+    crate::env::remove_var("JCODE_OPENROUTER_TRANSPORT_STATE");
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "jcode");
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(Some("jcode")),
+        OpenRouterTransportState::JcodeSubscription
+    );
+    assert!(!OpenRouterTransportState::from_current_env(Some("jcode")).accrues_user_api_key_cost());
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-compatible");
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(Some("openai-compatible")),
+        OpenRouterTransportState::DirectApiKey
+    );
+
+    crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(Some("openai-compatible")),
+        OpenRouterTransportState::DirectNoAuth
+    );
+    assert!(
+        !OpenRouterTransportState::from_current_env(Some("openai-compatible"))
+            .accrues_user_api_key_cost()
+    );
+
+    crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "my-gateway");
+    assert_eq!(
+        OpenRouterTransportState::from_current_env(None),
+        OpenRouterTransportState::DirectApiKey
+    );
 }
 
 #[test]

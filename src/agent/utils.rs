@@ -49,7 +49,7 @@ impl Agent {
         output_format: &str,
         revised_prompt: Option<&str>,
     ) -> Option<crate::side_panel::SidePanelSnapshot> {
-        match crate::tui::write_generated_image_side_panel_page(
+        match crate::generated_image::write_generated_image_side_panel_page(
             &self.session.id,
             id,
             path,

@@ -20,6 +20,28 @@ pub async fn run() -> Result<()> {
     logging::cleanup_old_logs();
     startup_profile::mark("log_cleanup");
     logging::info("jcode starting");
+
+    // Wire config-reload reactions without making config depend on auth/bus:
+    // when the config cache reloads, invalidate the auth-status cache and
+    // broadcast a models-updated event.
+    crate::config::on_config_reloaded(|| crate::auth::AuthStatus::invalidate_cache());
+    crate::config::on_config_reloaded(|| crate::bus::Bus::global().publish_models_updated());
+
+    // Invert the legacy provider_catalog -> auth dependency: provider_catalog
+    // consults registered fallback resolvers, and auth (the higher layer)
+    // registers its external-CLI credential scan here.
+    crate::provider_catalog::register_api_key_fallback_resolver(
+        crate::auth::external::load_api_key_for_env,
+    );
+
+    // Invert the legacy safety -> notifications dependency: safety raises a
+    // permission request and the notifications layer (which depends on safety
+    // types) delivers it via the dispatcher registered here.
+    crate::safety::register_permission_notifier(|action, description, request_id| {
+        crate::notifications::NotificationDispatcher::new()
+            .dispatch_permission_request(action, description, request_id);
+    });
+
     crate::platform::raise_nofile_limit_best_effort(8_192);
     startup_profile::mark("nofile_limit");
 

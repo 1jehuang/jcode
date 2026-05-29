@@ -3,4 +3,14 @@
 # CI overrides this file, so leaving rustc-wrapper unset here is safe.
 # Local fast-linker selection is handled by scripts/dev_cargo.sh so we don't
 # hard-force a linker mode that may be broken on a contributor machine.
-jobs = 6
+#
+# This is a conservative *static fallback* for direct `cargo` invocations. The
+# recommended build path (selfdev build -> scripts/dev_cargo.sh) ignores this
+# and instead sizes the job count from currently-available memory, so several
+# concurrent builds on one machine self-throttle instead of all assuming the
+# full core count and tripping earlyoom/OOM. Override either path explicitly
+# with CARGO_BUILD_JOBS / JCODE_BUILD_JOBS.
+#
+# rustc on the large root jcode crate peaks around 2.5-3 GiB RSS, so 4 keeps a
+# single direct build memory-safe on a ~15 GiB machine while staying parallel.
+jobs = 4

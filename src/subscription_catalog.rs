@@ -181,6 +181,7 @@ pub fn apply_runtime_env() {
     crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", JCODE_ENV_FILE);
     crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", JCODE_CACHE_NAMESPACE);
     crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "jcode-subscription");
     crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
     crate::env::remove_var("JCODE_OPENROUTER_PROVIDER");
     crate::env::remove_var("JCODE_OPENROUTER_NO_FALLBACK");
@@ -193,6 +194,7 @@ pub fn clear_runtime_env() {
     crate::env::remove_var("JCODE_OPENROUTER_ENV_FILE");
     crate::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
     crate::env::remove_var("JCODE_OPENROUTER_PROVIDER_FEATURES");
+    crate::env::remove_var("JCODE_OPENROUTER_TRANSPORT_STATE");
     crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
     crate::env::remove_var("JCODE_OPENROUTER_PROVIDER");
     crate::env::remove_var("JCODE_OPENROUTER_NO_FALLBACK");

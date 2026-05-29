@@ -141,7 +141,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry(
         "/fast [on|off|status|default ...]",
-        "Toggle OpenAI/Codex fast mode",
+        "Toggle fast mode",
     ));
     lines.push(help_entry(
         "/transport <mode>",

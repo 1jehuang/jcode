@@ -82,6 +82,144 @@ fn auth_provider_hint_maps_openai_compatible_login_providers() {
 }
 
 #[test]
+fn auth_provider_hint_maps_direct_provider_logins_by_display_label() {
+    // LoginCompleted carries the descriptor display label, which must still map
+    // to the canonical server provider id so the auth-change refresh is
+    // attributed correctly (regression: an Anthropic API-key login used to send
+    // no hint, so the server reported "OpenAI credentials are active" and
+    // skipped the post-login model switch).
+    assert_eq!(
+        auth_provider_hint_for_login_provider("Anthropic API"),
+        Some("anthropic-api")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("anthropic-api"),
+        Some("anthropic-api")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("claude-api"),
+        Some("anthropic-api")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("Anthropic/Claude"),
+        Some("claude")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("claude"),
+        Some("claude")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("OpenAI"),
+        Some("openai")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("OpenAI API"),
+        Some("openai-api")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("OpenRouter"),
+        Some("openrouter")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("AWS Bedrock"),
+        Some("bedrock")
+    );
+}
+
+#[test]
+fn auth_provider_hint_resolves_every_emitted_login_completed_provider() {
+    // Every string published as `LoginCompleted.provider` (see the emit sites in
+    // src/tui/app/auth.rs) must resolve to a canonical server provider id so the
+    // auth-change refresh is attributed to the right provider and the post-login
+    // model auto-select runs. Before the loose display-name resolution, only
+    // Azure and OpenAI-compatible logins resolved; every direct provider sent no
+    // hint, so the server fell back to the session's active provider (the
+    // "OpenAI credentials are active" bug) and skipped the model switch.
+    //
+    // Pairs of (emitted string, expected canonical hint). `None` is only correct
+    // for auto-import, which intentionally has no single runtime to attribute to.
+    let cases: &[(&str, Option<&str>)] = &[
+        // OAuth logins emit lowercase descriptor ids.
+        ("openai", Some("openai")),
+        ("claude", Some("claude")),
+        ("gemini", Some("gemini")),
+        ("copilot", Some("copilot")),
+        ("antigravity", Some("antigravity")),
+        ("cursor", Some("cursor")),
+        // API-key paste logins emit descriptor display labels.
+        ("Anthropic API", Some("anthropic-api")),
+        ("OpenAI API", Some("openai-api")),
+        ("AWS Bedrock", Some("bedrock")),
+        ("OpenRouter", Some("openrouter")),
+        // Azure keeps its dedicated runtime id mapping.
+        ("Azure OpenAI", Some("azure-openai")),
+        // Auto-import has no single runtime to attribute the refresh to.
+        ("auto-import", None),
+    ];
+
+    for (emitted, expected) in cases {
+        assert_eq!(
+            auth_provider_hint_for_login_provider(emitted),
+            *expected,
+            "login provider {emitted:?} should resolve to {expected:?}"
+        );
+    }
+
+    // Every login provider descriptor's display label must also resolve, so
+    // future API-key providers routed through the generic paste path keep
+    // working without a code change here.
+    for descriptor in crate::provider_catalog::login_providers() {
+        if matches!(
+            descriptor.target,
+            crate::provider_catalog::LoginProviderTarget::AutoImport
+        ) {
+            continue;
+        }
+        assert!(
+            auth_provider_hint_for_login_provider(descriptor.display_name).is_some(),
+            "display label {:?} (id {:?}) should resolve to a provider hint",
+            descriptor.display_name,
+            descriptor.id
+        );
+        assert!(
+            auth_provider_hint_for_login_provider(descriptor.id).is_some(),
+            "descriptor id {:?} should resolve to a provider hint",
+            descriptor.id
+        );
+    }
+}
+
+#[test]
+fn auth_changed_event_for_anthropic_api_login_targets_claude_api_route() {
+    let auth = super::auth_changed_event_for_login_provider("Anthropic API")
+        .expect("Anthropic API login should produce a typed auth event");
+    // The server maps the descriptor id `anthropic-api` to the `claude-api`
+    // route family for model selection and labelling.
+    assert_eq!(auth.provider.as_str(), "anthropic-api");
+    assert_eq!(
+        auth.auth_method,
+        Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey)
+    );
+    assert_eq!(
+        auth.credential_source,
+        Some(crate::protocol::AuthCredentialSource::ApiKeyFile)
+    );
+    // Direct providers must not claim the OpenAI-compatible runtime/namespace.
+    assert!(auth.expected_runtime.is_none());
+    assert!(auth.expected_catalog_namespace.is_none());
+}
+
+#[test]
+fn auth_changed_event_for_oauth_claude_login_is_not_marked_as_api_key_paste() {
+    let auth = super::auth_changed_event_for_login_provider("claude")
+        .expect("Claude OAuth login should produce a typed auth event");
+    assert_eq!(auth.provider.as_str(), "claude");
+    // OAuth logins are not API-key pastes.
+    assert!(auth.auth_method.is_none());
+    assert!(auth.credential_source.is_none());
+}
+
+#[test]
 fn auth_changed_event_for_cerebras_login_carries_runtime_and_catalog_identity() {
     let auth = super::auth_changed_event_for_login_provider("Cerebras")
         .expect("Cerebras login should produce typed auth event");

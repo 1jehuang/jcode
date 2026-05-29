@@ -1,13 +1,11 @@
 use crate::id::{extract_session_name, new_id, new_memorable_session_id};
 use crate::message::{ContentBlock, Message, Role};
-use crate::storage;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
-mod active_pids;
-use active_pids::{active_pids_dir, register_active_pid, unregister_active_pid};
-pub use active_pids::{active_session_ids, find_active_session_id_by_pid};
+use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
+pub use crate::storage::{active_session_ids, find_active_session_id_by_pid};
 mod crash;
 mod journal;
 mod memory_profile;

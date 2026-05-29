@@ -350,6 +350,7 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_AUTH_HEADER",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
@@ -445,6 +446,7 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_AUTH_HEADER",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
@@ -460,7 +462,7 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
 
     let activation = crate::auth::lifecycle::activate_auth_change(&request);
     let default_model = activation.activated_model.as_deref();
-    assert_eq!(default_model, Some("qwen-3-235b-a22b-instruct-2507"));
+    assert_eq!(default_model, Some("gpt-oss-120b"));
     assert_eq!(
         std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
         Ok("openai-compatible")
@@ -499,6 +501,7 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_AUTH_HEADER",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
@@ -607,6 +610,7 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_AUTH_HEADER",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
@@ -681,7 +685,7 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
     assert!(
         final_activity
             .message
-            .contains("Selected model: `qwen-3-235b-a22b-instruct-2507`"),
+            .contains("Selected model: `gpt-oss-120b`"),
         "final auth catalog update should switch away from stale OpenAI model: {}",
         final_activity.message
     );
@@ -707,6 +711,7 @@ async fn notify_auth_changed_does_not_override_manual_model_selected_during_refr
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_AUTH_HEADER",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
@@ -849,6 +854,7 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
             "JCODE_OPENROUTER_ENV_FILE",
             "JCODE_OPENROUTER_CACHE_NAMESPACE",
             "JCODE_OPENROUTER_PROVIDER_FEATURES",
+            "JCODE_OPENROUTER_TRANSPORT_STATE",
             "JCODE_OPENROUTER_MODEL_CATALOG",
             "JCODE_OPENROUTER_AUTH_HEADER",
             "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
@@ -1032,6 +1038,7 @@ async fn notify_auth_changed_switches_only_current_session_model() {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_MODEL_CATALOG",
         "JCODE_OPENROUTER_AUTH_HEADER",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",

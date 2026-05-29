@@ -6989,7 +6989,7 @@ fn desktop_model_choice_switch_spec_preserves_route_identity_state_space() {
         (
             "claude-opus-4-6",
             "Anthropic",
-            "api-key",
+            "claude-api",
             "claude-api:claude-opus-4-6",
         ),
         (

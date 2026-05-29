@@ -384,11 +384,11 @@ fn test_build_response_request_respects_configured_cache_retention() {
 #[test]
 fn test_openai_cache_ttl_is_model_aware() {
     assert_eq!(
-        crate::tui::cache_ttl_for_provider_model("openai", Some("gpt-5.5")),
+        crate::provider::cache_ttl_for_provider_model("openai", Some("gpt-5.5")),
         Some(24 * 60 * 60)
     );
     assert_eq!(
-        crate::tui::cache_ttl_for_provider_model("openai", Some("gpt-4o")),
+        crate::provider::cache_ttl_for_provider_model("openai", Some("gpt-4o")),
         Some(300)
     );
 }

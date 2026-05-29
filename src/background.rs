@@ -460,7 +460,7 @@ impl BackgroundTaskManager {
         &self,
         tool_name: &str,
         session_id: &str,
-        handle: JoinHandle<Result<crate::tool::ToolOutput>>,
+        handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
         let task_id = Self::generate_task_id();
         let output_path = self.output_dir.join(format!("{}.output", task_id));

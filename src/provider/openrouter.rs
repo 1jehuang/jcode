@@ -58,6 +58,7 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 const DEFAULT_API_BASE: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
+const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
 const KIMI_CODING_USER_AGENT: &str = "claude-cli/1.0.0";
 const KIMI_CODING_X_APP: &str = "cli";
 
@@ -294,6 +295,95 @@ fn configured_allow_no_auth() -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenRouterTransportState {
+    /// Real OpenRouter BYOK. The provider implementation is both the runtime identity
+    /// and the HTTP transport.
+    OpenRouterApiKey,
+    /// Jcode subscription access currently reuses the OpenRouter HTTP slot, but is
+    /// not user BYOK/OpenRouter billing.
+    JcodeSubscription,
+    /// A direct OpenAI-compatible endpoint that needs a user key, Azure credential,
+    /// or provider-profile secret while reusing the OpenRouter-compatible transport.
+    DirectApiKey,
+    /// A direct local/no-auth OpenAI-compatible endpoint, for example Ollama or LM Studio.
+    DirectNoAuth,
+}
+
+impl OpenRouterTransportState {
+    pub(crate) fn from_current_env(runtime_provider: Option<&str>) -> Self {
+        if let Some(state) = Self::from_env_marker() {
+            return state;
+        }
+
+        let runtime_provider = runtime_provider
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+
+        if matches!(runtime_provider.as_deref(), Some("jcode")) {
+            return Self::JcodeSubscription;
+        }
+
+        if configured_allow_no_auth() {
+            return Self::DirectNoAuth;
+        }
+
+        if Self::runtime_provider_is_direct_compatible(runtime_provider.as_deref())
+            || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
+        {
+            return Self::DirectApiKey;
+        }
+
+        let api_base = configured_api_base();
+        if provider_features_enabled(&api_base) {
+            Self::OpenRouterApiKey
+        } else {
+            Self::DirectApiKey
+        }
+    }
+
+    fn from_env_marker() -> Option<Self> {
+        let raw = std::env::var(OPENROUTER_TRANSPORT_STATE_ENV).ok()?;
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+
+        match value.as_str() {
+            "openrouter" | "openrouter-api-key" | "openrouter_byok" | "openrouter-byok" => {
+                Some(Self::OpenRouterApiKey)
+            }
+            "jcode" | "jcode-subscription" | "subscription" => Some(Self::JcodeSubscription),
+            "direct" | "direct-api-key" | "openai-compatible" | "compatible-api-key" => {
+                Some(Self::DirectApiKey)
+            }
+            "direct-no-auth" | "no-auth" | "local" => Some(Self::DirectNoAuth),
+            other => {
+                crate::logging::warn(&format!(
+                    "Ignoring invalid {} '{}'; expected openrouter-api-key, jcode-subscription, direct-api-key, or direct-no-auth",
+                    OPENROUTER_TRANSPORT_STATE_ENV, other
+                ));
+                None
+            }
+        }
+    }
+
+    fn runtime_provider_is_direct_compatible(runtime_provider: Option<&str>) -> bool {
+        matches!(runtime_provider, Some("openai-compatible" | "azure-openai"))
+            || runtime_provider
+                .and_then(crate::provider_catalog::openai_compatible_profile_by_id)
+                .is_some()
+    }
+
+    pub(crate) fn accrues_user_api_key_cost(self) -> bool {
+        matches!(self, Self::OpenRouterApiKey | Self::DirectApiKey)
+    }
+
+    pub(crate) fn is_real_openrouter(self) -> bool {
+        matches!(self, Self::OpenRouterApiKey)
+    }
 }
 
 fn is_kimi_coding_api_base(api_base: &str) -> bool {

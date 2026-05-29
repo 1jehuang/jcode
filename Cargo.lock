@@ -3533,7 +3533,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.14.4"
+version = "0.14.6"
 dependencies = [
  "agentgrep",
  "anyhow",
@@ -3575,6 +3575,7 @@ dependencies = [
  "jcode-embedding",
  "jcode-gateway-types",
  "jcode-import-core",
+ "jcode-logging",
  "jcode-memory-types",
  "jcode-message-types",
  "jcode-notify-email",
@@ -3593,6 +3594,7 @@ dependencies = [
  "jcode-storage",
  "jcode-swarm-core",
  "jcode-task-types",
+ "jcode-terminal-image",
  "jcode-terminal-launch",
  "jcode-tool-core",
  "jcode-tool-types",
@@ -3776,6 +3778,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "jcode-logging"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jcode-core",
+ "jcode-storage",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3981,6 +3994,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+]
+
+[[package]]
+name = "jcode-terminal-image"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "crossterm",
 ]
 
 [[package]]

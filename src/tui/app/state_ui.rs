@@ -1509,7 +1509,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             "5m" | "5min" | "default" | "reset" => {
                 crate::provider::anthropic::set_cache_ttl_1h(false);
                 app.push_display_message(DisplayMessage::system(
-                    "Cache TTL set to 5 minutes (default).".to_string(),
+                    "Cache TTL set to 5 minutes.".to_string(),
                 ));
             }
             "" => {
@@ -1519,7 +1519,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 let msg = if new_state {
                     "Cache TTL toggled to 1 hour. Cache writes cost 2x base input tokens.\nUse `/cache 5m` to revert."
                 } else {
-                    "Cache TTL toggled to 5 minutes (default).\nUse `/cache 1h` to extend."
+                    "Cache TTL toggled to 5 minutes.\nUse `/cache 1h` to extend."
                 };
                 app.push_display_message(DisplayMessage::system(msg.to_string()));
             }

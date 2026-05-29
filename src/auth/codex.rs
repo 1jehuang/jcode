@@ -258,6 +258,16 @@ pub fn remove_account(label: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn clear_accounts() -> Result<usize> {
+    let mut auth = load_auth_file()?;
+    let removed = auth.openai_accounts.len();
+    auth.openai_accounts.clear();
+    auth.active_openai_account = None;
+    save_auth_file(&auth)?;
+    set_active_account_override(None);
+    Ok(removed)
+}
+
 pub fn update_account_tokens(
     label: &str,
     access_token: &str,

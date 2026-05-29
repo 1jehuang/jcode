@@ -307,6 +307,17 @@ pub fn remove_account(label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove every stored Anthropic account in one write.
+pub fn clear_accounts() -> Result<usize> {
+    let mut auth = load_auth_file()?;
+    let removed = auth.anthropic_accounts.len();
+    auth.anthropic_accounts.clear();
+    auth.active_anthropic_account = None;
+    save_auth_file(&auth)?;
+    set_active_account_override(None);
+    Ok(removed)
+}
+
 /// Update tokens for a specific account (called after token refresh).
 pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: i64) -> Result<()> {
     let mut auth = load_auth_file()?;

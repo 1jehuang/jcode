@@ -19,6 +19,11 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/logout" {
+        app.show_interactive_logout();
+        return true;
+    }
+
     if let Some(provider) = trimmed
         .strip_prefix("/login ")
         .or_else(|| trimmed.strip_prefix("/auth "))
@@ -28,6 +33,27 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
             crate::provider_catalog::resolve_login_selection(provider, &providers)
         {
             app.start_login_provider(provider);
+        } else {
+            let valid = providers
+                .iter()
+                .map(|provider| provider.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            app.push_display_message(DisplayMessage::error(format!(
+                "Unknown provider '{}'. Use: {}",
+                provider.trim(),
+                valid
+            )));
+        }
+        return true;
+    }
+
+    if let Some(provider) = trimmed.strip_prefix("/logout ") {
+        let providers = crate::provider_catalog::tui_login_providers();
+        if let Some(provider) =
+            crate::provider_catalog::resolve_login_selection(provider, &providers)
+        {
+            app.start_logout_provider(provider);
         } else {
             let valid = providers
                 .iter()

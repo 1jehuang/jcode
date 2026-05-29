@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.14.4"
+version = "0.14.6"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -15,6 +15,7 @@ members = [
     "crates/jcode-gateway-types",
     "crates/jcode-import-core",
     "crates/jcode-pdf",
+    "crates/jcode-logging",
     "crates/jcode-background-types",
     "crates/jcode-batch-types",
     "crates/jcode-build-support",
@@ -54,6 +55,7 @@ members = [
     "crates/jcode-tui-usage-overlay",
     "crates/jcode-update-core",
     "crates/jcode-terminal-launch",
+    "crates/jcode-terminal-image",
     "crates/jcode-tui-workspace",
     "crates/jcode-mobile-core",
     "crates/jcode-mobile-sim",
@@ -143,6 +145,7 @@ proctitle = "0.1"
 jcode-embedding = { path = "crates/jcode-embedding", optional = true }
 jcode-gateway-types = { path = "crates/jcode-gateway-types" }
 jcode-import-core = { path = "crates/jcode-import-core" }
+jcode-logging = { path = "crates/jcode-logging" }
 
 # OAuth
 base64 = "0.22"
@@ -174,6 +177,7 @@ jcode-tui-tool-display = { path = "crates/jcode-tui-tool-display" }
 jcode-tui-usage-overlay = { path = "crates/jcode-tui-usage-overlay" }
 jcode-update-core = { path = "crates/jcode-update-core" }
 jcode-terminal-launch = { path = "crates/jcode-terminal-launch" }
+jcode-terminal-image = { path = "crates/jcode-terminal-image" }
 jcode-tui-workspace = { path = "crates/jcode-tui-workspace" }
 jcode-usage-types = { path = "crates/jcode-usage-types" }
 

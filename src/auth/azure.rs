@@ -80,6 +80,7 @@ pub fn apply_runtime_env() -> Result<()> {
     crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", ENV_FILE);
     crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
     crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
     crate::env::set_var("JCODE_OPENROUTER_MODEL_CATALOG", "0");
 
     if uses_entra_id() {

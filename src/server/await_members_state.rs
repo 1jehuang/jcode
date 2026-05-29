@@ -163,7 +163,7 @@ pub(super) fn ensure_pending_state(
     mode: Option<&str>,
     deadline_unix_ms: u64,
 ) -> PersistedAwaitMembersState {
-    if let Some(existing) = load_state(key) {
+    if let Some(existing) = load_state(key).filter(PersistedAwaitMembersState::is_pending) {
         return existing;
     }
 
