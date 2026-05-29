@@ -191,6 +191,71 @@ fn cleanup_prepared_visible_spawn_session(session_id: &str) {
     }
 }
 
+/// Maximum time to wait for a visibly-spawned session's interactive client to
+/// attach before concluding the launch did not actually produce a live worker.
+const VISIBLE_SPAWN_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// Poll interval while waiting for a client attachment.
+const VISIBLE_SPAWN_ATTACH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Wait for a visibly-spawned session to register a live client attachment.
+///
+/// A successful terminal-launch fork does not guarantee that an interactive
+/// client connected (e.g. on a headless host or `jcode serve` shared server).
+/// We treat the appearance of at least one live event channel
+/// (`SwarmMember::event_txs`) as proof that a real client attached. Returns
+/// `true` if an attachment is observed before the timeout, `false` otherwise.
+async fn wait_for_live_attachment(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> bool {
+    wait_for_live_attachment_with(
+        session_id,
+        swarm_members,
+        VISIBLE_SPAWN_ATTACH_TIMEOUT,
+        VISIBLE_SPAWN_ATTACH_POLL,
+    )
+    .await
+}
+
+/// Parameterized core of [`wait_for_live_attachment`] so tests can use short
+/// timeouts/poll intervals without controlling the global clock.
+async fn wait_for_live_attachment_with(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let members = swarm_members.read().await;
+            if let Some(member) = members.get(session_id)
+                && !member.event_txs.is_empty()
+            {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// Remove a visibly-spawned session that never attached a live client so its
+/// swarm membership and on-disk records do not linger as a stuck "startup
+/// queued" ghost after we fall back to a headless worker.
+async fn cleanup_orphaned_visible_spawn_session(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
+    {
+        let mut members = swarm_members.write().await;
+        members.remove(session_id);
+    }
+    cleanup_prepared_visible_spawn_session(session_id);
+}
+
 fn prepare_visible_spawn_session<F>(
     working_dir: Option<&str>,
     model_override: Option<&str>,
@@ -262,26 +327,36 @@ async fn register_visible_spawned_member(
 
     {
         let mut members = swarm_members.write().await;
-        members.insert(
-            session_id.to_string(),
-            SwarmMember {
-                session_id: session_id.to_string(),
-                event_tx,
-                event_txs: HashMap::new(),
-                working_dir: working_dir.map(PathBuf::from),
-                swarm_id: Some(swarm_id.to_string()),
-                swarm_enabled: true,
-                status,
-                detail,
-                friendly_name: Some(friendly_name),
-                report_back_to_session_id: report_back_to_session_id.map(str::to_string),
-                latest_completion_report: None,
-                role: "agent".to_string(),
-                joined_at: now,
-                last_status_change: now,
-                is_headless: false,
-            },
-        );
+        // If a real interactive client has already attached and registered this
+        // member (possible under Auto mode, where we wait for an attachment
+        // before registering), do not clobber its live event channels.
+        if members
+            .get(session_id)
+            .is_some_and(|member| !member.event_txs.is_empty())
+        {
+            // Client already owns this member; nothing to register.
+        } else {
+            members.insert(
+                session_id.to_string(),
+                SwarmMember {
+                    session_id: session_id.to_string(),
+                    event_tx,
+                    event_txs: HashMap::new(),
+                    working_dir: working_dir.map(PathBuf::from),
+                    swarm_id: Some(swarm_id.to_string()),
+                    swarm_enabled: true,
+                    status,
+                    detail,
+                    friendly_name: Some(friendly_name),
+                    report_back_to_session_id: report_back_to_session_id.map(str::to_string),
+                    latest_completion_report: None,
+                    role: "agent".to_string(),
+                    joined_at: now,
+                    last_status_change: now,
+                    is_headless: false,
+                },
+            );
+        }
     }
 
     {
@@ -369,6 +444,31 @@ pub(super) async fn spawn_swarm_agent(
             startup_message.as_deref(),
             spawn_visible_session_window,
         ),
+    };
+
+    // In Auto mode a visible launch only *forks* a terminal launcher; it does
+    // not guarantee that an interactive client actually attached and started
+    // driving the session. On a server/headless host (no GUI terminal, or a
+    // `jcode serve` shared server) the launcher fork succeeds but no client
+    // ever connects, leaving the agent stuck at "startup queued" forever.
+    //
+    // To make Auto reliable, after a "successful" visible launch we wait a
+    // short window for the spawned session to register a live client
+    // attachment. If none arrives we tear down the orphaned visible session and
+    // fall back to the in-process headless runner (which always executes).
+    let visible_spawn = match (resolved_spawn_mode, visible_spawn) {
+        (SwarmSpawnMode::Auto, Ok((candidate_session_id, true))) => {
+            if wait_for_live_attachment(&candidate_session_id, swarm_members).await {
+                Ok((candidate_session_id, true))
+            } else {
+                crate::logging::warn(&format!(
+                    "Auto swarm spawn: visible client did not attach within timeout for session {candidate_session_id}; falling back to headless"
+                ));
+                cleanup_orphaned_visible_spawn_session(&candidate_session_id, swarm_members).await;
+                Ok((candidate_session_id, false))
+            }
+        }
+        (_, other) => other,
     };
 
     let (new_session_id, is_headless_fallback) = match visible_spawn {

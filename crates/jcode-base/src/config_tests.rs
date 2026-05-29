@@ -35,10 +35,10 @@ fn preserve_reasoning_context_defaults_to_enabled() {
 }
 
 #[test]
-fn swarm_spawn_mode_defaults_to_visible() {
+fn swarm_spawn_mode_defaults_to_auto() {
     assert_eq!(
         Config::default().agents.swarm_spawn_mode,
-        SwarmSpawnMode::Visible
+        SwarmSpawnMode::Auto
     );
 }
 

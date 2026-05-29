@@ -370,11 +370,13 @@ pub struct AgentsConfig {
 #[serde(rename_all = "lowercase")]
 pub enum SwarmSpawnMode {
     /// Open a visible/headed terminal window. This preserves historical behavior.
-    #[default]
     Visible,
     /// Create the worker in-process without opening a terminal window.
     Headless,
-    /// Try visible first and fall back to headless if a window cannot be opened.
+    /// Try visible first and fall back to headless if a window cannot be opened
+    /// or if a launched window never attaches a live client. This is the
+    /// default because it is reliable on both desktop and headless/server hosts.
+    #[default]
     Auto,
 }
 

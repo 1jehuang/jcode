@@ -1,7 +1,8 @@
 use super::{
     ensure_spawn_coordinator_swarm, prepare_visible_spawn_session, register_visible_spawned_member,
     require_coordinator_swarm, resolve_spawn_working_dir, resolve_stop_target_session,
-    resolve_swarm_spawn_model_and_provider, swarm_stop_allowed_by_owner,
+    resolve_swarm_spawn_model_and_provider, swarm_stop_allowed_by_owner, wait_for_live_attachment,
+    wait_for_live_attachment_with,
 };
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
@@ -229,6 +230,103 @@ async fn register_visible_spawned_member_marks_startup_as_running() {
             event.session_id == "child-1"
                 && matches!(event.event, SwarmEventType::MemberChange { ref action } if action == "joined")
         }));
+}
+
+#[tokio::test]
+async fn wait_for_live_attachment_times_out_when_no_client_attaches() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    // Member exists but has no live event channels (the visible-launch ghost).
+    {
+        let (ghost, _rx) = member("child-ghost", Some("swarm-1"), "agent");
+        swarm_members
+            .write()
+            .await
+            .insert("child-ghost".to_string(), ghost);
+    }
+    // Use short timeout/poll so the test is fast; a session that never attaches
+    // must return false.
+    let attached = wait_for_live_attachment_with(
+        "child-ghost",
+        &swarm_members,
+        std::time::Duration::from_millis(120),
+        std::time::Duration::from_millis(20),
+    )
+    .await;
+    assert!(
+        !attached,
+        "no client ever attached, so wait_for_live_attachment must return false"
+    );
+}
+
+#[tokio::test]
+async fn wait_for_live_attachment_detects_attached_client() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let (client_tx, _client_rx_keep_alive) = mpsc::unbounded_channel();
+    {
+        let (mut attached, _rx) = member("child-live", Some("swarm-1"), "agent");
+        attached
+            .event_txs
+            .insert("conn-1".to_string(), client_tx);
+        swarm_members
+            .write()
+            .await
+            .insert("child-live".to_string(), attached);
+    }
+    let attached = wait_for_live_attachment("child-live", &swarm_members).await;
+    assert!(
+        attached,
+        "a member with a live event channel must be detected as attached"
+    );
+}
+
+#[tokio::test]
+async fn register_visible_spawned_member_does_not_clobber_attached_client() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(VecDeque::new()));
+    let event_counter = Arc::new(AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(8);
+
+    // Simulate a real interactive client having already attached and registered
+    // this member with a live event channel before registration runs. Keep the
+    // receiver alive so the sender is not considered closed (and pruned).
+    let (client_tx, _client_rx_keep_alive) = mpsc::unbounded_channel();
+    {
+        let (mut attached, _rx) = member("child-1", Some("swarm-1"), "agent");
+        attached
+            .event_txs
+            .insert("conn-1".to_string(), client_tx);
+        attached.status = "ready".to_string();
+        swarm_members
+            .write()
+            .await
+            .insert("child-1".to_string(), attached);
+    }
+
+    register_visible_spawned_member(
+        "child-1",
+        "swarm-1",
+        Some("/tmp/worktree"),
+        true,
+        Some("owner"),
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let members = swarm_members.read().await;
+    let member = members.get("child-1").expect("member should still exist");
+    assert!(
+        !member.event_txs.is_empty(),
+        "registration must not clobber the live client's event channels"
+    );
+    assert_eq!(
+        member.status, "ready",
+        "registration must not reset the attached client's status to startup queued"
+    );
 }
 
 #[test]
