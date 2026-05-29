@@ -1204,6 +1204,14 @@ impl OpenRouterProvider {
         self.supports_provider_features || self.profile_id.is_none()
     }
 
+    /// The active built-in OpenAI-compatible profile id (e.g. "nvidia-nim",
+    /// "deepseek"), if this provider was constructed from one. Returns `None`
+    /// for the native OpenRouter runtime and for raw/custom endpoints that the
+    /// user configured directly via `JCODE_OPENROUTER_API_BASE`.
+    pub(crate) fn active_profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
+    }
+
     pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
         let Some(profile_id) = self.profile_id.as_deref() else {
             return models;

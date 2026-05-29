@@ -612,6 +612,64 @@ impl MultiProvider {
                 Ok(())
             }
             ActiveProvider::OpenRouter => {
+                // A native OpenRouter catalog model (e.g. "openrouter/owl-alpha")
+                // must run on the native OpenRouter runtime. If the previous
+                // selection was a direct OpenAI-compatible profile (e.g. NVIDIA
+                // NIM via "nvidia-nim:..."), that profile's endpoint and API key
+                // were written into the global JCODE_OPENROUTER_* env by
+                // `force_apply_openai_compatible_profile_env(Some(profile))` and
+                // are never cleared on the way back. Without resetting them, the
+                // native model would be POSTed to the stale profile endpoint
+                // (e.g. https://integrate.api.nvidia.com/v1) with the wrong API
+                // key, yielding a 404. Clear the override and rebuild the
+                // provider so it picks up the native OpenRouter endpoint again.
+                //
+                // We must not clobber an intentionally locked named profile
+                // (JCODE_PROVIDER_PROFILE_ACTIVE), and only reset when the target
+                // is a native catalog model rather than a profile-prefixed one.
+                // We only reset when the *previous* selection was a built-in
+                // direct profile (it has a profile id, e.g. "nvidia-nim") and
+                // the *target* is a native openrouter.ai catalog model
+                // (id begins with "openrouter/"). This deliberately excludes:
+                //   - raw/custom endpoints the user configured directly via
+                //     JCODE_OPENROUTER_API_BASE (profile_id == None), which must
+                //     be preserved, and
+                //   - "@provider"-pinned or opaque model ids on forced
+                //     OpenRouter providers.
+                let target_is_native_openrouter = self
+                    .openrouter_provider()
+                    .and_then(|existing| existing.active_profile_id().map(|id| id.to_string()))
+                    .is_some()
+                    && Self::openai_compatible_model_prefix(model).is_none()
+                    && model.starts_with("openrouter/")
+                    && openrouter_catalog_model_id(model).is_some();
+                let named_profile_locked =
+                    std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some();
+
+                if target_is_native_openrouter && !named_profile_locked {
+                    crate::logging::info(
+                        "Resetting stale OpenAI-compatible profile env before selecting native OpenRouter model",
+                    );
+                    crate::provider_catalog::force_apply_openai_compatible_profile_env(None);
+                    if openrouter::OpenRouterProvider::has_credentials() {
+                        match openrouter::OpenRouterProvider::new() {
+                            Ok(rebuilt) => {
+                                *self
+                                    .openrouter
+                                    .write()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                    Some(Arc::new(rebuilt));
+                            }
+                            Err(e) => {
+                                crate::logging::warn(&format!(
+                                    "Failed to rebuild native OpenRouter provider after profile reset: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 let Some(openrouter) = self.openrouter_provider() else {
                     anyhow::bail!(
                         "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."

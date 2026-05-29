@@ -435,6 +435,96 @@ fn test_state_space_openrouter_default_survives_switch_to_nvidia_nim() {
     });
 }
 
+/// Regression test for the NVIDIA-endpoint leak: selecting a direct
+/// OpenAI-compatible profile (NVIDIA NIM) writes that profile's endpoint and
+/// API key into the global `JCODE_OPENROUTER_*` env. Switching *back* to a
+/// native OpenRouter catalog model used to leave those overrides in place, so
+/// the native model was POSTed to https://integrate.api.nvidia.com/v1 with the
+/// NVIDIA key and returned 404. Switching back must restore the native
+/// OpenRouter runtime.
+#[test]
+fn test_switch_back_to_native_openrouter_restores_endpoint_after_nvidia() {
+    with_clean_provider_test_env(|| {
+        let nvidia = crate::provider_catalog::openai_compatible_profile_by_id("nvidia-nim")
+            .expect("NVIDIA NIM profile exists");
+
+        save_test_openrouter_model_cache(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            &["openrouter/owl-alpha"],
+        );
+
+        crate::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(None);
+        let openrouter = Arc::new(
+            openrouter::OpenRouterProvider::new().expect("OpenRouter provider should initialize"),
+        );
+        openrouter
+            .set_model("openrouter/owl-alpha")
+            .expect("OpenRouter default model should be selectable");
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(openrouter)),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: None,
+        };
+
+        // 1) Switch to NVIDIA NIM. This stamps the NVIDIA endpoint + key into
+        //    the global JCODE_OPENROUTER_* env.
+        crate::env::set_var(nvidia.api_key_env, "test-nvidia-key");
+        provider
+            .set_model("nvidia-nim:nvidia/llama-3.1-nemotron-ultra-253b-v1")
+            .expect("NVIDIA NIM model should be selectable after OpenRouter default");
+        assert_eq!(
+            std::env::var("JCODE_OPENROUTER_API_BASE").as_deref(),
+            Ok("https://integrate.api.nvidia.com/v1"),
+            "NVIDIA switch should set the NVIDIA endpoint in the global env"
+        );
+        assert!(
+            provider
+                .openrouter_provider()
+                .expect("NVIDIA direct provider installed")
+                .direct_openai_compatible_route_parts()
+                .is_some(),
+            "NVIDIA NIM should be a direct OpenAI-compatible route"
+        );
+
+        // 2) Switch back to the native OpenRouter catalog model.
+        provider
+            .set_model("openrouter/owl-alpha")
+            .expect("native OpenRouter model should be selectable after NVIDIA");
+
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        assert_eq!(provider.model(), "openrouter/owl-alpha");
+
+        // The stale NVIDIA endpoint override must be cleared so the native
+        // model talks to openrouter.ai again, not integrate.api.nvidia.com.
+        assert!(
+            std::env::var("JCODE_OPENROUTER_API_BASE").is_err(),
+            "Switching back to a native OpenRouter model must clear the NVIDIA endpoint override; got {:?}",
+            std::env::var("JCODE_OPENROUTER_API_BASE")
+        );
+        assert!(
+            provider
+                .openrouter_provider()
+                .expect("OpenRouter provider installed after switch-back")
+                .direct_openai_compatible_route_parts()
+                .is_none(),
+            "Native OpenRouter model must run on the native runtime, not a direct OpenAI-compatible profile"
+        );
+    });
+}
+
 #[test]
 fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available() {
     with_clean_provider_test_env(|| {
