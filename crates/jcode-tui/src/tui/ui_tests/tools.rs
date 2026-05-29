@@ -349,6 +349,61 @@ fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
 }
 
 #[test]
+fn test_swarm_summary_shows_placeholder_while_streaming_before_args_arrive() {
+    // Streaming providers surface a tool call as soon as the name is known,
+    // before any argument tokens arrive (input is an empty object). The summary
+    // must not flash "action missing"; it should show a neutral placeholder.
+    for input in [
+        serde_json::json!({}),
+        serde_json::Value::Null,
+        serde_json::json!(""),
+    ] {
+        let tool = ToolCall {
+            id: "call_swarm_streaming".to_string(),
+            name: "swarm".to_string(),
+            input,
+            intent: None,
+        };
+        let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(40));
+        assert!(
+            !summary.contains("action missing"),
+            "streaming swarm call must not show 'action missing'; summary={summary:?}"
+        );
+        assert_eq!(summary, "…", "summary={summary:?}");
+    }
+}
+
+#[test]
+fn test_swarm_summary_reports_missing_action_when_args_present_but_no_action() {
+    // If the call has real arguments but genuinely lacks `action`, the
+    // diagnostic label is still surfaced (this is a real malformed call).
+    let tool = ToolCall {
+        id: "call_swarm_no_action".to_string(),
+        name: "swarm".to_string(),
+        input: serde_json::json!({ "target_session": "abc" }),
+        intent: None,
+    };
+    let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(40));
+    assert!(
+        summary.contains("action missing"),
+        "a populated-but-action-less swarm call should surface the diagnostic; summary={summary:?}"
+    );
+}
+
+#[test]
+fn test_swarm_summary_renders_spawn_action_with_prompt() {
+    let tool = ToolCall {
+        id: "call_swarm_spawn".to_string(),
+        name: "swarm".to_string(),
+        input: serde_json::json!({ "action": "spawn", "message": "do the thing" }),
+        intent: None,
+    };
+    let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(40));
+    assert!(summary.starts_with("spawn"), "summary={summary:?}");
+    assert!(!summary.contains("action missing"), "summary={summary:?}");
+}
+
+#[test]
 fn test_tool_summary_read_supports_start_line_end_line() {
     let tool = ToolCall {
         id: "call_read_range".to_string(),

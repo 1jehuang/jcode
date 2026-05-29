@@ -1,8 +1,8 @@
 use super::{
     ensure_spawn_coordinator_swarm, prepare_visible_spawn_session, register_visible_spawned_member,
     require_coordinator_swarm, resolve_spawn_working_dir, resolve_stop_target_session,
-    resolve_swarm_spawn_model_and_provider, swarm_stop_allowed_by_owner, wait_for_live_attachment,
-    wait_for_live_attachment_with,
+    resolve_swarm_spawn_model_and_provider, session_has_live_attachment,
+    swarm_stop_allowed_by_owner, wait_for_live_attachment, wait_for_live_attachment_with,
 };
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
@@ -276,6 +276,53 @@ async fn wait_for_live_attachment_detects_attached_client() {
     assert!(
         attached,
         "a member with a live event channel must be detected as attached"
+    );
+}
+
+#[tokio::test]
+async fn session_has_live_attachment_false_for_headless_coordinator() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    {
+        // Coordinator member present but with no live event channels: this is a
+        // coordinator running headless inside a `jcode serve` shared server.
+        let (coordinator, _rx) = member("coordinator-headless", Some("swarm-1"), "coordinator");
+        swarm_members
+            .write()
+            .await
+            .insert("coordinator-headless".to_string(), coordinator);
+    }
+    assert!(
+        !session_has_live_attachment("coordinator-headless", &swarm_members).await,
+        "a coordinator with no live event channels must report no attachment so Auto skips the visible spawn"
+    );
+}
+
+#[tokio::test]
+async fn session_has_live_attachment_false_for_unknown_session() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    assert!(
+        !session_has_live_attachment("does-not-exist", &swarm_members).await,
+        "an unknown session must report no attachment"
+    );
+}
+
+#[tokio::test]
+async fn session_has_live_attachment_true_for_attached_coordinator() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let (client_tx, _client_rx_keep_alive) = mpsc::unbounded_channel();
+    {
+        let (mut coordinator, _rx) = member("coordinator-live", Some("swarm-1"), "coordinator");
+        coordinator
+            .event_txs
+            .insert("conn-1".to_string(), client_tx);
+        swarm_members
+            .write()
+            .await
+            .insert("coordinator-live".to_string(), coordinator);
+    }
+    assert!(
+        session_has_live_attachment("coordinator-live", &swarm_members).await,
+        "a coordinator with a live event channel must report an attachment so Auto tries the visible spawn"
     );
 }
 

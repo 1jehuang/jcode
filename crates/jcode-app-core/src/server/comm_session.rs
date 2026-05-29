@@ -217,6 +217,26 @@ async fn wait_for_live_attachment(
     .await
 }
 
+/// Whether a session currently has at least one live interactive client
+/// attached (i.e. an active TUI is draining its event stream).
+///
+/// Used as a fast, deployment-agnostic proxy for "can a visible spawn actually
+/// attach a driver?". If the coordinator that requested the spawn is itself
+/// running headless inside a `jcode serve` shared server (no attached TUI),
+/// then opening a fresh Terminal for a child will not produce a live worker in
+/// this deployment, so Auto mode should skip the visible attempt entirely
+/// rather than open an orphan window and wait out the attach timeout.
+async fn session_has_live_attachment(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> bool {
+    let members = swarm_members.read().await;
+    members
+        .get(session_id)
+        .map(|member| !member.event_txs.is_empty())
+        .unwrap_or(false)
+}
+
 /// Parameterized core of [`wait_for_live_attachment`] so tests can use short
 /// timeouts/poll intervals without controlling the global clock.
 async fn wait_for_live_attachment_with(
@@ -434,8 +454,32 @@ pub(super) async fn spawn_swarm_agent(
         .as_deref()
         .map(append_swarm_completion_report_instructions);
 
+    // In Auto mode, decide up-front whether a visible spawn can possibly work.
+    // A visible spawn only helps when an interactive client can attach and drive
+    // the child. We use the requesting coordinator's own attachment state as a
+    // fast, deployment-agnostic proxy: if the coordinator is itself running
+    // headless inside a `jcode serve` shared server (no attached TUI), opening a
+    // fresh Terminal for the child would just orphan a window and stall on the
+    // attach timeout, so we skip straight to the in-process headless runner.
+    let auto_should_try_visible = match resolved_spawn_mode {
+        SwarmSpawnMode::Auto => {
+            let coordinator_attached =
+                session_has_live_attachment(req_session_id, swarm_members).await;
+            if !coordinator_attached {
+                crate::logging::info(
+                    "Auto swarm spawn: coordinator has no live interactive client (headless server); spawning child headless directly",
+                );
+            }
+            coordinator_attached
+        }
+        _ => true,
+    };
+
     let visible_spawn = match resolved_spawn_mode {
         SwarmSpawnMode::Headless => Err(anyhow::anyhow!("headless spawn requested")),
+        SwarmSpawnMode::Auto if !auto_should_try_visible => {
+            Err(anyhow::anyhow!("auto spawn: headless server, skipping visible"))
+        }
         SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
             resolved_working_dir.as_deref(),
             spawn_model.as_deref(),

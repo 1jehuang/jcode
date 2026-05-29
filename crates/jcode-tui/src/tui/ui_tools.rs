@@ -59,6 +59,39 @@ fn infer_selfdev_action_from_display_text(text: Option<&str>) -> Option<&'static
     }
 }
 
+/// Returns true when a tool call's input has no streamed arguments yet.
+///
+/// Streaming providers surface a tool call as soon as the tool *name* is known,
+/// before any argument tokens arrive, so `input` is momentarily an empty object
+/// (`{}`), `null`, or otherwise non-populated. Action-keyed summaries must treat
+/// this as "still streaming" rather than "field missing" to avoid flashing a
+/// bogus "action missing" label (and spamming warnings) for every spawned agent.
+fn tool_input_is_unpopulated(tool: &ToolCall) -> bool {
+    match &tool.input {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// Resolves a tool's `action` field for display.
+///
+/// When the field is present, returns it. When the call is still streaming
+/// (no args yet), returns a neutral placeholder without logging. Only when the
+/// call has real arguments but genuinely lacks `action` do we log and surface
+/// the diagnostic "action missing" label.
+fn resolve_tool_action_for_display<'a>(tool: &'a ToolCall, display_context: &str) -> &'a str {
+    if let Some(action) = tool.input.get("action").and_then(|v| v.as_str()) {
+        return action;
+    }
+    if tool_input_is_unpopulated(tool) {
+        return "…";
+    }
+    log_missing_tool_action_for_display(tool, display_context);
+    "action missing"
+}
+
 fn log_missing_tool_action_for_display(tool: &ToolCall, display_context: &str) {
     log_missing_tool_field_for_display(tool, display_context, "action");
 }
@@ -307,14 +340,7 @@ fn truncate_swarm_text(value: &str, max_width: usize) -> String {
 }
 
 fn summarize_swarm_tool_action(tool: &ToolCall, bounded: &dyn Fn(usize) -> usize) -> String {
-    let action = tool
-        .input
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            log_missing_tool_action_for_display(tool, "swarm");
-            "action missing"
-        });
+    let action = resolve_tool_action_for_display(tool, "swarm");
     let target = tool
         .input
         .get("to_session")
@@ -1134,14 +1160,7 @@ pub(super) fn get_tool_summary_with_budget(
             })
             .unwrap_or_default(),
         "memory" => {
-            let action = tool
-                .input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or_else(|| {
-                    log_missing_tool_action_for_display(tool, "memory");
-                    "action missing"
-                });
+            let action = resolve_tool_action_for_display(tool, "memory");
             match action {
                 "remember" => {
                     let content = tool
@@ -1202,14 +1221,7 @@ pub(super) fn get_tool_summary_with_budget(
             }
         }
         "initiative" => {
-            let action = tool
-                .input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or_else(|| {
-                    log_missing_tool_action_for_display(tool, "initiative");
-                    "action missing"
-                });
+            let action = resolve_tool_action_for_display(tool, "initiative");
             let id = tool.input.get("id").and_then(|v| v.as_str());
             let title = tool.input.get("title").and_then(|v| v.as_str());
             match (action, id, title) {
@@ -1249,14 +1261,7 @@ pub(super) fn get_tool_summary_with_budget(
             action.to_string()
         }
         "side_panel" => {
-            let action = tool
-                .input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or_else(|| {
-                    log_missing_tool_action_for_display(tool, "side_panel");
-                    "action missing"
-                });
+            let action = resolve_tool_action_for_display(tool, "side_panel");
             let target = tool
                 .input
                 .get("title")
