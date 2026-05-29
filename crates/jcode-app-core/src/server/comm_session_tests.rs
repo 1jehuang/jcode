@@ -1,7 +1,7 @@
 use super::{
     ensure_spawn_coordinator_swarm, prepare_visible_spawn_session, register_visible_spawned_member,
     require_coordinator_swarm, resolve_spawn_working_dir, resolve_stop_target_session,
-    resolve_swarm_spawn_model_and_provider, session_has_live_attachment,
+    resolve_swarm_spawn_model_and_provider, running_as_detached_server, session_has_live_attachment,
     swarm_stop_allowed_by_owner, wait_for_live_attachment, wait_for_live_attachment_with,
 };
 use crate::agent::Agent;
@@ -324,6 +324,30 @@ async fn session_has_live_attachment_true_for_attached_coordinator() {
         session_has_live_attachment("coordinator-live", &swarm_members).await,
         "a coordinator with a live event channel must report an attachment so Auto tries the visible spawn"
     );
+}
+
+#[test]
+fn running_as_detached_server_respects_force_visible_override() {
+    // The JCODE_SWARM_FORCE_VISIBLE escape hatch must force the visible path
+    // (i.e. report "not a detached server") regardless of TTY state. This is
+    // the only branch we can assert deterministically across CI/interactive
+    // environments without controlling the process's controlling terminal.
+    let prev = std::env::var("JCODE_SWARM_FORCE_VISIBLE").ok();
+    // SAFETY: single-threaded test; restored below.
+    unsafe { std::env::set_var("JCODE_SWARM_FORCE_VISIBLE", "1") };
+    assert!(
+        !running_as_detached_server(),
+        "JCODE_SWARM_FORCE_VISIBLE=1 must force the visible path"
+    );
+    unsafe { std::env::set_var("JCODE_SWARM_FORCE_VISIBLE", "true") };
+    assert!(
+        !running_as_detached_server(),
+        "JCODE_SWARM_FORCE_VISIBLE=true must force the visible path"
+    );
+    match prev {
+        Some(value) => unsafe { std::env::set_var("JCODE_SWARM_FORCE_VISIBLE", value) },
+        None => unsafe { std::env::remove_var("JCODE_SWARM_FORCE_VISIBLE") },
+    }
 }
 
 #[tokio::test]

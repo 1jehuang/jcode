@@ -218,14 +218,9 @@ async fn wait_for_live_attachment(
 }
 
 /// Whether a session currently has at least one live interactive client
-/// attached (i.e. an active TUI is draining its event stream).
-///
-/// Used as a fast, deployment-agnostic proxy for "can a visible spawn actually
-/// attach a driver?". If the coordinator that requested the spawn is itself
-/// running headless inside a `jcode serve` shared server (no attached TUI),
-/// then opening a fresh Terminal for a child will not produce a live worker in
-/// this deployment, so Auto mode should skip the visible attempt entirely
-/// rather than open an orphan window and wait out the attach timeout.
+/// attached (i.e. an active TUI is draining its event stream). Retained as a
+/// tested building block for attachment-state checks.
+#[cfg(test)]
 async fn session_has_live_attachment(
     session_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -235,6 +230,48 @@ async fn session_has_live_attachment(
         .get(session_id)
         .map(|member| !member.event_txs.is_empty())
         .unwrap_or(false)
+}
+
+/// Whether this process is running as a detached server (no controlling TTY).
+///
+/// A persistent `jcode serve` shared server is started detached and has no
+/// controlling terminal (`ps` shows TTY `??`). In that mode, optimistically
+/// opening a fresh Terminal window for a swarm child and hoping it attaches
+/// back over the socket just orphans an empty window and stalls on the attach
+/// timeout, because nothing wires that interactive client to the spawned
+/// session. An interactive `jcode` (or desktop app) run by a user *does* have a
+/// controlling TTY. So "no controlling TTY" is a reliable, deployment-agnostic
+/// signal that Auto should spawn swarm children headless directly.
+///
+/// Overridable via `JCODE_SWARM_FORCE_VISIBLE=1` for power users on exotic
+/// setups who really do want the visible path attempted regardless.
+fn running_as_detached_server() -> bool {
+    if std::env::var("JCODE_SWARM_FORCE_VISIBLE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    !process_has_controlling_tty()
+}
+
+/// Returns true if the current process has a controlling terminal.
+#[cfg(unix)]
+fn process_has_controlling_tty() -> bool {
+    // Opening /dev/tty succeeds only when the process has a controlling
+    // terminal; on a detached server it fails with ENXIO/ENODEV.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+fn process_has_controlling_tty() -> bool {
+    // On non-unix we conservatively assume an interactive context; the
+    // post-launch attach-wait still guards against a failed attach.
+    true
 }
 
 /// Parameterized core of [`wait_for_live_attachment`] so tests can use short
@@ -455,22 +492,20 @@ pub(super) async fn spawn_swarm_agent(
         .map(append_swarm_completion_report_instructions);
 
     // In Auto mode, decide up-front whether a visible spawn can possibly work.
-    // A visible spawn only helps when an interactive client can attach and drive
-    // the child. We use the requesting coordinator's own attachment state as a
-    // fast, deployment-agnostic proxy: if the coordinator is itself running
-    // headless inside a `jcode serve` shared server (no attached TUI), opening a
-    // fresh Terminal for the child would just orphan a window and stall on the
-    // attach timeout, so we skip straight to the in-process headless runner.
+    // A visible spawn only helps when a freshly-opened Terminal can attach and
+    // drive the child. When this process is a detached `jcode serve` shared
+    // server (no controlling TTY), opening that window just orphans it and
+    // stalls on the attach timeout, so we skip straight to the in-process
+    // headless runner. See `running_as_detached_server`.
     let auto_should_try_visible = match resolved_spawn_mode {
         SwarmSpawnMode::Auto => {
-            let coordinator_attached =
-                session_has_live_attachment(req_session_id, swarm_members).await;
-            if !coordinator_attached {
+            let detached_server = running_as_detached_server();
+            if detached_server {
                 crate::logging::info(
-                    "Auto swarm spawn: coordinator has no live interactive client (headless server); spawning child headless directly",
+                    "Auto swarm spawn: detached server (no controlling TTY); spawning child headless directly",
                 );
             }
-            coordinator_attached
+            !detached_server
         }
         _ => true,
     };
@@ -478,7 +513,7 @@ pub(super) async fn spawn_swarm_agent(
     let visible_spawn = match resolved_spawn_mode {
         SwarmSpawnMode::Headless => Err(anyhow::anyhow!("headless spawn requested")),
         SwarmSpawnMode::Auto if !auto_should_try_visible => {
-            Err(anyhow::anyhow!("auto spawn: headless server, skipping visible"))
+            Err(anyhow::anyhow!("auto spawn: detached server, skipping visible"))
         }
         SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
             resolved_working_dir.as_deref(),
