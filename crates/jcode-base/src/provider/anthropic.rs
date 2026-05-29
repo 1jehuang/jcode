@@ -44,6 +44,18 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
+/// Returns the messages endpoint URL, respecting ANTHROPIC_BASE_URL if set.
+fn messages_url(is_oauth: bool) -> String {
+    if let Ok(base) = std::env::var("ANTHROPIC_BASE_URL") {
+        let base = base.trim_end_matches('/');
+        format!("{}/messages", base)
+    } else if is_oauth {
+        API_URL_OAUTH.to_string()
+    } else {
+        API_URL.to_string()
+    }
+}
+
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
 pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
 
@@ -1769,7 +1781,7 @@ async fn stream_response(
 
     let connect_start = std::time::Instant::now();
     // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    let url = messages_url(is_oauth);
 
     let mut req = client
         .post(url)

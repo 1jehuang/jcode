@@ -1177,6 +1177,28 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
     }
 }
 
+#[test]
+fn test_messages_url_default() {
+    crate::env::remove_var("ANTHROPIC_BASE_URL");
+    assert_eq!(messages_url(false), API_URL);
+    assert_eq!(messages_url(true), API_URL_OAUTH);
+}
+
+#[test]
+fn test_messages_url_base_url_override() {
+    crate::env::set_var("ANTHROPIC_BASE_URL", "http://127.0.0.1:3456/v1");
+    let _guard = EnvVarGuard { key: "ANTHROPIC_BASE_URL", previous: None };
+    assert_eq!(messages_url(false), "http://127.0.0.1:3456/v1/messages");
+    assert_eq!(messages_url(true), "http://127.0.0.1:3456/v1/messages");
+}
+
+#[test]
+fn test_messages_url_base_url_trailing_slash() {
+    crate::env::set_var("ANTHROPIC_BASE_URL", "http://127.0.0.1:3456/v1/");
+    let _guard = EnvVarGuard { key: "ANTHROPIC_BASE_URL", previous: None };
+    assert_eq!(messages_url(false), "http://127.0.0.1:3456/v1/messages");
+}
+
 /// The runtime-provider identity that `set_credential_mode` writes must decode
 /// back to the exact same credential mode. This guards the model picker / header
 /// widget from reporting OAuth when an API key is in use (or vice versa): the
