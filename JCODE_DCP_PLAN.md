@@ -32,12 +32,14 @@ Agent::messages_for_provider()
 
 ## Prerequisites
 
-Before starting jcode implementation, DCP must have:
+DCP APIs are now complete (all 4 items implemented). Before building jcode with DCP:
 
-- [x] `dcp_bridge.rs` — jcode ↔ DCP message converter (already exists)
-- [ ] `has_pending_work()` — DCP API Plan D1
-- [ ] `transform_messages_with_diff()` — DCP API Plan D2
-- [ ] DCP rebuilt and `Cargo.toml` path dependency updated
+- [x] `dcp_bridge.rs` — jcode ↔ DCP message converter (already exists in jcode)
+- [x] `has_pending_work()` — DCP API Plan D1 ✅
+- [x] `transform_messages_with_diff()` — DCP API Plan D2 ✅
+- [x] `count_messages_tokens()` — DCP API Plan D3 ✅
+- [x] `last_nudge_kind()` — DCP API Plan D4 ✅
+- [x] DCP committed at `https://github.com/quangdang46/dynamic_context_pruning`
 
 ---
 
@@ -48,12 +50,19 @@ Before starting jcode implementation, DCP must have:
 **File**: `/data/projects/jcode-dcp/Cargo.toml`
 
 ```toml
-# Update the path to point to the updated DCP crate
-dynamic_context_pruning = { path = "/data/projects/dynamic_context_pruning/crates/dynamic_context_pruning", optional = true }
+# Use git URL — DCP is published at github.com/quangdang46/dynamic_context_pruning
+# The `dynamic_context_pruning` package is the umbrella crate at crates/dynamic_context_pruning/
+dynamic_context_pruning = { git = "https://github.com/quangdang46/dynamic_context_pruning", branch = "main", package = "dynamic_context_pruning" }
 
 [features]
 dcp = ["dep:dynamic_context_pruning"]
 ```
+
+> **Dev note**: During active DCP development, you may want to use a local path instead:
+> ```toml
+> dynamic_context_pruning = { path = "/path/to/your/dynamic_context_pruning/crates/dynamic_context_pruning", optional = true }
+> ```
+> Switch back to the git URL when DCP features are stable.
 
 Verify:
 ```bash
