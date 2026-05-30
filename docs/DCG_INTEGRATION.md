@@ -4,6 +4,8 @@
 > Synthesized from 9-repo research, dcg-core analysis, 3 rounds QA interview, discussion
 > Date: 2026-05-30
 > Branch: experiment/dcg-permission-modes
+>
+> **DCG Plan** (dcg-core enhancements) is at: `https://github.com/quangdang46/destructive_command_guard/blob/main/docs/DCG_PLAN.md`
 
 ---
 
