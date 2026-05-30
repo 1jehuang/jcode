@@ -14,7 +14,11 @@ use serde::{Deserialize, Serialize};
 
 /// Fast/cheap OpenAI model used when Codex credentials are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
-const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
+/// Pareto-optimal sidecar fallback: `gpt-5.4-mini` (live in the Codex catalog as
+/// of 2026-05) keeps the full 272k context window of `gpt-5.4` while being
+/// cheaper and faster, which suits the sidecar's high-frequency
+/// relevance/extraction workload. See docs/model-role-assignment.md.
+const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4-mini";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
 /// Fast/cheap Claude model used when only Claude credentials are available.
