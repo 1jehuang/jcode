@@ -20,9 +20,275 @@
 
 ---
 
-## 2. Cross-Repo Permission Mode Comparison
+## 2. Per-Repo Detailed Reports
 
-### 2.1 Mode Enums
+### 2.1 claude-code (CCB) — ⭐⭐⭐ HIGH
+
+**Relevance:** Direct ancestor của jcode. Contains the complete reference implementation for permission modes, command safety classification, sandboxing, user consent flows, dangerous command detection, and tool policy.
+
+**Modes:** `plan` → `default` → `acceptEdits` → `dontAsk` → `auto` → `bypassPermissions` (6 modes, Shift+Tab cycling)
+
+**Permission Pipeline (~1500 lines in `permissions.ts`):**
+```
+Step 1a: deny rules → deny
+Step 1b: ask rules → ask
+Step 1c: tool.checkPermissions() → tool-specific result
+Step 1d: Tool denied → deny
+Step 1e: requiresUserInteraction() → ask (even in bypass)
+Step 1f: Content-specific ask rules → ask (even in bypass)
+Step 1g: Safety checks (.git/, .claude/, shell configs) → ask (even in bypass)
+Step 2a: bypassPermissions mode → allow all remaining
+Step 2b: Always-allowed rules → allow
+Step 3:  Convert passthrough → ask
+Post: dontAsk→deny, auto→YOLO classifier, denial tracking (3 consecutive / 20 total → fallback)
+```
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `src/types/permissions.ts` | `PermissionMode` union, `PermissionBehavior`, `PermissionRule`, `PermissionDecision`, `YoloClassifierResult` |
+| `src/utils/permissions/permissions.ts` | Main pipeline (~1500 lines), `hasPermissionsToUseTool()` entry point |
+| `src/utils/permissions/permissionSetup.ts` | `initialPermissionModeFromCLI()` parses `--dangerously-skip-permissions` and `--permission-mode` |
+| `src/utils/permissions/dangerousPatterns.ts` | `DANGEROUS_BASH_PATTERNS`: python, node, eval, sudo, curl, wget, git, kubectl, aws, gcloud... |
+| `src/utils/permissions/filesystem.ts` | `DANGEROUS_FILES` (.gitconfig, .bashrc, .zshrc, .mcp.json) + `DANGEROUS_DIRECTORIES` (.git, .vscode, .claude) |
+| `src/utils/permissions/denialTracking.ts` | `DENIAL_LIMITS = { maxConsecutive: 3, maxTotal: 20 }`, fallback to interactive prompt |
+| `src/utils/permissions/yoloClassifier.ts` | `classifyYoloAction()` — LLM subagent auto-approval, two-stage (fast + thinking) |
+| `src/utils/permissions/PermissionMode.ts` | Mode config map with titles/symbols/colors, `permissionModeFromString()` |
+| `src/utils/permissions/getNextPermissionMode.ts` | Shift+Tab cycle logic |
+| `src/utils/shell/readOnlyCommandValidation.ts` | ~1900 lines whitelist of safe git/gh/docker/rg commands with per-flag validation |
+| `src/utils/sandbox/sandbox-adapter.ts` | `SandboxManager` wrapping `@anthropic-ai/sandbox-runtime` |
+| `src/hooks/toolPermission/PermissionContext.ts` | Permission context factory with `handleUserAllow()`, `runHooks()`, `tryClassifier()` |
+| `src/hooks/toolPermission/handlers/interactiveHandler.ts` | Interactive REPL permission handler: TUI dialog |
+| `src/components/permissions/` | Full directory of permission request UI components (15+ files) |
+
+**Architecture Pattern:** Layered permission pipeline with 6 modes, 3 decision outcomes. Rule sources priority: policySettings > flagSettings > userSettings > projectSettings > localSettings > cliArg > command > session.
+
+**Gaps:** No formal policy DSL. Classifier prompts bundled (not readable). GrowthBook/Statsig feature flag dependency. BashTool internal permission checks in separate `@claude-code-best/builtin-tools` package.
+
+---
+
+### 2.2 codex (OpenAI) — ⭐⭐⭐ HIGH
+
+**Relevance:** Rust-native, most comprehensive OS-level sandboxing, exec-policy rule engine, LLM guardian auto-reviewer. Directly applicable patterns for dcg-core evolution.
+
+**Key Enums (Rust):**
+```rust
+AskForApproval { UnlessTrusted, OnFailure, OnRequest, Granular(Config), Never }
+SandboxPolicy { DangerFullAccess, ReadOnly{network}, WorkspaceWrite{writable_roots,network}, ExternalSandbox }
+ExecApprovalRequirement { Skip{bypass_sandbox,amendment}, NeedsApproval{reason,amendment}, Forbidden{reason} }
+Decision { Allow, Prompt, Forbidden }
+```
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `codex-rs/protocol/src/protocol.rs` | Core enums: `AskForApproval`, `SandboxPolicy`, `GranularApprovalConfig` |
+| `codex-rs/protocol/src/approvals.rs` | `ExecApprovalRequestEvent`, `GuardianAssessmentEvent`, amendment types |
+| `codex-rs/core/src/exec_policy.rs` | `ExecPolicyManager`, `BANNED_PREFIX_SUGGESTIONS`, unmatched command decision flow |
+| `codex-rs/core/src/guardian/mod.rs` | LLM-based auto-reviewer: risk assessment, 90s timeout, fail-closed, circuit breaker |
+| `codex-rs/core/src/tools/sandboxing.rs` | `ExecApprovalRequirement`, `ApprovalStore`, approval flow orchestration |
+| `codex-rs/core/src/safety.rs` | `SafetyCheck { AutoApprove, AskUser, Reject }`, `assess_patch_safety()` |
+| `codex-rs/shell-command/src/command_safety/is_safe_command.rs` | Explicit safelist: cat, ls, grep, head, tail, git status/log/diff, rg, find... |
+| `codex-rs/shell-command/src/command_safety/is_dangerous_command.rs` | `command_might_be_dangerous()`: rm -rf, sudo chains, Windows dangerous commands |
+| `codex-rs/utils/cli/src/shared_options.rs` | `--sandbox`, `--dangerously-bypass-approvals-and-sandbox` (alias `--yolo`) |
+| `codex-rs/utils/approval-presets/src/lib.rs` | 3 presets: Read Only, Default/Auto, Full Access |
+| `codex-rs/config/src/permissions_toml.rs` | Named permission profiles with `extends` inheritance |
+| `codex-rs/core/src/landlock.rs` | Linux sandbox (bubblewrap + landlock fallback) |
+| `codex-rs/sandboxing/src/seatbelt.rs` | macOS Seatbelt policy generation |
+| `codex-rs/tui/src/bottom_pane/approval_overlay.rs` | TUI approval modal |
+
+**Architecture Pattern:** Defense-in-depth: CLI flags → Config TOML → PermissionProfile → OS Sandbox (bubblewrap/Seatbelt/WFP) → AskForApproval → Exec Policy Engine → Command Safety Classifier → Guardian Auto-Review → TUI Approval Overlay.
+
+**Gaps:** Guardian is OpenAI-specific. No intermediate trust levels (only trusted/untrusted). No dry-run/preview mode. `--yolo` bypass has no audit trail.
+
+---
+
+### 2.3 pi-agent-rust — ⭐⭐⭐ HIGH
+
+**Relevance:** Rust 2024 edition, same language as jcode. Enum-driven policy with O(1) hot path, WASM sandbox, graduated enforcement rollout. Patterns directly transferable.
+
+**Key Enums (Rust):**
+```rust
+ExtensionPolicyMode { Strict, Prompt, Permissive }
+PolicyDecision { Allow, Prompt, Deny }
+PolicyProfile { Safe, Standard, Permissive }
+EnforcementState { Allow, Harden, Prompt, Deny, Terminate }
+ExtensionTrustState { Pending, Acknowledged, Trusted, Killed }
+RolloutPhase { Shadow, LogOnly, EnforceNew, EnforceAll }
+DangerousCommandClass { RecursiveDelete, ForkBomb, ReverseShell, DiskWipe, ... }
+```
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `src/extensions.rs` (~50K lines) | Core: all policy types, evaluation pipeline, exec mediation, dangerous command classifier |
+| `src/permissions.rs` | JSON-file persistent store: Allow/Deny per extension+capability, file-lock, 0o600, expiry |
+| `src/config.rs` | `ExtensionPolicyConfig`, resolution chain: CLI > env > config > default |
+| `src/cli.rs` | `--extension-policy {safe|balanced|permissive}`, `--explain-extension-policy` |
+| `src/extension_scoring.rs` | `RiskLevel { Low, Moderate, High, Critical }` for extension risk scoring |
+| `src/resource_governor.rs` | Host-level resource admission (CPU, memory, FD, backpressure) |
+| `src/pi_wasm.rs` | WASM runtime bridge with wasmtime, per-instance limits, memory caps |
+| `docs/security/invariants.md` | Normative 5-stage decision pipeline (A-E) |
+
+**5-Layer Precedence Chain:**
+```
+Layer 1: per-extension deny → Deny
+Layer 2: global deny_caps → Deny
+Layer 3: per-extension allow → Allow
+Layer 4: global default_caps → Allow
+Layer 5: mode fallback → Strict=Deny, Prompt=Prompt, Permissive=Allow
+```
+
+**Unique Patterns:**
+- **O(1) PolicySnapshot**: Precompiled at dispatcher creation time, zero-cost hot-path lookup
+- **Graduated Rollout**: Shadow→LogOnly→EnforceNew→EnforceAll with auto-rollback on false-positive rate
+- **Dangerous Command Classes**: 10 classes (RecursiveDelete, DeviceWrite, ForkBomb, PipeToShell, SystemShutdown, PermissionEscalation, ProcessTermination, CredentialFileModification, DiskWipe, ReverseShell)
+- **Per-Extension Quotas**: hostcalls/sec, max subprocesses, max write bytes, max HTTP requests
+
+**Gaps:** No top-level agent permission mode (only extension-scoped). No `--dangerously-skip-permissions` CLI flag. Built-in tools lack classification. WASM sandbox is extensions-only.
+
+---
+
+### 2.4 opencode — ⭐⭐ HIGH
+
+**Relevance:** Layered ruleset evaluation with wildcard matching, per-agent and per-session permissions, doom-loop detection, bash arity model. Clean architecture.
+
+**Key Pattern:** `allow/deny/ask` per-tool rules with `findLast`-wins evaluation, default = `ask`.
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `packages/opencode/src/permission/index.ts` | Core service: `ask()`, `reply()`, `list()` triad, deferred/pending state machine |
+| `packages/core/src/permission.ts` | Pure evaluation: `evaluate()` with findLast + wildcard matching against merged rulesets |
+| `packages/opencode/src/permission/arity.ts` | Bash arity dictionary: command prefix → token count for human-readable matching |
+| `packages/opencode/src/config/permission.ts` | Config schema: actions are `ask/allow/deny`, known keys (read, edit, bash, glob, grep...) |
+| `packages/opencode/src/agent/subagent-permissions.ts` | Derives subagent session permission from parent denies + external_directory rules |
+| `packages/opencode/src/session/tools.ts` | Tool execution permission gate: merges agent.permission + session.permission |
+| `packages/opencode/src/session/processor.ts` | Doom loop detection: 3 identical tool calls → `doom_loop` permission ask |
+| `packages/opencode/src/cli/cmd/run.ts` | `--dangerously-skip-permissions` auto-approves; non-interactive auto-rejects |
+| `packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx` | Full TUI permission dialog: 3-stage flow (permission → always/reject) |
+
+**Architecture Pattern:** Config → Agent → Session → Runtime-approved rules merge. `evaluate()` uses `findLast` wins with wildcard matching. Three-way ask: Allow Once / Always / Reject.
+
+**Gaps:** No OS sandboxing. No persistent allowlist across restarts. No user/role-based access control. Policy system is experimental (provider-only). No audit log.
+
+---
+
+### 2.5 oh-my-openagent — ⭐⭐ HIGH
+
+**Relevance:** Hook-chain permission system with Claude Code mode compatibility, multi-agent RBAC, per-agent tool restrictions, write-before-read guard.
+
+**Permission Mode:** `PermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions"` (CC compatible)
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `src/config/schema/internal/permission.ts` | `PermissionValue` enum (`ask/allow/deny`), `AgentPermissionSchema` per-tool |
+| `src/hooks/claude-code-hooks/types.ts` | `PermissionMode` + `PermissionDecision` + full Claude Code hooks interface |
+| `src/hooks/claude-code-hooks/pre-tool-use.ts` | Pre-tool-use gate: exit codes (2=deny, 1=ask, 0=allow) |
+| `src/hooks/write-existing-file-guard/hook.ts` | Prevents overwriting files without reading first (LRU: 256 sessions × 1024 paths) |
+| `src/hooks/team-tool-gating/hook.ts` | Role-based access: lead-only ops, member-or-lead ops, participant-scoped |
+| `src/hooks/bash-file-read-guard.ts` | Warns when bash used for simple file reads instead of Read tool |
+| `src/shared/agent-tool-restrictions.ts` | Per-agent tool denylists (explore agents can't write/edit/task) |
+| `src/features/claude-code-mcp-loader/configure-allowed-env-vars.ts` | MCP env allowlist with user-only security boundary |
+| `src/plugin/tool-execute-before.ts` | Master pipeline: chains all 17+ guards sequentially |
+
+**Architecture Pattern:** 5-layer enforcement: (1) config-level disable arrays, (2) per-agent denylists, (3) hook-chain pre-execution gates (17+ guards), (4) Claude Code hooks bridge (exit code mapping), (5) path/resource boundaries.
+
+**Gaps:** No actual sandbox execution engine (schema only). No centralized policy engine. No runtime permission escalation. No audit logging.
+
+---
+
+### 2.6 oh-my-pi — ⭐⭐ HIGH
+
+**Relevance:** Clean 3-tier/3-mode architecture with per-tool user overrides, ACP client-bridge permissions, critical bash pattern detection, plan mode guard.
+
+**Key Types:**
+```typescript
+type ApprovalMode = "always-ask" | "write" | "yolo"  // default: yolo
+type ToolTier = "read" | "write" | "exec"
+type ApprovalPolicy = "allow" | "deny" | "prompt"
+```
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `packages/coding-agent/src/tools/approval.ts` | Core engine: `ApprovalMode`, `ToolTier`, `resolveApproval()`, mode-to-tier mapping |
+| `packages/coding-agent/src/tools/bash.ts` | `CRITICAL_BASH_PATTERNS` (26 regex): rm -rf /, fork bombs, disk destruction, remote-fetch-then-execute... |
+| `packages/coding-agent/src/tools/plan-mode-guard.ts` | Blocks renames/deletes/writes except to approved plan file |
+| `packages/coding-agent/src/tools/auto-generated-guard.ts` | Blocks editing auto-generated files (protoc, sqlc, swagger...) |
+| `packages/coding-agent/src/extensibility/extensions/wrapper.ts` | `ExtensionToolWrapper`: approval gate fires BEFORE extension handlers |
+| `packages/coding-agent/src/session/client-bridge.ts` | ACP bridge: `allow_once/allow_always/reject_once/reject_always` semantics |
+| `packages/coding-agent/src/config/settings-schema.ts` | `tools.approvalMode` + `tools.approval` per-tool override |
+| `packages/coding-agent/src/cli/args.ts` | `--auto-approve` / `--yolo` / `--approval-mode` flags |
+| `packages/coding-agent/examples/extensions/plan-mode.ts` | Full plan-mode extension: SAFE_COMMANDS (22) + DESTRUCTIVE_PATTERNS (35) |
+| `docs/approval-mode.md` | Canonical documentation of approval system |
+
+**Architecture Pattern:** 4 axes: (1) Tool self-declares tier (`read/write/exec`), (2) Global approval mode sets auto-approve threshold, (3) Per-tool user override always wins, (4) Extension/hook interception post-approval.
+
+**Gaps:** No OS sandboxing. Protected paths only as hook examples. yolo is default (convenience > safety). No audit trail.
+
+---
+
+### 2.7 codebuff — ⭐ MEDIUM
+
+**Relevance:** Per-agent tool whitelist with runtime enforcement, propose-vs-execute two-phase editing, organization RBAC. No user-facing permission mode enum.
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `packages/agent-runtime/src/tools/tool-executor.ts` | Runtime enforcement: checks `agentTemplate.toolNames.includes(toolName)`, errors if unauthorized |
+| `packages/agent-runtime/src/templates/strings.ts` | Subagent restriction message: "You only have access to tools: X" |
+| `packages/agent-runtime/src/tools/handlers/tool/spawn-agent-utils.ts` | `spawnableAgents[]` validation: parent can only spawn whitelisted children |
+| `common/src/tools/params/tool/run-terminal-command.ts` | Prompt-based safety rules (DO NOT list) — not code-enforced |
+| `common/src/tools/params/tool/propose-str-replace.ts` | Propose tool: creates diff preview without writing |
+| `agents/editor/best-of-n/editor-implementor.ts` | Restricted agent: only `propose_write_file`, `propose_str_replace` |
+| `web/src/lib/organization-permissions.ts` | RBAC: member < admin < owner role hierarchy |
+
+**Architecture Pattern:** 4 layers: (1) Agent template tool whitelist (structural), (2) Spawnable agent allowlist (delegation), (3) Propose-then-apply (separation of duty), (4) Prompt-based safety (LLM guidance, not enforced).
+
+**Gaps:** No user-facing permission mode enum. No sandboxing. No protected path enforcement. No tool classification by danger level. No escalation flow. Prompt-based safety is bypassable.
+
+---
+
+### 2.8 dcg-core (current state) — ⭐⭐⭐ BASE LIBRARY
+
+**Relevance:** Core library that jcode depends on. Already provides Engine, Effect, ToolCall, Mode, Decision, Session, ProtectedPaths.
+
+**Already Available (v0.6.0-rc.1):**
+| Feature | File | Status |
+|---------|------|--------|
+| `Mode` enum (6 variants + `pre_check()`) | `mode.rs` | ✅ Complete |
+| `Effect` enum (7 variants + `is_read_only()` + `is_subset()`) | `effect.rs` | ✅ Complete |
+| `ToolCall` enum (5 variants) | `tool_call.rs` | ✅ Complete |
+| `Decision` tri-state (Allow/Prompt/Deny with reasons + alternatives) | `decision.rs` | ✅ Complete |
+| `Engine::evaluate()` pipeline | `engine.rs` | ✅ Complete |
+| `EngineConfig` builder (working_dir + protected_paths) | `engine.rs` | ✅ Complete |
+| `Session` (allow-once codes + per-command deny counter) | `session.rs` | ✅ Complete |
+| `ProtectedPaths` prefix matcher | `protected_paths.rs` | ✅ Complete |
+
+**Evaluation Pipeline:**
+```
+1. Resolve path against protected-paths list
+2. Mode::pre_check() (short-circuit for Bypass/Plan/AcceptEdits+protected)
+3. Fallthrough: mode.fallthrough_allows() decides Allow vs Deny+deny_counter bump
+```
+
+**Needs Building (Phase 2):**
+- Dangerous command patterns (26-50 regex, severity, alternatives)
+- Safe command whitelist (known-safe read-only commands)
+- Denial escalation logic (use existing deny_counter → escalate after N)
+- Session-wide denial budget (track total denials, not just per-command)
+- Pack rule integration (50+ security packs from dcg-cli)
+- YOLO classifier trait (interface for consumer to inject LLM)
+- Per-tool user overrides (TOML config for allow/deny/prompt)
+- Network policy (host allowlist/denylist)
+
+---
+
+## 3. Cross-Repo Comparison Tables
+
+### 3.1 Mode Enums
 
 | Repo | Modes | Count |
 |------|-------|-------|
@@ -34,7 +300,7 @@
 | **oh-my-openagent** | `default`, `plan`, `acceptEdits`, `bypassPermissions` (CC compat) | 4 |
 | **codebuff** | No user-facing mode enum | 0 |
 
-### 2.2 Decision Outcomes
+### 3.2 Decision Outcomes
 
 All repos converge on **tri-state decision**:
 
@@ -44,7 +310,7 @@ All repos converge on **tri-state decision**:
 | Prompt/Ask | ✅ | ✅ Prompt | ✅ | ✅ | ✅ |
 | Deny/Forbidden | ✅ | ✅ Forbidden | ✅ | ✅ | ✅ |
 
-### 2.3 Tool Classification
+### 3.3 Tool Classification
 
 | Repo | Classification Method | Tiers |
 |------|----------------------|-------|
@@ -57,9 +323,9 @@ All repos converge on **tri-state decision**:
 
 ---
 
-## 3. Proven Patterns (consistent across 3+ repos)
+## 4. Proven Patterns (consistent across 3+ repos)
 
-### 3.1 Enum-Driven Mode + Pre-Check Fast Path
+### 4.1 Enum-Driven Mode + Pre-Check Fast Path
 
 Every mature system uses an enum to represent the active mode, with a `pre_check()` or equivalent that short-circuits before expensive evaluation:
 
@@ -69,7 +335,7 @@ pre_check(mode, effects) → AllowImmediately | DenyImmediately | PromptImmediat
 
 **Sources:** claude-code (`PermissionMode`), codex (`AskForApproval`), pi-agent-rust (`ExtensionPolicyMode`), dcg-core (`Mode::pre_check()`)
 
-### 3.2 Effect Taxonomy
+### 4.2 Effect Taxonomy
 
 Tag every tool call with effects, then mode determines which effect sets auto-allow:
 
@@ -85,7 +351,7 @@ Tag every tool call with effects, then mode determines which effect sets auto-al
 
 **dcg-core already has this:** `Effect` enum with 7 variants + `is_read_only()` + `is_subset()`.
 
-### 3.3 ToolCall Abstraction
+### 4.3 ToolCall Abstraction
 
 Normalize agent-specific tool names into a common taxonomy:
 
@@ -99,7 +365,7 @@ Normalize agent-specific tool names into a common taxonomy:
 
 **dcg-core already has this:** `ToolCall` enum with 5 variants.
 
-### 3.4 `--dangerously-skip-permissions` Escape Hatch
+### 4.4 `--dangerously-skip-permissions` Escape Hatch
 
 Universal across all TypeScript-based agents:
 
@@ -112,7 +378,7 @@ Universal across all TypeScript-based agents:
 
 **jcode already has this:** `--dangerously-skip-permissions` (added in this branch).
 
-### 3.5 Per-Tool User Overrides
+### 4.5 Per-Tool User Overrides
 
 Users can set `allow/deny/prompt` per tool in config, overriding mode baseline:
 
@@ -123,7 +389,7 @@ Users can set `allow/deny/prompt` per tool in config, overriding mode baseline:
 | oh-my-pi | `tools.approval.<toolName>: allow|deny|prompt` |
 | codex | Named permission profiles in TOML |
 
-### 3.6 Dangerous Command Detection
+### 4.6 Dangerous Command Detection
 
 Regex/pattern-based detection of unsafe commands before execution:
 
@@ -134,7 +400,7 @@ Regex/pattern-based detection of unsafe commands before execution:
 | pi-agent-rust | 10 classes | `DangerousCommandClass` enum |
 | codex | ~50+ commands | `is_known_safe_command()` + `command_might_be_dangerous()` |
 
-### 3.7 Denial Tracking / Circuit Breaker
+### 4.7 Denial Tracking / Circuit Breaker
 
 When auto mode keeps denying, fall back to interactive prompt:
 
@@ -144,7 +410,7 @@ When auto mode keeps denying, fall back to interactive prompt:
 | codex | 3 per turn | Per turn |
 | dcg-core | Per-command counter (exists, escalation not yet wired) | Per command hash |
 
-### 3.8 Session-Scoped Approval Caching
+### 4.8 Session-Scoped Approval Caching
 
 Avoid re-prompting the same action within a session:
 
@@ -155,7 +421,7 @@ Avoid re-prompting the same action within a session:
 | claude-code | Tool permission context with cached rules |
 | dcg-core | Allow-once codes (6-char hex, SHA-256 derived, 24h TTL) |
 
-### 3.9 Subagent Permission Restriction
+### 4.9 Subagent Permission Restriction
 
 Children inherit restricted subset of parent rules:
 
@@ -166,7 +432,7 @@ Children inherit restricted subset of parent rules:
 | oh-my-openagent | Per-agent denylists + team denylist |
 | codebuff | Agent template `toolNames[]` + `spawnableAgents[]` |
 
-### 3.10 Mode Cycling (TUI)
+### 4.10 Mode Cycling (TUI)
 
 Runtime mode switching via keyboard shortcut:
 
@@ -178,7 +444,7 @@ Runtime mode switching via keyboard shortcut:
 
 ---
 
-## 4. Unique / Novel Patterns (single repo)
+## 5. Unique / Novel Patterns (single repo)
 
 | Pattern | Repo | Description |
 |---------|------|-------------|
@@ -195,7 +461,7 @@ Runtime mode switching via keyboard shortcut:
 
 ---
 
-## 5. dcg-core Status: Has vs Needs
+## 6. dcg-core Status: Has vs Needs
 
 ### ✅ Already Available in dcg-core v0.6.0-rc.1
 
@@ -238,9 +504,9 @@ Runtime mode switching via keyboard shortcut:
 
 ---
 
-## 6. Architecture Recommendation
+## 7. Architecture Recommendation
 
-### 6.1 Layered Pipeline (recommended)
+### 7.1 Layered Pipeline (recommended)
 
 ```
 CLI flags (--permission-mode, --dangerously-skip-permissions)
@@ -271,13 +537,13 @@ dcg-core Engine::evaluate(session, tool_call, mode, effects)
     jcode TUI: Auto-approve (Allow) / Show dialog (Prompt) / Block (Deny)
 ```
 
-### 6.2 Config Hierarchy
+### 7.2 Config Hierarchy
 
 ```
 CLI flag > JCODE_PERMISSION_MODE env > .jcode/config.toml > ~/.jcode/config.toml > Mode::Default
 ```
 
-### 6.3 TOML Config Schema (proposed)
+### 7.3 TOML Config Schema (proposed)
 
 ```toml
 [permissions]
@@ -302,7 +568,7 @@ max_total = 20
 
 ---
 
-## 7. Open Questions (need further discussion)
+## 8. Open Questions (need further discussion)
 
 1. **YOLO classifier design** — Trait-based in dcg-core vs all in jcode? What LLM provider? How to keep dcg clean?
 2. **MCP permission pipeline** — Unified with core tools or separate system?
@@ -312,7 +578,7 @@ max_total = 20
 
 ---
 
-## 8. Reference Links
+## 9. Reference Links
 
 ### claude-code
 - Permission pipeline: https://github.com/claude-code-best/claude-code/blob/main/src/utils/permissions/permissions.ts
