@@ -16,6 +16,8 @@
 | opencode | TypeScript / Bun | ⭐⭐ Layered ruleset, wildcard matching |
 | oh-my-openagent | TypeScript | ⭐⭐ Hook-chain, CC mode compat |
 | oh-my-pi | TypeScript + Rust | ⭐⭐ 3-tier/3-mode, ACP bridge |
+| oh-my-claudecode | TypeScript / CC plugin | ⭐⭐⭐ Hook-based defense-in-depth, worker RBAC, execution modes |
+| oh-my-codex | TypeScript / Codex plugin | ⭐⭐ Pass-through wrapper, madmax isolation, workflow exclusivity |
 | codebuff | TypeScript | ⭐ Tool whitelist, propose-vs-execute |
 
 ---
@@ -230,7 +232,94 @@ type ApprovalPolicy = "allow" | "deny" | "prompt"
 
 ---
 
-### 2.7 codebuff — ⭐ MEDIUM
+### 2.7 oh-my-claudecode — ⭐⭐⭐ HIGH
+
+**Relevance:** Claude Code plugin with deeply layered permission/safety architecture: Bash command allowlisting, worker RBAC, execution mode mutual exclusion, SSRF prevention, security config strict mode, verification tiers, and session isolation.
+
+**Key Pattern:** Hook-based defense-in-depth — 11 Claude Code lifecycle events intercepted, three decision layers (permission, security config, execution mode), worker RBAC (advisory), verification tiers with auto-security escalation.
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `src/hooks/permission-handler/index.ts` | Central Bash permission handler: safe command regex patterns, dangerous shell char detection, heredoc auto-approval, repo path validation, reads `settings.local.json` allow/ask |
+| `src/lib/security-config.ts` | `OMC_SECURITY=strict` master switch. Governs: tool path restriction, python sandbox, project skills disable, auto-update disable, hard max iterations, remote MCP disable, external LLM disable. Strict = one-way (only tightens) |
+| `src/team/permissions.ts` | Worker RBAC: `WorkerPermissions` with `allowedPaths`, `deniedPaths`, `allowedCommands`, `maxFileSize`. Glob matching, secure deny-defaults (`.git/**`, `.env*`, `**/secrets/**`, `**/.ssh/**`) |
+| `src/hooks/mode-registry/index.ts` | Execution mode mutual exclusion: autopilot vs autoresearch. Session-scoped state with tombstone TTL |
+| `src/hooks/persistent-mode/index.ts` (~2185 lines) | "Boulder never stops" engine: hard max iteration enforcement, cancel signal TTL, stale state detection, circuit breakers, context limit escape hatches |
+| `src/utils/ssrf-guard.ts` | URL validation blocking private IPs, loopback, link-local, IPv6-mapped, hex/octal encoded, cloud metadata paths |
+| `src/verification/tier-selector.ts` | Three-tier verification: LIGHT (haiku, <5 files), STANDARD (sonnet), THOROUGH (opus, security/auth changes always THOROUGH) |
+| `src/lib/session-isolation.ts` | `isStateForSession()` with strict vs lenient modes preventing cross-session state leakage |
+| `hooks/hooks.json` | Full lifecycle hook registration: 11 events (UserPromptSubmit, SessionStart, PreToolUse, PermissionRequest, PostToolUse, Stop, SessionEnd...) |
+| `src/team/governance.ts` | Governance flags: delegation_only, plan_approval_required, nested_teams_allowed, cleanup_requires_all_workers_inactive |
+
+**Safe Command Patterns:**
+```typescript
+const SAFE_PATTERNS = [
+  /^git (status|diff|log|branch|show|fetch)/,
+  /^npm run (lint|build|check|typecheck)/,
+  /^cargo (check|clippy|build)/,
+  /^ls( |$)/,
+  /^eslint /,  /^prettier /,
+];
+const DANGEROUS_SHELL_CHARS = /[;&|`$()<>\n\r\t\0\\{}\[\]*?~!#]/;
+```
+
+**Security Config Strict Mode:**
+```typescript
+const STRICT_OVERRIDES: SecurityConfig = {
+  restrictToolPaths: true, pythonSandbox: true,
+  disableProjectSkills: true, disableAutoUpdate: true,
+  hardMaxIterations: 200, disableRemoteMcp: true,
+  disableExternalLLM: true,
+};
+```
+
+**Architecture Pattern:** 3-layer hook-based defense: (1) Permission Layer (Bash classification via regex + shell metachar detection, reads Claude native allow/ask lists), (2) Security Config Layer (`OMC_SECURITY=strict` master switch, one-way tightening), (3) Execution Mode Layer (mutual exclusion, hard iteration caps, circuit breakers). Worker RBAC is advisory (injected into prompts, not mechanically enforced).
+
+**Gaps:** No OS-level sandbox. Worker permissions advisory-only. No `--dangerously-skip-permissions` equivalent. No per-tool granularity beyond Bash. No audit log for permission decisions.
+
+---
+
+### 2.8 oh-my-codex — ⭐⭐ MEDIUM
+
+**Relevance:** Workflow orchestration wrapper for Codex/Claude/Gemini CLIs. Does NOT implement its own permission mode system — acts as pass-through translator. Has meaningful safety infrastructure: madmax isolation, MCP path traversal guards, workflow exclusivity, team worker permission bypass automation.
+
+**Key Pattern:** Pass-through wrapper that translates upstream permission flags per CLI backend: `--madmax` → Codex `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions` for Claude workers, `--approval-mode yolo` for Gemini workers.
+
+**Key Files:**
+| File | Role |
+|------|------|
+| `src/cli/constants.ts` | Core permission flag constants: `--madmax`, `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions` |
+| `src/cli/index.ts` | `shouldAutoIsolateMadmaxLaunch()` detects madmax → creates isolated run dirs with context-key locking. `createMadmaxIsolatedRoot()` with stale detection (30s timeout) |
+| `src/team/tmux-session.ts` | `translateWorkerLaunchArgsForCli()`: per-CLI flag mapping. `shouldGrantExecutionBypassForRole()` bypasses only for `tools === 'execution'` agents. Auto-accept Claude bypass/trust prompts in tmux |
+| `src/team/state.ts` | `PermissionsSnapshot` with `approval_mode`, `sandbox_mode`, `network_access`. `resolvePermissionsSnapshot()` reads from multiple env vars (OMX/CODEX/CLAUDE/OMX_SANDBOX) |
+| `src/config/mcp-registry.ts` | MCP server registry with `approval_mode` pass-through to Claude Code settings |
+| `src/config/codex-hooks.ts` | Full hook lifecycle: SessionStart, PreToolUse, PostToolUse, Stop. Trust state (hash-based) for managed hooks |
+| `src/mcp/hermes-bridge.ts` | `SAFE_ARTIFACT_PREFIXES` whitelist, `normalizeArtifactRelativePath()` rejects `../`, NUL bytes, absolute paths |
+| `src/mcp/state-paths.ts` | Path traversal defense: strict regex for session IDs, `enforceWorkingDirectoryPolicy()` restricts MCP dirs to `OMX_MCP_WORKDIR_ROOTS` |
+| `src/state/workflow-transition.ts` | Exclusive workflow mode enforcement: `evaluateWorkflowTransition()` with allow-overlap matrix for ralph/autopilot/team/ultrawork modes |
+| `src/modes/base.ts` | 8 execution modes: autopilot, autoresearch, deep-interview, ralph, ultrawork, team, ultraqa, ralplan |
+
+**Permission Flag Translation:**
+```typescript
+// Codex workers: no special flags (inherits upstream)
+// Gemini workers: --approval-mode yolo (for execution role)
+// Claude workers: --dangerously-skip-permissions (for execution role)
+export function translateWorkerLaunchArgsForCli(workerCli, args, prompt, role) {
+  if (workerCli === 'codex') return [...args];
+  if (workerCli === 'gemini') return shouldGrantExecutionBypassForRole(role)
+    ? [GEMINI_APPROVAL_MODE_FLAG, GEMINI_APPROVAL_MODE_YOLO] : [];
+  return shouldGrantExecutionBypassForRole(role) ? [CLAUDE_SKIP_PERMISSIONS_FLAG] : [];
+}
+```
+
+**Architecture Pattern:** Pass-through wrapper: (1) Translates upstream permission flags per CLI backend, (2) Auto-isolates madmax launches with context-key locking, (3) Automates permission prompt acceptance in tmux team workers, (4) Enforces workflow exclusivity (mode mutual exclusion), (5) Guards MCP surfaces with path traversal defense and working directory policy.
+
+**Gaps:** No custom permission mode enum (relies on upstream). No tool-level classification or allowlist/denylist. No user consent prompt flow (auto-accepts). No policy config file. No sandboxing/containerization. No audit trail.
+
+---
+
+### 2.9 codebuff — ⭐ MEDIUM
 
 **Relevance:** Per-agent tool whitelist with runtime enforcement, propose-vs-execute two-phase editing, organization RBAC. No user-facing permission mode enum.
 
@@ -251,7 +340,7 @@ type ApprovalPolicy = "allow" | "deny" | "prompt"
 
 ---
 
-### 2.8 dcg-core (current state) — ⭐⭐⭐ BASE LIBRARY
+### 2.10 dcg-core (current state) — ⭐⭐⭐ BASE LIBRARY
 
 **Relevance:** Core library that jcode depends on. Already provides Engine, Effect, ToolCall, Mode, Decision, Session, ProtectedPaths.
 
