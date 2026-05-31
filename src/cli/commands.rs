@@ -1,10 +1,12 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::{browser, gateway, memory, session, storage, tui};
 
@@ -35,6 +37,1363 @@ pub enum AmbientSubcommand {
     Trigger,
     Stop,
     RunVisible,
+}
+
+pub enum CloudSubcommand {
+    Sessions(CloudSessionsSubcommand),
+}
+
+pub enum CloudSessionsSubcommand {
+    Configure {
+        api_base: Option<String>,
+        api_token: Option<String>,
+        api_token_env: Option<String>,
+        api_token_id: Option<String>,
+        user_id: Option<String>,
+        helper: Option<String>,
+        clear: bool,
+    },
+    Status {
+        json: bool,
+    },
+    Upload {
+        session_file: String,
+        raw: bool,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+    UploadLatest {
+        sessions_dir: String,
+        raw: bool,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+    Sync {
+        sessions_dir: Option<String>,
+        since_days: Option<u64>,
+        all: bool,
+        max: usize,
+        min_interval_mins: Option<u64>,
+        raw: bool,
+        dry_run: bool,
+        force: bool,
+        json: bool,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+    List {
+        limit: usize,
+        json: bool,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+    Verify {
+        session_id: String,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+    Dashboard {
+        limit: usize,
+        output: Option<String>,
+        open: bool,
+        with_view: bool,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+    View {
+        session_id: String,
+        format: String,
+        output: Option<String>,
+        open: bool,
+        user_id: String,
+        profile: Option<String>,
+        region: Option<String>,
+        helper: Option<String>,
+    },
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CloudSessionsConfig {
+    api_base: Option<String>,
+    api_token: Option<String>,
+    api_token_id: Option<String>,
+    helper: Option<String>,
+    user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CloudSessionsConfigStatus {
+    path: String,
+    exists: bool,
+    api_base: Option<String>,
+    api_token_configured: bool,
+    api_token_id: Option<String>,
+    helper: Option<String>,
+    user_id: Option<String>,
+}
+
+pub fn run_cloud_command(cmd: CloudSubcommand) -> Result<()> {
+    match cmd {
+        CloudSubcommand::Sessions(action) => run_cloud_sessions_command(action),
+    }
+}
+
+fn run_cloud_sessions_command(action: CloudSessionsSubcommand) -> Result<()> {
+    match action {
+        CloudSessionsSubcommand::Configure {
+            api_base,
+            api_token,
+            api_token_env,
+            api_token_id,
+            user_id,
+            helper,
+            clear,
+        } => run_cloud_sessions_configure(
+            api_base,
+            api_token,
+            api_token_env,
+            api_token_id,
+            user_id,
+            helper,
+            clear,
+        ),
+        CloudSessionsSubcommand::Status { json } => run_cloud_sessions_status(json),
+        CloudSessionsSubcommand::Dashboard {
+            limit,
+            output,
+            open,
+            with_view,
+            user_id,
+            profile,
+            region,
+            helper,
+        } => run_cloud_sessions_dashboard(CloudSessionsDashboardRequest {
+            limit,
+            output,
+            open,
+            with_view,
+            user_id,
+            profile,
+            region,
+            helper,
+        }),
+        CloudSessionsSubcommand::Sync {
+            sessions_dir,
+            since_days,
+            all,
+            max,
+            min_interval_mins,
+            raw,
+            dry_run,
+            force,
+            json,
+            user_id,
+            profile,
+            region,
+            helper,
+        } => run_cloud_sessions_sync(CloudSessionsSyncRequest {
+            sessions_dir,
+            since_days,
+            all,
+            max,
+            min_interval_mins,
+            raw,
+            dry_run,
+            force,
+            json,
+            user_id,
+            profile,
+            region,
+            helper,
+        }),
+        other => run_cloud_sessions_helper_command(other),
+    }
+}
+
+fn run_cloud_sessions_helper_command(action: CloudSessionsSubcommand) -> Result<()> {
+    let config = load_cloud_sessions_config()?.unwrap_or_default();
+    let helper_override = cloud_sessions_helper_override(&action).or_else(|| config.helper.clone());
+    let helper = resolve_jade_sessions_helper(helper_override.as_deref())?;
+    let helper_env = cloud_sessions_helper_env(&config);
+    let args = build_jade_sessions_args_with_config(action, &config);
+    let mut command = ProcessCommand::new(&helper);
+    command
+        .args(&args)
+        .envs(helper_env)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let status = command
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to run {}: {err}", helper.display()))?;
+
+    if !status.success() {
+        anyhow::bail!("{} exited with status {status}", helper.display());
+    }
+    Ok(())
+}
+
+fn cloud_sessions_config_path() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("cloud_sessions.json"))
+}
+
+fn load_cloud_sessions_config() -> Result<Option<CloudSessionsConfig>> {
+    let path = cloud_sessions_config_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    let config = serde_json::from_str(&content)
+        .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))?;
+    Ok(Some(config))
+}
+
+fn save_cloud_sessions_config(config: &CloudSessionsConfig) -> Result<PathBuf> {
+    let path = cloud_sessions_config_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_vec_pretty(config)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&content)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &content)?;
+    }
+    Ok(path)
+}
+
+fn run_cloud_sessions_configure(
+    api_base: Option<String>,
+    api_token: Option<String>,
+    api_token_env: Option<String>,
+    api_token_id: Option<String>,
+    user_id: Option<String>,
+    helper: Option<String>,
+    clear: bool,
+) -> Result<()> {
+    let path = cloud_sessions_config_path()?;
+    if clear {
+        match std::fs::remove_file(&path) {
+            Ok(()) => println!("Removed Jade cloud sessions config at {}", path.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                println!("No Jade cloud sessions config found at {}", path.display());
+            }
+            Err(err) => return Err(err.into()),
+        }
+        return Ok(());
+    }
+
+    if api_base.is_none()
+        && api_token.is_none()
+        && api_token_env.is_none()
+        && api_token_id.is_none()
+        && user_id.is_none()
+        && helper.is_none()
+    {
+        anyhow::bail!(
+            "nothing to configure; pass --api-base, --api-token/--api-token-env, --api-token-id, --user-id, --helper, or --clear"
+        );
+    }
+
+    let mut config = load_cloud_sessions_config()?.unwrap_or_default();
+    if let Some(value) = non_empty(api_base) {
+        config.api_base = Some(value);
+    }
+    if let Some(value) = non_empty(api_token) {
+        config.api_token = Some(value);
+    }
+    if let Some(var) = non_empty(api_token_env) {
+        let value = std::env::var(&var)
+            .map_err(|err| anyhow::anyhow!("failed to read {var} for --api-token-env: {err}"))?;
+        let value = non_empty(Some(value))
+            .ok_or_else(|| anyhow::anyhow!("{var} for --api-token-env was empty"))?;
+        config.api_token = Some(value);
+    }
+    if let Some(value) = non_empty(api_token_id) {
+        config.api_token_id = Some(value);
+    }
+    if let Some(value) = non_empty(user_id) {
+        config.user_id = Some(value);
+    }
+    if let Some(value) = non_empty(helper) {
+        config.helper = Some(value);
+    }
+
+    let path = save_cloud_sessions_config(&config)?;
+    println!("Saved Jade cloud sessions config to {}", path.display());
+    println!("api_base: {}", configured_label(config.api_base.as_deref()));
+    println!(
+        "api_token: {}",
+        if config.api_token.is_some() {
+            "configured"
+        } else {
+            "not configured"
+        }
+    );
+    println!(
+        "api_token_id: {}",
+        configured_label(config.api_token_id.as_deref())
+    );
+    println!("user_id: {}", configured_label(config.user_id.as_deref()));
+    println!("helper: {}", configured_label(config.helper.as_deref()));
+    Ok(())
+}
+
+fn run_cloud_sessions_status(json: bool) -> Result<()> {
+    let path = cloud_sessions_config_path()?;
+    let config = load_cloud_sessions_config()?.unwrap_or_default();
+    let status = CloudSessionsConfigStatus {
+        path: path.display().to_string(),
+        exists: path.exists(),
+        api_base: config.api_base,
+        api_token_configured: config.api_token.is_some(),
+        api_token_id: config.api_token_id,
+        helper: config.helper,
+        user_id: config.user_id,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!("Jade cloud sessions config: {}", status.path);
+        println!("exists: {}", status.exists);
+        println!("api_base: {}", configured_label(status.api_base.as_deref()));
+        println!(
+            "api_token: {}",
+            if status.api_token_configured {
+                "configured"
+            } else {
+                "not configured"
+            }
+        );
+        println!(
+            "api_token_id: {}",
+            configured_label(status.api_token_id.as_deref())
+        );
+        println!("user_id: {}", configured_label(status.user_id.as_deref()));
+        println!("helper: {}", configured_label(status.helper.as_deref()));
+    }
+    Ok(())
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+struct CloudSessionsSyncRequest {
+    sessions_dir: Option<String>,
+    since_days: Option<u64>,
+    all: bool,
+    max: usize,
+    min_interval_mins: Option<u64>,
+    raw: bool,
+    dry_run: bool,
+    force: bool,
+    json: bool,
+    user_id: String,
+    profile: Option<String>,
+    region: Option<String>,
+    helper: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct CloudSessionsSyncState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_sync_at: Option<String>,
+    #[serde(default)]
+    sessions: std::collections::BTreeMap<String, CloudSessionsSyncRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CloudSessionsSyncRecord {
+    sha256: String,
+    size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modified_unix: Option<i64>,
+    uploaded_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CloudSessionsSyncEntry {
+    session_id: String,
+    path: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CloudSessionsSyncReport {
+    sessions_dir: String,
+    dry_run: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    throttled: bool,
+    scanned: usize,
+    uploaded: usize,
+    skipped_unchanged: usize,
+    failed: usize,
+    reached_max: bool,
+    entries: Vec<CloudSessionsSyncEntry>,
+}
+
+struct SyncCandidate {
+    session_id: String,
+    path: PathBuf,
+    size: u64,
+    modified_unix: Option<i64>,
+}
+
+fn cloud_sessions_sync_state_path() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("cloud_sessions_sync.json"))
+}
+
+fn load_cloud_sessions_sync_state() -> Result<CloudSessionsSyncState> {
+    let path = cloud_sessions_sync_state_path()?;
+    if !path.exists() {
+        return Ok(CloudSessionsSyncState::default());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str(&content)
+        .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))
+}
+
+fn save_cloud_sessions_sync_state(state: &CloudSessionsSyncState) -> Result<PathBuf> {
+    let path = cloud_sessions_sync_state_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_vec_pretty(state)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&content)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &content)?;
+    }
+    Ok(path)
+}
+
+fn resolve_sync_sessions_dir(override_path: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = override_path.map(str::trim).filter(|path| !path.is_empty()) {
+        return Ok(expand_home_path(path));
+    }
+    Ok(crate::storage::jcode_dir()?.join("sessions"))
+}
+
+fn expand_home_path(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(stripped);
+    }
+    if path == "~"
+        && let Some(home) = dirs::home_dir()
+    {
+        return home;
+    }
+    PathBuf::from(path)
+}
+
+fn is_syncable_session_stem(stem: &str) -> bool {
+    (stem.starts_with("session_") || stem.starts_with("imported_")) && !stem.ends_with(".journal")
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)
+        .map_err(|err| anyhow::anyhow!("failed to open {}: {err}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|err| anyhow::anyhow!("failed to hash {}: {err}", path.display()))?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn collect_sync_candidates(dir: &Path) -> Result<Vec<SyncCandidate>> {
+    let mut candidates = Vec::new();
+    if !dir.exists() {
+        anyhow::bail!("sessions directory not found: {}", dir.display());
+    }
+    for entry in std::fs::read_dir(dir)
+        .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", dir.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if !is_syncable_session_stem(stem) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+        let modified_unix = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|dur| dur.as_secs() as i64);
+        candidates.push(SyncCandidate {
+            session_id: stem.to_string(),
+            path,
+            size: metadata.len(),
+            modified_unix,
+        });
+    }
+    Ok(candidates)
+}
+
+fn run_jade_upload(
+    helper: &Path,
+    helper_env: &[(&'static str, String)],
+    file: &Path,
+    user_id: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+    raw: bool,
+) -> Result<()> {
+    let mut args = vec!["upload".to_string()];
+    append_common_jade_args(
+        &mut args,
+        user_id.to_string(),
+        profile.map(ToOwned::to_owned),
+        region.map(ToOwned::to_owned),
+    );
+    if raw {
+        args.push("--raw".to_string());
+    }
+    args.push(file.display().to_string());
+
+    let output = ProcessCommand::new(helper)
+        .args(&args)
+        .envs(helper_env.iter().cloned())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to run {}: {err}", helper.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        let detail = if detail.is_empty() {
+            format!("exited with status {}", output.status)
+        } else {
+            detail.lines().last().unwrap_or(detail).to_string()
+        };
+        anyhow::bail!(detail);
+    }
+    Ok(())
+}
+
+fn run_cloud_sessions_sync(request: CloudSessionsSyncRequest) -> Result<()> {
+    let config = load_cloud_sessions_config()?.unwrap_or_default();
+    let helper_override = request.helper.clone().or_else(|| config.helper.clone());
+    let user_id = config_or_default_user_id(request.user_id.clone(), &config);
+    let sessions_dir = resolve_sync_sessions_dir(request.sessions_dir.as_deref())?;
+    let mut state = load_cloud_sessions_sync_state()?;
+
+    // Self-throttle so the command is safe to call from cron/systemd timers without
+    // re-uploading or even rescanning more often than requested.
+    if !request.force
+        && !request.dry_run
+        && let Some(min_interval) = request.min_interval_mins
+        && min_interval > 0
+        && let Some(last) = state
+            .last_sync_at
+            .as_deref()
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+    {
+        let elapsed_mins = (chrono::Utc::now() - last.with_timezone(&chrono::Utc)).num_minutes();
+        if elapsed_mins < min_interval as i64 {
+            let report = CloudSessionsSyncReport {
+                sessions_dir: sessions_dir.display().to_string(),
+                dry_run: request.dry_run,
+                throttled: true,
+                scanned: 0,
+                uploaded: 0,
+                skipped_unchanged: 0,
+                failed: 0,
+                reached_max: false,
+                entries: Vec::new(),
+            };
+            if request.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Jade cloud sessions sync skipped: last sync {elapsed_mins}m ago (< --min-interval-mins {min_interval})"
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    let helper = resolve_jade_sessions_helper(helper_override.as_deref())?;
+    let helper_env = cloud_sessions_helper_env(&config);
+    let mut candidates = collect_sync_candidates(&sessions_dir)?;
+
+    if !request.all {
+        let since_days = request.since_days.unwrap_or(7);
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|dur| dur.as_secs() as i64)
+            .unwrap_or(0)
+            - (since_days as i64) * 86_400;
+        candidates.retain(|candidate| candidate.modified_unix.map(|m| m >= cutoff).unwrap_or(true));
+    }
+
+    // Newest first so --max keeps the most recent sessions.
+    candidates.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+
+    let mut report = CloudSessionsSyncReport {
+        sessions_dir: sessions_dir.display().to_string(),
+        dry_run: request.dry_run,
+        throttled: false,
+        scanned: 0,
+        uploaded: 0,
+        skipped_unchanged: 0,
+        failed: 0,
+        reached_max: false,
+        entries: Vec::new(),
+    };
+    let mut state_dirty = false;
+
+    for candidate in candidates {
+        if report.uploaded + report.failed >= request.max {
+            report.reached_max = true;
+            break;
+        }
+        report.scanned += 1;
+        let sha = match sha256_file(&candidate.path) {
+            Ok(sha) => sha,
+            Err(err) => {
+                report.failed += 1;
+                report.entries.push(CloudSessionsSyncEntry {
+                    session_id: candidate.session_id,
+                    path: candidate.path.display().to_string(),
+                    status: "failed",
+                    error: Some(err.to_string()),
+                });
+                continue;
+            }
+        };
+
+        if !request.force
+            && let Some(record) = state.sessions.get(&candidate.session_id)
+            && record.sha256 == sha
+        {
+            report.skipped_unchanged += 1;
+            continue;
+        }
+
+        if request.dry_run {
+            report.uploaded += 1;
+            report.entries.push(CloudSessionsSyncEntry {
+                session_id: candidate.session_id,
+                path: candidate.path.display().to_string(),
+                status: "would-upload",
+                error: None,
+            });
+            continue;
+        }
+
+        match run_jade_upload(
+            &helper,
+            &helper_env,
+            &candidate.path,
+            &user_id,
+            request.profile.as_deref(),
+            request.region.as_deref(),
+            request.raw,
+        ) {
+            Ok(()) => {
+                report.uploaded += 1;
+                state.sessions.insert(
+                    candidate.session_id.clone(),
+                    CloudSessionsSyncRecord {
+                        sha256: sha,
+                        size: candidate.size,
+                        modified_unix: candidate.modified_unix,
+                        uploaded_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                state_dirty = true;
+                report.entries.push(CloudSessionsSyncEntry {
+                    session_id: candidate.session_id,
+                    path: candidate.path.display().to_string(),
+                    status: "uploaded",
+                    error: None,
+                });
+            }
+            Err(err) => {
+                report.failed += 1;
+                report.entries.push(CloudSessionsSyncEntry {
+                    session_id: candidate.session_id,
+                    path: candidate.path.display().to_string(),
+                    status: "failed",
+                    error: Some(err.to_string()),
+                });
+            }
+        }
+    }
+
+    // Record completion time for non-dry runs (even if nothing changed) so
+    // --min-interval-mins throttling works for schedulers, and persist any
+    // newly uploaded session records.
+    if !request.dry_run {
+        state.last_sync_at = Some(chrono::Utc::now().to_rfc3339());
+        save_cloud_sessions_sync_state(&state)?;
+    } else if state_dirty {
+        save_cloud_sessions_sync_state(&state)?;
+    }
+
+    if request.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let verb = if request.dry_run {
+            "Would upload"
+        } else {
+            "Uploaded"
+        };
+        println!("Jade cloud sessions sync ({})", report.sessions_dir);
+        println!(
+            "scanned: {}  {}: {}  unchanged: {}  failed: {}",
+            report.scanned, verb, report.uploaded, report.skipped_unchanged, report.failed
+        );
+        if report.reached_max {
+            println!("note: reached --max {}; rerun to continue", request.max);
+        }
+        for entry in &report.entries {
+            match entry.error.as_deref() {
+                Some(error) => println!("  [{}] {} ({})", entry.status, entry.session_id, error),
+                None => println!("  [{}] {}", entry.status, entry.session_id),
+            }
+        }
+    }
+
+    if report.failed > 0 {
+        anyhow::bail!("{} session(s) failed to upload", report.failed);
+    }
+    Ok(())
+}
+
+struct CloudSessionsDashboardRequest {
+    limit: usize,
+    output: Option<String>,
+    open: bool,
+    with_view: bool,
+    user_id: String,
+    profile: Option<String>,
+    region: Option<String>,
+    helper: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CloudSessionListItem {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    message_count: Option<serde_json::Value>,
+    #[serde(default)]
+    uploaded_at: Option<String>,
+}
+
+fn fetch_cloud_session_list_json(
+    helper: &Path,
+    helper_env: &[(&'static str, String)],
+    user_id: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+    limit: usize,
+) -> Result<Vec<CloudSessionListItem>> {
+    let mut args = vec!["list".to_string()];
+    append_common_jade_args(
+        &mut args,
+        user_id.to_string(),
+        profile.map(ToOwned::to_owned),
+        region.map(ToOwned::to_owned),
+    );
+    args.extend(["--limit".to_string(), limit.to_string()]);
+    args.push("--json".to_string());
+
+    let output = ProcessCommand::new(helper)
+        .args(&args)
+        .envs(helper_env.iter().cloned())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to run {}: {err}", helper.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        anyhow::bail!(
+            "{} list failed: {}",
+            helper.display(),
+            if detail.is_empty() {
+                format!("exited with status {}", output.status)
+            } else {
+                detail.to_string()
+            }
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_cloud_session_list_json(stdout.trim())
+}
+
+/// Parse the helper's `list --json` output.
+///
+/// The Jade helper prints a top-level JSON array, but we also accept an object
+/// wrapper keyed by `items` or `sessions` so the dashboard keeps working if the
+/// helper's output shape changes.
+fn parse_cloud_session_list_json(raw: &str) -> Result<Vec<CloudSessionListItem>> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|err| anyhow::anyhow!("failed to parse Jade list JSON: {err}"))?;
+    let array = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(mut map) => map
+            .remove("items")
+            .or_else(|| map.remove("sessions"))
+            .and_then(|value| match value {
+                serde_json::Value::Array(items) => Some(items),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to parse Jade list JSON: expected an array or an object with an `items`/`sessions` array"
+                )
+            })?,
+        other => anyhow::bail!(
+            "failed to parse Jade list JSON: expected an array, found {}",
+            json_value_kind(&other)
+        ),
+    };
+    array
+        .into_iter()
+        .map(|item| {
+            serde_json::from_value(item)
+                .map_err(|err| anyhow::anyhow!("failed to parse Jade list item: {err}"))
+        })
+        .collect()
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn message_count_label(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::Number(num)) => num.to_string(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        _ => "-".to_string(),
+    }
+}
+
+fn render_cloud_sessions_dashboard_html(
+    user_id: &str,
+    items: &[CloudSessionListItem],
+    view_links: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let generated = chrono::Utc::now().to_rfc3339();
+    let mut rows = String::new();
+    for item in items {
+        let session_id = item.session_id.as_deref().unwrap_or("(unknown)");
+        let title = item
+            .title
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or(item.short_name.as_deref())
+            .unwrap_or("(untitled)");
+        let uploaded = item.uploaded_at.as_deref().unwrap_or("-");
+        // When a local per-session viewer was generated, link the session id to it.
+        let id_cell = match item.session_id.as_deref().and_then(|id| view_links.get(id)) {
+            Some(link) => format!(
+                "<a href='{}'>{}</a>",
+                html_escape(link),
+                html_escape(session_id)
+            ),
+            None => html_escape(session_id),
+        };
+        rows.push_str(&format!(
+            "<tr><td class='id'>{}</td><td>{}</td><td class='num'>{}</td><td class='ts'>{}</td></tr>\n",
+            id_cell,
+            html_escape(title),
+            html_escape(&message_count_label(item.message_count.as_ref())),
+            html_escape(uploaded),
+        ));
+    }
+    if rows.is_empty() {
+        rows.push_str("<tr><td colspan='4' class='empty'>No uploaded sessions found.</td></tr>\n");
+    }
+    format!(
+        "<!doctype html><meta charset='utf-8'>\n\
+<title>Jade Cloud Sessions Dashboard</title>\n\
+<style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1b1b1f}}\
+h1{{margin-bottom:0.2rem}}.meta{{color:#666;margin-bottom:1.5rem}}\
+table{{border-collapse:collapse;width:100%}}th,td{{text-align:left;padding:0.5rem 0.6rem;border-bottom:1px solid #e3e3e8}}\
+th{{background:#f6f8fa;position:sticky;top:0}}td.id{{font-family:ui-monospace,monospace;font-size:0.85rem}}\
+td.id a{{color:#0a58ca;text-decoration:none}}td.id a:hover{{text-decoration:underline}}\
+td.num{{text-align:right}}td.ts{{white-space:nowrap;color:#555}}td.empty{{text-align:center;color:#888;padding:2rem}}\
+tr:hover td{{background:#fafbff}}</style>\n\
+<h1>Jade Cloud Sessions</h1>\n\
+<div class='meta'>user: {user} &middot; {count} session(s) &middot; generated {generated}</div>\n\
+<table><thead><tr><th>Session ID</th><th>Title</th><th>Messages</th><th>Uploaded</th></tr></thead>\n\
+<tbody>\n{rows}</tbody></table>\n",
+        user = html_escape(user_id),
+        count = items.len(),
+        generated = html_escape(&generated),
+        rows = rows,
+    )
+}
+
+fn run_cloud_sessions_dashboard(request: CloudSessionsDashboardRequest) -> Result<()> {
+    let config = load_cloud_sessions_config()?.unwrap_or_default();
+    let helper_override = request.helper.clone().or_else(|| config.helper.clone());
+    let helper = resolve_jade_sessions_helper(helper_override.as_deref())?;
+    let helper_env = cloud_sessions_helper_env(&config);
+    let user_id = config_or_default_user_id(request.user_id.clone(), &config);
+
+    let items = fetch_cloud_session_list_json(
+        &helper,
+        &helper_env,
+        &user_id,
+        request.profile.as_deref(),
+        request.region.as_deref(),
+        request.limit,
+    )?;
+
+    let output_path = match request
+        .output
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        Some(path) => expand_home_path(path),
+        None => std::env::temp_dir().join(format!(
+            "jade-cloud-dashboard-{}.html",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        )),
+    };
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Optionally download each session and render a local per-session viewer,
+    // then link the dashboard rows to those files (relative to the dashboard).
+    let mut view_links: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    if request.with_view {
+        let views_dir = dashboard_views_dir(&output_path);
+        std::fs::create_dir_all(&views_dir)?;
+        let total = items.len();
+        let mut generated = 0usize;
+        for (idx, item) in items.iter().enumerate() {
+            let Some(session_id) = item.session_id.as_deref().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let view_file = views_dir.join(format!("{}.html", sanitize_filename(session_id)));
+            eprintln!("[{}/{}] downloading {}", idx + 1, total, session_id);
+            match generate_cloud_session_view_html(
+                &helper,
+                &helper_env,
+                &user_id,
+                request.profile.as_deref(),
+                request.region.as_deref(),
+                session_id,
+                &view_file,
+            ) {
+                Ok(()) => {
+                    if let Some(rel) = relative_link(&output_path, &view_file) {
+                        view_links.insert(session_id.to_string(), rel);
+                        generated += 1;
+                    }
+                }
+                Err(err) => {
+                    eprintln!("  warning: could not render viewer for {session_id}: {err}");
+                }
+            }
+        }
+        eprintln!(
+            "Generated {generated}/{total} per-session viewer(s) in {}",
+            views_dir.display()
+        );
+    }
+
+    let html = render_cloud_sessions_dashboard_html(&user_id, &items, &view_links);
+    std::fs::write(&output_path, html.as_bytes())
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", output_path.display()))?;
+
+    println!(
+        "Wrote Jade cloud sessions dashboard ({} session(s)) to {}",
+        items.len(),
+        output_path.display()
+    );
+    if request.open {
+        let _ = open::that(&output_path);
+    }
+    Ok(())
+}
+
+/// Directory that holds per-session viewer HTML files for a dashboard.
+fn dashboard_views_dir(dashboard_path: &Path) -> PathBuf {
+    let stem = dashboard_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "dashboard".to_string());
+    let parent = dashboard_path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}-views"))
+}
+
+/// Make a filesystem-safe filename component from a session id.
+fn sanitize_filename(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Build a link from the dashboard file to a viewer file, preferring a relative
+/// path when both share a parent directory so the dashboard is portable.
+fn relative_link(dashboard_path: &Path, view_file: &Path) -> Option<String> {
+    let base = dashboard_path.parent()?;
+    let rel = view_file.strip_prefix(base).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// Invoke the helper's `view --format html --output <file>` for one session.
+fn generate_cloud_session_view_html(
+    helper: &Path,
+    helper_env: &[(&'static str, String)],
+    user_id: &str,
+    profile: Option<&str>,
+    region: Option<&str>,
+    session_id: &str,
+    output_file: &Path,
+) -> Result<()> {
+    let mut args = vec!["view".to_string()];
+    append_common_jade_args(
+        &mut args,
+        user_id.to_string(),
+        profile.map(ToOwned::to_owned),
+        region.map(ToOwned::to_owned),
+    );
+    args.extend(["--format".to_string(), "html".to_string()]);
+    args.extend([
+        "--output".to_string(),
+        output_file.to_string_lossy().to_string(),
+    ]);
+    args.push(session_id.to_string());
+
+    let output = ProcessCommand::new(helper)
+        .args(&args)
+        .envs(helper_env.iter().cloned())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| anyhow::anyhow!("failed to run {}: {err}", helper.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        anyhow::bail!(
+            "{}",
+            if detail.is_empty() {
+                format!("view exited with status {}", output.status)
+            } else {
+                detail.to_string()
+            }
+        );
+    }
+    Ok(())
+}
+
+fn configured_label(value: Option<&str>) -> &str {
+    value
+        .filter(|value| !value.is_empty())
+        .unwrap_or("not configured")
+}
+
+fn config_or_default_user_id(user_id: String, config: &CloudSessionsConfig) -> String {
+    if user_id == "dev" {
+        config.user_id.clone().unwrap_or(user_id)
+    } else {
+        user_id
+    }
+}
+
+fn cloud_sessions_helper_env(config: &CloudSessionsConfig) -> Vec<(&'static str, String)> {
+    let mut env = Vec::new();
+    if let Some(api_base) = non_empty(config.api_base.clone()) {
+        env.push(("JADE_API_BASE", api_base));
+    }
+    if let Some(api_token) = non_empty(config.api_token.clone()) {
+        env.push(("JADE_API_TOKEN", api_token));
+    }
+    if let Some(api_token_id) = non_empty(config.api_token_id.clone()) {
+        env.push(("JADE_API_TOKEN_ID", api_token_id));
+    }
+    env
+}
+
+fn cloud_sessions_helper_override(action: &CloudSessionsSubcommand) -> Option<String> {
+    match action {
+        CloudSessionsSubcommand::Configure { .. }
+        | CloudSessionsSubcommand::Status { .. }
+        | CloudSessionsSubcommand::Sync { .. } => None,
+        CloudSessionsSubcommand::Upload { helper, .. }
+        | CloudSessionsSubcommand::UploadLatest { helper, .. }
+        | CloudSessionsSubcommand::List { helper, .. }
+        | CloudSessionsSubcommand::Verify { helper, .. }
+        | CloudSessionsSubcommand::Dashboard { helper, .. }
+        | CloudSessionsSubcommand::View { helper, .. } => helper.clone(),
+    }
+}
+
+fn append_common_jade_args(
+    args: &mut Vec<String>,
+    user_id: String,
+    profile: Option<String>,
+    region: Option<String>,
+) {
+    args.extend(["--user-id".to_string(), user_id]);
+    if let Some(profile) = profile {
+        args.extend(["--profile".to_string(), profile]);
+    }
+    if let Some(region) = region {
+        args.extend(["--region".to_string(), region]);
+    }
+}
+
+#[cfg(test)]
+fn build_jade_sessions_args(action: CloudSessionsSubcommand) -> Vec<String> {
+    build_jade_sessions_args_with_config(action, &CloudSessionsConfig::default())
+}
+
+fn build_jade_sessions_args_with_config(
+    action: CloudSessionsSubcommand,
+    config: &CloudSessionsConfig,
+) -> Vec<String> {
+    match action {
+        CloudSessionsSubcommand::Configure { .. }
+        | CloudSessionsSubcommand::Status { .. }
+        | CloudSessionsSubcommand::Sync { .. }
+        | CloudSessionsSubcommand::Dashboard { .. } => {
+            unreachable!(
+                "configure/status/sync/dashboard do not invoke the Jade helper via this builder"
+            )
+        }
+        CloudSessionsSubcommand::Upload {
+            session_file,
+            raw,
+            user_id,
+            profile,
+            region,
+            ..
+        } => {
+            let mut args = vec!["upload".to_string()];
+            append_common_jade_args(
+                &mut args,
+                config_or_default_user_id(user_id, config),
+                profile,
+                region,
+            );
+            if raw {
+                args.push("--raw".to_string());
+            }
+            args.push(session_file);
+            args
+        }
+        CloudSessionsSubcommand::UploadLatest {
+            sessions_dir,
+            raw,
+            user_id,
+            profile,
+            region,
+            ..
+        } => {
+            let mut args = vec!["upload-latest".to_string()];
+            append_common_jade_args(
+                &mut args,
+                config_or_default_user_id(user_id, config),
+                profile,
+                region,
+            );
+            args.extend(["--sessions-dir".to_string(), sessions_dir]);
+            if raw {
+                args.push("--raw".to_string());
+            }
+            args
+        }
+        CloudSessionsSubcommand::List {
+            limit,
+            json,
+            user_id,
+            profile,
+            region,
+            ..
+        } => {
+            let mut args = vec!["list".to_string()];
+            append_common_jade_args(
+                &mut args,
+                config_or_default_user_id(user_id, config),
+                profile,
+                region,
+            );
+            args.extend(["--limit".to_string(), limit.to_string()]);
+            if json {
+                args.push("--json".to_string());
+            }
+            args
+        }
+        CloudSessionsSubcommand::Verify {
+            session_id,
+            user_id,
+            profile,
+            region,
+            ..
+        } => {
+            let mut args = vec!["verify".to_string()];
+            append_common_jade_args(
+                &mut args,
+                config_or_default_user_id(user_id, config),
+                profile,
+                region,
+            );
+            args.push(session_id);
+            args
+        }
+        CloudSessionsSubcommand::View {
+            session_id,
+            format,
+            output,
+            open,
+            user_id,
+            profile,
+            region,
+            ..
+        } => {
+            let mut args = vec!["view".to_string()];
+            append_common_jade_args(
+                &mut args,
+                config_or_default_user_id(user_id, config),
+                profile,
+                region,
+            );
+            args.extend(["--format".to_string(), format]);
+            if let Some(output) = output {
+                args.extend(["--output".to_string(), output]);
+            }
+            if open {
+                args.push("--open".to_string());
+            }
+            args.push(session_id);
+            args
+        }
+    }
+}
+
+fn resolve_jade_sessions_helper(override_path: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = override_path.map(str::trim).filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    if let Some(path) = std::env::var_os("JCODE_JADE_SESSIONS_HELPER")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+    {
+        return Ok(path);
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("../jade/scripts/jade_sessions.py"));
+        candidates.push(cwd.join("jade/scripts/jade_sessions.py"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("jade/scripts/jade_sessions.py"));
+    }
+
+    for candidate in candidates {
+        if is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!(
+        "Could not find Jade session helper. Set --helper PATH or JCODE_JADE_SESSIONS_HELPER. Expected a private helper like ~/jade/scripts/jade_sessions.py"
+    );
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 pub async fn run_ambient_command(cmd: AmbientSubcommand) -> Result<()> {
@@ -986,12 +2345,40 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
         .unwrap_or(false)
 }
 
-fn incomplete_run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
-    crate::todo::load_todos(session_id)
-        .unwrap_or_default()
-        .into_iter()
+const RUN_TODO_CONFIDENCE_THRESHOLD: u8 = 90;
+const RUN_TODO_CONFIDENCE_SUMMARY_PREFIX: &str = "All todos are done. Todo confidence summary:";
+
+enum RunAutoPokeFollowUp {
+    Incomplete { count: usize, message: String },
+    ConfidenceSummary { total_todos: usize, message: String },
+}
+
+fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
+    crate::todo::load_todos(session_id).unwrap_or_default()
+}
+
+fn build_run_auto_poke_follow_up_from_todos(
+    todos: &[crate::todo::TodoItem],
+    confidence_summary_sent: bool,
+) -> Option<RunAutoPokeFollowUp> {
+    let incomplete: Vec<_> = todos
+        .iter()
         .filter(|todo| todo.status != "completed" && todo.status != "cancelled")
-        .collect()
+        .cloned()
+        .collect();
+    if !incomplete.is_empty() {
+        return Some(RunAutoPokeFollowUp::Incomplete {
+            count: incomplete.len(),
+            message: build_run_poke_message(&incomplete),
+        });
+    }
+    if !confidence_summary_sent && !todos.is_empty() {
+        return Some(RunAutoPokeFollowUp::ConfidenceSummary {
+            total_todos: todos.len(),
+            message: build_run_todo_confidence_summary_message(todos),
+        });
+    }
+    None
 }
 
 fn build_run_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
@@ -1002,6 +2389,150 @@ fn build_run_poke_message(incomplete: &[crate::todo::TodoItem]) -> String {
     )
 }
 
+fn run_todo_confidence_weight(priority: &str) -> u32 {
+    match priority {
+        "high" => 3,
+        "medium" => 2,
+        _ => 1,
+    }
+}
+
+fn run_weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> Option<u8> {
+    let mut weighted_sum = 0u32;
+    let mut total_weight = 0u32;
+    for (score, weight) in scores {
+        weighted_sum += u32::from(score) * weight;
+        total_weight += weight;
+    }
+    if total_weight == 0 {
+        None
+    } else {
+        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+    }
+}
+
+fn build_run_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
+    let completed: Vec<&crate::todo::TodoItem> = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .collect();
+    let cancelled_count = todos
+        .iter()
+        .filter(|todo| todo.status == "cancelled")
+        .count();
+
+    let planning_average = run_weighted_confidence_average(todos.iter().filter_map(|todo| {
+        todo.confidence
+            .map(|score| (score, run_todo_confidence_weight(&todo.priority)))
+    }));
+    let completion_scores: Vec<(&crate::todo::TodoItem, u8, u32)> = completed
+        .iter()
+        .filter_map(|todo| {
+            todo.completion_confidence
+                .map(|score| (*todo, score, run_todo_confidence_weight(&todo.priority)))
+        })
+        .collect();
+    let completion_average = run_weighted_confidence_average(
+        completion_scores
+            .iter()
+            .map(|(_, score, weight)| (*score, *weight)),
+    );
+    let missing_completion_confidence = completed
+        .iter()
+        .filter(|todo| todo.completion_confidence.is_none())
+        .count();
+    let below_threshold_count = completion_scores
+        .iter()
+        .filter(|(_, score, _)| *score < RUN_TODO_CONFIDENCE_THRESHOLD)
+        .count();
+    let lowest_completed = completion_scores
+        .iter()
+        .min_by_key(|(_, score, _)| *score)
+        .map(|(_, score, _)| *score);
+
+    let mut lines = vec![RUN_TODO_CONFIDENCE_SUMMARY_PREFIX.to_string()];
+    lines.push(format!(
+        "- Completed todos: {}{}.",
+        completed.len(),
+        if cancelled_count == 0 {
+            String::new()
+        } else {
+            format!(
+                " ({} cancelled todo{} skipped)",
+                cancelled_count,
+                if cancelled_count == 1 { "" } else { "s" }
+            )
+        }
+    ));
+
+    match completion_average {
+        Some(avg) => lines.push(format!("- Weighted completion confidence: {}%.", avg)),
+        None if !completed.is_empty() => lines.push(
+            "- Weighted completion confidence: unknown because no completed todo has completion_confidence."
+                .to_string(),
+        ),
+        None => lines.push("- No completed todos recorded completion confidence.".to_string()),
+    }
+    lines.push(format!(
+        "- Confidence threshold: {}%.",
+        RUN_TODO_CONFIDENCE_THRESHOLD
+    ));
+
+    match planning_average {
+        Some(avg) => lines.push(format!("- Weighted planning confidence: {}%.", avg)),
+        None => lines.push("- Weighted planning confidence: unknown.".to_string()),
+    }
+
+    match lowest_completed {
+        Some(score) => lines.push(format!("- Lowest completed todo confidence: {}%.", score)),
+        None => lines.push("- Lowest completed todo confidence: unknown.".to_string()),
+    }
+
+    if missing_completion_confidence > 0 {
+        lines.push(format!(
+            "- Missing completion_confidence on {} completed todo{}.",
+            missing_completion_confidence,
+            if missing_completion_confidence == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+
+    if below_threshold_count > 0 {
+        lines.push(format!(
+            "- {} completed todo{} below the {}% confidence threshold.",
+            below_threshold_count,
+            if below_threshold_count == 1 {
+                " is"
+            } else {
+                "s are"
+            },
+            RUN_TODO_CONFIDENCE_THRESHOLD
+        ));
+    }
+
+    let needs_validation = completion_average
+        .map(|avg| avg < RUN_TODO_CONFIDENCE_THRESHOLD)
+        .unwrap_or(true)
+        || missing_completion_confidence > 0
+        || below_threshold_count > 0;
+    if needs_validation {
+        lines.push(
+            "- Suggested action: validate or test before finalizing. Inspect the result and update completion_confidence when the evidence changes."
+                .to_string(),
+        );
+    } else {
+        lines.push(
+            "- Suggested action: use this confidence summary when deciding whether any further validation would materially improve certainty before finalizing."
+                .to_string(),
+        );
+    }
+
+    lines.join("\n")
+}
+
 async fn run_single_message_command_plain_with_auto_poke(
     agent: &mut crate::agent::Agent,
     message: &str,
@@ -1009,30 +2540,41 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut next_message = message.to_string();
     let max_turns = run_command_auto_poke_max_turns();
     let mut turns_completed = 0usize;
+    let mut confidence_summary_sent = false;
     loop {
         agent.run_once(&next_message).await?;
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
         }
-        let incomplete = incomplete_run_todos(agent.session_id());
-        if incomplete.is_empty() {
-            break;
-        }
-        if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
-            if let Some(max_turns) = max_turns {
+        let todos = run_todos(agent.session_id());
+        match build_run_auto_poke_follow_up_from_todos(&todos, confidence_summary_sent) {
+            Some(RunAutoPokeFollowUp::ConfidenceSummary { message, .. }) => {
+                confidence_summary_sent = true;
+                next_message = message;
                 eprintln!(
-                    "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
-                    incomplete.len()
+                    "Auto-poking: todos complete; sending confidence summary follow-up. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                );
+                continue;
+            }
+            Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
+                    if let Some(max_turns) = max_turns {
+                        eprintln!(
+                            "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
+                            count
+                        );
+                    }
+                    break;
+                }
+                next_message = message;
+                eprintln!(
+                    "Auto-poking: {} incomplete todo(s). Set JCODE_RUN_AUTO_POKE=0 to disable.",
+                    count
                 );
             }
-            break;
+            None => break,
         }
-        next_message = build_run_poke_message(&incomplete);
-        eprintln!(
-            "Auto-poking: {} incomplete todo(s). Set JCODE_RUN_AUTO_POKE=0 to disable.",
-            incomplete.len()
-        );
     }
     Ok(())
 }
@@ -1045,26 +2587,34 @@ async fn run_single_message_command_capture_with_auto_poke(
     let max_turns = run_command_auto_poke_max_turns();
     let mut outputs = Vec::new();
     let mut turns_completed = 0usize;
+    let mut confidence_summary_sent = false;
     loop {
         outputs.push(agent.run_once_capture(&next_message).await?);
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
         }
-        let incomplete = incomplete_run_todos(agent.session_id());
-        if incomplete.is_empty() {
-            break;
-        }
-        if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
-            if let Some(max_turns) = max_turns {
-                outputs.push(format!(
-                    "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
-                    incomplete.len()
-                ));
+        let todos = run_todos(agent.session_id());
+        match build_run_auto_poke_follow_up_from_todos(&todos, confidence_summary_sent) {
+            Some(RunAutoPokeFollowUp::ConfidenceSummary { message, .. }) => {
+                confidence_summary_sent = true;
+                next_message = message;
+                continue;
             }
-            break;
+            Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
+                    if let Some(max_turns) = max_turns {
+                        outputs.push(format!(
+                            "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
+                            count
+                        ));
+                    }
+                    break;
+                }
+                next_message = message;
+            }
+            None => break,
         }
-        next_message = build_run_poke_message(&incomplete);
     }
     Ok(outputs.join("\n\n"))
 }
@@ -1105,6 +2655,7 @@ async fn run_single_message_command_ndjson(
     let mut next_message = message.to_string();
     let mut result: Result<()> = Ok(());
     let mut turns_completed = 0usize;
+    let mut confidence_summary_sent = false;
     loop {
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
@@ -1144,34 +2695,53 @@ async fn run_single_message_command_ndjson(
         if !run_command_auto_poke_enabled() {
             break;
         }
-        let incomplete = incomplete_run_todos(&session_id);
-        if incomplete.is_empty() {
-            break;
-        }
-        if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
-            if let Some(max_turns) = max_turns {
+        let todos = run_todos(&session_id);
+        match build_run_auto_poke_follow_up_from_todos(&todos, confidence_summary_sent) {
+            Some(RunAutoPokeFollowUp::ConfidenceSummary {
+                total_todos,
+                message,
+            }) => {
+                confidence_summary_sent = true;
+                next_message = message;
                 write_json_line(
                     &mut stdout,
                     &serde_json::json!({
-                        "type": "auto_poke_stopped",
+                        "type": "auto_poke_confidence_summary",
                         "session_id": session_id,
-                        "incomplete_todos": incomplete.len(),
-                        "max_turns": max_turns,
+                        "todos": total_todos,
+                        "message": next_message,
+                    }),
+                )?;
+                continue;
+            }
+            Some(RunAutoPokeFollowUp::Incomplete { count, message }) => {
+                if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
+                    if let Some(max_turns) = max_turns {
+                        write_json_line(
+                            &mut stdout,
+                            &serde_json::json!({
+                                "type": "auto_poke_stopped",
+                                "session_id": session_id,
+                                "incomplete_todos": count,
+                                "max_turns": max_turns,
+                            }),
+                        )?;
+                    }
+                    break;
+                }
+                next_message = message;
+                write_json_line(
+                    &mut stdout,
+                    &serde_json::json!({
+                        "type": "auto_poke",
+                        "session_id": session_id,
+                        "incomplete_todos": count,
+                        "message": next_message,
                     }),
                 )?;
             }
-            break;
+            None => break,
         }
-        next_message = build_run_poke_message(&incomplete);
-        write_json_line(
-            &mut stdout,
-            &serde_json::json!({
-                "type": "auto_poke",
-                "session_id": session_id,
-                "incomplete_todos": incomplete.len(),
-                "message": next_message,
-            }),
-        )?;
     }
 
     match result {
@@ -1448,7 +3018,7 @@ pub async fn run_model_command(
                 .map(|route| ModelListRouteReport {
                     provider: cli_route_provider_display(&route.provider, &route.api_method),
                     model: route.model.clone(),
-                    method: cli_api_method_display(&route.api_method).to_string(),
+                    method: cli_api_method_display(&route.api_method),
                     available: route.available,
                 })
                 .collect(),
@@ -1472,20 +3042,15 @@ pub async fn run_model_command(
     Ok(())
 }
 
-fn cli_api_method_display(raw: &str) -> &str {
-    match raw {
-        "claude-oauth" | "openai-oauth" | "code-assist-oauth" => "oauth",
-        "api-key" | "openai-api-key" => "api key",
-        method if method.starts_with("openai-compatible") => "api key",
-        method => method
-            .split_once(':')
-            .map(|(method, _)| method)
-            .unwrap_or(method),
-    }
+fn cli_api_method_display(raw: &str) -> String {
+    crate::provider::ModelRouteApiMethod::parse(raw).display_label()
 }
 
 fn cli_route_provider_display(provider: &str, api_method: &str) -> String {
-    if api_method == "openrouter" && provider != "auto" && !provider.contains("OpenRouter") {
+    if crate::provider::ModelRouteApiMethod::parse(api_method).is_openrouter()
+        && provider != "auto"
+        && !provider.contains("OpenRouter")
+    {
         format!("OpenRouter/{}", provider)
     } else {
         provider.to_string()
@@ -1535,12 +3100,20 @@ fn filter_cli_model_routes_for_choice(
 
     let keep = |route: &&crate::provider::ModelRoute| match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            route.api_method == "claude-oauth" || route.api_method == "api-key"
+            route.api_method_kind().is_anthropic_credential_route()
         }
-        ProviderChoice::Openai => route.api_method == "openai-oauth",
-        ProviderChoice::OpenaiApi => route.api_method == "openai-api-key",
-        ProviderChoice::Openrouter | ProviderChoice::Azure => route.api_method == "openrouter",
-        ProviderChoice::Copilot => route.api_method == "copilot",
+        ProviderChoice::Openai => matches!(
+            route.api_method_kind(),
+            crate::provider::ModelRouteApiMethod::OpenAIOAuth
+        ),
+        ProviderChoice::OpenaiApi => matches!(
+            route.api_method_kind(),
+            crate::provider::ModelRouteApiMethod::OpenAIApiKey
+        ),
+        ProviderChoice::Openrouter | ProviderChoice::Azure => {
+            route.api_method_kind().is_openrouter()
+        }
+        ProviderChoice::Copilot => route.api_method_kind().is_copilot(),
         _ => true,
     };
 

@@ -205,8 +205,8 @@ pub fn record_full(
         diff_hash,
         intent: intent.into(),
         session_id: session_id.map(ToOwned::to_owned),
-        version_at_record: env!("JCODE_VERSION").to_string(),
-        git_hash_at_record: env!("JCODE_GIT_HASH").to_string(),
+        version_at_record: jcode_build_meta::VERSION.to_string(),
+        git_hash_at_record: jcode_build_meta::GIT_HASH.to_string(),
         provenance,
         rationale,
         validation,
@@ -323,7 +323,7 @@ pub struct CustomizationStatus {
 /// to version-based heuristics).
 pub fn scan_status(repo_root: Option<&Path>) -> Result<Vec<CustomizationStatus>> {
     let records = list()?;
-    let current_version = env!("JCODE_VERSION");
+    let current_version = jcode_build_meta::VERSION;
     let mut out = Vec::with_capacity(records.len());
 
     for record in records {
@@ -593,7 +593,7 @@ mod tests {
             let id = record("tweak foo", vec!["src/foo.rs".to_string()], "diff", None).unwrap();
 
             // Force version_at_record to match current — record() uses
-            // env!("JCODE_VERSION") which IS the current version, so this
+            // jcode_build_meta::VERSION which IS the current version, so this
             // is automatically true. Validate the path.
             let report = scan_status(Some(repo.path())).unwrap();
             let found = report.iter().find(|s| s.id == id).unwrap();
@@ -659,7 +659,7 @@ mod tests {
                     current,
                 } => {
                     assert_eq!(recorded_at, "v0.1.0-old");
-                    assert_eq!(current, env!("JCODE_VERSION"));
+                    assert_eq!(current, jcode_build_meta::VERSION);
                 }
                 other => panic!("expected StaleVersion, got {:?}", other),
             }

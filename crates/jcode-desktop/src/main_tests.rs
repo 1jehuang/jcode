@@ -3392,8 +3392,8 @@ fn single_session_typing_model_slash_opens_preview_picker_without_submitting() {
         provider_name: Some("Claude".to_string()),
         models: vec![session_launch::DesktopModelChoice {
             model: "claude-opus-4-5".to_string(),
-            provider: Some("claude".to_string()),
-            api_method: Some("oauth".to_string()),
+            provider: Some("Anthropic".to_string()),
+            api_method: Some("claude-oauth".to_string()),
             detail: Some("premium".to_string()),
             available: true,
         }],
@@ -3413,11 +3413,11 @@ fn single_session_typing_model_slash_opens_preview_picker_without_submitting() {
     assert!(picker.contains("Model picker"));
     assert!(picker.contains("filter \"opus\""));
     assert!(picker.contains("claude-opus-4-5"));
-    assert!(picker.contains("claude · oauth · premium"));
+    assert!(picker.contains("Anthropic · claude-oauth · premium"));
 
     assert_eq!(
         app.handle_key(KeyInput::SubmitDraft),
-        KeyOutcome::SetModel("claude-opus-4-5".to_string())
+        KeyOutcome::SetModel("claude-oauth:claude-opus-4-5".to_string())
     );
     assert!(!app.model_picker.open);
     assert!(app.draft.is_empty());
@@ -3437,15 +3437,15 @@ fn single_session_model_slash_preview_accepts_vim_navigation_keys() {
         models: vec![
             session_launch::DesktopModelChoice {
                 model: "claude-sonnet-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: None,
                 available: true,
             },
             session_launch::DesktopModelChoice {
                 model: "claude-opus-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: None,
                 available: true,
             },
@@ -3463,7 +3463,7 @@ fn single_session_model_slash_preview_accepts_vim_navigation_keys() {
     assert_eq!(app.draft, "/model");
     assert_eq!(
         app.handle_key(KeyInput::SubmitDraft),
-        KeyOutcome::SetModel("claude-opus-4-5".to_string())
+        KeyOutcome::SetModel("claude-oauth:claude-opus-4-5".to_string())
     );
 }
 
@@ -4243,6 +4243,17 @@ fn desktop_maps_standard_clipboard_shortcuts_across_platform_modifiers() {
     );
     assert_eq!(
         to_key_input(&Key::Character("v".into()), ModifiersState::SUPER),
+        KeyInput::PasteText
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("v".into()), ModifiersState::ALT),
+        KeyInput::PasteText
+    );
+    assert_eq!(
+        to_key_input(
+            &Key::Character("v".into()),
+            ModifiersState::ALT | ModifiersState::SHIFT
+        ),
         KeyInput::PasteText
     );
     assert_eq!(
@@ -6684,15 +6695,15 @@ fn single_session_model_picker_loads_filters_and_selects_model() {
         models: vec![
             session_launch::DesktopModelChoice {
                 model: "claude-sonnet-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: Some("active account".to_string()),
                 available: true,
             },
             session_launch::DesktopModelChoice {
                 model: "claude-opus-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: Some("premium".to_string()),
                 available: true,
             },
@@ -6715,8 +6726,8 @@ fn single_session_model_picker_loads_filters_and_selects_model() {
     assert!(picker.contains("type to filter"));
     assert!(picker.contains("2 models"));
     assert!(picker.contains("claude-sonnet-4-5"));
-    assert!(picker.contains("claude"));
-    assert!(picker.contains("oauth"));
+    assert!(picker.contains("Anthropic"));
+    assert!(picker.contains("claude-oauth"));
 
     assert_eq!(
         app.handle_key(KeyInput::Character("opus".to_string())),
@@ -6749,7 +6760,7 @@ fn single_session_model_picker_loads_filters_and_selects_model() {
     );
     assert_eq!(
         app.handle_key(KeyInput::SubmitDraft),
-        KeyOutcome::SetModel("claude-opus-4-5".to_string())
+        KeyOutcome::SetModel("claude-oauth:claude-opus-4-5".to_string())
     );
     assert!(!app.model_picker.open);
 }
@@ -6767,15 +6778,15 @@ fn single_session_model_picker_accepts_vim_navigation_keys() {
         models: vec![
             session_launch::DesktopModelChoice {
                 model: "claude-sonnet-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: None,
                 available: true,
             },
             session_launch::DesktopModelChoice {
                 model: "claude-opus-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: None,
                 available: true,
             },
@@ -6802,7 +6813,7 @@ fn single_session_model_picker_accepts_vim_navigation_keys() {
     assert_eq!(app.model_picker.selected, 1);
     assert_eq!(
         app.handle_key(KeyInput::SubmitDraft),
-        KeyOutcome::SetModel("claude-opus-4-5".to_string())
+        KeyOutcome::SetModel("claude-oauth:claude-opus-4-5".to_string())
     );
 }
 
@@ -6826,8 +6837,8 @@ fn single_session_model_picker_filter_supports_fuzzy_abbreviations() {
             },
             session_launch::DesktopModelChoice {
                 model: "claude-opus-4-5".to_string(),
-                provider: Some("claude".to_string()),
-                api_method: Some("oauth".to_string()),
+                provider: Some("Anthropic".to_string()),
+                api_method: Some("claude-oauth".to_string()),
                 detail: Some("premium".to_string()),
                 available: true,
             },
@@ -6947,6 +6958,78 @@ fn single_session_model_picker_cold_start_benchmark() {
     eprintln!(
         "model_picker_cold_start_benchmark open={open_elapsed:?} catalog={catalog_elapsed:?} first_render={first_render_elapsed:?} filter={filter_elapsed:?} filtered_render={filtered_render_elapsed:?}"
     );
+}
+
+#[test]
+fn desktop_model_choice_switch_spec_preserves_route_identity_state_space() {
+    let choice =
+        |model: &str, provider: &str, api_method: &str| session_launch::DesktopModelChoice {
+            model: model.to_string(),
+            provider: Some(provider.to_string()),
+            api_method: Some(api_method.to_string()),
+            detail: None,
+            available: true,
+        };
+
+    for (model, provider, api_method, expected) in [
+        ("gpt-5.5", "OpenAI", "openai-oauth", "openai-oauth:gpt-5.5"),
+        ("gpt-5.5", "OpenAI", "openai-api-key", "openai-api:gpt-5.5"),
+        (
+            "claude-opus-4-6",
+            "Anthropic",
+            "claude-oauth",
+            "claude-oauth:claude-opus-4-6",
+        ),
+        (
+            "claude-opus-4-6",
+            "claude",
+            "oauth",
+            "claude-oauth:claude-opus-4-6",
+        ),
+        (
+            "claude-opus-4-6",
+            "Anthropic",
+            "claude-api",
+            "claude-api:claude-opus-4-6",
+        ),
+        (
+            "glm-51-nvfp4",
+            "Comtegra GPU Cloud",
+            "openai-compatible:comtegra",
+            "comtegra:glm-51-nvfp4",
+        ),
+        (
+            "claude-sonnet-4-6",
+            "Copilot",
+            "copilot",
+            "copilot:claude-sonnet-4-6",
+        ),
+        ("gpt-5.5", "Cursor", "cursor", "cursor:gpt-5.5"),
+        (
+            "anthropic.claude-sonnet-4-6",
+            "Bedrock",
+            "bedrock",
+            "bedrock:anthropic.claude-sonnet-4-6",
+        ),
+        (
+            "gemini-3-pro",
+            "Antigravity",
+            "https",
+            "antigravity:gemini-3-pro",
+        ),
+        (
+            "openai/gpt-5.5",
+            "OpenAI",
+            "openrouter",
+            "openai/gpt-5.5@OpenAI",
+        ),
+    ] {
+        assert_eq!(
+            desktop_model_choice_switch_spec(&choice(model, provider, api_method)),
+            expected,
+            "{provider} via {api_method} should not collapse to a bare model"
+        );
+    }
 }
 
 #[test]
@@ -9603,6 +9686,7 @@ fn workspace_session_panel_composes_single_session_geometry() {
             space_hold_progress: None,
             surface_frames: None,
             exiting_surfaces: &HashMap::new(),
+            workspace_panel_cache: None,
             status_color: workspace_status_bar_target_color(&workspace),
             status_text_frame: None,
         },
@@ -9721,6 +9805,7 @@ fn workspace_session_panel_reuses_single_session_primitive_exactly() {
             space_hold_progress: None,
             surface_frames: None,
             exiting_surfaces: &HashMap::new(),
+            workspace_panel_cache: None,
             status_color: workspace_status_bar_target_color(&workspace),
             status_text_frame: None,
         },

@@ -1,0 +1,181 @@
+[package]
+name = "jcode-base"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Foundational layer of the jcode application core: the downward-closed set of
+# modules (provider, auth, config, session, message, memory, telemetry, ...)
+# that the server/tool/agent layer depends on. Split out of `jcode-app-core` so
+# the two halves compile as separate rustc units, halving peak compile memory.
+# `jcode-app-core` re-exports this crate (`pub use jcode_base::*`) so that every
+# existing `crate::<module>` path keeps resolving unchanged.
+
+[lib]
+name = "jcode_base"
+path = "src/lib.rs"
+
+[dependencies]
+# Memory allocator (reduces fragmentation for long-running server)
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
+tikv-jemalloc-sys = { version = "0.6", optional = true }
+
+# Async runtime
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+serde_yaml = "0.9"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# File operations
+glob = "0.3"
+ignore = "0.4"           # gitignore-aware file walking
+walkdir = "2"
+similar = "2"            # diffing for edits
+
+# Utilities
+dirs = "5"               # home directory
+anyhow = "1"
+thiserror = "1"
+libc = "0.2"             # Unix system calls (flock)
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+urlencoding = "2"        # URL encoding for web search
+uuid = { version = "1", features = ["v4", "v5"] }
+proctitle = "0.1"
+
+# Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
+jcode-embedding = { path = "../jcode-embedding", optional = true }
+jcode-gateway-types = { path = "../jcode-gateway-types" }
+jcode-import-core = { path = "../jcode-import-core" }
+jcode-logging = { path = "../jcode-logging" }
+
+# OAuth
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.9.3"
+hex = "0.4"
+url = "2"
+open = "5"               # Open URLs in browser
+jcode-auth-types = { path = "../jcode-auth-types" }
+jcode-azure-auth = { path = "../jcode-azure-auth" }
+jcode-agent-runtime = { path = "../jcode-agent-runtime" }
+jcode-ambient-types = { path = "../jcode-ambient-types" }
+jcode-notify-email = { path = "../jcode-notify-email" }
+jcode-provider-metadata = { path = "../jcode-provider-metadata" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-provider-openai = { path = "../jcode-provider-openai" }
+jcode-provider-openrouter = { path = "../jcode-provider-openrouter" }
+jcode-provider-gemini = { path = "../jcode-provider-gemini" }
+jcode-tui-markdown = { path = "../jcode-tui-markdown" }
+jcode-tui-messages = { path = "../jcode-tui-messages" }
+jcode-tui-core = { path = "../jcode-tui-core" }
+jcode-tui-mermaid = { path = "../jcode-tui-mermaid" }
+jcode-tui-account-picker = { path = "../jcode-tui-account-picker" }
+jcode-tui-render = { path = "../jcode-tui-render" }
+jcode-tui-session-picker = { path = "../jcode-tui-session-picker", features = ["serde"] }
+jcode-tui-style = { path = "../jcode-tui-style" }
+jcode-tui-tool-display = { path = "../jcode-tui-tool-display" }
+jcode-tui-usage-overlay = { path = "../jcode-tui-usage-overlay" }
+jcode-update-core = { path = "../jcode-update-core" }
+jcode-terminal-launch = { path = "../jcode-terminal-launch" }
+jcode-terminal-image = { path = "../jcode-terminal-image" }
+jcode-tui-workspace = { path = "../jcode-tui-workspace" }
+jcode-usage-types = { path = "../jcode-usage-types" }
+
+# Streaming
+tokio-stream = "0.1"
+bytes = "1"
+
+# TUI
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+arboard = "3"              # Clipboard support
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
+
+# Markdown & syntax highlighting
+unicode-width = "0.2"   # Unicode character display width
+
+# NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
+# (tool/read.rs), not here.
+jcode-background-types = { path = "../jcode-background-types" }
+jcode-batch-types = { path = "../jcode-batch-types" }
+jcode-build-support = { path = "../jcode-build-support" }
+jcode-build-meta = { path = "../jcode-build-meta" }
+jcode-compaction-core = { path = "../jcode-compaction-core" }
+jcode-config-types = { path = "../jcode-config-types" }
+jcode-core = { path = "../jcode-core" }
+jcode-memory-types = { path = "../jcode-memory-types" }
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-overnight-core = { path = "../jcode-overnight-core" }
+jcode-plan = { path = "../jcode-plan" }
+jcode-swarm-core = { path = "../jcode-swarm-core" }
+jcode-protocol = { path = "../jcode-protocol" }
+jcode-selfdev-types = { path = "../jcode-selfdev-types" }
+jcode-session-types = { path = "../jcode-session-types" }
+jcode-storage = { path = "../jcode-storage" }
+jcode-task-types = { path = "../jcode-task-types" }
+jcode-tool-core = { path = "../jcode-tool-core" }
+jcode-tool-types = { path = "../jcode-tool-types" }
+jcode-side-panel-types = { path = "../jcode-side-panel-types" }
+
+# Archive extraction (for auto-update)
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.2" }
+qrcode = { version = "0.14.1", default-features = false }
+aws-config = "1.8.16"
+aws-credential-types = "1.2.14"
+aws-sdk-bedrockruntime = "1.130.0"
+aws-types = "1.3.15"
+aws-smithy-types = "1.4.7"
+aws-sdk-bedrock = "1.141.0"
+aws-sdk-sts = "1.103.0"
+
+[features]
+default = ["embeddings"]
+# Compiles the in-crate test helpers (storage::lock_test_env,
+# auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, ...) as
+# `pub` so downstream crates' test targets can reach them. Enabled as a
+# dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
+# (non-test) builds.
+test-support = []
+jemalloc = [
+    "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-ctl",
+    "dep:tikv-jemalloc-sys",
+    "tikv-jemallocator/stats",
+    "tikv-jemalloc-ctl/stats",
+]
+jemalloc-prof = [
+    "jemalloc",
+    "tikv-jemallocator/profiling",
+    "tikv-jemalloc-ctl/profiling",
+]
+embeddings = ["dep:jcode-embedding"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey = "0.7"
+
+[dev-dependencies]
+# Cross-layer test (provider/gemini_tests.rs builds a tool::Registry, which lives
+# in the upper jcode-app-core layer). Dev-dependency cycles are permitted by
+# Cargo and do not affect the library build.
+jcode-app-core = { path = "../jcode-app-core", default-features = false }

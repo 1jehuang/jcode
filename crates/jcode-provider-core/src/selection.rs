@@ -120,10 +120,18 @@ pub fn provider_from_model_key(key: &str) -> Option<ActiveProvider> {
 }
 
 pub fn explicit_model_provider_prefix(model: &str) -> Option<(ActiveProvider, &'static str, &str)> {
-    if let Some(rest) = model.strip_prefix("claude:") {
+    if let Some(rest) = model.strip_prefix("claude-api:") {
+        Some((ActiveProvider::Claude, "claude-api:", rest))
+    } else if let Some(rest) = model.strip_prefix("claude-oauth:") {
+        Some((ActiveProvider::Claude, "claude-oauth:", rest))
+    } else if let Some(rest) = model.strip_prefix("claude:") {
         Some((ActiveProvider::Claude, "claude:", rest))
     } else if let Some(rest) = model.strip_prefix("anthropic:") {
         Some((ActiveProvider::Claude, "anthropic:", rest))
+    } else if let Some(rest) = model.strip_prefix("openai-api:") {
+        Some((ActiveProvider::OpenAI, "openai-api:", rest))
+    } else if let Some(rest) = model.strip_prefix("openai-oauth:") {
+        Some((ActiveProvider::OpenAI, "openai-oauth:", rest))
     } else if let Some(rest) = model.strip_prefix("openai:") {
         Some((ActiveProvider::OpenAI, "openai:", rest))
     } else if let Some(rest) = model.strip_prefix("copilot:") {
@@ -308,6 +316,18 @@ mod tests {
         assert_eq!(provider_from_model_key("missing"), None);
 
         for (raw, expected_provider, expected_prefix, expected_model) in [
+            (
+                "claude-api:sonnet",
+                ActiveProvider::Claude,
+                "claude-api:",
+                "sonnet",
+            ),
+            (
+                "claude-oauth:sonnet",
+                ActiveProvider::Claude,
+                "claude-oauth:",
+                "sonnet",
+            ),
             ("claude:sonnet", ActiveProvider::Claude, "claude:", "sonnet"),
             (
                 "anthropic:sonnet",
@@ -316,6 +336,18 @@ mod tests {
                 "sonnet",
             ),
             ("openai:gpt-5", ActiveProvider::OpenAI, "openai:", "gpt-5"),
+            (
+                "openai-oauth:gpt-5",
+                ActiveProvider::OpenAI,
+                "openai-oauth:",
+                "gpt-5",
+            ),
+            (
+                "openai-api:gpt-5",
+                ActiveProvider::OpenAI,
+                "openai-api:",
+                "gpt-5",
+            ),
             (
                 "copilot:gpt-5",
                 ActiveProvider::Copilot,

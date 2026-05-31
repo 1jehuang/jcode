@@ -1,0 +1,1708 @@
+//! Persistent Memory Agent
+//!
+//! A dedicated Haiku-powered agent for memory management that runs alongside
+//! the main agent. It has access to memory-specific tools only (no code execution).
+//!
+//! Architecture:
+//! - Receives context updates from main agent via channel
+//! - Uses embeddings for fast similarity search
+//! - Uses Haiku LLM to decide what's relevant and dig deeper
+//! - Surfaces relevant memories to main agent via PENDING_MEMORY
+
+use anyhow::Result;
+use chrono::Utc;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use tokio::sync::mpsc;
+
+use crate::embedding;
+use crate::memory::{self, MemoryEntry, MemoryManager};
+use crate::memory_graph::{ClusterEntry, EdgeKind, MemoryGraph};
+use crate::memory_types::{MemoryEventKind, MemoryState, StepResult, StepStatus};
+use crate::sidecar::Sidecar;
+
+/// Context from a retrieval operation for post-retrieval maintenance
+#[derive(Debug, Clone)]
+struct RetrievalContext {
+    /// Memory IDs that were verified as relevant by Haiku
+    verified_ids: Vec<String>,
+    /// Memory IDs that were retrieved but rejected by Haiku
+    rejected_ids: Vec<String>,
+    /// Brief snippet of the context for gap logging
+    context_snippet: String,
+}
+
+/// Channel capacity for context updates
+const CONTEXT_CHANNEL_CAPACITY: usize = 16;
+
+/// Similarity threshold for topic change detection (lower = more different)
+const TOPIC_CHANGE_THRESHOLD: f32 = 0.3;
+
+/// Maximum memories to surface per turn
+const MAX_MEMORIES_PER_TURN: usize = 5;
+
+/// Reset surfaced memories every N turns to allow re-surfacing
+const TURN_RESET_INTERVAL: usize = 50;
+
+/// How often to run periodic cluster refinement in post-retrieval maintenance.
+const CLUSTER_REFINEMENT_INTERVAL: u64 = 50;
+
+/// Global memory agent instance
+static MEMORY_AGENT: tokio::sync::OnceCell<MemoryAgentHandle> = tokio::sync::OnceCell::const_new();
+static MAINTENANCE_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Lightweight runtime stats for UI/debugging.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryAgentStats {
+    /// Number of context turns processed by memory agent.
+    pub turns_processed: usize,
+    /// Number of maintenance cycles completed.
+    pub maintenance_runs: usize,
+    /// Last maintenance duration in ms.
+    pub last_maintenance_ms: Option<u64>,
+}
+
+static MEMORY_AGENT_STATS: Mutex<MemoryAgentStats> = Mutex::new(MemoryAgentStats {
+    turns_processed: 0,
+    maintenance_runs: 0,
+    last_maintenance_ms: None,
+});
+
+/// Build a transcript string suitable for memory extraction.
+pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> String {
+    let mut transcript = String::new();
+    for msg in messages {
+        let role = match msg.role {
+            crate::message::Role::User => "User",
+            crate::message::Role::Assistant => "Assistant",
+        };
+        transcript.push_str(&format!("**{}:**\n", role));
+        for block in &msg.content {
+            match block {
+                crate::message::ContentBlock::Text { text, .. } => {
+                    transcript.push_str(text);
+                    transcript.push('\n');
+                }
+                crate::message::ContentBlock::ToolUse { name, .. } => {
+                    transcript.push_str(&format!("[Used tool: {}]\n", name));
+                }
+                crate::message::ContentBlock::ToolResult { content, .. } => {
+                    let preview = if content.len() > 200 {
+                        format!("{}...", crate::util::truncate_str(content, 200))
+                    } else {
+                        content.clone()
+                    };
+                    transcript.push_str(&format!("[Result: {}]\n", preview));
+                }
+                crate::message::ContentBlock::Reasoning { .. }
+                | crate::message::ContentBlock::AnthropicThinking { .. }
+                | crate::message::ContentBlock::OpenAIReasoning { .. } => {}
+                crate::message::ContentBlock::Image { .. } => {
+                    transcript.push_str("[Image]\n");
+                }
+                crate::message::ContentBlock::OpenAICompaction { .. } => {
+                    transcript.push_str("[OpenAI native compaction]\n");
+                }
+            }
+        }
+        transcript.push('\n');
+    }
+    transcript
+}
+
+fn manager_for_working_dir(working_dir: Option<&str>) -> MemoryManager {
+    match working_dir {
+        Some(dir) if !dir.trim().is_empty() => MemoryManager::new().with_project_dir(dir),
+        _ => MemoryManager::new(),
+    }
+}
+
+async fn run_final_extraction(transcript: String, session_id: String, working_dir: Option<String>) {
+    crate::logging::info(&format!(
+        "Final extraction starting for session {} ({} chars)",
+        session_id,
+        transcript.len()
+    ));
+
+    let sidecar = crate::sidecar::Sidecar::new();
+    let manager = manager_for_working_dir(working_dir.as_deref());
+
+    let existing: Vec<String> = manager
+        .list_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.active)
+        .map(|e| e.content)
+        .collect();
+
+    let result = sidecar
+        .extract_memories_with_existing(&transcript, &existing)
+        .await;
+
+    match result {
+        Ok(extracted) if !extracted.is_empty() => {
+            let mut stored_count = 0;
+
+            for mem in &extracted {
+                let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
+
+                let trust = match mem.trust.as_str() {
+                    "high" => crate::memory::TrustLevel::High,
+                    "low" => crate::memory::TrustLevel::Low,
+                    _ => crate::memory::TrustLevel::Medium,
+                };
+
+                let entry = crate::memory::MemoryEntry::new(category, &mem.content)
+                    .with_source(&session_id)
+                    .with_trust(trust);
+
+                if manager.remember_project(entry).is_ok() {
+                    stored_count += 1;
+                }
+            }
+
+            if stored_count > 0 {
+                crate::logging::info(&format!(
+                    "Final extraction for session {}: stored {} memories",
+                    session_id, stored_count
+                ));
+            }
+        }
+        Ok(_) => {
+            crate::logging::info(&format!(
+                "Final extraction for session {}: no memories extracted",
+                session_id
+            ));
+        }
+        Err(e) => {
+            crate::logging::info(&format!(
+                "Final extraction for session {} failed: {}",
+                session_id, e
+            ));
+        }
+    }
+}
+
+/// Handle to communicate with the memory agent
+#[derive(Clone)]
+pub struct MemoryAgentHandle {
+    /// Send messages to the agent
+    tx: mpsc::Sender<AgentMessage>,
+}
+
+impl MemoryAgentHandle {
+    /// Send a context update to the memory agent (async)
+    pub async fn update_context(
+        &self,
+        session_id: &str,
+        messages: Arc<[crate::message::Message]>,
+        working_dir: Option<String>,
+    ) {
+        self.update_context_sync_with_dir(session_id, messages, working_dir);
+    }
+
+    pub fn update_context_sync(&self, session_id: &str, messages: Arc<[crate::message::Message]>) {
+        self.update_context_sync_with_dir(session_id, messages, None);
+    }
+
+    pub fn update_context_sync_with_dir(
+        &self,
+        session_id: &str,
+        messages: Arc<[crate::message::Message]>,
+        working_dir: Option<String>,
+    ) {
+        let msg = AgentMessage::Context {
+            session_id: session_id.to_string(),
+            messages,
+            working_dir,
+            timestamp: Instant::now(),
+        };
+        let _ = self.tx.try_send(msg);
+    }
+
+    /// Reset all memory agent state (call on new session)
+    pub fn reset(&self) {
+        let _ = self.tx.try_send(AgentMessage::Reset);
+    }
+}
+
+/// Messages sent to the memory agent
+enum AgentMessage {
+    Context {
+        session_id: String,
+        messages: Arc<[crate::message::Message]>,
+        working_dir: Option<String>,
+        timestamp: Instant,
+    },
+    Reset,
+}
+
+/// Minimum turns before we consider extracting on topic change
+const MIN_TURNS_FOR_EXTRACTION: usize = 4;
+
+/// Trigger a periodic incremental extraction every N turns, even without a topic change.
+/// This ensures memories are captured during long single-topic sessions.
+const PERIODIC_EXTRACTION_INTERVAL: usize = 12;
+
+/// Skip repeated relevance checks when the formatted context is unchanged.
+const RELEVANCE_CONTEXT_REPEAT_SUPPRESSION_SECS: u64 = 30;
+
+fn relevance_context_signature(context: &str) -> String {
+    context
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn bump_turn_stat() {
+    if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
+        stats.turns_processed = stats.turns_processed.saturating_add(1);
+    }
+}
+
+fn record_maintenance_stat(duration_ms: u64) {
+    if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
+        stats.maintenance_runs = stats.maintenance_runs.saturating_add(1);
+        stats.last_maintenance_ms = Some(duration_ms);
+    }
+}
+
+/// Per-session state tracked by the memory agent
+#[derive(Default)]
+struct SessionState {
+    /// Working directory associated with this session.
+    working_dir: Option<String>,
+    /// Last context embedding (for topic change detection)
+    last_context_embedding: Option<Vec<f32>>,
+    /// Last context string (for extraction when topic changes)
+    last_context_string: Option<String>,
+    /// Signature of the last relevance-check context.
+    last_relevance_context_signature: Option<String>,
+    /// When the last relevance check was started for this session.
+    last_relevance_check_at: Option<Instant>,
+    /// IDs of memories already surfaced to this session (avoid repetition)
+    surfaced_memories: HashSet<String>,
+    /// Conversation turn count for this session
+    turn_count: usize,
+    /// Turn count since last extraction for this session
+    turns_since_extraction: usize,
+}
+
+/// The persistent memory agent state
+pub struct MemoryAgent {
+    /// Channel to receive messages
+    rx: mpsc::Receiver<AgentMessage>,
+
+    /// Optional sidecar for LLM-backed memory decisions.
+    sidecar: Option<Sidecar>,
+
+    /// Per-session state keyed by session ID
+    sessions: HashMap<String, SessionState>,
+}
+
+impl MemoryAgent {
+    /// Create a new memory agent
+    fn new(rx: mpsc::Receiver<AgentMessage>) -> Self {
+        Self {
+            rx,
+            sidecar: memory::memory_sidecar_enabled().then(Sidecar::new),
+            sessions: HashMap::new(),
+        }
+    }
+
+    /// Reset all agent state
+    fn reset(&mut self) {
+        crate::logging::info(&format!(
+            "Memory agent reset: clearing all state ({} sessions)",
+            self.sessions.len()
+        ));
+        self.sessions.clear();
+        memory::clear_all_injected_memories();
+        if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
+            stats.turns_processed = 0;
+            stats.maintenance_runs = 0;
+            stats.last_maintenance_ms = None;
+        }
+    }
+
+    /// Get or create per-session state
+    fn session_state(&mut self, session_id: &str) -> &mut SessionState {
+        self.sessions.entry(session_id.to_string()).or_default()
+    }
+
+    fn manager_for_session(&self, session_id: &str) -> MemoryManager {
+        let working_dir = self
+            .sessions
+            .get(session_id)
+            .and_then(|state| state.working_dir.as_deref());
+        manager_for_working_dir(working_dir)
+    }
+
+    /// Run the memory agent loop
+    async fn run(mut self) {
+        crate::logging::info("Memory agent started");
+
+        while let Some(msg) = self.rx.recv().await {
+            match msg {
+                AgentMessage::Reset => {
+                    self.reset();
+                }
+                AgentMessage::Context {
+                    session_id,
+                    messages,
+                    working_dir,
+                    timestamp,
+                } => {
+                    {
+                        let ss = self.session_state(&session_id);
+                        if working_dir.is_some() {
+                            ss.working_dir = working_dir;
+                        }
+                        ss.turn_count += 1;
+                    }
+                    bump_turn_stat();
+
+                    {
+                        let ss = self.session_state(&session_id);
+                        if ss.turn_count.is_multiple_of(TURN_RESET_INTERVAL) {
+                            crate::logging::info(&format!(
+                                "[{}] Memory agent periodic reset at turn {} (clearing {} surfaced memories)",
+                                session_id,
+                                ss.turn_count,
+                                ss.surfaced_memories.len()
+                            ));
+                            ss.surfaced_memories.clear();
+                        }
+                    }
+
+                    if let Err(e) = self.process_context(&session_id, messages, timestamp).await {
+                        crate::logging::error(&format!("Memory agent error: {}", e));
+                    }
+                }
+            }
+        }
+
+        crate::logging::info("Memory agent stopped");
+    }
+
+    /// Process a context update
+    async fn process_context(
+        &mut self,
+        session_id: &str,
+        messages: Arc<[crate::message::Message]>,
+        _timestamp: Instant,
+    ) -> Result<()> {
+        let memory_manager = self.manager_for_session(session_id);
+        let context = memory::format_context_for_relevance(&messages);
+        if context.is_empty() {
+            return Ok(());
+        }
+
+        let context_signature = relevance_context_signature(&context);
+        {
+            let ss = self.session_state(session_id);
+            if ss.last_relevance_context_signature.as_deref() == Some(context_signature.as_str())
+                && ss.last_relevance_check_at.is_some_and(|at| {
+                    at.elapsed().as_secs() < RELEVANCE_CONTEXT_REPEAT_SUPPRESSION_SECS
+                })
+            {
+                crate::logging::info(&format!(
+                    "[{}] Skipping memory relevance check for unchanged context",
+                    session_id
+                ));
+                return Ok(());
+            }
+
+            ss.last_relevance_context_signature = Some(context_signature);
+            ss.last_relevance_check_at = Some(Instant::now());
+        }
+
+        self.session_state(session_id).turns_since_extraction += 1;
+
+        memory::set_state(MemoryState::Embedding);
+        memory::add_event(MemoryEventKind::EmbeddingStarted);
+
+        // Step 1: Embed current context
+        let start = Instant::now();
+        let context_for_embedding = context.clone();
+        let context_embedding =
+            match tokio::task::spawn_blocking(move || embedding::embed(&context_for_embedding))
+                .await
+            {
+                Ok(Ok(emb)) => emb,
+                Ok(Err(e)) => {
+                    crate::logging::event_rate_limited(
+                        crate::logging::LogLevel::Info,
+                        "memory_agent_embedding_failed",
+                        std::time::Duration::from_secs(60),
+                        "MEMORY_EMBEDDING_FAILED",
+                        vec![
+                            ("session_id", session_id.to_string()),
+                            ("error", e.to_string()),
+                            ("fallback", "skip_memory_relevance".to_string()),
+                        ],
+                    );
+                    memory::set_state(MemoryState::Idle);
+                    return Ok(());
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("Embedding task failed: {}", e));
+                    memory::set_state(MemoryState::Idle);
+                    return Ok(());
+                }
+            };
+
+        // Check for topic change (comparing against this session's last embedding)
+        {
+            let ss = self.session_state(session_id);
+            if let Some(ref last_emb) = ss.last_context_embedding {
+                let similarity = embedding::cosine_similarity(&context_embedding, last_emb);
+                if similarity < TOPIC_CHANGE_THRESHOLD {
+                    crate::logging::info(&format!(
+                        "[{}] Topic change detected (sim={:.2}), resetting session memory state",
+                        session_id, similarity
+                    ));
+                    crate::memory_log::log_topic_change(
+                        session_id,
+                        &format!("sim={:.2}", similarity),
+                        "new topic detected",
+                    );
+
+                    // Extract memories from the PREVIOUS topic before moving on
+                    if ss.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION {
+                        if let Some(prev_context) = ss.last_context_string.clone() {
+                            crate::logging::info(&format!(
+                                "[{}] Triggering incremental extraction ({} turns since last)",
+                                session_id, ss.turns_since_extraction
+                            ));
+                            ss.turns_since_extraction = 0;
+                            let _ = ss;
+                            self.extract_from_context(session_id, &prev_context, "topic change")
+                                .await;
+                            let ss = self.session_state(session_id);
+                            ss.surfaced_memories.clear();
+                            memory::clear_injected_memories(session_id);
+                        } else {
+                            ss.surfaced_memories.clear();
+                            memory::clear_injected_memories(session_id);
+                        }
+                    } else {
+                        ss.surfaced_memories.clear();
+                        memory::clear_injected_memories(session_id);
+                    }
+                }
+            }
+        }
+
+        // Store current context for potential future extraction
+        {
+            let ss = self.session_state(session_id);
+            ss.last_context_embedding = Some(context_embedding.clone());
+            ss.last_context_string = Some(context.clone());
+        }
+
+        // Periodic extraction: even without topic change, extract every N turns
+        {
+            let ss = self.session_state(session_id);
+            if ss.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL {
+                let extraction_ctx = memory::format_context_for_extraction(&messages);
+                if extraction_ctx.len() >= 200 {
+                    crate::logging::info(&format!(
+                        "[{}] Triggering periodic extraction ({} turns since last, {} chars context)",
+                        session_id,
+                        ss.turns_since_extraction,
+                        extraction_ctx.len()
+                    ));
+                    ss.turns_since_extraction = 0;
+                    let _ = ss;
+                    self.extract_from_context(session_id, &extraction_ctx, "periodic")
+                        .await;
+                }
+            }
+        }
+
+        // Step 2: Find similar memories by embedding
+        let candidates = memory_manager.find_similar_with_embedding(
+            &context_embedding,
+            memory::EMBEDDING_SIMILARITY_THRESHOLD,
+            memory::EMBEDDING_MAX_HITS,
+        )?;
+
+        let embedding_latency = start.elapsed().as_millis() as u64;
+        memory::add_event(MemoryEventKind::EmbeddingComplete {
+            latency_ms: embedding_latency,
+            hits: candidates.len(),
+        });
+
+        if candidates.is_empty() {
+            memory::set_state(MemoryState::Idle);
+            return Ok(());
+        }
+
+        // Filter out already-surfaced memories (per-session + global injection tracking)
+        let total_before_filter = candidates.len();
+        let new_candidates: Vec<_> = {
+            let ss = self.session_state(session_id);
+            candidates
+                .into_iter()
+                .filter(|(entry, _)| {
+                    !ss.surfaced_memories.contains(&entry.id)
+                        && !memory::is_memory_injected(session_id, &entry.id)
+                })
+                .collect()
+        };
+
+        crate::memory_log::log_candidate_filter(
+            session_id,
+            total_before_filter,
+            new_candidates.len(),
+            &context,
+        );
+
+        if new_candidates.is_empty() {
+            memory::set_state(MemoryState::Idle);
+            return Ok(());
+        }
+
+        // Step 3: Use Haiku to decide what's relevant and worth surfacing
+        memory::set_state(MemoryState::SidecarChecking {
+            count: new_candidates.len(),
+        });
+        memory::add_event(MemoryEventKind::SidecarStarted);
+
+        let candidate_ids: Vec<String> = new_candidates.iter().map(|(e, _)| e.id.clone()).collect();
+
+        let relevant = self
+            .evaluate_candidates(session_id, &context, new_candidates)
+            .await?;
+
+        let verified_ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
+        let rejected_ids: Vec<String> = candidate_ids
+            .iter()
+            .filter(|id| !verified_ids.contains(id))
+            .cloned()
+            .collect();
+
+        let retrieval_ctx = RetrievalContext {
+            verified_ids: verified_ids.clone(),
+            rejected_ids,
+            context_snippet: context[..context.len().min(200)].to_string(),
+        };
+
+        // Step 4: Format and store for main agent
+        if !relevant.is_empty() {
+            let ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
+            {
+                let ss = self.session_state(session_id);
+                for entry in &relevant {
+                    ss.surfaced_memories.insert(entry.id.clone());
+                }
+            }
+
+            if let Some(prompt) = memory::format_relevant_prompt(&relevant, MAX_MEMORIES_PER_TURN) {
+                let display_prompt =
+                    memory::format_relevant_display_prompt(&relevant, MAX_MEMORIES_PER_TURN);
+                let count = prompt
+                    .lines()
+                    .map(str::trim_start)
+                    .filter(|line| {
+                        line.split_once(". ")
+                            .map(|(prefix, _)| {
+                                !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit())
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count()
+                    .max(1);
+
+                memory::set_pending_memory_with_ids_and_display(
+                    session_id,
+                    prompt,
+                    count,
+                    ids,
+                    display_prompt,
+                );
+                memory::set_state(MemoryState::FoundRelevant { count });
+            } else {
+                memory::set_state(MemoryState::Idle);
+            }
+        } else {
+            memory::set_state(MemoryState::Idle);
+        }
+
+        // Step 5: Post-retrieval maintenance (runs in background)
+        self.post_retrieval_maintenance(memory_manager, retrieval_ctx)
+            .await;
+
+        Ok(())
+    }
+
+    /// Use Haiku to evaluate which candidates are actually relevant
+    async fn evaluate_candidates(
+        &self,
+        session_id: &str,
+        context: &str,
+        candidates: Vec<(MemoryEntry, f32)>,
+    ) -> Result<Vec<MemoryEntry>> {
+        if !memory::memory_sidecar_enabled() {
+            return Ok(candidates
+                .into_iter()
+                .take(MAX_MEMORIES_PER_TURN)
+                .map(|(entry, sim)| {
+                    crate::logging::info(&format!(
+                        "[{}] Memory relevant (semantic sim={:.2}): {}",
+                        session_id,
+                        sim,
+                        &entry.content[..entry.content.len().min(40)]
+                    ));
+                    entry
+                })
+                .collect());
+        }
+
+        let Some(sidecar) = self.sidecar.clone() else {
+            return Ok(Vec::new());
+        };
+
+        let mut relevant = Vec::new();
+
+        // Process in parallel
+        let futures: Vec<_> = candidates
+            .iter()
+            .take(MAX_MEMORIES_PER_TURN)
+            .map(|(entry, sim)| {
+                let sidecar = sidecar.clone();
+                let content = entry.content.clone();
+                let ctx = context.to_string();
+                let similarity = *sim;
+                async move {
+                    let start = Instant::now();
+                    let result = sidecar.check_relevance(&content, &ctx).await;
+                    (result, start.elapsed(), similarity)
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        for ((entry, _), (result, elapsed, sim)) in candidates.iter().zip(results) {
+            match result {
+                Ok((is_relevant, reason)) => {
+                    memory::add_event(MemoryEventKind::SidecarComplete {
+                        latency_ms: elapsed.as_millis() as u64,
+                    });
+
+                    if is_relevant {
+                        crate::logging::info(&format!(
+                            "[{}] Memory relevant (sim={:.2}): {} - {}",
+                            session_id,
+                            sim,
+                            &entry.content[..entry.content.len().min(40)],
+                            reason
+                        ));
+                        memory::add_event(MemoryEventKind::SidecarRelevant {
+                            memory_preview: entry.content[..entry.content.len().min(30)]
+                                .to_string(),
+                        });
+                        relevant.push(entry.clone());
+                    } else {
+                        memory::add_event(MemoryEventKind::SidecarNotRelevant);
+                    }
+                }
+                Err(e) => {
+                    memory::add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
+                }
+            }
+
+            if relevant.len() >= MAX_MEMORIES_PER_TURN {
+                break;
+            }
+        }
+
+        Ok(relevant)
+    }
+
+    /// Extract memories from a context string
+    ///
+    /// This is an incremental extraction - we extract from a portion of the
+    /// conversation (on topic change or periodically) rather than waiting for session end.
+    async fn extract_from_context(&self, session_id: &str, context: &str, reason: &str) {
+        if !memory::memory_sidecar_enabled() {
+            crate::logging::info(&format!(
+                "Incremental extraction skipped for session {}: memory sidecar disabled",
+                session_id
+            ));
+            return;
+        }
+
+        // Don't extract from very short contexts
+        if context.len() < 200 {
+            return;
+        }
+
+        // Update UI state
+        memory::set_state(MemoryState::Extracting {
+            reason: reason.to_string(),
+        });
+        memory::add_event(MemoryEventKind::ExtractionStarted {
+            reason: reason.to_string(),
+        });
+
+        let Some(sidecar) = self.sidecar.clone() else {
+            crate::logging::info(&format!(
+                "Incremental extraction skipped for session {}: sidecar unavailable",
+                session_id
+            ));
+            return;
+        };
+        let memory_manager = self.manager_for_session(session_id);
+        let context_owned = context.to_string();
+
+        let existing: Vec<String> = {
+            let context_summary = if context_owned.len() > 2000 {
+                &context_owned[context_owned.len() - 2000..]
+            } else {
+                &context_owned
+            };
+            match memory_manager.find_similar(context_summary, 0.25, 80) {
+                Ok(similar) if !similar.is_empty() => similar
+                    .into_iter()
+                    .map(|(entry, _score)| entry.content)
+                    .collect(),
+                _ => memory_manager
+                    .list_all()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|e| e.active)
+                    .take(40)
+                    .map(|e| e.content)
+                    .collect(),
+            }
+        };
+
+        // Similarity threshold for duplicate detection
+        const DUPLICATE_THRESHOLD: f32 = 0.90;
+
+        // Run extraction in background - don't block the main flow
+        tokio::spawn(async move {
+            match sidecar
+                .extract_memories_with_existing(&context_owned, &existing)
+                .await
+            {
+                Ok(extracted) if !extracted.is_empty() => {
+                    let mut stored_count = 0;
+                    let mut stored_ids: Vec<String> = Vec::new();
+                    let mut reinforced_count = 0;
+                    let mut superseded_count = 0;
+
+                    for mem in extracted {
+                        let category = match mem.category.as_str() {
+                            "fact" => memory::MemoryCategory::Fact,
+                            "preference" => memory::MemoryCategory::Preference,
+                            "correction" => memory::MemoryCategory::Correction,
+                            _ => memory::MemoryCategory::Fact,
+                        };
+
+                        let trust = match mem.trust.as_str() {
+                            "high" => memory::TrustLevel::High,
+                            "low" => memory::TrustLevel::Low,
+                            _ => memory::TrustLevel::Medium,
+                        };
+
+                        // Check for duplicate: find semantically similar existing memories
+                        let similar =
+                            memory_manager.find_similar(&mem.content, DUPLICATE_THRESHOLD, 1);
+
+                        if let Ok(matches) = similar
+                            && let Some((existing, _sim)) = matches.first()
+                        {
+                            let existing_id = existing.id.clone();
+                            let mut did_reinforce = false;
+
+                            if let Ok(mut graph) = memory_manager.load_project_graph()
+                                && graph.get_memory(&existing_id).is_some()
+                            {
+                                let strength = if let Some(entry) =
+                                    graph.get_memory_mut(&existing_id)
+                                {
+                                    entry.reinforce("incremental", 0);
+                                    entry.strength
+                                } else {
+                                    crate::logging::warn(&format!(
+                                        "Expected project memory {} during reinforcement, but it disappeared before update",
+                                        existing_id
+                                    ));
+                                    continue;
+                                };
+                                if memory_manager.save_project_graph(&graph).is_ok() {
+                                    did_reinforce = true;
+                                    crate::logging::info(&format!(
+                                        "Reinforced existing memory {} (strength={})",
+                                        existing_id, strength
+                                    ));
+                                }
+                            }
+
+                            if !did_reinforce
+                                && let Ok(mut graph) = memory_manager.load_global_graph()
+                                && graph.get_memory(&existing_id).is_some()
+                            {
+                                if let Some(entry) = graph.get_memory_mut(&existing_id) {
+                                    entry.reinforce("incremental", 0);
+                                    let _ = memory_manager.save_global_graph(&graph);
+                                    did_reinforce = true;
+                                } else {
+                                    crate::logging::warn(&format!(
+                                        "Expected global memory {} during reinforcement, but it disappeared before update",
+                                        existing_id
+                                    ));
+                                }
+                            }
+
+                            if did_reinforce {
+                                reinforced_count += 1;
+                            }
+                            continue;
+                        }
+
+                        // No duplicate - check for contradiction in same category
+                        let contradiction_found =
+                            match memory_manager.find_similar(&mem.content, 0.5, 5) {
+                                Ok(candidates) => {
+                                    let mut found = None;
+                                    for (candidate, _) in &candidates {
+                                        if candidate.category == category {
+                                            match sidecar
+                                                .check_contradiction(
+                                                    &mem.content,
+                                                    &candidate.content,
+                                                )
+                                                .await
+                                            {
+                                                Ok(true) => {
+                                                    found = Some(candidate.id.clone());
+                                                    break;
+                                                }
+                                                Ok(false) => {}
+                                                Err(e) => {
+                                                    crate::logging::info(&format!(
+                                                        "Contradiction check failed: {}",
+                                                        e
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    found
+                                }
+                                Err(_) => None,
+                            };
+
+                        // Create the new memory
+                        let entry = memory::MemoryEntry::new(category, &mem.content)
+                            .with_source("incremental")
+                            .with_trust(trust);
+
+                        match memory_manager.remember_project(entry) {
+                            Ok(new_id) => {
+                                stored_count += 1;
+                                stored_ids.push(new_id.clone());
+
+                                // If contradiction found, supersede the old memory and add Contradicts edge
+                                if let Some(old_id) = contradiction_found
+                                    && let Ok(mut graph) = memory_manager.load_project_graph()
+                                {
+                                    graph.mark_contradiction(&new_id, &old_id);
+                                    if let Some(old_entry) = graph.get_memory_mut(&old_id) {
+                                        old_entry.supersede(&new_id);
+                                    }
+                                    if memory_manager.save_project_graph(&graph).is_ok() {
+                                        superseded_count += 1;
+                                        crate::logging::info(&format!(
+                                            "Superseded memory {} with {} (Contradicts edge added)",
+                                            old_id, new_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::logging::info(&format!("Failed to store memory: {}", e));
+                            }
+                        }
+                    }
+
+                    // Create DerivedFrom edges between co-extracted memories
+                    if stored_ids.len() >= 2
+                        && let Ok(mut graph) = memory_manager.load_project_graph()
+                    {
+                        let mut linked = false;
+                        for i in 0..stored_ids.len() {
+                            for j in (i + 1)..stored_ids.len() {
+                                graph.add_edge(
+                                    &stored_ids[i],
+                                    &stored_ids[j],
+                                    crate::memory_graph::EdgeKind::DerivedFrom,
+                                );
+                                linked = true;
+                            }
+                        }
+                        if linked {
+                            let _ = memory_manager.save_project_graph(&graph);
+                        }
+                    }
+
+                    let total = stored_count + reinforced_count;
+                    if total > 0 {
+                        crate::logging::info(&format!(
+                            "Incremental extraction: {} stored, {} reinforced, {} superseded",
+                            stored_count, reinforced_count, superseded_count
+                        ));
+                        memory::add_event(MemoryEventKind::ExtractionComplete { count: total });
+                    }
+                    memory::set_state(MemoryState::Idle);
+                }
+                Ok(_) => {
+                    // No memories extracted - that's fine
+                    memory::set_state(MemoryState::Idle);
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("Incremental extraction failed: {}", e));
+                    memory::add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
+                    memory::set_state(MemoryState::Idle);
+                }
+            }
+        });
+    }
+
+    /// Post-retrieval maintenance tasks
+    ///
+    /// After serving memories, we can use the retrieval context to:
+    /// 1. Create links between co-relevant memories
+    /// 2. Boost confidence for verified memories
+    /// 3. Decay confidence for rejected memories
+    /// 4. Log memory gaps for future learning
+    async fn post_retrieval_maintenance(
+        &self,
+        memory_manager: MemoryManager,
+        ctx: RetrievalContext,
+    ) {
+        memory::set_state(MemoryState::Maintaining {
+            phase: "graph upkeep".to_string(),
+        });
+        memory::add_event(MemoryEventKind::MaintenanceStarted {
+            verified: ctx.verified_ids.len(),
+            rejected: ctx.rejected_ids.len(),
+        });
+        memory::pipeline_update(|p| {
+            p.maintain = StepStatus::Running;
+        });
+
+        // Run maintenance in background - don't block retrieval flow
+        tokio::spawn(async move {
+            let started = Instant::now();
+
+            // 1. Link discovery: Create RelatesTo edges between co-relevant memories
+            let mut links = 0usize;
+            if ctx.verified_ids.len() >= 2 {
+                match discover_links(&memory_manager, &ctx.verified_ids).await {
+                    Ok(count) => {
+                        links = count;
+                        if count > 0 {
+                            memory::add_event(MemoryEventKind::MaintenanceLinked { links: count });
+                        }
+                    }
+                    Err(e) => {
+                        crate::logging::info(&format!("Link discovery failed: {}", e));
+                    }
+                }
+            }
+
+            // 2. Boost confidence for verified memories (they were actually useful)
+            let mut boosted = 0usize;
+            for id in &ctx.verified_ids {
+                match boost_memory_confidence(&memory_manager, id, 0.05) {
+                    Ok(()) => boosted += 1,
+                    Err(e) => {
+                        crate::logging::info(&format!("Confidence boost failed for {}: {}", id, e))
+                    }
+                }
+            }
+
+            // 3. Gentle decay for rejected memories (may be stale)
+            let mut decayed = 0usize;
+            for id in &ctx.rejected_ids {
+                match decay_memory_confidence(&memory_manager, id, 0.02) {
+                    Ok(()) => decayed += 1,
+                    Err(e) => {
+                        crate::logging::info(&format!("Confidence decay failed for {}: {}", id, e))
+                    }
+                }
+            }
+            if boosted > 0 || decayed > 0 {
+                memory::add_event(MemoryEventKind::MaintenanceConfidence { boosted, decayed });
+            }
+
+            // 4. Gap detection: Log when we had no relevant memories
+            if ctx.verified_ids.is_empty() && !ctx.rejected_ids.is_empty() {
+                memory::add_event(MemoryEventKind::MaintenanceGap {
+                    candidates: ctx.rejected_ids.len(),
+                });
+                crate::logging::info(&format!(
+                    "Memory gap detected: {} candidates retrieved but none relevant. Context: {}...",
+                    ctx.rejected_ids.len(),
+                    &ctx.context_snippet[..ctx.context_snippet.len().min(100)]
+                ));
+            }
+
+            // 5. Periodic cluster refinement
+            let tick = MAINTENANCE_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+            if tick.is_multiple_of(CLUSTER_REFINEMENT_INTERVAL) && ctx.verified_ids.len() >= 2 {
+                match refine_clusters(&memory_manager, &ctx.verified_ids).await {
+                    Ok(stats) => {
+                        if stats.clusters_touched > 0 {
+                            memory::add_event(MemoryEventKind::MaintenanceCluster {
+                                clusters: stats.clusters_touched,
+                                members: stats.member_links,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        crate::logging::info(&format!("Cluster refinement failed: {}", e));
+                    }
+                }
+            }
+
+            // 6. Tag inference from shared context
+            if ctx.verified_ids.len() >= 2 {
+                match infer_context_tag(&memory_manager, &ctx.verified_ids, &ctx.context_snippet) {
+                    Ok(Some((tag, applied))) => {
+                        memory::add_event(MemoryEventKind::MaintenanceTagInferred { tag, applied });
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        crate::logging::info(&format!("Tag inference failed: {}", e));
+                    }
+                }
+            }
+
+            // 7. Periodic garbage collection: prune low-confidence memories
+            let mut pruned = 0usize;
+            if tick.is_multiple_of(CLUSTER_REFINEMENT_INTERVAL * 5) {
+                match prune_low_confidence(&memory_manager) {
+                    Ok(count) => pruned = count,
+                    Err(e) => {
+                        crate::logging::info(&format!("Memory pruning failed: {}", e));
+                    }
+                }
+            }
+
+            let latency_ms = started.elapsed().as_millis() as u64;
+            record_maintenance_stat(latency_ms);
+            memory::add_event(MemoryEventKind::MaintenanceComplete { latency_ms });
+            memory::pipeline_update(|p| {
+                p.maintain = StepStatus::Done;
+                p.maintain_result = Some(StepResult {
+                    summary: format!("{}L {}↑ {}↓ {}P", links, boosted, decayed, pruned),
+                    latency_ms,
+                });
+            });
+            memory::set_state(MemoryState::Idle);
+            crate::logging::info(&format!(
+                "Memory maintenance complete: links={}, boosted={}, decayed={}, {}ms",
+                links, boosted, decayed, latency_ms
+            ));
+        });
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClusterRefinementStats {
+    clusters_touched: usize,
+    member_links: usize,
+    cluster_id: Option<String>,
+}
+
+async fn refine_clusters(
+    manager: &MemoryManager,
+    verified_ids: &[String],
+) -> Result<ClusterRefinementStats> {
+    if verified_ids.len() < 2 {
+        return Ok(ClusterRefinementStats::default());
+    }
+
+    let mut project_graph = manager.load_project_graph()?;
+    let mut global_graph = manager.load_global_graph()?;
+    let now = Utc::now();
+
+    let project_ids: Vec<String> = verified_ids
+        .iter()
+        .filter(|id| project_graph.memories.contains_key(*id))
+        .cloned()
+        .collect();
+    let global_ids: Vec<String> = verified_ids
+        .iter()
+        .filter(|id| global_graph.memories.contains_key(*id))
+        .cloned()
+        .collect();
+
+    let mut out = ClusterRefinementStats::default();
+    let mut project_changed = false;
+    let mut global_changed = false;
+
+    if project_ids.len() >= 2 {
+        let stats = apply_cluster_assignment(&mut project_graph, "project", &project_ids, now);
+        if stats.clusters_touched > 0 {
+            out.clusters_touched += stats.clusters_touched;
+            out.member_links += stats.member_links;
+            project_changed = true;
+
+            if let Some(cluster_id) = stats.cluster_id.as_ref()
+                && project_graph
+                    .clusters
+                    .get(cluster_id)
+                    .and_then(|c| c.name.as_deref())
+                    .map(|n| n.ends_with("co-relevance"))
+                    .unwrap_or(false)
+            {
+                let member_contents: Vec<String> = project_ids
+                    .iter()
+                    .filter_map(|id| project_graph.get_memory(id))
+                    .map(|m| m.content[..m.content.len().min(80)].to_string())
+                    .collect();
+                if let Ok(name) = name_cluster_with_sidecar(&member_contents).await
+                    && let Some(cluster) = project_graph.clusters.get_mut(cluster_id)
+                {
+                    cluster.name = Some(name);
+                }
+            }
+        }
+    }
+    if global_ids.len() >= 2 {
+        let stats = apply_cluster_assignment(&mut global_graph, "global", &global_ids, now);
+        if stats.clusters_touched > 0 {
+            out.clusters_touched += stats.clusters_touched;
+            out.member_links += stats.member_links;
+            global_changed = true;
+        }
+    }
+
+    if project_changed {
+        manager.save_project_graph(&project_graph)?;
+    }
+    if global_changed {
+        manager.save_global_graph(&global_graph)?;
+    }
+
+    Ok(out)
+}
+
+async fn name_cluster_with_sidecar(member_contents: &[String]) -> Result<String> {
+    if !memory::memory_sidecar_enabled() {
+        let fallback = infer_candidate_tag(&member_contents.join(" "))
+            .unwrap_or_else(|| "shared context".to_string());
+        return Ok(fallback);
+    }
+
+    let sidecar = Sidecar::new();
+    let mut prompt = String::from(
+        "These memories were retrieved together. Give this cluster a short descriptive name (2-4 words, no quotes):\n",
+    );
+    for (i, content) in member_contents.iter().enumerate() {
+        prompt.push_str(&format!("{}. {}\n", i + 1, content));
+    }
+    let name = sidecar
+        .complete(
+            "You name memory clusters. Reply with ONLY the cluster name, 2-4 words, no quotes or punctuation.",
+            &prompt,
+        )
+        .await?;
+    let name = name.trim().to_string();
+    if name.is_empty() || name.len() > 60 {
+        anyhow::bail!("Invalid cluster name");
+    }
+    Ok(name)
+}
+
+fn apply_cluster_assignment(
+    graph: &mut MemoryGraph,
+    scope: &str,
+    member_ids: &[String],
+    now: chrono::DateTime<Utc>,
+) -> ClusterRefinementStats {
+    let mut members: Vec<String> = member_ids.to_vec();
+    members.sort();
+    members.dedup();
+    if members.len() < 2 {
+        return ClusterRefinementStats::default();
+    }
+
+    let cluster_key = format!("auto-{}-{:016x}", scope, stable_hash(&members));
+    let cluster_id = format!("cluster:{}", cluster_key);
+    let centroid = average_embedding(graph, &members);
+
+    {
+        let cluster = graph
+            .clusters
+            .entry(cluster_id.clone())
+            .or_insert_with(|| ClusterEntry::new(cluster_key.clone()));
+        if cluster.name.is_none() {
+            cluster.name = Some(format!("{} co-relevance", scope));
+        }
+        cluster.member_count = members.len() as u32;
+        cluster.updated_at = now;
+        cluster.centroid = centroid;
+    }
+
+    graph.metadata.last_cluster_update = Some(now);
+
+    let mut linked = 0usize;
+    for id in members {
+        if !graph.memories.contains_key(&id) {
+            continue;
+        }
+        let before = graph.get_edges(&id).len();
+        graph.add_edge(&id, &cluster_id, EdgeKind::InCluster);
+        let after = graph.get_edges(&id).len();
+        if after > before {
+            linked += 1;
+        }
+    }
+
+    ClusterRefinementStats {
+        clusters_touched: 1,
+        member_links: linked,
+        cluster_id: Some(cluster_id),
+    }
+}
+
+fn prune_low_confidence(manager: &MemoryManager) -> Result<usize> {
+    let min_confidence = 0.15;
+    let min_age_hours = 24;
+    let now = Utc::now();
+    let mut pruned = 0usize;
+
+    for scope in &["project", "global"] {
+        let mut graph = if *scope == "project" {
+            manager.load_project_graph()?
+        } else {
+            manager.load_global_graph()?
+        };
+
+        let ids_to_prune: Vec<String> = graph
+            .memories
+            .iter()
+            .filter(|(_, entry)| {
+                let age_hours = (now - entry.created_at).num_hours();
+                age_hours >= min_age_hours && entry.confidence < min_confidence
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        if ids_to_prune.is_empty() {
+            continue;
+        }
+
+        for id in &ids_to_prune {
+            graph.remove_memory(id);
+            pruned += 1;
+        }
+
+        if *scope == "project" {
+            manager.save_project_graph(&graph)?;
+        } else {
+            manager.save_global_graph(&graph)?;
+        }
+
+        if !ids_to_prune.is_empty() {
+            crate::logging::info(&format!(
+                "Pruned {} low-confidence {} memories (conf < {}, age >= {}h)",
+                ids_to_prune.len(),
+                scope,
+                min_confidence,
+                min_age_hours
+            ));
+        }
+    }
+
+    Ok(pruned)
+}
+
+fn stable_hash(values: &[String]) -> u64 {
+    // Deterministic FNV-1a hash to keep auto-cluster IDs stable across runs.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for value in values {
+        for byte in value.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+fn average_embedding(graph: &MemoryGraph, member_ids: &[String]) -> Vec<f32> {
+    let mut sum: Vec<f32> = Vec::new();
+    let mut count = 0usize;
+
+    for id in member_ids {
+        let Some(emb) = graph.memories.get(id).and_then(|m| m.embedding.as_ref()) else {
+            continue;
+        };
+        if sum.is_empty() {
+            sum = vec![0.0; emb.len()];
+        }
+        if emb.len() != sum.len() {
+            continue;
+        }
+        for (slot, value) in sum.iter_mut().zip(emb.iter()) {
+            *slot += *value;
+        }
+        count += 1;
+    }
+
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let denom = count as f32;
+    for value in &mut sum {
+        *value /= denom;
+    }
+    sum
+}
+
+fn infer_context_tag(
+    manager: &MemoryManager,
+    verified_ids: &[String],
+    context_snippet: &str,
+) -> Result<Option<(String, usize)>> {
+    if verified_ids.len() < 2 {
+        return Ok(None);
+    }
+
+    let project_graph = manager.load_project_graph()?;
+    let global_graph = manager.load_global_graph()?;
+
+    let mut tag_sets: Vec<HashSet<String>> = Vec::new();
+    for id in verified_ids {
+        let Some(memory) = project_graph
+            .memories
+            .get(id)
+            .or_else(|| global_graph.memories.get(id))
+        else {
+            continue;
+        };
+        tag_sets.push(memory.tags.iter().map(|t| t.to_ascii_lowercase()).collect());
+    }
+
+    if tag_sets.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut common = tag_sets[0].clone();
+    for tags in tag_sets.iter().skip(1) {
+        common.retain(|tag| tags.contains(tag));
+    }
+    if !common.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(tag) = infer_candidate_tag(context_snippet) else {
+        return Ok(None);
+    };
+
+    let mut applied = 0usize;
+    for id in verified_ids {
+        let already_tagged = project_graph
+            .memories
+            .get(id)
+            .or_else(|| global_graph.memories.get(id))
+            .map(|m| m.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)))
+            .unwrap_or(false);
+        if already_tagged {
+            continue;
+        }
+        if manager.tag_memory(id, &tag).is_ok() {
+            applied += 1;
+        }
+    }
+
+    if applied > 0 {
+        Ok(Some((tag, applied)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn infer_candidate_tag(context: &str) -> Option<String> {
+    const STOPWORDS: &[&str] = &[
+        "about", "after", "again", "agent", "also", "because", "before", "being", "build", "check",
+        "code", "context", "could", "debug", "extract", "from", "have", "into", "just", "memory",
+        "might", "project", "really", "should", "that", "their", "there", "these", "they", "this",
+        "those", "very", "what", "when", "with", "would", "your",
+    ];
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut token = String::new();
+    let mut flush = |raw: &mut String| {
+        if raw.is_empty() {
+            return;
+        }
+        let candidate = raw.to_ascii_lowercase();
+        raw.clear();
+        if candidate.len() < 4 || candidate.len() > 32 {
+            return;
+        }
+        if candidate.chars().all(|ch| ch.is_ascii_digit()) {
+            return;
+        }
+        if STOPWORDS.contains(&candidate.as_str()) {
+            return;
+        }
+        *counts.entry(candidate).or_insert(0) += 1;
+    };
+
+    for ch in context.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            token.push(ch);
+        } else {
+            flush(&mut token);
+        }
+    }
+    flush(&mut token);
+
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .max_by_key(|(_, count)| *count)
+        .map(|(tag, _)| tag)
+}
+
+/// Discover links between co-relevant memories
+async fn discover_links(manager: &MemoryManager, memory_ids: &[String]) -> Result<usize> {
+    // For each pair of co-relevant memories, create a RelatesTo link
+    // Use a moderate weight since we're inferring the relationship
+    const LINK_WEIGHT: f32 = 0.6;
+    let mut linked = 0usize;
+
+    for i in 0..memory_ids.len() {
+        for j in (i + 1)..memory_ids.len() {
+            let from = &memory_ids[i];
+            let to = &memory_ids[j];
+
+            // Try to link (may fail if memories are in different stores)
+            match manager.link_memories(from, to, LINK_WEIGHT) {
+                Ok(()) => linked += 1,
+                Err(e) => {
+                    // This is expected for cross-store memories, just log at debug level
+                    crate::logging::info(&format!("Could not link {} -> {}: {}", from, to, e));
+                }
+            }
+        }
+    }
+
+    Ok(linked)
+}
+
+/// Boost a memory's confidence score
+fn boost_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
+    // Load project graph first
+    let mut graph = manager.load_project_graph()?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.boost_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_project_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Boosted confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
+        return Ok(());
+    }
+
+    // Try global
+    let mut graph = manager.load_global_graph()?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.boost_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_global_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Boosted confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!("Memory not found: {}", memory_id))
+}
+
+/// Decay a memory's confidence score
+fn decay_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
+    // Load project graph first
+    let mut graph = manager.load_project_graph()?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.decay_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_project_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Decayed confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
+        return Ok(());
+    }
+
+    // Try global
+    let mut graph = manager.load_global_graph()?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.decay_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_global_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Decayed confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!("Memory not found: {}", memory_id))
+}
+
+/// Initialize and start the global memory agent
+pub async fn init() -> Result<MemoryAgentHandle> {
+    let handle = MEMORY_AGENT
+        .get_or_init(|| async {
+            let (tx, rx) = mpsc::channel(CONTEXT_CHANNEL_CAPACITY);
+
+            // Spawn the memory agent task
+            let agent = MemoryAgent::new(rx);
+            tokio::spawn(agent.run());
+
+            MemoryAgentHandle { tx }
+        })
+        .await;
+
+    Ok(handle.clone())
+}
+
+/// Get the global memory agent handle (if initialized)
+pub fn get() -> Option<MemoryAgentHandle> {
+    MEMORY_AGENT.get().cloned()
+}
+
+/// Send a context update to the memory agent (convenience function)
+pub async fn update_context(
+    session_id: &str,
+    messages: Arc<[crate::message::Message]>,
+    working_dir: Option<String>,
+) {
+    if let Some(handle) = get() {
+        handle
+            .update_context(session_id, messages, working_dir)
+            .await;
+    }
+}
+
+/// Send a context update synchronously (for use from non-async code)
+/// This is non-blocking - it just sends to the channel
+pub fn update_context_sync(session_id: &str, messages: Arc<[crate::message::Message]>) {
+    update_context_sync_with_dir(session_id, messages, None);
+}
+
+pub fn update_context_sync_with_dir(
+    session_id: &str,
+    messages: Arc<[crate::message::Message]>,
+    working_dir: Option<String>,
+) {
+    if let Some(handle) = get() {
+        handle.update_context_sync_with_dir(session_id, messages, working_dir);
+    } else {
+        let sid = session_id.to_string();
+        tokio::spawn(async move {
+            if let Ok(handle) = init().await {
+                handle.update_context_sync_with_dir(&sid, messages, working_dir);
+            }
+        });
+    }
+}
+
+/// Reset the memory agent state (call on new session)
+/// This clears surfaced memories, context embedding, and turn count
+pub fn reset() {
+    if let Some(handle) = get() {
+        handle.reset();
+    }
+}
+
+/// Trigger a final memory extraction when a session ends.
+///
+/// This is fire-and-forget: spawns a tokio task that runs extraction
+/// and logs the result. Does not block the caller.
+pub fn trigger_final_extraction(transcript: String, session_id: String) {
+    trigger_final_extraction_with_dir(transcript, session_id, None);
+}
+
+pub fn trigger_final_extraction_with_dir(
+    transcript: String,
+    session_id: String,
+    working_dir: Option<String>,
+) {
+    if transcript.len() < 200 {
+        return;
+    }
+
+    crate::memory_log::log_final_extraction(&session_id, transcript.len());
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(run_final_extraction(transcript, session_id, working_dir));
+    } else {
+        std::thread::spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => {
+                    runtime.block_on(run_final_extraction(transcript, session_id, working_dir))
+                }
+                Err(err) => crate::logging::info(&format!(
+                    "Final extraction runtime startup failed: {}",
+                    err
+                )),
+            }
+        });
+    }
+}
+
+/// Check if the memory agent is currently processing (has been initialized)
+pub fn is_active() -> bool {
+    get().is_some()
+}
+
+/// Snapshot memory-agent runtime stats for UI/debug.
+pub fn stats() -> MemoryAgentStats {
+    MEMORY_AGENT_STATS
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
+// Re-export constants for use in memory.rs
+
+#[cfg(test)]
+#[path = "memory_agent_tests.rs"]
+mod tests;

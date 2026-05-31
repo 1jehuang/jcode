@@ -24,6 +24,12 @@ pub const MIN_TURNS_TO_KEEP: usize = 2;
 /// Max chars for a single tool result during emergency truncation
 pub const EMERGENCY_TOOL_RESULT_MAX_CHARS: usize = 4000;
 
+/// Max chars to keep for an inline image payload during emergency recovery.
+/// Images are usually base64 screenshots; at hard-threshold time the useful
+/// state should be represented by nearby tool text/summary, not by replaying a
+/// huge raw image in the recent tail.
+pub const EMERGENCY_IMAGE_MAX_CHARS: usize = 1024;
+
 /// Approximate chars per token for estimation
 pub const CHARS_PER_TOKEN: usize = 4;
 
@@ -155,7 +161,9 @@ pub fn build_compaction_conversation_text(
                     };
                     conversation_text.push_str(&format!("[Result: {}]\n", truncated));
                 }
-                ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Reasoning { .. }
+                | ContentBlock::AnthropicThinking { .. }
+                | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { .. } => conversation_text.push_str("[Image]\n"),
                 ContentBlock::OpenAICompaction { .. } => {
                     conversation_text.push_str("[OpenAI native compaction]\n")
@@ -267,6 +275,21 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
         .map(|block| match block {
             ContentBlock::Text { text, .. } => text.len(),
             ContentBlock::Reasoning { text } => text.len(),
+            ContentBlock::AnthropicThinking {
+                thinking,
+                signature,
+            } => thinking.len() + signature.len(),
+            ContentBlock::OpenAIReasoning {
+                id,
+                summary,
+                encrypted_content,
+                status,
+            } => {
+                id.len()
+                    + summary.iter().map(String::len).sum::<usize>()
+                    + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                    + status.as_ref().map(String::len).unwrap_or(0)
+            }
             ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
             ContentBlock::ToolResult { content, .. } => content.len() + 20,
             ContentBlock::Image { data, .. } => data.len(),
@@ -464,6 +487,41 @@ pub fn emergency_truncate_tool_results(messages: &mut [Message], max_chars: usiz
     truncated
 }
 
+pub fn emergency_truncate_large_payloads(
+    messages: &mut [Message],
+    max_tool_result_chars: usize,
+    max_image_chars: usize,
+) -> usize {
+    let mut truncated = 0;
+
+    for msg in messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            match block {
+                ContentBlock::ToolResult { content, .. }
+                    if content.len() > max_tool_result_chars =>
+                {
+                    *content = emergency_truncated_tool_result(content, max_tool_result_chars);
+                    truncated += 1;
+                }
+                ContentBlock::Image { media_type, data } if data.len() > max_image_chars => {
+                    let original_len = data.len();
+                    let media_type = media_type.clone();
+                    *block = ContentBlock::Text {
+                        text: format!(
+                            "[Image omitted during emergency context recovery: media_type={media_type}, original_base64_chars={original_len}. Rely on adjacent browser/tool text, screenshots saved to disk, or re-open/re-screenshot if visual details are needed.]"
+                        ),
+                        cache_control: None,
+                    };
+                    truncated += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    truncated
+}
+
 pub fn emergency_truncated_tool_result(content: &str, max_chars: usize) -> String {
     let original_len = content.len();
     let keep_head = max_chars / 2;
@@ -626,5 +684,28 @@ mod tests {
         let truncated = emergency_truncated_tool_result(&original, 25);
         assert!(truncated.contains("chars truncated for context recovery"));
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn emergency_truncation_replaces_large_images_with_text_marker() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "a".repeat(2048),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let truncated = emergency_truncate_large_payloads(&mut messages, 4000, 1024);
+        assert_eq!(truncated, 1);
+        match &messages[0].content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("Image omitted during emergency context recovery"));
+                assert!(text.contains("original_base64_chars=2048"));
+            }
+            other => panic!("expected image to be replaced with text marker, got {other:?}"),
+        }
     }
 }

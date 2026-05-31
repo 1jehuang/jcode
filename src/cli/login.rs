@@ -275,6 +275,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::ClaudeApiKey => {
+                login_anthropic_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAi => login_openai_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -562,6 +565,35 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
         eprintln!("Profile email: {}", email);
     }
     crate::telemetry::record_auth_success("claude", "oauth");
+    Ok(())
+}
+
+fn login_anthropic_api_key_flow() -> Result<()> {
+    eprintln!("Setting up Anthropic API...");
+    eprintln!("Get your API key from: https://console.anthropic.com/settings/keys\n");
+    eprint!("Paste your Anthropic API key: ");
+    io::stdout().flush()?;
+
+    let key = read_secret_line()?;
+
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    if !key.starts_with("sk-ant-") {
+        eprintln!("Warning: Anthropic API keys typically start with 'sk-ant-'. Saving anyway.");
+    }
+
+    save_named_api_key("anthropic.env", "ANTHROPIC_API_KEY", &key)?;
+    eprintln!("\nSuccessfully saved Anthropic API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("anthropic.env")
+            .display()
+    );
+    eprintln!("Provider: claude (native Anthropic Messages API)");
+    crate::telemetry::record_auth_success("anthropic-api", "api_key");
     Ok(())
 }
 
@@ -898,6 +930,27 @@ fn login_openai_compatible_flow(
         }
     };
 
+    if !resolved.requires_api_key && resolved.default_model.is_none() {
+        match resolved.id.as_str() {
+            "ollama" => {
+                eprintln!(
+                    "Next step: install a model with `ollama pull llama3.2`, then run `jcode --provider ollama --model llama3.2 run 'hello'`."
+                );
+            }
+            "lmstudio" => {
+                eprintln!(
+                    "Next step: load a chat model in LM Studio's Local Server, then run jcode with that exact model id, for example `jcode --provider lmstudio --model <model-id> run 'hello'`."
+                );
+            }
+            _ => {
+                eprintln!(
+                    "Next step: run jcode with a model available on this endpoint, for example `jcode --provider {} --model <model-id> run 'hello'`.",
+                    resolved.id
+                );
+            }
+        }
+    }
+
     eprintln!(
         "Stored at {}",
         crate::storage::app_config_dir()?
@@ -911,63 +964,7 @@ fn login_openai_compatible_flow(
     Ok(())
 }
 
-pub fn read_secret_line() -> Result<String> {
-    use crossterm::terminal;
-
-    if !io::stdin().is_terminal() {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        return Ok(input.trim().to_string());
-    }
-
-    let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-    if !was_raw && terminal::enable_raw_mode().is_err() {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        return Ok(input.trim().to_string());
-    }
-
-    struct RawModeGuard(bool);
-    impl Drop for RawModeGuard {
-        fn drop(&mut self) {
-            if self.0 {
-                let _ = crossterm::terminal::disable_raw_mode();
-            }
-        }
-    }
-
-    let _guard = RawModeGuard(!was_raw);
-
-    let mut input = String::new();
-    loop {
-        if let crossterm::event::Event::Key(key_event) =
-            crossterm::event::read().context("Failed to read key input")?
-        {
-            use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                continue;
-            }
-            match key_event.code {
-                KeyCode::Enter => {
-                    eprintln!();
-                    break;
-                }
-                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    anyhow::bail!("Cancelled.");
-                }
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(input.trim().to_string())
-}
+pub use crate::secret_input::read_secret_line;
 
 fn read_line_trimmed(prompt: &str) -> Result<String> {
     print!("{}", prompt);

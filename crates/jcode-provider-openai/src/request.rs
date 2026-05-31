@@ -233,6 +233,31 @@ pub fn build_responses_input_with_logger(
                                 "content": [{ "type": "output_text", "text": text }]
                             }));
                         }
+                        ContentBlock::OpenAIReasoning {
+                            id,
+                            summary,
+                            encrypted_content,
+                            status,
+                        } => {
+                            let mut item = serde_json::json!({
+                                "type": "reasoning",
+                                "id": id,
+                                "summary": summary
+                                    .iter()
+                                    .map(|text| serde_json::json!({
+                                        "type": "summary_text",
+                                        "text": text,
+                                    }))
+                                    .collect::<Vec<_>>(),
+                            });
+                            if let Some(encrypted_content) = encrypted_content {
+                                item["encrypted_content"] = serde_json::json!(encrypted_content);
+                            }
+                            if let Some(status) = status {
+                                item["status"] = serde_json::json!(status);
+                            }
+                            items.push(item);
+                        }
                         ContentBlock::ToolUse { id, name, input } => {
                             let arguments = if input.is_object() {
                                 serde_json::to_string(&input).unwrap_or_default()
@@ -601,5 +626,32 @@ mod tests {
             *level == OpenAiRequestLogLevel::Warn
                 && message.contains("Dropping oversized native compaction payload")
         }));
+    }
+
+    #[test]
+    fn build_responses_input_replays_openai_reasoning_item() {
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::OpenAIReasoning {
+                id: "rs_123".to_string(),
+                summary: vec!["Checked constraints.".to_string()],
+                encrypted_content: Some("enc_reasoning".to_string()),
+                status: Some("completed".to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let items = build_responses_input(&messages);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], json!("reasoning"));
+        assert_eq!(items[0]["id"], json!("rs_123"));
+        assert_eq!(items[0]["encrypted_content"], json!("enc_reasoning"));
+        assert_eq!(items[0]["status"], json!("completed"));
+        assert_eq!(
+            items[0]["summary"],
+            json!([{ "type": "summary_text", "text": "Checked constraints." }])
+        );
     }
 }

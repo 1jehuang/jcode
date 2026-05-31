@@ -428,6 +428,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         compacted_total: 128,
         compacted_visible: 64,
         compacted_remaining: 64,
+        compacted_hidden_prompts: 3,
     };
     let json = encode_event(&event);
     assert!(json.contains("\"type\":\"compacted_history\""));

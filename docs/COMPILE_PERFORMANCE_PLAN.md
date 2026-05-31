@@ -542,6 +542,158 @@ Current TUI-boundary stance:
 - **Reason:** the remaining high-value TUI files are larger but still more tightly coupled to `App`, config, images,
   side-panel state, and rendering orchestration, so they need staged extraction rather than a rushed top-level split.
 
+## Root-Crate Decomposition Strategy (2026-05-29)
+
+The previous splits created many `*-types` / `*-core` crates that the root re-exports from, but
+`scripts/analyze_root_crate.py` shows **334K of 336K root-crate lines are still genuinely in-root**:
+the heavy logic stayed behind thin facades. The analyzer (committed alongside this section) gives the
+objective map needed to finish the job. Run it any time:
+
+```bash
+python3 scripts/analyze_root_crate.py          # ranked modules + blockers + cycles + feedback arcs
+python3 scripts/analyze_root_crate.py --full    # full feedback-arc-set listing
+python3 scripts/analyze_root_crate.py --json     # machine-readable
+```
+
+### The core problem: one giant dependency cycle
+
+The library-only module graph (test code excluded) has a single **strongly-connected component of 42
+modules / ~310K lines (92% of the crate)**: `tui, server, provider, tool, cli, auth, agent, session, …`.
+You cannot peel `tui`/`server`/`provider` into independent crates while they mutually reference each
+other. This is *the* structural blocker, and it is why "just move the big dirs out" never works.
+
+### The good news: the cycle is shallow
+
+The 42-module cycle is held together by only **46 back-edges totaling 178 references**, and most are
+single-reference "accidental" couplings. Breaking this small feedback arc set turns the graph into a
+DAG, after which modules peel off bottom-up. Cheapest-first (from the analyzer):
+
+- **1-ref edges (≈24 of them):** e.g. `agent -> tui` (one `write_generated_image_side_panel_page` call),
+  `tool -> tui` (one `tui::image::display_image` import), `config -> auth`, `config -> tool`,
+  `telemetry -> cli`, `bus -> provider`, `browser -> provider`. Each is a single call/import that can move
+  to a shared lower-level crate or be inverted behind a trait/callback.
+- **Mid-weight edges:** `usage -> auth` (4), `tool -> provider` (5), `tool -> server` (5),
+  `sidecar -> provider` (7), `agent -> tool` (9), `import -> tui` (9), `usage -> provider` (9).
+- **Heavy structural seams (design carefully):** `agent -> provider` (20), `cli -> tui` (21),
+  `auth -> provider` (39). These are the genuine architectural couplings worth a trait seam.
+
+### Execution order (bottom-up, DAG-first)
+
+1. **Baseline metrics.** Record peak rustc RSS for the largest current unit and full-build wall time
+   (`scripts/bench_compile.sh`), so each extraction's memory/compile win is measurable.
+2. **Break the cheap back-edges first.** Eliminate the 1-2 ref couplings (image helpers, single config
+   lookups, telemetry/cli) by moving shared primitives down into existing low-level crates
+   (`jcode-core`, `jcode-tui-*`) or inverting them behind small traits. Re-run the analyzer; watch the
+   SCC shrink.
+3. **Extract already-clean leaves.** Modules the analyzer marks "extractable now" (no in-root blockers):
+   `background`, `prompt`, `safety`, `transport`, `replay`, `browser`, `perf`, plus the many <400 loc
+   leaves. These need no cycle-breaking and immediately shrink the root crate.
+4. **Address the heavy seams** (`auth↔provider`, `cli↔tui`, `agent↔provider`) with deliberate trait
+   boundaries once the cheap edges are gone.
+5. **Lift the big subsystems** (`tool` 29K, `provider` 35K, `server` 38K, then `tui` 125K) once they are
+   no longer in the cycle. `tui` goes last: almost nothing depends on it (sink of the DAG), so once its
+   own outbound deps are crates it lifts cleanly and removes the single largest compilation unit.
+
+### Why this directly reduces compile memory
+
+rustc holds an entire crate's IR in memory at its codegen peak, so peak RSS scales with the size of the
+largest compilation unit. Today that unit is the 336K-line root crate (~2.5-3 GiB/process). Every module
+moved into its own crate shrinks the largest unit, lowering peak per-process RSS, which is exactly what
+lets more parallel jobs run without OOM (complementing the memory-adaptive job count above). It also
+sharpens incremental caching: editing one file rebuilds one small crate instead of the whole monolith.
+
+## Results: Phases A/B/C (2026-05-29) and the stop decision
+
+The monolithic root crate was physically split into a strict downward DAG of separately-compiled
+crates. Each is its own rustc unit, so each type-checks/codegens independently and the global peak
+per-process memory is the max over units (not their sum).
+
+```
+jcode (root: cli + bin)        depends on
+  -> jcode-tui (tui + video_export)   depends on
+       -> jcode-app-core (server/tool/agent SCC + leaves)  depends on
+            -> jcode-base (provider/auth/config/session/message/memory foundation)
+```
+
+Ground-truth per-rustc peak `VmHWM` (selfdev profile, single-job, `/tmp/peakrss2.sh`):
+
+| unit | peak VmHWM | note |
+| --- | --- | --- |
+| monolith (before) | **3.18 GiB** | the unit that OOM-killed the 15 GB/no-swap machine |
+| jcode-base | 1.126 GiB | FLOOR: bottom crate, fewest internal deps |
+| jcode-app-core | 1.176 GiB | base + 0.050 |
+| jcode-tui | 1.280 GiB | app-core + 0.104 (98K loc adds only +0.104) |
+| jcode (root cli) | 0.664 GiB | thin shell, fast incremental for cli iteration |
+
+**Outcome: largest single compilation unit 3.18 -> 1.28 GiB (-60%).** No unit exceeds ~1.3 GiB, so the
+memory-adaptive job limiter can schedule parallel rustc jobs without OOM. Commits: `4dd91a9c` (Phase A),
+`4aec863e` (Phase B), `f649daeb` (test import), `85c96735` (Phase C jcode-tui), `2591c0e5` (test-support
+feature restoring cross-crate `#[cfg(test)]` helpers). Full `cargo check --workspace --all-targets` is
+clean.
+
+### Why we STOPPED here (the Stop Conditions above)
+
+A further split of `jcode-tui` (the current 1.280 GiB max) was analyzed and deliberately **not** done:
+
+- **It is feasible but low-value.** The render layer already depends on a 106-method `TuiState` trait
+  (`ui::draw(frame, app: &dyn TuiState)`), not the concrete `App`; production back-edges from render
+  modules into `app` are essentially nil (one `ui_input.rs` use of two pure helpers/consts), so a clean
+  `app` vs `render` cut exists.
+- **But the peak is floor-bound, not tui-bound.** `jcode-base` alone is already 1.126 GiB because every
+  crate inherits the same external-dep monomorphization (serde/tokio/reqwest/ratatui). tui's entire 98K
+  loc adds only +0.104 over app-core, so splitting it into ~49K halves would shave only ~30-50 MB and
+  **cannot** reach the "<1.13 GiB" target, which is structurally pinned by the base floor.
+- **It adds real maintenance cost:** partitioning the 1535-line `mod.rs` glue (view-model types
+  `DisplayMessage`/`ToolCall`/`ProcessingStatus`/`TuiState` itself) and extending every feature-forwarding
+  chain (jemalloc/embeddings/pdf/test-support) by another hop.
+
+Per the Stop Conditions, continuing high-churn refactors on compile-memory grounds alone is not justified
+once the binding peak is the shared base floor. The remaining levers (lower the floor itself) are profile-
+level (codegen-units/debuginfo) or dependency-level (trim/feature-gate heavy external deps), not further
+crate carving.
+
+## Results: incremental-rebuild fixes (2026-05-29)
+
+After the structural split, the inner-loop wall time was attributed with `cargo --timings` and
+`CARGO_LOG=...fingerprint`. Two non-structural defects dominated real self-dev iteration far more than any
+remaining crate-size effect:
+
+1. **Right-sized the parallel-job memory budget** (`scripts/dev_cargo.sh`, commit `83857b13`). The adaptive
+   limiter budgeted 2048 MiB/rustc, calibrated for the old 2.5-3 GiB monolith. With the largest unit now
+   ~1.28 GiB, that stale figure capped an idle 15 GiB/8-core box at 6 jobs. Lowered to 1536 MiB/job so an
+   idle machine uses all cores (and a pressured one gains a job: 4 -> 5 at ~9 GiB available) while staying
+   OOM-safe (pessimistic 8-job concurrent RSS ~6.7 GiB).
+
+2. **Stopped git activity from forcing full-tree recompiles** (`crates/jcode-build-meta/build.rs`, commit
+   `8d87b2c0`). This was the dominant inner-loop tax. `jcode-build-meta` embeds version/git metadata that
+   every crate consumes via `env!("JCODE_*")`. It (a) declared `.git/HEAD` + `.git/index` as
+   `rerun-if-changed` inputs and (b) auto-incremented a persistent patch counter on every rerun. Cargo
+   marks a build script dirty whenever a declared input is newer than its output, reruns it, and then
+   force-recompiles all dependents via `StaleDepFingerprint`; the counter guaranteed the output actually
+   changed each time. Net effect: any `git add`/`git status`/commit/concurrent-agent git op invalidated the
+   entire graph (base -> app-core -> tui -> cli).
+
+   Fix: derive the dev patch number deterministically from committed git state
+   (`base.patch + commits-since-base-tag`, a pure function of HEAD) and drop the `.git/*` rerun triggers,
+   keeping `Cargo.toml` + `JCODE_RELEASE_BUILD`/`JCODE_BUILD_SEMVER`/`JCODE_BUILD_GIT_*` env triggers so
+   release/dist builds still embed exact metadata.
+
+   Measured (selfdev, warm, this machine):
+
+   | scenario | before | after |
+   | --- | --- | --- |
+   | build after `git/index` touch (commit, `git add`, parallel agent) | ~18-25s | **0.65s** |
+   | build after `git/HEAD` touch | ~18s | **0.87s** |
+   | build after a real code edit (`jcode-base/src/lib.rs`) | ~20s | ~20s (correctly unchanged) |
+
+   The dev `--version` git hash may lag the latest in-session commit until the next real rebuild; that is
+   cosmetic and refreshed automatically by release builds (which clean/override).
+
+Diagnostic recipe for "why did everything just recompile?":
+`CARGO_LOG=cargo::core::compiler::fingerprint=info <cargo build> 2>&1 | grep -iE 'stale|dirty'`.
+Look for `StaleItem(ChangedFile { reference: <build-script output>, stale: <some input> })` -- it names the
+exact `rerun-if-changed` input whose mtime outran the build-script output.
+
 ## Developer Workflow Guidance
 
 ### Fast local cargo wrapper
@@ -580,7 +732,7 @@ cargo check --all-targets -p jcode --features dev-bins --quiet
 
 The wrapper:
 
-- uses `sccache` automatically when available
+- uses `sccache` automatically when available **for non-incremental builds only**
 - prefers `lld` locally on Linux x86_64
 - uses the fast `selfdev` Cargo profile for self-dev build/reload workflows
 - can inject a named feature profile via `JCODE_DEV_FEATURE_PROFILE` unless explicit feature args are present
@@ -594,6 +746,133 @@ JCODE_FAST_LINKER=lld scripts/dev_cargo.sh build --release -p jcode --bin jcode
 JCODE_FAST_LINKER=mold scripts/dev_cargo.sh build --release -p jcode --bin jcode
 JCODE_FAST_LINKER=system scripts/dev_cargo.sh build --release -p jcode --bin jcode
 ```
+
+### sccache: non-incremental only
+
+`sccache` cannot cache incremental compilation units. All of jcode's common
+profiles (`selfdev`, `dev`, `release`, `test`) set `incremental = true`, so on
+the inner loop sccache produced a **0% hit rate** (measured across 272 real
+compilations and clean workspace/dep rebuilds) while still adding per-rustc
+wrapper overhead and a misleading "enabled" status.
+
+`dev_cargo.sh` now decides automatically:
+
+- **Incremental builds** (selfdev/dev/release/test, or `CARGO_INCREMENTAL=1`):
+  sccache is skipped (`sccache_status=skipped-incremental`), since it can never hit.
+- **Non-incremental builds** (`release-lto`, or `CARGO_INCREMENTAL=0`): sccache is
+  enabled, where it genuinely produces cache hits (CI, distribution builds).
+
+Overrides:
+
+```bash
+JCODE_SCCACHE=on   scripts/dev_cargo.sh build --profile selfdev ...   # force-enable
+JCODE_SCCACHE=off  scripts/dev_cargo.sh build --profile release-lto ... # force-disable
+CARGO_INCREMENTAL=0 scripts/dev_cargo.sh build --profile selfdev ...   # makes it cacheable
+```
+
+- 2026-05-29: made sccache incremental-aware. Validation on this machine:
+  `--print-setup` reports `skipped-incremental` for `--profile selfdev` and `enabled`
+  for `--profile release-lto`; `JCODE_SCCACHE=on` and `CARGO_INCREMENTAL=0` both
+  re-enable it for selfdev. A clean `jcode-azure-auth` rebuild under the old
+  always-on sccache showed `0/54` cache hits, confirming the prior wasted overhead.
+
+### Remote build host fast-fail / fast-recovery
+
+When `JCODE_REMOTE_CARGO=1` (commonly set in `~/.config/jcode/remote-build.env`),
+`dev_cargo.sh` offloads builds to `JCODE_REMOTE_HOST` via `scripts/remote_build.sh`.
+The preflight is designed so that remote builds "just work" when the host is up,
+without paying a slow timeout when it is down:
+
+- A cheap `bash` `/dev/tcp` reachability probe runs before the SSH preflight, so an
+  offline host fails over to local cargo in about **1s** instead of waiting for the
+  full SSH `ConnectTimeout` (previously ~5s on every build).
+- After a recent failure, subsequent builds use a shorter recovery probe timeout
+  (default **0.3s**) so repeated builds during an outage stay cheap.
+- Recovery is detected on the **very next build**: an up host answers the TCP probe
+  in a few milliseconds, so it immediately reverts to remote builds with no cooldown.
+- The probe is skipped automatically when the SSH config uses `ProxyJump`/`ProxyCommand`
+  (where a direct TCP probe to the final host would be misleading), falling back to the
+  normal SSH preflight.
+
+Tunables (all optional):
+
+```bash
+JCODE_REMOTE_TCP_TIMEOUT=1            # first-probe TCP timeout (seconds, fractional ok)
+JCODE_REMOTE_RECOVERY_TCP_TIMEOUT=0.3 # probe timeout while host was recently down
+JCODE_REMOTE_DOWN_TTL=300             # how long to keep using the recovery timeout
+JCODE_REMOTE_TCP_PROBE=0              # disable the pre-probe; use SSH preflight only
+JCODE_REMOTE_CARGO=0                  # disable remote builds entirely for one command
+```
+
+- 2026-05-29: added the TCP pre-probe + recovery-timeout logic above. Validation on this
+  machine (remote host offline): warm self-dev edit-build preflight dropped from about
+  **5.0s** to about **1.0s** on the first build and about **0.3s** on subsequent builds,
+  while an up host still reconnects on the next build (TCP probe answered in ~10ms in
+  unit tests). Function-level unit tests covered reachable/unreachable probes, the
+  recent-failure window, and `desktop-tailscale` endpoint resolution.
+
+### Target dir cleanup (`scripts/clean_target.sh`)
+
+The `target/` directory grows without bound across profiles (dev/selfdev/release)
+and cross-compile caches (`*-apple-darwin`, `*-pc-windows-*`, `linux-compat`). On
+this machine it reached ~84GB. A bloated target dir does not slow compilation
+directly, but it can exhaust disk and force full rebuilds when space runs out.
+
+`scripts/clean_target.sh` reclaims space **safely while parallel builds are running**:
+
+- It never touches a `target/<profile>` dir that has an active `rustc`/`cargo`
+  process (scanned via `/proc/<pid>/cmdline`) or that was written to within a recent
+  activity window (default 20min, `JCODE_CLEAN_ACTIVE_WINDOW_MIN`).
+- Default mode removes only cross-compile/compat caches (regenerated on demand) and
+  reports what it would free.
+- `--aggressive` additionally runs `cargo clean --profile <p>` on stale profiles
+  (still subject to the active-process / recent-write guards).
+
+```bash
+scripts/clean_target.sh                        # dry-run: report reclaimable space
+scripts/clean_target.sh --apply                # remove cross-compile/compat caches
+scripts/clean_target.sh --apply --aggressive   # also cargo-clean stale profiles
+```
+
+- 2026-05-29: reclaimed a stale `target/aarch64-apple-darwin` (2.5G) and added this
+  script. Dry-runs verified it correctly SKIPs profiles with recent writes / active
+  rustc while a parallel agent was building on `debug`/`selfdev`.
+
+### Memory-adaptive cargo job count
+
+The biggest day-to-day pain on the 8-core/15 GiB dev machine was **memory
+pressure**: several self-dev agents build at once, and `.cargo/config.toml` pinned
+a static `jobs = 6`. rustc on the large root `jcode` crate peaks around 2.5-3 GiB
+RSS, so 6 concurrent rustc processes (across one or several builds) overshoot RAM
+on a no-swap box and `earlyoom` kills the build. A static job count is wrong in both
+directions: it wastes cores when the machine is idle and oversubscribes memory when
+it is busy.
+
+`scripts/dev_cargo.sh` (the path `selfdev build` uses) now sizes the job count from
+**currently-available** memory each time it runs:
+
+- `select_build_jobs()` reads `MemAvailable` and divides by a per-job memory budget
+  (default **2048 MiB**, `JCODE_BUILD_MIB_PER_JOB`), then clamps into `[1, nproc]`.
+- It exports `CARGO_BUILD_JOBS`, which overrides `build.jobs` from `.cargo/config.toml`.
+- An idle machine still uses every core; under pressure a fresh build self-throttles
+  (e.g. it picked **2 jobs** at ~5.9 GiB available during a parallel-agent build).
+- Explicit `JCODE_BUILD_JOBS` / `CARGO_BUILD_JOBS` always win; invalid values warn and
+  fall back to adaptive sizing. Non-Linux hosts keep the cargo/`.cargo` default.
+
+The committed static fallback in `.cargo/config.toml` was also lowered from `6` to
+`4` for direct `cargo` invocations that bypass the wrapper (still memory-safe for a
+single build on ~15 GiB, but no longer assuming a near-full core count).
+
+```bash
+JCODE_BUILD_JOBS=2            # hard override the job count for one command
+JCODE_BUILD_MIB_PER_JOB=2048  # memory budget per rustc job (default)
+scripts/dev_cargo.sh --print-setup   # shows build_jobs_status + cargo_build_jobs
+```
+
+- 2026-05-29: added adaptive sizing. Verified via `--print-setup` and a stubbed-cargo
+  harness that overrides win, invalid input falls through to adaptive, budget extremes
+  clamp to `[1, nproc]`, and the chosen `CARGO_BUILD_JOBS` is exported to the child
+  cargo process. A real `dev_cargo.sh check -p jcode-logging` build succeeded.
 
 For compile timing, prefer repeatable touched-file measurements over no-op hot-cache reruns:
 

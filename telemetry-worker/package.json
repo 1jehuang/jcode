@@ -14,7 +14,10 @@
     "migrate:dashboard-indexes": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0007_dashboard_indexes.sql",
     "migrate:agent-time": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0008_agent_time_and_churn.sql",
     "migrate:feedback-text": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0009_feedback_text.sql",
-    "health": "npx wrangler d1 execute jcode-telemetry --remote --file=health.sql"
+    "migrate:daily-active": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0010_daily_active_users.sql",
+    "migrate:daily-active-backfill": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0011_backfill_daily_active_recent.sql",
+    "health": "npx wrangler d1 execute jcode-telemetry --remote --file=health.sql",
+    "dau": "npx wrangler d1 execute jcode-telemetry --remote --file=dau.sql"
   },
   "devDependencies": {
     "wrangler": "^4"

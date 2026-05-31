@@ -50,6 +50,18 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,
 ) -> Option<String> {
+    if matches!(choice, super::provider_init::ProviderChoice::Fpt) {
+        let model = effective_openai_compatible_auth_test_model(
+            crate::provider_catalog::FPT_PROFILE,
+            model,
+        )
+        .unwrap_or_else(|| "the selected model".to_string());
+        return Some(format!(
+            "Skipped: FPT model '{}' is hosted on an OpenAI-compatible/vLLM-style endpoint that rejects OpenAI tool-choice requests unless server-side auto-tool parsing is enabled. Basic provider smoke still validates chat.",
+            model
+        ));
+    }
+
     if !matches!(choice, super::provider_init::ProviderChoice::NvidiaNim) {
         return None;
     }
@@ -102,7 +114,9 @@ fn effective_openai_compatible_auth_test_model(
                 .then(|| cfg.provider.default_model.clone())
                 .flatten()
         })
-        .or_else(|| crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model)
+        .or_else(|| {
+            crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model
+        })
 }
 
 fn nvidia_nim_model_supports_openai_tools(model: &str) -> bool {
@@ -111,8 +125,7 @@ fn nvidia_nim_model_supports_openai_tools(model: &str) -> bool {
     // visual-model API family. The OpenAI-compatible chat endpoint accepts basic
     // prompts for this model, but tool-enabled smoke has been observed returning
     // a server-side `unhashable type: 'dict'` 500 when sent OpenAI tools.
-    !(normalized.contains("moonshotai/kimi-k2.6")
-        || normalized.contains("moonshotai/kimi-k2-6"))
+    !(normalized.contains("moonshotai/kimi-k2.6") || normalized.contains("moonshotai/kimi-k2-6"))
 }
 
 async fn discover_openai_compatible_validation_model(
@@ -196,6 +209,37 @@ mod nvidia_nim_tool_smoke_tests {
             tool_smoke_skip_detail_for_choice(
                 &super::super::provider_init::ProviderChoice::Groq,
                 Some("moonshotai/kimi-k2.6"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn skips_fpt_tool_smoke_for_vllm_auto_tool_choice_gap() {
+        let detail = tool_smoke_skip_detail_for_choice(
+            &super::super::provider_init::ProviderChoice::Fpt,
+            Some("FPT.AI-KIE-v1.7"),
+        )
+        .expect("FPT should skip tool smoke when server-side auto tool parsing is unavailable");
+
+        assert!(detail.contains("FPT model 'FPT.AI-KIE-v1.7'"));
+        assert!(detail.contains("vLLM-style endpoint"));
+        assert!(detail.contains("Basic provider smoke still validates chat"));
+    }
+
+    #[test]
+    fn allows_cerebras_models_to_attempt_tool_smoke() {
+        assert!(
+            tool_smoke_skip_detail_for_choice(
+                &super::super::provider_init::ProviderChoice::Cerebras,
+                Some("gpt-oss-120b"),
+            )
+            .is_none()
+        );
+        assert!(
+            tool_smoke_skip_detail_for_choice(
+                &super::super::provider_init::ProviderChoice::Cerebras,
+                Some("zai-glm-4.7"),
             )
             .is_none()
         );

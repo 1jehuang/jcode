@@ -8,6 +8,7 @@ pub struct StreamBuffer {
     buffer: String,
     last_flush: Instant,
     timeout: Duration,
+    smooth_frame_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +29,7 @@ impl StreamBuffer {
             buffer: String::new(),
             last_flush: Instant::now(),
             timeout: Duration::from_millis(150),
+            smooth_frame_chars: 96,
         }
     }
 
@@ -37,14 +39,11 @@ impl StreamBuffer {
 
         // Find semantic boundary
         if let Some(boundary) = self.find_boundary() {
-            let chunk = self.buffer[..boundary].to_string();
-            self.buffer = self.buffer[boundary..].to_string();
-            self.last_flush = Instant::now();
-            return Some(chunk);
+            return Some(self.drain_prefix(boundary.min(self.smooth_frame_boundary())));
         }
 
         if self.last_flush.elapsed() >= self.timeout {
-            return self.flush();
+            return self.flush_smooth_frame();
         }
 
         None
@@ -57,6 +56,20 @@ impl StreamBuffer {
         } else {
             self.last_flush = Instant::now();
             Some(std::mem::take(&mut self.buffer))
+        }
+    }
+
+    /// Flush up to one smooth-render frame worth of text. This is used for
+    /// periodic streaming redraws so large provider/SSE bursts are revealed
+    /// over a few quick frames instead of popping into the TUI all at once.
+    /// Finalization paths should still call [`flush`] to avoid leaving text
+    /// buffered at message boundaries.
+    pub fn flush_smooth_frame(&mut self) -> Option<String> {
+        if self.buffer.is_empty() {
+            None
+        } else {
+            let boundary = self.smooth_frame_boundary().min(self.buffer.len());
+            Some(self.drain_prefix(boundary))
         }
     }
 
@@ -78,6 +91,25 @@ impl StreamBuffer {
         }
     }
 
+    fn smooth_frame_boundary(&self) -> usize {
+        if self.buffer.chars().count() <= self.smooth_frame_chars {
+            return self.buffer.len();
+        }
+        self.buffer
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .nth(self.smooth_frame_chars)
+            .unwrap_or(self.buffer.len())
+    }
+
+    fn drain_prefix(&mut self, boundary: usize) -> String {
+        let boundary = floor_char_boundary(&self.buffer, boundary);
+        let chunk = self.buffer[..boundary].to_string();
+        self.buffer = self.buffer[boundary..].to_string();
+        self.last_flush = Instant::now();
+        chunk
+    }
+
     /// Find a boundary in the buffer (newline-based), returns position after boundary
     fn find_boundary(&self) -> Option<usize> {
         let buf = &self.buffer;
@@ -97,6 +129,14 @@ impl StreamBuffer {
 
         None
     }
+}
+
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    index = index.min(s.len());
+    while index > 0 && !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 #[cfg(test)]
@@ -145,5 +185,34 @@ mod tests {
         // Second push returns second line
         let result = buf.push("");
         assert_eq!(result, Some("Line two\n".to_string()));
+    }
+
+    #[test]
+    fn test_smooth_frame_flush_caps_large_chunks() {
+        let mut buf = StreamBuffer::new();
+        let text = "a".repeat(150);
+        assert_eq!(buf.push(&text), None);
+
+        let first = buf.flush_smooth_frame().unwrap();
+        assert_eq!(first.len(), 96);
+        assert_eq!(buf.buffer.len(), 54);
+
+        let rest = buf.flush().unwrap();
+        assert_eq!(rest.len(), 54);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_smooth_frame_flush_respects_utf8_boundaries() {
+        let mut buf = StreamBuffer::new();
+        let text = "é".repeat(120);
+        assert_eq!(buf.push(&text), None);
+
+        let first = buf.flush_smooth_frame().unwrap();
+        assert_eq!(first.chars().count(), 96);
+        assert!(first.is_char_boundary(first.len()));
+
+        let rest = buf.flush().unwrap();
+        assert_eq!(rest.chars().count(), 24);
     }
 }

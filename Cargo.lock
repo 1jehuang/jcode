@@ -3776,7 +3776,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.13.0"
+version = "0.17.0"
 dependencies = [
  "agentgrep",
  "anyhow",
@@ -3812,6 +3812,7 @@ dependencies = [
  "jcode-azure-auth",
  "jcode-background-types",
  "jcode-batch-types",
+ "jcode-build-meta",
  "jcode-build-support",
  "jcode-compaction-core",
  "jcode-config-types",
@@ -3819,6 +3820,7 @@ dependencies = [
  "jcode-embedding",
  "jcode-gateway-types",
  "jcode-import-core",
+ "jcode-logging",
  "jcode-memory-types",
  "jcode-message-types",
  "jcode-notify-email",
@@ -3837,9 +3839,11 @@ dependencies = [
  "jcode-storage",
  "jcode-swarm-core",
  "jcode-task-types",
+ "jcode-terminal-image",
  "jcode-terminal-launch",
  "jcode-tool-core",
  "jcode-tool-types",
+ "jcode-tui",
  "jcode-tui-account-picker",
  "jcode-tui-core",
  "jcode-tui-markdown",
@@ -3902,6 +3906,115 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-app-core"
+version = "0.1.0"
+dependencies = [
+ "agentgrep",
+ "anyhow",
+ "arboard",
+ "async-stream",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-bedrock",
+ "aws-sdk-bedrockruntime",
+ "aws-sdk-sts",
+ "aws-smithy-types",
+ "aws-types",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "futures",
+ "glob",
+ "global-hotkey",
+ "hashline",
+ "hex",
+ "ignore",
+ "image",
+ "jcode-agent-runtime",
+ "jcode-ambient-types",
+ "jcode-auth-types",
+ "jcode-azure-auth",
+ "jcode-background-types",
+ "jcode-base",
+ "jcode-batch-types",
+ "jcode-build-meta",
+ "jcode-build-support",
+ "jcode-compaction-core",
+ "jcode-config-types",
+ "jcode-core",
+ "jcode-gateway-types",
+ "jcode-import-core",
+ "jcode-logging",
+ "jcode-memory-types",
+ "jcode-message-types",
+ "jcode-notify-email",
+ "jcode-overnight-core",
+ "jcode-pdf",
+ "jcode-plan",
+ "jcode-protocol",
+ "jcode-provider-core",
+ "jcode-provider-gemini",
+ "jcode-provider-metadata",
+ "jcode-provider-openai",
+ "jcode-provider-openrouter",
+ "jcode-selfdev-types",
+ "jcode-session-types",
+ "jcode-side-panel-types",
+ "jcode-storage",
+ "jcode-swarm-core",
+ "jcode-task-types",
+ "jcode-terminal-image",
+ "jcode-terminal-launch",
+ "jcode-tool-core",
+ "jcode-tool-types",
+ "jcode-tui-account-picker",
+ "jcode-tui-core",
+ "jcode-tui-markdown",
+ "jcode-tui-mermaid",
+ "jcode-tui-messages",
+ "jcode-tui-render",
+ "jcode-tui-session-picker",
+ "jcode-tui-style",
+ "jcode-tui-tool-display",
+ "jcode-tui-usage-overlay",
+ "jcode-tui-workspace",
+ "jcode-update-core",
+ "jcode-usage-types",
+ "libc",
+ "open",
+ "proctitle",
+ "qrcode",
+ "rand 0.9.3",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "similar",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "toml",
+ "unicode-width 0.2.0",
+ "url",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "jcode-auth-types"
 version = "0.1.0"
 dependencies = [
@@ -3925,12 +4038,126 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-base"
+version = "0.1.0"
+dependencies = [
+ "agentgrep",
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-bedrock",
+ "aws-sdk-bedrockruntime",
+ "aws-sdk-sts",
+ "aws-smithy-types",
+ "aws-types",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "futures",
+ "glob",
+ "global-hotkey",
+ "hex",
+ "ignore",
+ "image",
+ "jcode-agent-runtime",
+ "jcode-ambient-types",
+ "jcode-app-core",
+ "jcode-auth-types",
+ "jcode-azure-auth",
+ "jcode-background-types",
+ "jcode-batch-types",
+ "jcode-build-meta",
+ "jcode-build-support",
+ "jcode-compaction-core",
+ "jcode-config-types",
+ "jcode-core",
+ "jcode-embedding",
+ "jcode-gateway-types",
+ "jcode-import-core",
+ "jcode-logging",
+ "jcode-memory-types",
+ "jcode-message-types",
+ "jcode-notify-email",
+ "jcode-overnight-core",
+ "jcode-plan",
+ "jcode-protocol",
+ "jcode-provider-core",
+ "jcode-provider-gemini",
+ "jcode-provider-metadata",
+ "jcode-provider-openai",
+ "jcode-provider-openrouter",
+ "jcode-selfdev-types",
+ "jcode-session-types",
+ "jcode-side-panel-types",
+ "jcode-storage",
+ "jcode-swarm-core",
+ "jcode-task-types",
+ "jcode-terminal-image",
+ "jcode-terminal-launch",
+ "jcode-tool-core",
+ "jcode-tool-types",
+ "jcode-tui-account-picker",
+ "jcode-tui-core",
+ "jcode-tui-markdown",
+ "jcode-tui-mermaid",
+ "jcode-tui-messages",
+ "jcode-tui-render",
+ "jcode-tui-session-picker",
+ "jcode-tui-style",
+ "jcode-tui-tool-display",
+ "jcode-tui-usage-overlay",
+ "jcode-tui-workspace",
+ "jcode-update-core",
+ "jcode-usage-types",
+ "libc",
+ "open",
+ "proctitle",
+ "qrcode",
+ "rand 0.9.3",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "similar",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "toml",
+ "unicode-width 0.2.0",
+ "url",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "jcode-batch-types"
 version = "0.1.0"
 dependencies = [
  "jcode-message-types",
  "serde",
 ]
+
+[[package]]
+name = "jcode-build-meta"
+version = "0.1.0"
 
 [[package]]
 name = "jcode-build-support"
@@ -4020,6 +4247,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "jcode-logging"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jcode-core",
+ "jcode-storage",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -4228,6 +4466,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-terminal-image"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "crossterm",
+]
+
+[[package]]
 name = "jcode-terminal-launch"
 version = "0.1.0"
 dependencies = [
@@ -4254,6 +4500,58 @@ name = "jcode-tool-types"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "jcode-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "ffs-search",
+ "futures",
+ "global-hotkey",
+ "hex",
+ "image",
+ "jcode-app-core",
+ "jcode-build-meta",
+ "jcode-core",
+ "jcode-logging",
+ "jcode-protocol",
+ "jcode-provider-core",
+ "jcode-selfdev-types",
+ "jcode-session-types",
+ "jcode-terminal-image",
+ "jcode-tui-account-picker",
+ "jcode-tui-core",
+ "jcode-tui-markdown",
+ "jcode-tui-mermaid",
+ "jcode-tui-messages",
+ "jcode-tui-render",
+ "jcode-tui-session-picker",
+ "jcode-tui-style",
+ "jcode-tui-tool-display",
+ "jcode-tui-usage-overlay",
+ "jcode-tui-workspace",
+ "libc",
+ "open",
+ "rand 0.9.3",
+ "ratatui",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "unicode-width 0.2.0",
+ "url",
 ]
 
 [[package]]

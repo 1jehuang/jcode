@@ -281,7 +281,9 @@ async fn run_context_audit_for_target(
             skipped_models_without_context: 0,
             mismatches: Vec::new(),
             success: true,
-            detail: "Skipped: provider does not use the OpenRouter/OpenAI-compatible live catalog path.".to_string(),
+            detail:
+                "Skipped: provider does not use the OpenRouter/OpenAI-compatible live catalog path."
+                    .to_string(),
         };
     }
 
@@ -391,9 +393,7 @@ fn print_context_audit_reports(reports: &[AuthTestContextAuditReport]) {
         for mismatch in report.mismatches.iter().take(20) {
             println!(
                 "  mismatch: {} catalog={} resolved={}",
-                mismatch.model,
-                mismatch.catalog_context_window,
-                mismatch.resolved_context_window
+                mismatch.model, mismatch.catalog_context_window, mismatch.resolved_context_window
             );
         }
         if report.mismatches.len() > 20 {
@@ -717,7 +717,10 @@ fn persist_auth_test_live_verification_event(
                 ));
             }
             "tool_smoke" => {
-                capabilities.push("real_jcode_tool_smoke");
+                let tool_smoke_skipped = auth_test_step_is_skipped(step);
+                if !tool_smoke_skipped {
+                    capabilities.push("real_jcode_tool_smoke");
+                }
                 expected.push(crate::live_tests::checkpoints::TOOL_CALL_PARSE);
                 expected.push(crate::live_tests::checkpoints::TOOL_EXECUTION_LOOP);
                 expected.push(crate::live_tests::checkpoints::TOOL_RESULT_FOLLOWUP);
@@ -755,10 +758,12 @@ fn persist_auth_test_live_verification_event(
     } else {
         crate::live_tests::LiveVerificationResult::Failed
     };
+    let (coverage_provider_id, coverage_provider_label) =
+        auth_test_coverage_provider_identity(report);
     let mut event = crate::live_tests::LiveVerificationEvent::new(
         "auth_test_real_jcode_runtime",
-        report.provider.clone(),
-        report.provider.clone(),
+        coverage_provider_id,
+        coverage_provider_label,
         crate::live_tests::LiveVerificationAuth::non_secret("auth-test", None::<String>),
         result,
     )
@@ -777,11 +782,36 @@ fn persist_auth_test_live_verification_event(
     Ok(())
 }
 
+fn auth_test_coverage_provider_identity(report: &AuthTestProviderReport) -> (String, String) {
+    if report.provider == "openai-compatible"
+        && let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+    {
+        let profile_name = profile_name.trim();
+        if !profile_name.is_empty() {
+            let label = crate::config::config()
+                .providers
+                .get(profile_name)
+                .map(|profile| {
+                    format!(
+                        "{} (custom OpenAI-compatible: {})",
+                        profile_name, profile.base_url
+                    )
+                })
+                .unwrap_or_else(|| format!("{} (custom OpenAI-compatible)", profile_name));
+            return (profile_name.to_string(), label);
+        }
+    }
+
+    (report.provider.clone(), report.provider.clone())
+}
+
 fn auth_test_step_stage(
     checkpoint: &'static str,
     step: &AuthTestStepReport,
 ) -> crate::live_tests::LiveVerificationStage {
-    let status = if step.ok {
+    let status = if auth_test_step_is_skipped(step) {
+        crate::live_tests::LiveVerificationStageStatus::Skipped
+    } else if step.ok {
         crate::live_tests::LiveVerificationStageStatus::Passed
     } else {
         crate::live_tests::LiveVerificationStageStatus::Failed
@@ -789,6 +819,10 @@ fn auth_test_step_stage(
     crate::live_tests::LiveVerificationStage::new(checkpoint, status)
         .with_evidence("auth_test_step", serde_json::json!(step.name))
         .with_evidence("detail", serde_json::json!(step.detail))
+}
+
+fn auth_test_step_is_skipped(step: &AuthTestStepReport) -> bool {
+    step.detail.trim_start().starts_with("Skipped:")
 }
 
 fn auth_test_tool_derived_stage(

@@ -9,7 +9,7 @@ pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://opencode.ai/zen/v1",
     api_key_env: "OPENCODE_API_KEY",
     env_file: "opencode.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#opencode-zen",
     default_model: Some("minimax-m2.7"),
     requires_api_key: true,
 };
@@ -20,7 +20,7 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     api_base: "https://opencode.ai/zen/go/v1",
     api_key_env: "OPENCODE_GO_API_KEY",
     env_file: "opencode-go.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#opencode-go",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -33,19 +33,6 @@ pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     env_file: "zai.env",
     setup_url: "https://docs.z.ai/guides/develop/openai/introduction",
     default_model: Some("glm-4.5"),
-    requires_api_key: true,
-};
-
-pub const BIGMODEL_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "bigmodel",
-    display_name: "Zhipu BigModel",
-    // Mainland China endpoint (api.z.ai is the international/Code-Plan
-    // mirror, open.bigmodel.cn is the consumer-facing API gateway).
-    api_base: "https://open.bigmodel.cn/api/paas/v4",
-    api_key_env: "ZHIPU_API_KEY",
-    env_file: "bigmodel.env",
-    setup_url: "https://bigmodel.cn/dev/howuse/model",
-    default_model: Some("glm-5.1"),
     requires_api_key: true,
 };
 
@@ -66,7 +53,7 @@ pub const AI302_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.302.ai/v1",
     api_key_env: "302AI_API_KEY",
     env_file: "302ai.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#302ai",
     default_model: Some("qwen3-235b-a22b-instruct-2507"),
     requires_api_key: true,
 };
@@ -77,7 +64,7 @@ pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://inference.baseten.co/v1",
     api_key_env: "BASETEN_API_KEY",
     env_file: "baseten.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#baseten",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
 };
@@ -88,8 +75,54 @@ pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.cortecs.ai/v1",
     api_key_env: "CORTECS_API_KEY",
     env_file: "cortecs.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#cortecs",
     default_model: Some("kimi-k2.5"),
+    requires_api_key: true,
+};
+
+// OpenRouter also has a dedicated provider implementation elsewhere, but it
+// speaks the standard OpenAI-compatible /api/v1 endpoint, so it can be driven
+// by `provider-doctor` / `provider-test-coverage` like any other
+// OpenAI-compatible provider. `default_model` is None so the doctor selects the
+// live catalog's first model unless `--model` is passed.
+pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "openrouter",
+    display_name: "OpenRouter",
+    api_base: "https://openrouter.ai/api/v1",
+    api_key_env: "OPENROUTER_API_KEY",
+    env_file: "openrouter.env",
+    setup_url: "https://openrouter.ai/keys",
+    default_model: None,
+    requires_api_key: true,
+};
+
+// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
+// endpoints, so they can be driven by `provider-doctor` /
+// `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
+// alias the native login-provider ids (`anthropic-api`, `openai-api`); auth
+// activation deliberately routes them through the native runtime, while the
+// live HTTP probes hit these hosts (Anthropic needs `x-api-key` +
+// `anthropic-version`, handled in the probe layer). `default_model` is None so
+// the doctor selects from the live catalog unless `--model` is passed.
+pub const ANTHROPIC_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "anthropic-api",
+    display_name: "Anthropic API",
+    api_base: "https://api.anthropic.com/v1",
+    api_key_env: "ANTHROPIC_API_KEY",
+    env_file: "anthropic.env",
+    setup_url: "https://docs.anthropic.com/en/api/openai-sdk",
+    default_model: None,
+    requires_api_key: true,
+};
+
+pub const OPENAI_NATIVE_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "openai-api",
+    display_name: "OpenAI API",
+    api_base: "https://api.openai.com/v1",
+    api_key_env: "OPENAI_API_KEY",
+    env_file: "openai.env",
+    setup_url: "https://platform.openai.com/api-keys",
+    default_model: None,
     requires_api_key: true,
 };
 
@@ -101,21 +134,6 @@ pub const DEEPSEEK_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     env_file: "deepseek.env",
     setup_url: "https://api-docs.deepseek.com/",
     default_model: Some("deepseek-v4-flash"),
-    requires_api_key: true,
-};
-
-pub const COHERE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "cohere",
-    display_name: "Cohere",
-    // Cohere ships an OpenAI-compatible endpoint under /compatibility/v1.
-    // It accepts the OpenAI Chat Completions request shape and returns the
-    // OpenAI streaming chunk schema; see
-    // https://docs.cohere.com/v2/docs/compatibility-api
-    api_base: "https://api.cohere.com/compatibility/v1",
-    api_key_env: "COHERE_API_KEY",
-    env_file: "cohere.env",
-    setup_url: "https://docs.cohere.com/v2/docs/compatibility-api",
-    default_model: Some("command-a-03-2025"),
     requires_api_key: true,
 };
 
@@ -147,7 +165,7 @@ pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://app.frogbot.ai/api/v1",
     api_key_env: "FIRMWARE_API_KEY",
     env_file: "firmware.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#firmware",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -158,7 +176,7 @@ pub const HUGGING_FACE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfil
     api_base: "https://router.huggingface.co/v1",
     api_key_env: "HF_TOKEN",
     env_file: "huggingface.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#hugging-face",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
 };
@@ -169,7 +187,7 @@ pub const MOONSHOT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.moonshot.ai/v1",
     api_key_env: "MOONSHOT_API_KEY",
     env_file: "moonshotai.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#moonshot-ai",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -180,7 +198,7 @@ pub const NEBIUS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.tokenfactory.nebius.com/v1",
     api_key_env: "NEBIUS_API_KEY",
     env_file: "nebius.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#nebius-token-factory",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
 };
@@ -191,7 +209,7 @@ pub const SCALEWAY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.scaleway.ai/v1",
     api_key_env: "SCALEWAY_API_KEY",
     env_file: "scaleway.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#scaleway",
     default_model: Some("qwen3-coder-30b-a3b-instruct"),
     requires_api_key: true,
 };
@@ -202,7 +220,7 @@ pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1",
     api_key_env: "STACKIT_API_KEY",
     env_file: "stackit.env",
-    setup_url: "https://github.com/quangdang46/jcode#oauth-and-providers",
+    setup_url: "https://opencode.ai/docs/providers#stackit",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
 };
@@ -339,7 +357,7 @@ pub const CEREBRAS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_key_env: "CEREBRAS_API_KEY",
     env_file: "cerebras.env",
     setup_url: "https://inference-docs.cerebras.ai/introduction",
-    default_model: Some("qwen-3-235b-a22b-instruct-2507"),
+    default_model: Some("gpt-oss-120b"),
     requires_api_key: true,
 };
 
@@ -365,39 +383,6 @@ pub const NVIDIA_NIM_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
-pub const GITLAB_DUO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "gitlab-duo",
-    display_name: "GitLab Duo",
-    // GitLab Duo's chat API is exposed through the AI Gateway under
-    // /api/v4/chat/agent. Authentication is via Personal Access Token
-    // with the `ai_features` scope. Self-hosted GitLab Enterprise users
-    // can override the base URL via the standard provider profile config.
-    api_base: "https://gitlab.com/api/v4/chat/agent",
-    api_key_env: "GITLAB_TOKEN",
-    env_file: "gitlab-duo.env",
-    setup_url: "https://docs.gitlab.com/ee/user/gitlab_duo/",
-    default_model: Some("claude-sonnet-4"),
-    requires_api_key: true,
-};
-
-pub const VERTEX_AI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "vertex-ai",
-    display_name: "Vertex AI",
-    // Google Cloud Vertex AI exposes Anthropic Claude (and other models)
-    // through an OpenAI-compatible endpoint. The api_base shown here is
-    // the public US-Central1 region; users with a different region or
-    // project should override via:
-    //   provider-vertex-ai.env:
-    //     JCODE_OPENAI_COMPAT_API_BASE=https://<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/<region>/endpoints/openapi
-    // Auth uses a Google Cloud access token (gcloud auth print-access-token).
-    api_base: "https://us-central1-aiplatform.googleapis.com/v1/openapi",
-    api_key_env: "GOOGLE_CLOUD_ACCESS_TOKEN",
-    env_file: "vertex-ai.env",
-    setup_url: "https://cloud.google.com/vertex-ai/docs/start/quickstarts",
-    default_model: Some("claude-sonnet-4@20250101"),
-    requires_api_key: true,
-};
-
 pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "xiaomi-mimo",
     display_name: "Xiaomi MiMo",
@@ -420,11 +405,10 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 36] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 35] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
-    BIGMODEL_PROFILE,
     KIMI_PROFILE,
     CHUTES_PROFILE,
     CEREBRAS_PROFILE,
@@ -432,8 +416,10 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 36] = [
     AI302_PROFILE,
     BASETEN_PROFILE,
     CORTECS_PROFILE,
+    OPENROUTER_OPENAI_COMPAT_PROFILE,
+    ANTHROPIC_OPENAI_COMPAT_PROFILE,
+    OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
     DEEPSEEK_PROFILE,
-    COHERE_PROFILE,
     COMTEGRA_PROFILE,
     FPT_PROFILE,
     FIRMWARE_PROFILE,
@@ -451,8 +437,6 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 36] = [
     MINIMAX_PROFILE,
     XAI_PROFILE,
     NVIDIA_NIM_PROFILE,
-    GITLAB_DUO_PROFILE,
-    VERTEX_AI_PROFILE,
     XIAOMI_MIMO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -470,6 +454,19 @@ pub const CLAUDE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     recommended: true,
     target: LoginProviderTarget::Claude,
     order: LoginProviderSurfaceOrder::new(Some(1), Some(1), Some(1), Some(1), Some(1)),
+};
+
+pub const ANTHROPIC_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "anthropic-api",
+    display_name: "Anthropic API",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::Anthropic,
+    auth_status_method: "API key",
+    aliases: &["claude-api", "anthropic-key", "claude-key"],
+    menu_detail: "direct Anthropic Messages API",
+    recommended: false,
+    target: LoginProviderTarget::ClaudeApiKey,
+    order: LoginProviderSurfaceOrder::new(Some(2), Some(2), Some(2), Some(2), Some(2)),
 };
 
 pub const AUTO_IMPORT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -600,35 +597,11 @@ pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     auth_kind: LoginProviderAuthKind::ApiKey,
     auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
     auth_status_method: "API key",
-    aliases: &[
-        "z.ai",
-        "z-ai",
-        "zai-coding",
-        "zhipu",
-        "bigmodel",
-        "glm",
-        "zhipu-bigmodel",
-    ],
+    aliases: &["z.ai", "z-ai", "zai-coding", "zhipu"],
     menu_detail: "API key",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(7), Some(6), Some(7), Some(6), Some(6)),
-};
-
-pub const BIGMODEL_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "bigmodel",
-    display_name: "Zhipu BigModel",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    // Distinct aliases from ZAI: bigmodel-cn / zhipu-cn / glm-cn
-    // explicitly target the mainland China endpoint. Bare 'bigmodel'
-    // and 'zhipu' continue to resolve to Z.AI for backward compat.
-    aliases: &["bigmodel-cn", "zhipu-cn", "glm-cn"],
-    menu_detail: "API key, mainland China endpoint",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(BIGMODEL_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(8), Some(7), Some(8), Some(7), Some(7)),
 };
 
 pub const KIMI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -739,20 +712,6 @@ pub const DEEPSEEK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescri
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(DEEPSEEK_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(21), Some(21), Some(21), Some(21), Some(21)),
-};
-
-pub const COHERE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "cohere",
-    display_name: "Cohere",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["command-r", "command-a"],
-    menu_detail: "OpenAI-compatible Cohere API",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(COHERE_PROFILE),
-    // Slot in next to DeepSeek (21) since both are RAG/tool-leaning vendors.
-    order: LoginProviderSurfaceOrder::new(Some(22), Some(22), Some(22), Some(22), Some(22)),
 };
 
 pub const COMTEGRA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -976,32 +935,6 @@ pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(34), Some(34), Some(34), Some(34), Some(34)),
 };
 
-pub const GITLAB_DUO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "gitlab-duo",
-    display_name: "GitLab Duo",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "Personal Access Token (ai_features scope)",
-    aliases: &["gitlab", "duo", "gitlab-pro"],
-    menu_detail: "GitLab Duo (PAT with ai_features scope)",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(GITLAB_DUO_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(35), Some(35), Some(35), Some(35), Some(35)),
-};
-
-pub const VERTEX_AI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "vertex-ai",
-    display_name: "Vertex AI (Google Cloud)",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "Google Cloud access token (gcloud auth print-access-token)",
-    aliases: &["vertex", "gcp", "google-vertex"],
-    menu_detail: "Vertex AI: Anthropic Claude via Google Cloud (gcloud access token)",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(VERTEX_AI_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(36), Some(36), Some(36), Some(36), Some(36)),
-};
-
 pub const LMSTUDIO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "lmstudio",
     display_name: "LM Studio",
@@ -1119,9 +1052,10 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 49] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 46] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
+    ANTHROPIC_API_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
     OPENAI_API_LOGIN_PROVIDER,
     JCODE_LOGIN_PROVIDER,
@@ -1131,7 +1065,6 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 49] = [
     OPENCODE_LOGIN_PROVIDER,
     OPENCODE_GO_LOGIN_PROVIDER,
     ZAI_LOGIN_PROVIDER,
-    BIGMODEL_LOGIN_PROVIDER,
     KIMI_LOGIN_PROVIDER,
     CHUTES_LOGIN_PROVIDER,
     CEREBRAS_LOGIN_PROVIDER,
@@ -1140,7 +1073,6 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 49] = [
     BASETEN_LOGIN_PROVIDER,
     CORTECS_LOGIN_PROVIDER,
     DEEPSEEK_LOGIN_PROVIDER,
-    COHERE_LOGIN_PROVIDER,
     COMTEGRA_LOGIN_PROVIDER,
     FPT_LOGIN_PROVIDER,
     FIRMWARE_LOGIN_PROVIDER,
@@ -1158,8 +1090,6 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 49] = [
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
-    GITLAB_DUO_LOGIN_PROVIDER,
-    VERTEX_AI_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,

@@ -26,6 +26,7 @@ pub enum LoginProviderTarget {
     AutoImport,
     Jcode,
     Claude,
+    ClaudeApiKey,
     OpenAi,
     OpenAiApiKey,
     OpenRouter,
@@ -189,6 +190,24 @@ pub fn resolve_login_provider(input: &str) -> Option<LoginProviderDescriptor> {
     })
 }
 
+/// Resolve a login provider by id, alias, or display name.
+///
+/// Login completion events carry the human-readable provider label (e.g.
+/// "Anthropic API") rather than the canonical id/alias, so the stricter
+/// [`resolve_login_provider`] (id/alias only) misses them. Auth-change routing
+/// needs to map those labels back to a provider id; matching the display name
+/// here keeps the post-login model refresh attributed to the correct provider.
+pub fn resolve_login_provider_loose(input: &str) -> Option<LoginProviderDescriptor> {
+    if let Some(provider) = resolve_login_provider(input) {
+        return Some(provider);
+    }
+    let normalized = normalize_provider_input(input)?;
+    login_providers()
+        .iter()
+        .copied()
+        .find(|provider| provider.display_name.to_ascii_lowercase() == normalized)
+}
+
 pub fn resolve_login_selection(
     input: &str,
     providers: &[LoginProviderDescriptor],
@@ -350,6 +369,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_login_provider_loose_matches_id_alias_and_display_name() {
+        // id
+        assert_eq!(
+            resolve_login_provider_loose("anthropic-api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // alias
+        assert_eq!(
+            resolve_login_provider_loose("claude-api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // display name (the form LoginCompleted carries for API-key paste logins)
+        assert_eq!(
+            resolve_login_provider_loose("Anthropic API").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // display name is matched case-insensitively
+        assert_eq!(
+            resolve_login_provider_loose("anthropic api").map(|d| d.id),
+            Some("anthropic-api")
+        );
+        // unknown input stays unresolved
+        assert_eq!(resolve_login_provider_loose("not-a-provider"), None);
+    }
+
+    #[test]
+    fn resolve_login_provider_loose_resolves_every_descriptor_by_id_and_display_name() {
+        // Guards the LoginCompleted attribution path: the TUI publishes either a
+        // descriptor id (OAuth logins) or a display label (API-key paste logins),
+        // and both must resolve so the post-login auth-change refresh is
+        // attributed to the right provider instead of falling back to the
+        // session's active provider.
+        for descriptor in login_providers() {
+            assert_eq!(
+                resolve_login_provider_loose(descriptor.id).map(|d| d.id),
+                Some(descriptor.id),
+                "descriptor id {:?} should resolve",
+                descriptor.id
+            );
+            assert_eq!(
+                resolve_login_provider_loose(descriptor.display_name).map(|d| d.id),
+                Some(descriptor.id),
+                "display name {:?} (id {:?}) should resolve",
+                descriptor.display_name,
+                descriptor.id
+            );
+        }
+    }
+
+    #[test]
     fn minimax_profile_uses_official_openai_compatible_configuration() {
         assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
         assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
@@ -402,6 +471,33 @@ mod tests {
         assert!(matches!(
             NVIDIA_NIM_LOGIN_PROVIDER.target,
             LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "nvidia-nim"
+        ));
+    }
+
+    #[test]
+    fn cerebras_profile_uses_official_openai_compatible_configuration() {
+        assert_eq!(CEREBRAS_PROFILE.id, "cerebras");
+        assert_eq!(CEREBRAS_PROFILE.display_name, "Cerebras");
+        assert_eq!(CEREBRAS_PROFILE.api_base, "https://api.cerebras.ai/v1");
+        assert_eq!(CEREBRAS_PROFILE.api_key_env, "CEREBRAS_API_KEY");
+        assert_eq!(CEREBRAS_PROFILE.env_file, "cerebras.env");
+        assert_eq!(
+            CEREBRAS_PROFILE.setup_url,
+            "https://inference-docs.cerebras.ai/introduction"
+        );
+        assert_eq!(CEREBRAS_PROFILE.default_model, Some("gpt-oss-120b"));
+        assert!(CEREBRAS_PROFILE.requires_api_key);
+        assert_eq!(
+            CEREBRAS_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::ApiKey
+        );
+        assert_eq!(
+            CEREBRAS_LOGIN_PROVIDER.auth_state_key,
+            LoginProviderAuthStateKey::OpenRouterLike
+        );
+        assert!(matches!(
+            CEREBRAS_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(profile) if profile.id == "cerebras"
         ));
     }
 

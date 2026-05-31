@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn different_models_dont_collide() {
         let (_dir, mut cache) = fresh_cache();
-        let mut e1 = entry("c1");
+        let e1 = entry("c1");
         let mut e2 = entry("c1");
         e2.model_id = "openai/gpt-5".to_string();
         cache.put(e1.clone(), b"blob-anthropic").unwrap();

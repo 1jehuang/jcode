@@ -1,0 +1,1520 @@
+use super::*;
+use std::cell::RefCell;
+use std::sync::Mutex;
+use std::time::Duration;
+
+const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidgetProviderKind {
+    Anthropic,
+    OpenAI,
+    OpenCode,
+    OpenRouter,
+    CostBasedApiKey,
+    Copilot,
+    Gemini,
+    Unknown,
+}
+
+impl WidgetProviderKind {
+    fn from_provider_key(raw: Option<&str>) -> Self {
+        match raw.map(|provider| provider.trim().to_ascii_lowercase()) {
+            Some(provider) if provider == "openrouter" => Self::OpenRouter,
+            Some(provider) if matches!(provider.as_str(), "opencode" | "opencode-go") => {
+                Self::OpenCode
+            }
+            Some(provider)
+                if matches!(
+                    provider.as_str(),
+                    "bedrock" | "aws-bedrock" | "azure-openai"
+                ) || crate::provider_catalog::openai_compatible_profile_by_id(&provider)
+                    .is_some_and(|profile| profile.requires_api_key) =>
+            {
+                Self::CostBasedApiKey
+            }
+            Some(provider) if provider == "copilot" => Self::Copilot,
+            Some(provider) if provider == "gemini" => Self::Gemini,
+            Some(provider) if provider == "openai" => Self::OpenAI,
+            Some(provider) if matches!(provider.as_str(), "anthropic" | "claude") => {
+                Self::Anthropic
+            }
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WidgetRouteInfo {
+    provider: WidgetProviderKind,
+    is_remote: bool,
+}
+
+impl App {
+    fn sanitize_remote_model_hint(model: Option<String>) -> Option<String> {
+        model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("unknown"))
+    }
+
+    fn configured_remote_provider_hint(&self) -> Option<String> {
+        std::env::var("JCODE_PROVIDER")
+            .ok()
+            .or_else(|| crate::config::config().provider.default_provider.clone())
+            .map(|provider| provider.trim().to_string())
+            .filter(|provider| !provider.is_empty())
+    }
+
+    fn configured_remote_model_hint(&self) -> Option<String> {
+        Self::sanitize_remote_model_hint(
+            std::env::var("JCODE_MODEL")
+                .ok()
+                .or_else(|| crate::config::config().provider.default_model.clone()),
+        )
+    }
+
+    fn effective_remote_provider_model(&self) -> Option<String> {
+        Self::sanitize_remote_model_hint(self.remote_provider_model.clone())
+            .or_else(|| Self::sanitize_remote_model_hint(self.session.model.clone()))
+            .or_else(|| self.configured_remote_model_hint())
+    }
+
+    fn remote_header_provider_model(&self) -> Option<String> {
+        let effective_model = self.effective_remote_provider_model();
+
+        self.remote_startup_phase
+            .as_ref()
+            .and_then(|phase| {
+                if matches!(phase, super::RemoteStartupPhase::Connecting)
+                    && effective_model.is_some()
+                {
+                    return effective_model.clone();
+                }
+
+                let elapsed = self
+                    .remote_startup_phase_started
+                    .map(|started| started.elapsed())
+                    .unwrap_or_default();
+                let should_defer_header = matches!(phase, super::RemoteStartupPhase::Connecting)
+                    && elapsed < REMOTE_STARTUP_HEADER_DEBOUNCE;
+
+                if should_defer_header {
+                    None
+                } else {
+                    Some(phase.header_label_with_elapsed(elapsed))
+                }
+            })
+            .or(effective_model)
+            .or_else(|| {
+                (self.remote_session_id.is_some() || self.connection_type.is_some())
+                    .then(|| "connected".to_string())
+            })
+    }
+
+    fn remote_header_provider_name(&self) -> Option<String> {
+        let configured_provider_hint = self.configured_remote_provider_hint();
+        self.remote_provider_name
+            .clone()
+            .or_else(|| {
+                self.effective_remote_provider_model().and_then(|model| {
+                    crate::provider::provider_for_model_with_hint(&model, None)
+                        .or(configured_provider_hint.as_deref())
+                        .map(str::to_string)
+                })
+            })
+            .filter(|provider| !provider.trim().is_empty())
+    }
+
+    fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
+        let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
+        let remote_provider_name = if uses_remote_widget_metadata {
+            self.remote_header_provider_name()
+        } else {
+            None
+        };
+        let provider_name = if uses_remote_widget_metadata {
+            remote_provider_name.as_deref()
+        } else {
+            Some(self.provider.name())
+        };
+
+        let provider_from_hint = WidgetProviderKind::from_provider_key(provider_name);
+        let provider = if provider_from_hint != WidgetProviderKind::Unknown {
+            provider_from_hint
+        } else {
+            WidgetProviderKind::from_provider_key(
+                model
+                    .map(|model| crate::provider::resolve_model_capabilities(model, provider_name))
+                    .and_then(|caps| caps.provider)
+                    .as_deref(),
+            )
+        };
+
+        WidgetRouteInfo {
+            provider,
+            is_remote: uses_remote_widget_metadata,
+        }
+    }
+
+    fn widget_auth_method(&self, route: WidgetRouteInfo) -> crate::tui::info_widget::AuthMethod {
+        if route.is_remote {
+            return crate::tui::info_widget::AuthMethod::Unknown;
+        }
+
+        let auth_status = crate::auth::AuthStatus::check_fast();
+        let runtime_provider = active_runtime_provider_key();
+
+        match route.provider {
+            WidgetProviderKind::Anthropic => {
+                if matches!(
+                    runtime_provider.as_deref(),
+                    Some("claude-api" | "anthropic-api")
+                ) {
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                } else if matches!(runtime_provider.as_deref(), Some("claude" | "anthropic")) {
+                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
+                } else if auth_status.anthropic.has_oauth {
+                    // Anthropic Auto prefers OAuth (Claude subscription) before
+                    // falling back to a direct API key.
+                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
+                } else if auth_status.anthropic.has_api_key {
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
+                }
+            }
+            WidgetProviderKind::OpenAI => {
+                if matches!(runtime_provider.as_deref(), Some("openai-api")) {
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                } else if matches!(runtime_provider.as_deref(), Some("openai"))
+                    || auth_status.openai_has_oauth
+                {
+                    crate::tui::info_widget::AuthMethod::OpenAIOAuth
+                } else if auth_status.openai_has_api_key {
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
+                }
+            }
+            WidgetProviderKind::OpenCode => crate::tui::info_widget::AuthMethod::OpenCodeApiKey,
+            WidgetProviderKind::OpenRouter => {
+                let transport_state =
+                    crate::provider::openrouter::OpenRouterTransportState::from_current_env(
+                        runtime_provider.as_deref(),
+                    );
+                if transport_state.is_real_openrouter() {
+                    crate::tui::info_widget::AuthMethod::OpenRouterApiKey
+                } else if transport_state.accrues_user_api_key_cost() {
+                    crate::tui::info_widget::AuthMethod::ApiKey
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
+                }
+            }
+            WidgetProviderKind::CostBasedApiKey => crate::tui::info_widget::AuthMethod::ApiKey,
+            WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
+            WidgetProviderKind::Gemini => {
+                if auth_status.gemini == crate::auth::AuthState::Available {
+                    crate::tui::info_widget::AuthMethod::GeminiOAuth
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
+                }
+            }
+            WidgetProviderKind::Unknown => crate::tui::info_widget::AuthMethod::Unknown,
+        }
+    }
+
+    fn widget_usage_info(
+        &self,
+        route: WidgetRouteInfo,
+        auth_method: crate::tui::info_widget::AuthMethod,
+    ) -> Option<crate::tui::info_widget::UsageInfo> {
+        let output_tps = if matches!(self.status, ProcessingStatus::Streaming) {
+            self.compute_streaming_tps()
+        } else {
+            None
+        };
+
+        let cost_based_usage = || crate::tui::info_widget::UsageInfo {
+            provider: crate::tui::info_widget::UsageProvider::CostBased,
+            five_hour: 0.0,
+            five_hour_resets_at: None,
+            seven_day: 0.0,
+            seven_day_resets_at: None,
+            spark: None,
+            spark_resets_at: None,
+            total_cost: self.total_cost,
+            input_tokens: self.total_input_tokens,
+            output_tokens: self.total_output_tokens,
+            cache_read_tokens: self.streaming_cache_read_tokens,
+            cache_write_tokens: self.streaming_cache_creation_tokens,
+            output_tps,
+            available: true,
+        };
+
+        match route.provider {
+            WidgetProviderKind::Copilot => Some(crate::tui::info_widget::UsageInfo {
+                provider: crate::tui::info_widget::UsageProvider::Copilot,
+                five_hour: 0.0,
+                five_hour_resets_at: None,
+                seven_day: 0.0,
+                seven_day_resets_at: None,
+                spark: None,
+                spark_resets_at: None,
+                total_cost: 0.0,
+                input_tokens: self.total_input_tokens,
+                output_tokens: self.total_output_tokens,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                output_tps,
+                available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+            }),
+            WidgetProviderKind::Anthropic => {
+                if matches!(
+                    auth_method,
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                ) {
+                    return Some(cost_based_usage());
+                }
+
+                let usage = crate::usage::get_sync();
+                Some(crate::tui::info_widget::UsageInfo {
+                    provider: crate::tui::info_widget::UsageProvider::Anthropic,
+                    five_hour: usage.five_hour,
+                    five_hour_resets_at: usage.five_hour_resets_at.clone(),
+                    seven_day: usage.seven_day,
+                    seven_day_resets_at: usage.seven_day_resets_at.clone(),
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: usage.last_error.is_none(),
+                })
+            }
+            WidgetProviderKind::OpenAI => {
+                if matches!(
+                    auth_method,
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                ) {
+                    return Some(cost_based_usage());
+                }
+
+                let openai_usage = crate::usage::get_openai_usage_sync();
+                Some(crate::tui::info_widget::UsageInfo {
+                    provider: crate::tui::info_widget::UsageProvider::OpenAI,
+                    five_hour: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .map(|w| w.usage_ratio)
+                        .unwrap_or(0.0),
+                    five_hour_resets_at: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    seven_day: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .map(|w| w.usage_ratio)
+                        .unwrap_or(0.0),
+                    seven_day_resets_at: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    spark: openai_usage.spark.as_ref().map(|w| w.usage_ratio),
+                    spark_resets_at: openai_usage
+                        .spark
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    total_cost: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: openai_usage.has_limits(),
+                })
+            }
+            WidgetProviderKind::Gemini => None,
+            WidgetProviderKind::OpenRouter => {
+                if route.is_remote {
+                    return Some(cost_based_usage());
+                }
+
+                let runtime_provider = active_runtime_provider_key();
+                let transport_state =
+                    crate::provider::openrouter::OpenRouterTransportState::from_current_env(
+                        runtime_provider.as_deref(),
+                    );
+                if transport_state.accrues_user_api_key_cost() {
+                    Some(cost_based_usage())
+                } else {
+                    None
+                }
+            }
+            WidgetProviderKind::OpenCode | WidgetProviderKind::CostBasedApiKey => {
+                Some(cost_based_usage())
+            }
+            WidgetProviderKind::Unknown => None,
+        }
+    }
+}
+
+impl crate::tui::TuiState for App {
+    fn display_messages(&self) -> &[DisplayMessage] {
+        &self.display_messages
+    }
+
+    fn display_user_message_count(&self) -> usize {
+        self.display_user_message_count
+    }
+
+    fn compacted_hidden_user_prompts(&self) -> usize {
+        self.compacted_history_lazy.hidden_user_prompts
+    }
+
+    fn has_display_edit_tool_messages(&self) -> bool {
+        self.display_edit_tool_message_count > 0
+    }
+
+    fn side_pane_images(&self) -> Vec<crate::session::RenderedImage> {
+        if self.is_remote {
+            self.remote_side_pane_images.clone()
+        } else {
+            crate::session::render_images(&self.session)
+        }
+    }
+
+    fn display_messages_version(&self) -> u64 {
+        self.display_messages_version
+    }
+
+    fn streaming_text(&self) -> &str {
+        &self.streaming_text
+    }
+
+    fn input(&self) -> &str {
+        &self.input
+    }
+
+    fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
+    fn is_processing(&self) -> bool {
+        self.is_processing || self.pending_queued_dispatch || self.split_launch_in_flight()
+    }
+
+    fn queued_messages(&self) -> &[String] {
+        &self.queued_messages
+    }
+
+    fn interleave_message(&self) -> Option<&str> {
+        self.interleave_message.as_deref()
+    }
+
+    fn pending_soft_interrupts(&self) -> &[String] {
+        &self.pending_soft_interrupts
+    }
+
+    fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    fn auto_scroll_paused(&self) -> bool {
+        self.auto_scroll_paused
+    }
+
+    fn provider_name(&self) -> String {
+        if self.is_remote {
+            self.remote_header_provider_name().unwrap_or_default()
+        } else {
+            self.remote_provider_name.clone().unwrap_or_else(|| {
+                crate::provider_catalog::runtime_provider_display_name(self.provider.name())
+            })
+        }
+    }
+
+    fn provider_model(&self) -> String {
+        if self.is_remote {
+            self.remote_header_provider_model()
+                .unwrap_or_else(|| "connecting to server…".to_string())
+        } else {
+            self.remote_provider_model
+                .clone()
+                .unwrap_or_else(|| self.provider.model().to_string())
+        }
+    }
+
+    fn upstream_provider(&self) -> Option<String> {
+        self.upstream_provider.clone()
+    }
+
+    fn connection_type(&self) -> Option<String> {
+        self.connection_type.clone()
+    }
+
+    fn status_detail(&self) -> Option<String> {
+        self.status_detail.clone()
+    }
+
+    fn mcp_servers(&self) -> Vec<(String, usize)> {
+        self.mcp_server_names.clone()
+    }
+
+    fn available_skills(&self) -> Vec<String> {
+        if self.is_remote && !self.remote_skills.is_empty() {
+            self.remote_skills.clone()
+        } else {
+            self.current_skills_snapshot()
+                .list()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        }
+    }
+
+    fn streaming_tokens(&self) -> (u64, u64) {
+        (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    fn streaming_cache_tokens(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        )
+    }
+
+    fn output_tps(&self) -> Option<f32> {
+        if !self.is_processing || !matches!(self.status, ProcessingStatus::Streaming) {
+            return None;
+        }
+        self.compute_streaming_tps()
+    }
+
+    fn streaming_tool_calls(&self) -> Vec<ToolCall> {
+        self.streaming_tool_calls.clone()
+    }
+
+    fn update_cost(&mut self) {
+        self.update_cost_impl()
+    }
+
+    fn elapsed(&self) -> Option<std::time::Duration> {
+        if let Some(d) = self.replay_elapsed_override {
+            return Some(d);
+        }
+        if self.is_processing() {
+            return self
+                .visible_turn_started
+                .or(self.processing_started)
+                .map(|t| t.elapsed());
+        }
+        self.split_launch_in_flight()
+            .then(|| self.pending_split_started_at.map(|t| t.elapsed()))
+            .flatten()
+    }
+
+    fn status(&self) -> ProcessingStatus {
+        if self.pending_queued_dispatch || self.split_launch_in_flight() {
+            ProcessingStatus::Sending
+        } else {
+            self.status.clone()
+        }
+    }
+
+    fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        App::command_suggestions(self)
+    }
+
+    fn command_suggestion_selected(&self) -> usize {
+        self.command_suggestion_selected
+    }
+
+    fn active_skill(&self) -> Option<String> {
+        self.active_skill.clone()
+    }
+
+    fn subagent_status(&self) -> Option<String> {
+        self.subagent_status.clone()
+    }
+
+    fn batch_progress(&self) -> Option<crate::bus::BatchProgress> {
+        self.batch_progress.clone()
+    }
+
+    fn time_since_activity(&self) -> Option<std::time::Duration> {
+        if let Some(last_activity) = self.last_stream_activity {
+            return Some(last_activity.elapsed());
+        }
+
+        // Restored/resumed clients often have a full transcript but no stream event in this
+        // process yet. Treat those as already idle so reopening many historical sessions does not
+        // spend the first warm-up window rerendering large static transcripts at idle FPS.
+        if !self.display_messages.is_empty() && !self.is_processing {
+            return Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + std::time::Duration::from_secs(1));
+        }
+
+        Some(self.app_started.elapsed())
+    }
+
+    fn stream_message_ended(&self) -> bool {
+        self.stream_message_ended
+    }
+
+    fn has_pending_mouse_scroll_animation(&self) -> bool {
+        self.mouse_scroll_queue != 0
+    }
+
+    fn total_session_tokens(&self) -> Option<(u64, u64)> {
+        // In remote mode, use tokens from server
+        // Independent mode doesn't currently track total tokens
+        self.remote_total_tokens
+    }
+
+    fn session_compaction_count(&self) -> usize {
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
+            return 0;
+        }
+        self.registry
+            .compaction()
+            .try_read()
+            .ok()
+            .map(|manager| manager.compacted_count())
+            .unwrap_or(0)
+    }
+
+    fn is_remote_mode(&self) -> bool {
+        self.is_remote
+    }
+
+    fn is_canary(&self) -> bool {
+        if self.is_remote {
+            self.remote_is_canary.unwrap_or(self.session.is_canary)
+        } else {
+            self.session.is_canary
+        }
+    }
+
+    fn is_replay(&self) -> bool {
+        self.is_replay
+    }
+
+    fn diff_mode(&self) -> crate::config::DiffDisplayMode {
+        self.diff_mode
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        if self.is_remote {
+            self.remote_session_id.clone()
+        } else {
+            Some(self.session.id.clone())
+        }
+    }
+
+    fn session_display_name(&self) -> Option<String> {
+        if self.is_remote {
+            self.remote_session_id
+                .as_ref()
+                .or(self.resume_session_id.as_ref())
+                .as_ref()
+                .and_then(|id| crate::id::extract_session_name(id))
+                .map(|s| s.to_string())
+        } else {
+            Some(self.session.display_name().to_string())
+        }
+    }
+
+    fn server_display_name(&self) -> Option<String> {
+        self.remote_server_short_name.clone().or_else(|| {
+            if !self.is_remote {
+                return None;
+            }
+            crate::registry::find_server_by_socket_sync(&crate::server::socket_path())
+                .map(|info| info.name)
+        })
+    }
+
+    fn server_display_icon(&self) -> Option<String> {
+        self.remote_server_icon.clone().or_else(|| {
+            if !self.is_remote {
+                return None;
+            }
+            crate::registry::find_server_by_socket_sync(&crate::server::socket_path())
+                .map(|info| info.icon)
+        })
+    }
+
+    fn server_sessions(&self) -> Vec<String> {
+        self.remote_sessions.clone()
+    }
+
+    fn connected_clients(&self) -> Option<usize> {
+        self.remote_client_count
+    }
+
+    fn status_notice(&self) -> Option<String> {
+        if !self.is_remote
+            && self.provider.uses_jcode_compaction()
+            && let Ok(manager) = self.registry.compaction().try_read()
+            && manager.is_compacting()
+        {
+            return Some(Self::format_compaction_progress_notice(
+                self.app_started.elapsed(),
+            ));
+        }
+        self.status_notice.as_ref().and_then(|(text, at)| {
+            if at.elapsed() <= Duration::from_secs(3) {
+                Some(text.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn active_experimental_feature_notice(&self) -> Option<String> {
+        self.active_experimental_feature_notice.clone()
+    }
+
+    fn remote_startup_phase_active(&self) -> bool {
+        self.remote_startup_phase.is_some()
+    }
+
+    fn dictation_key_label(&self) -> Option<String> {
+        self.dictation_key_label().map(|s| s.to_string())
+    }
+
+    fn animation_elapsed(&self) -> f32 {
+        self.app_started.elapsed().as_secs_f32()
+    }
+
+    fn rate_limit_remaining(&self) -> Option<Duration> {
+        self.rate_limit_reset.and_then(|reset_time| {
+            let now = Instant::now();
+            if reset_time > now {
+                Some(reset_time - now)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn queue_mode(&self) -> bool {
+        self.queue_mode
+    }
+
+    fn next_prompt_new_session_armed(&self) -> bool {
+        self.route_next_prompt_to_new_session
+    }
+
+    fn has_stashed_input(&self) -> bool {
+        self.stashed_input.is_some()
+    }
+
+    fn input_history_browse_status(&self) -> Option<(usize, usize)> {
+        let idx = self.input_history_index?;
+        let total = self.input_history.len();
+        if total == 0 {
+            return None;
+        }
+        Some((idx + 1, total))
+    }
+
+    fn context_snapshot(&self) -> crate::tui::ContextSnapshot {
+        use crate::message::{ContentBlock, Role};
+        use std::time::Instant;
+
+        static CACHE: Mutex<Option<(Instant, CachedContextSnapshot)>> = Mutex::new(None);
+        const TTL: Duration = Duration::from_millis(250);
+
+        let session_key = if self.is_remote {
+            self.remote_session_id
+                .clone()
+                .unwrap_or_else(|| self.session.id.clone())
+        } else {
+            self.session.id.clone()
+        };
+        let message_count = if self.is_remote {
+            self.display_messages.len()
+        } else {
+            self.session.messages.len()
+        };
+        let (compaction_count, compaction_summary_chars, is_compacting, compaction_fresh) =
+            if self.is_remote {
+                (0, 0, false, true)
+            } else if self.provider.uses_jcode_compaction() {
+                match self.registry.compaction().try_read() {
+                    Ok(manager) => (
+                        manager.compacted_count(),
+                        manager.summary_chars(),
+                        manager.is_compacting(),
+                        true,
+                    ),
+                    Err(_) => (0, 0, false, false),
+                }
+            } else {
+                (0, 0, false, true)
+            };
+
+        if !compaction_fresh {
+            return crate::tui::ContextSnapshot {
+                info: None,
+                revision: self.context_revision,
+                fresh: false,
+            };
+        }
+
+        if let Ok(cache) = CACHE.lock()
+            && let Some((ts, cached)) = &*cache
+            && ts.elapsed() < TTL
+            && cached.session_key == session_key
+            && cached.is_remote == self.is_remote
+            && cached.display_messages_version == self.display_messages_version
+            && cached.context_revision == self.context_revision
+            && cached.message_count == message_count
+            && cached.compaction_count == compaction_count
+            && cached.compaction_summary_chars == compaction_summary_chars
+            && cached.is_compacting == is_compacting
+        {
+            return cached.snapshot.clone();
+        }
+
+        let mut info = self.context_info.clone();
+        info.session_context_chars = 0;
+
+        // Compute dynamic stats from conversation
+        let mut user_chars = 0usize;
+        let mut user_count = 0usize;
+        let mut asst_chars = 0usize;
+        let mut asst_count = 0usize;
+        let mut tool_call_chars = 0usize;
+        let mut tool_call_count = 0usize;
+        let mut tool_result_chars = 0usize;
+        let mut tool_result_count = 0usize;
+
+        if self.is_remote {
+            for msg in &self.display_messages {
+                match msg.role.as_str() {
+                    "user" => {
+                        user_count += 1;
+                        user_chars += msg.content.len();
+                    }
+                    "assistant" => {
+                        asst_count += 1;
+                        asst_chars += msg.content.len();
+                    }
+                    "tool" => {
+                        tool_result_count += 1;
+                        tool_result_chars += msg.content.len();
+                        if let Some(tool) = &msg.tool_data {
+                            tool_call_count += 1;
+                            tool_call_chars += tool.name.len() + tool.input.to_string().len();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            let skip = if self.provider.uses_jcode_compaction() {
+                let compaction = self.registry.compaction();
+                let result = compaction
+                    .try_read()
+                    .ok()
+                    .map(|manager| (manager.compacted_count(), manager.summary_chars()));
+                if let Some((cc, sc)) = result {
+                    if cc > 0 && sc > 0 {
+                        user_count += 1;
+                        user_chars += sc;
+                    }
+                    cc
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            for msg in self.session.messages.iter().skip(skip) {
+                match msg.role {
+                    Role::User => user_count += 1,
+                    Role::Assistant => asst_count += 1,
+                }
+
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text, .. } => {
+                            if msg.role == Role::User
+                                && text.starts_with("<system-reminder>\n# Session Context")
+                            {
+                                info.session_context_chars += text.len();
+                                user_count = user_count.saturating_sub(1);
+                            } else {
+                                match msg.role {
+                                    Role::User => user_chars += text.len(),
+                                    Role::Assistant => asst_chars += text.len(),
+                                }
+                            }
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            tool_call_count += 1;
+                            tool_call_chars += name.len() + input.to_string().len();
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            tool_result_count += 1;
+                            tool_result_chars += content.len();
+                        }
+                        ContentBlock::Reasoning { text } => {
+                            asst_chars += text.len();
+                        }
+                        ContentBlock::AnthropicThinking {
+                            thinking,
+                            signature,
+                        } => {
+                            asst_chars += thinking.len() + signature.len();
+                        }
+                        ContentBlock::OpenAIReasoning {
+                            id,
+                            summary,
+                            encrypted_content,
+                            status,
+                        } => {
+                            asst_chars += id.len()
+                                + summary.iter().map(String::len).sum::<usize>()
+                                + encrypted_content.as_ref().map(String::len).unwrap_or(0)
+                                + status.as_ref().map(String::len).unwrap_or(0);
+                        }
+                        ContentBlock::Image { data, .. } => {
+                            user_chars += data.len();
+                        }
+                        ContentBlock::OpenAICompaction { encrypted_content } => {
+                            user_chars += encrypted_content.len();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Use the last exact tool-definition measurement if available.
+        // Fall back to the older rough estimate only before the first tool fetch.
+        let tool_defs_count = if info.tool_defs_count > 0 {
+            info.tool_defs_count
+        } else {
+            25
+        };
+        let tool_defs_chars = if info.tool_defs_chars > 0 {
+            info.tool_defs_chars
+        } else {
+            tool_defs_count * 500
+        };
+
+        info.user_messages_chars = user_chars;
+        info.user_messages_count = user_count;
+        info.assistant_messages_chars = asst_chars;
+        info.assistant_messages_count = asst_count;
+        info.tool_calls_chars = tool_call_chars;
+        info.tool_calls_count = tool_call_count;
+        info.tool_results_chars = tool_result_chars;
+        info.tool_results_count = tool_result_count;
+        info.tool_defs_chars = tool_defs_chars;
+        info.tool_defs_count = tool_defs_count;
+
+        // Update total
+        info.total_chars = info.system_prompt_chars
+            + info.session_context_chars
+            + info.project_agents_md_chars
+            + info.global_agents_md_chars
+            + info.skills_chars
+            + info.selfdev_chars
+            + info.memory_chars
+            + info.prompt_overlay_chars
+            + info.preferred_tools_chars
+            + info.tool_defs_chars
+            + info.user_messages_chars
+            + info.assistant_messages_chars
+            + info.tool_calls_chars
+            + info.tool_results_chars;
+
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((
+                Instant::now(),
+                CachedContextSnapshot {
+                    session_key,
+                    is_remote: self.is_remote,
+                    display_messages_version: self.display_messages_version,
+                    context_revision: self.context_revision,
+                    message_count,
+                    compaction_count,
+                    compaction_summary_chars,
+                    is_compacting,
+                    snapshot: crate::tui::ContextSnapshot {
+                        info: Some(info.clone()),
+                        revision: self.context_revision,
+                        fresh: true,
+                    },
+                },
+            ));
+        }
+
+        crate::tui::ContextSnapshot {
+            info: Some(info),
+            revision: self.context_revision,
+            fresh: true,
+        }
+    }
+
+    fn context_info(&self) -> crate::prompt::ContextInfo {
+        self.context_snapshot().info.unwrap_or_default()
+    }
+
+    fn context_limit(&self) -> Option<usize> {
+        Some(self.context_limit as usize)
+    }
+
+    fn client_update_available(&self) -> bool {
+        self.has_newer_binary()
+    }
+
+    fn server_update_available(&self) -> Option<bool> {
+        if self.is_remote {
+            self.remote_server_has_update
+        } else {
+            None
+        }
+    }
+
+    fn info_widget_data(&self) -> crate::tui::info_widget::InfoWidgetData {
+        let session_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
+        };
+
+        let todos = if self.swarm_enabled && !self.swarm_plan_items.is_empty() {
+            self.swarm_plan_items
+                .iter()
+                .map(|item| crate::todo::TodoItem {
+                    content: item.content.clone(),
+                    status: item.status.clone(),
+                    priority: item.priority.clone(),
+                    id: item.id.clone(),
+                    blocked_by: item.blocked_by.clone(),
+                    assigned_to: item.assigned_to.clone(),
+                    confidence: None,
+                    completion_confidence: None,
+                })
+                .collect()
+        } else {
+            gather_todos_for_session(session_id)
+        };
+
+        let context_snapshot = self.context_snapshot();
+        let context_info = if let Some(context_info) = context_snapshot.info.clone() {
+            (context_info.total_chars > 0).then_some(context_info)
+        } else {
+            None
+        };
+
+        let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
+        let (
+            model,
+            reasoning_effort,
+            service_tier,
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
+        ) = if uses_remote_widget_metadata {
+            (
+                self.remote_provider_model.clone(),
+                self.remote_reasoning_effort.clone(),
+                self.remote_service_tier.clone(),
+                None,
+                None,
+            )
+        } else {
+            (
+                Some(self.provider.model()),
+                self.provider.reasoning_effort(),
+                self.provider.service_tier(),
+                self.provider.native_compaction_mode(),
+                self.provider.native_compaction_threshold_tokens(),
+            )
+        };
+
+        let (session_count, client_count) = if self.is_remote {
+            (Some(self.remote_sessions.len()), None)
+        } else {
+            (None, None)
+        };
+        let session_name = self.session_display_name().map(|name| {
+            if let Some(ref srv) = self.remote_server_short_name {
+                format!("{} {}", srv, name)
+            } else {
+                name
+            }
+        });
+
+        let memory_info = gather_memory_info(self.memory_enabled);
+
+        // Gather swarm info
+        let swarm_info = if self.swarm_enabled {
+            let subagent_status = self.subagent_status.clone();
+            let mut members: Vec<crate::protocol::SwarmMemberStatus> = Vec::new();
+            let (session_count, client_count, session_names, has_activity) = if self.is_remote {
+                members = self.remote_swarm_members.clone();
+                let session_names = if !members.is_empty() {
+                    members
+                        .iter()
+                        .map(|m| {
+                            m.friendly_name
+                                .clone()
+                                .unwrap_or_else(|| m.session_id.chars().take(8).collect())
+                        })
+                        .collect()
+                } else {
+                    self.remote_sessions.clone()
+                };
+                let session_count = if !members.is_empty() {
+                    members.len()
+                } else {
+                    self.remote_sessions.len()
+                };
+                let has_activity = members
+                    .iter()
+                    .any(|m| m.status != "ready" || m.detail.is_some());
+                (
+                    session_count,
+                    self.remote_client_count,
+                    session_names,
+                    has_activity,
+                )
+            } else {
+                let (status, detail) = match &self.status {
+                    ProcessingStatus::Idle => ("ready".to_string(), None),
+                    ProcessingStatus::Sending => {
+                        ("running".to_string(), Some("sending".to_string()))
+                    }
+                    ProcessingStatus::Connecting(phase) => {
+                        ("running".to_string(), Some(phase.to_string()))
+                    }
+                    ProcessingStatus::Thinking(_) => ("thinking".to_string(), None),
+                    ProcessingStatus::Streaming => {
+                        ("running".to_string(), Some("streaming".to_string()))
+                    }
+                    ProcessingStatus::WaitingForNetwork { listener } => {
+                        ("waiting_network".to_string(), Some(listener.clone()))
+                    }
+                    ProcessingStatus::RunningTool(name) => {
+                        ("running".to_string(), Some(format!("tool: {}", name)))
+                    }
+                };
+                let detail = subagent_status.clone().or(detail);
+                let has_activity = status != "ready" || detail.is_some();
+                if has_activity {
+                    members.push(crate::protocol::SwarmMemberStatus {
+                        session_id: self.session.id.clone(),
+                        friendly_name: Some(self.session.display_name().to_string()),
+                        status,
+                        detail,
+                        role: None,
+                        is_headless: Some(false),
+                        live_attachments: Some(1),
+                        status_age_secs: Some(0),
+                    });
+                }
+                (
+                    1,
+                    None,
+                    vec![self.session.display_name().to_string()],
+                    has_activity,
+                )
+            };
+
+            // Only show if there's something interesting
+            if has_activity || session_count > 1 || client_count.is_some() {
+                Some(crate::tui::info_widget::SwarmInfo {
+                    session_count,
+                    subagent_status,
+                    client_count,
+                    session_names,
+                    members,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Gather background task info
+        let background_info = {
+            // Get running background tasks count
+            let bg_manager = crate::background::global();
+            let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
+
+            if running_count > 0 {
+                Some(crate::tui::info_widget::BackgroundInfo {
+                    running_count,
+                    running_tasks,
+                    progress_summary: progress.as_ref().map(|progress| progress.label.clone()),
+                    progress_detail: progress
+                        .as_ref()
+                        .and_then(|progress| progress.detail.clone()),
+                    memory_agent_active: false,
+                    memory_agent_turns: 0,
+                })
+            } else {
+                None
+            }
+        };
+
+        let route = self.widget_route_info(model.as_deref());
+        let auth_method = self.widget_auth_method(route);
+        let usage_info = self.widget_usage_info(route, auth_method);
+
+        let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
+            self.compute_streaming_tps()
+        } else {
+            None
+        };
+
+        let cache_hit_info = (self.total_cache_reported_input_tokens > 0).then(|| {
+            crate::tui::info_widget::CacheHitInfo {
+                reported_input_tokens: self.total_cache_reported_input_tokens,
+                read_tokens: self.total_cache_read_tokens,
+                creation_tokens: self.total_cache_creation_tokens,
+                optimal_input_tokens: self.total_cache_optimal_input_tokens,
+                last_reported_input_tokens: self.last_cache_reported_input_tokens,
+                last_read_tokens: self.last_cache_read_tokens,
+                last_optimal_input_tokens: self.last_cache_optimal_input_tokens,
+                miss_attributions: self
+                    .kv_cache_miss_samples
+                    .iter()
+                    .rev()
+                    .map(|sample| crate::tui::info_widget::CacheMissAttribution {
+                        turn_number: sample.turn_number,
+                        call_index: sample.call_index,
+                        missed_tokens: sample.missed_tokens,
+                        reason: sample.reason.label().to_string(),
+                    })
+                    .collect(),
+            }
+        });
+
+        // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
+        let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
+            crate::tui::mermaid::get_active_diagrams()
+        } else {
+            Vec::new()
+        };
+
+        let workspace_rows = if crate::tui::workspace_client::is_enabled() {
+            let session_id = if self.is_remote {
+                self.remote_session_id.as_deref()
+            } else {
+                Some(self.session.id.as_str())
+            };
+            crate::tui::workspace_client::visible_rows(5, session_id, self.is_processing)
+        } else {
+            Vec::new()
+        };
+
+        let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
+
+        let compaction_info = if !self.is_remote && self.provider.uses_jcode_compaction() {
+            let compaction = self.registry.compaction();
+            compaction.try_read().ok().and_then(|manager| {
+                let compacted_messages = manager.compacted_count();
+                let summary_chars = manager.summary_chars();
+                let is_compacting = manager.is_compacting();
+                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
+                    crate::tui::info_widget::CompactionInfo {
+                        is_compacting,
+                        compacted_messages,
+                        active_messages: manager.active_messages_count(),
+                        summary_chars,
+                        mode: manager.mode().as_str().to_string(),
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        crate::tui::info_widget::InfoWidgetData {
+            todos,
+            context_info,
+            context_info_stale: !context_snapshot.fresh,
+            queue_mode: Some(self.queue_mode),
+            context_limit: Some(self.context_limit as usize),
+            model,
+            reasoning_effort,
+            service_tier,
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
+            session_count,
+            session_name,
+            client_count,
+            memory_info,
+            swarm_info,
+            background_info,
+            usage_info,
+            tokens_per_second,
+            provider_name: if uses_remote_widget_metadata {
+                self.remote_provider_name
+                    .clone()
+                    .or_else(|| Some(self.provider.name().to_string()))
+            } else {
+                Some(self.provider.name().to_string())
+            },
+            auth_method,
+            upstream_provider: self.upstream_provider.clone(),
+            connection_type: self.connection_type.clone(),
+            diagrams,
+            workspace_rows,
+            workspace_animation_tick,
+            ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
+            observed_context_tokens: self.current_stream_context_tokens(),
+            cache_hit_info,
+            compaction_info,
+            is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
+                let compaction = self.registry.compaction();
+                compaction
+                    .try_read()
+                    .map(|m| m.is_compacting())
+                    .unwrap_or(false)
+            } else {
+                false
+            },
+            git_info: gather_git_info(),
+        }
+    }
+
+    fn workspace_mode_enabled(&self) -> bool {
+        crate::tui::workspace_client::is_enabled()
+    }
+
+    fn workspace_map_rows(&self) -> Vec<crate::tui::workspace_map::VisibleWorkspaceRow> {
+        let session_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
+        };
+        crate::tui::workspace_client::visible_rows(5, session_id, self.is_processing)
+    }
+
+    fn workspace_animation_tick(&self) -> u64 {
+        self.app_started.elapsed().as_millis() as u64 / 180
+    }
+
+    fn render_streaming_markdown(&self, width: usize) -> Vec<ratatui::text::Line<'static>> {
+        let mut renderer = self.streaming_md_renderer.borrow_mut();
+        renderer.set_width(Some(width));
+        renderer.update(&self.streaming_text)
+    }
+
+    fn centered_mode(&self) -> bool {
+        self.centered
+    }
+
+    fn auth_status(&self) -> crate::auth::AuthStatus {
+        crate::auth::AuthStatus::check_fast()
+    }
+
+    fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
+        self.diagram_mode
+    }
+
+    fn diagram_focus(&self) -> bool {
+        self.diagram_focus
+    }
+
+    fn diagram_index(&self) -> usize {
+        self.diagram_index
+    }
+
+    fn diagram_scroll(&self) -> (i32, i32) {
+        (self.diagram_scroll_x, self.diagram_scroll_y)
+    }
+
+    fn diagram_pane_ratio(&self) -> u8 {
+        self.animated_diagram_pane_ratio()
+    }
+
+    fn diagram_pane_animating(&self) -> bool {
+        self.diagram_pane_anim_start
+            .map(|s| s.elapsed().as_secs_f32() < Self::DIAGRAM_PANE_ANIM_DURATION)
+            .unwrap_or(false)
+    }
+
+    fn diagram_pane_enabled(&self) -> bool {
+        self.diagram_pane_enabled
+    }
+
+    fn diagram_pane_position(&self) -> crate::config::DiagramPanePosition {
+        self.diagram_pane_position
+    }
+
+    fn diagram_zoom(&self) -> u8 {
+        self.diagram_zoom
+    }
+    fn diff_pane_scroll(&self) -> usize {
+        self.diff_pane_scroll
+    }
+    fn diff_pane_scroll_x(&self) -> i32 {
+        self.diff_pane_scroll_x
+    }
+    fn side_panel_image_zoom_percent(&self) -> u8 {
+        self.side_panel_image_zoom_percent
+    }
+    fn diff_pane_focus(&self) -> bool {
+        self.diff_pane_focus
+    }
+    fn side_panel(&self) -> &crate::side_panel::SidePanelSnapshot {
+        &self.side_panel
+    }
+    fn pin_images(&self) -> bool {
+        self.pin_images && !self.side_panel_user_hidden
+    }
+    fn pinned_images_auto_hide_remaining_secs(&self) -> Option<u64> {
+        if self.side_panel_user_hidden
+            || self.side_panel.focused_page().is_some()
+            || self.diff_mode.is_file()
+        {
+            return None;
+        }
+        self.pinned_images_auto_hide_deadline.map(|deadline| {
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .saturating_add(1)
+        })
+    }
+    fn chat_native_scrollbar(&self) -> bool {
+        self.chat_native_scrollbar
+    }
+    fn side_panel_native_scrollbar(&self) -> bool {
+        self.side_panel_native_scrollbar
+    }
+    fn diff_line_wrap(&self) -> bool {
+        crate::config::config().display.diff_line_wrap
+    }
+    fn inline_interactive_state(&self) -> Option<&crate::tui::InlineInteractiveState> {
+        self.inline_interactive_state.as_ref()
+    }
+
+    fn inline_view_state(&self) -> Option<&crate::tui::InlineViewState> {
+        self.inline_view_state.as_ref()
+    }
+
+    fn changelog_scroll(&self) -> Option<usize> {
+        self.changelog_scroll
+    }
+
+    fn help_scroll(&self) -> Option<usize> {
+        self.help_scroll
+    }
+
+    fn model_status_overlay(&self) -> Option<(usize, &str)> {
+        self.model_status_scroll
+            .map(|scroll| (scroll, self.model_status_content.as_str()))
+    }
+
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&RefCell<crate::tui::session_picker::SessionPicker>> {
+        self.session_picker_overlay.as_ref()
+    }
+
+    fn login_picker_overlay(&self) -> Option<&RefCell<crate::tui::login_picker::LoginPicker>> {
+        self.login_picker_overlay.as_ref()
+    }
+
+    fn account_picker_overlay(
+        &self,
+    ) -> Option<&RefCell<crate::tui::account_picker::AccountPicker>> {
+        self.account_picker_overlay.as_ref()
+    }
+
+    fn usage_overlay(&self) -> Option<&RefCell<crate::tui::usage_overlay::UsageOverlay>> {
+        self.usage_overlay.as_ref()
+    }
+
+    fn working_dir(&self) -> Option<String> {
+        self.session.working_dir.clone()
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.app_started.elapsed().as_millis() as u64
+    }
+
+    fn copy_badge_ui(&self) -> crate::tui::CopyBadgeUiState {
+        self.copy_badge_ui.clone()
+    }
+
+    fn copy_selection_mode(&self) -> bool {
+        self.copy_selection_mode
+    }
+
+    fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
+        self.normalized_copy_selection()
+    }
+
+    fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {
+        if !self.copy_selection_mode {
+            return None;
+        }
+
+        let text = self.current_copy_selection_text().unwrap_or_default();
+        let has_selection = !text.is_empty();
+        Some(crate::tui::CopySelectionStatus {
+            pane: self
+                .current_copy_selection_pane()
+                .unwrap_or(crate::tui::CopySelectionPane::Chat),
+            has_action: has_selection,
+            selected_chars: text.chars().count(),
+            selected_lines: if has_selection {
+                text.lines().count().max(1)
+            } else {
+                0
+            },
+            dragging: self.copy_selection_dragging,
+        })
+    }
+
+    fn onboarding_preview_mode(&self) -> bool {
+        self.onboarding_preview_mode
+    }
+
+    fn onboarding_welcome_active(&self) -> bool {
+        App::onboarding_welcome_active(self)
+    }
+
+    fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
+        App::onboarding_welcome_kind(self)
+    }
+
+    fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        App::suggestion_prompts(self)
+    }
+
+    fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
+        let last_completed = self.last_api_completed?;
+        let provider = self.provider_name();
+        let model = self.provider_model();
+        let last_provider = self.last_api_completed_provider.as_deref()?;
+        let last_model = self.last_api_completed_model.as_deref()?;
+        if last_provider != provider || last_model != model {
+            return None;
+        }
+        let ttl_secs = crate::tui::cache_ttl_for_provider_model(provider, Some(&model))?;
+        let elapsed = last_completed.elapsed().as_secs();
+        let remaining = ttl_secs.saturating_sub(elapsed);
+        Some(crate::tui::CacheTtlInfo {
+            remaining_secs: remaining,
+            ttl_secs,
+            is_cold: remaining == 0,
+            cached_tokens: self.last_turn_input_tokens,
+        })
+    }
+}

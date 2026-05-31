@@ -20,6 +20,11 @@ pub struct RenderedCompactedHistoryInfo {
     pub visible_messages: usize,
     /// Number of older renderable compacted historical messages still hidden.
     pub remaining_messages: usize,
+    /// Number of user prompts (turns) that are hidden before the first rendered
+    /// message. Used to keep prompt numbering correct when older history is
+    /// truncated (e.g. the first visible prompt is really the 5th, not the 1st).
+    #[serde(default)]
+    pub hidden_user_prompts: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

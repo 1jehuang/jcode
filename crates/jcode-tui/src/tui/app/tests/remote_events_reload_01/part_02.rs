@@ -1,0 +1,351 @@
+#[test]
+fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = false;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+    app.processing_started = Some(Instant::now());
+    app.visible_turn_started = Some(Instant::now());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolStart {
+            id: "tool_read".to_string(),
+            name: "read".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolInput {
+            delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":2}"#.to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolExec {
+            id: "tool_read".to_string(),
+            name: "read".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input: 123,
+            output: 45,
+            cache_read_input: None,
+            cache_creation_input: None,
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            id: "tool_read".to_string(),
+            name: "read".to_string(),
+            output: "1 fn main() {}".to_string(),
+            error: None,
+        },
+        &mut remote,
+    );
+
+    let needs_redraw =
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+    assert!(
+        needs_redraw,
+        "remote Done must redraw after finalizing the response"
+    );
+
+    let footers: Vec<&DisplayMessage> = app
+        .display_messages()
+        .iter()
+        .filter(|msg| msg.role == "meta")
+        .collect();
+    assert!(
+        footers.iter().any(|msg| msg.content.contains("↑123 ↓45")),
+        "footer not found"
+    );
+}
+
+#[test]
+fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Continue working".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
+            }],
+        )
+        .expect("save todos");
+
+        let started = Instant::now() - Duration::from_secs(90);
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+        app.visible_turn_started = Some(started);
+
+        let needs_redraw =
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+        assert!(needs_redraw);
+        assert!(app.pending_queued_dispatch);
+
+        app.pending_queued_dispatch = false;
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+
+        assert_eq!(app.visible_turn_started, Some(started));
+        assert!(app.is_processing);
+        assert!(app.current_message_id.is_some());
+        assert!(!app.display_messages().iter().any(|msg| {
+            msg.role == "user"
+                && msg
+                    .content
+                    .contains("Continue working, or update the todo tool.")
+        }));
+    });
+}
+
+#[test]
+fn test_remote_auto_poke_completion_above_threshold_only_updates_ui() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finished work".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: Some(95),
+                completion_confidence: Some(95),
+            }],
+        )
+        .expect("save todos");
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Todos complete. Auto-poke finished. Cumulative confidence: 95%.")
+        }));
+    });
+}
+
+#[test]
+fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Needs validation".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: Some(80),
+                completion_confidence: Some(80),
+            }],
+        )
+        .expect("save todos");
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert!(app.hidden_queued_system_messages[0].contains("Keep working"));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Todos complete. Auto-poke finished. Cumulative confidence: 80%.")
+        }));
+    });
+}
+
+#[test]
+fn test_remote_poke_status_and_off_update_state() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Continue working".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+        app.pending_queued_dispatch = true;
+        app.queued_messages
+            .push(super::commands::build_poke_message(
+                &super::commands::incomplete_poke_todos(&app),
+            ));
+
+        app.input = "/poke status".to_string();
+        app.cursor_pos = app.input.len();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("/poke status should succeed remotely");
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Auto-poke: ON. 1 incomplete todo.")
+                && msg.content.contains("A follow-up poke is queued.")
+                && msg.content.contains("A turn is currently running.")
+        }));
+
+        app.input = "/poke off".to_string();
+        app.cursor_pos = app.input.len();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("/poke off should succeed remotely");
+
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
+        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content.contains("Auto-poke disabled.")
+                && msg.content.contains("Cleared 1 queued poke follow-up")
+        }));
+    });
+}
+
+#[test]
+fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.session.messages.clear();
+    app.push_display_message(DisplayMessage::user("hello"));
+    app.push_display_message(DisplayMessage::assistant("hi there"));
+
+    app.input = "/rewind".to_string();
+    app.cursor_pos = app.input.len();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .expect("/rewind should be handled remotely");
+
+    let last = app.display_messages().last().expect("history message");
+    assert!(last.content.contains("Conversation history:"));
+    assert!(last.content.contains("1 👤 User - hello"));
+    assert!(last.content.contains("2 🤖 Assistant - hi there"));
+    assert!(!last.content.contains("No messages in conversation"));
+}
+
+#[test]
+fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.push_display_message(DisplayMessage::user("hello"));
+    app.push_display_message(DisplayMessage::assistant("hi there"));
+
+    app.input = "/rewind 1".to_string();
+    app.cursor_pos = app.input.len();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .expect("/rewind N should be sent remotely");
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "session_rewind_remote".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            images: vec![],
+            provider_name: Some("mock".to_string()),
+            provider_model: Some("mock-model".to_string()),
+            subagent_model: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            token_usage_totals: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            reload_recovery: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            connection_type: None,
+            status_detail: None,
+            upstream_provider: None,
+            reasoning_effort: None,
+            service_tier: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        },
+        &mut remote,
+    );
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("rewind completion notice");
+    assert!(last.content.contains("✓ Rewound to message 1"));
+    assert!(last.content.contains("Undo anytime with /rewind undo"));
+}

@@ -1,0 +1,105 @@
+[package]
+name = "jcode-tui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Presentation layer for jcode: the terminal UI (`tui`) and the offline replay
+# `video_export`, extracted out of the monolithic root `jcode` crate so they
+# compile as a separate rustc unit. This crate builds on top of the application
+# core (`jcode-app-core`) and re-exports it via `pub use jcode_app_core::*`, so
+# every existing `crate::<module>` path (e.g. `crate::config`, `crate::server`)
+# keeps resolving unchanged across the tui code that was moved here. The root
+# `jcode` crate (cli + bin) in turn re-exports this crate via
+# `pub use jcode_tui::*`.
+
+[lib]
+name = "jcode_tui"
+path = "src/lib.rs"
+
+[dependencies]
+# Application core (server, agent, provider, auth, session, tool, config, ...).
+# Re-exported via `pub use jcode_app_core::*` in lib.rs. default-features=false
+# so this crate (and ultimately the root crate) controls app-core's features.
+jcode-app-core = { path = "../jcode-app-core", default-features = false }
+
+# Async runtime
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+ffs-search = "=0.1.3"
+libc = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+dirs = "5"
+similar = "2"
+tempfile = "3"
+open = "5"
+
+# OAuth / hashing helpers used by the login + account UI
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.9.3"
+hex = "0.4"
+url = "2"
+
+# TUI
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+unicode-width = "0.2"
+
+# Presentation-layer workspace crates
+jcode-build-meta = { path = "../jcode-build-meta" }
+jcode-logging = { path = "../jcode-logging" }
+jcode-core = { path = "../jcode-core" }
+jcode-protocol = { path = "../jcode-protocol" }
+jcode-selfdev-types = { path = "../jcode-selfdev-types" }
+jcode-session-types = { path = "../jcode-session-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-tui-markdown = { path = "../jcode-tui-markdown" }
+jcode-tui-messages = { path = "../jcode-tui-messages" }
+jcode-tui-core = { path = "../jcode-tui-core" }
+jcode-tui-mermaid = { path = "../jcode-tui-mermaid" }
+jcode-tui-account-picker = { path = "../jcode-tui-account-picker" }
+jcode-tui-render = { path = "../jcode-tui-render" }
+jcode-tui-session-picker = { path = "../jcode-tui-session-picker", features = ["serde"] }
+jcode-tui-style = { path = "../jcode-tui-style" }
+jcode-tui-tool-display = { path = "../jcode-tui-tool-display" }
+jcode-tui-usage-overlay = { path = "../jcode-tui-usage-overlay" }
+jcode-terminal-image = { path = "../jcode-terminal-image" }
+jcode-tui-workspace = { path = "../jcode-tui-workspace" }
+
+[features]
+default = ["pdf", "embeddings"]
+# Exposes bench-only debug helpers (e.g. debug_copy_selection_text_for_bench)
+# consumed by the dev `tui_bench` binary in the root crate.
+dev-bins = []
+# Forwarded to app-core (and onward to jcode-base) so the root crate's feature
+# set fully controls the optional stacks.
+jemalloc = ["jcode-app-core/jemalloc"]
+jemalloc-prof = ["jcode-app-core/jemalloc-prof"]
+embeddings = ["jcode-app-core/embeddings"]
+pdf = ["jcode-app-core/pdf"]
+mmdr-size-api = ["jcode-tui-mermaid/mmdr-size-api"]
+# Forwards the application core's `test-support` feature (and onward to
+# jcode-base) so downstream crates' test targets can reach the whole stack's
+# test helpers. Never enabled in normal (non-test) builds.
+test-support = ["jcode-app-core/test-support"]
+
+[dev-dependencies]
+# Enables the downstream test-support helpers for *this* crate's own test
+# target. Feature unification applies this only to test/bench/example builds.
+jcode-app-core = { path = "../jcode-app-core", features = ["test-support"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey = "0.7"

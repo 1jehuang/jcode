@@ -90,15 +90,46 @@ fn macos_current_terminal_is(term: &str) -> bool {
 fn macos_should_try_app_terminal(term: &str) -> bool {
     match term {
         "ghostty" => macos_current_terminal_is("ghostty") || macos_app_installed("Ghostty.app"),
+        "kitty" => {
+            macos_current_terminal_is("kitty")
+                || macos_app_installed("kitty.app")
+                || macos_app_installed("Kitty.app")
+        }
+        "wezterm" => {
+            macos_current_terminal_is("wezterm")
+                || macos_app_installed("WezTerm.app")
+                || macos_app_installed("wezterm.app")
+        }
+        "alacritty" => {
+            macos_current_terminal_is("alacritty") || macos_app_installed("Alacritty.app")
+        }
         "iterm2" => {
             macos_current_terminal_is("iterm2")
                 || macos_app_installed("iTerm.app")
                 || macos_app_installed("iTerm2.app")
         }
+        // Apple Terminal ships with every macOS install, so it is the guaranteed
+        // last-resort fallback and is always worth trying.
         "terminal" => true,
         _ => true,
     }
 }
+
+/// Ordered macOS terminal preference list used when spawning a new window.
+///
+/// Earlier entries are preferred. Apple's built-in `Terminal.app` is intentionally
+/// last because it is the guaranteed fallback that exists on every macOS install,
+/// while the modern terminals above it are only attempted when actually
+/// installed (or currently in use). See `macos_should_try_app_terminal`.
+#[cfg(target_os = "macos")]
+const MACOS_TERMINAL_PREFERENCE: &[&str] = &[
+    "ghostty",
+    "kitty",
+    "wezterm",
+    "alacritty",
+    "iterm2",
+    "terminal",
+];
 
 #[cfg(unix)]
 pub fn detected_resume_terminal() -> Option<String> {
@@ -181,15 +212,7 @@ pub fn resume_terminal_candidates() -> Vec<String> {
 
     #[cfg(target_os = "macos")]
     {
-        for term in [
-            "tmux",
-            "ghostty",
-            "kitty",
-            "wezterm",
-            "alacritty",
-            "iterm2",
-            "terminal",
-        ] {
+        for &term in MACOS_TERMINAL_PREFERENCE {
             if macos_should_try_app_terminal(term) {
                 push_unique_terminal(&mut candidates, term);
             }
@@ -342,14 +365,13 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
         }
         #[cfg(target_os = "macos")]
         "terminal" => {
-            cmd = Command::new("open");
-            cmd.args([
-                "-a",
-                "Terminal",
-                command.program.to_str().unwrap_or("jcode"),
-                "--args",
-            ]);
-            cmd.args(&command.args);
+            // `open -a Terminal <binary> --args ...` does NOT execute the binary with
+            // arguments; it asks Terminal to open the file as a document. On a default
+            // macOS install (where Apple Terminal is the only available terminal), that
+            // means split/resume spawns silently fail to launch jcode. Use AppleScript's
+            // `do script` so the command actually runs in a new Terminal window.
+            cmd = Command::new("osascript");
+            cmd.args(["-e", &macos_terminal_applescript(command, cwd)]);
         }
         #[cfg(not(unix))]
         "wt" => {
@@ -366,6 +388,37 @@ fn command_parts(command: &TerminalCommand) -> Vec<String> {
     std::iter::once(command.program.to_string_lossy().into_owned())
         .chain(command.args.iter().cloned())
         .collect()
+}
+
+/// Build the inner `/bin/sh` script that Apple Terminal's `do script` will run.
+///
+/// `do script` always executes in a login shell, so we `cd` into the working
+/// directory and `exec` the target command (optionally injecting the fresh-spawn
+/// env var, which would otherwise be lost because the spawned shell does not
+/// inherit the env of the `osascript` process).
+#[cfg(any(target_os = "macos", test))]
+fn macos_terminal_inner_script(command: &TerminalCommand, cwd: &Path) -> String {
+    let shell = shell_command(&command_parts(command));
+    format!(
+        "cd {} && exec {}{}",
+        sh_escape(&cwd.to_string_lossy()),
+        if command.fresh_spawn {
+            "env JCODE_FRESH_SPAWN=1 "
+        } else {
+            ""
+        },
+        shell
+    )
+}
+
+/// Build the full AppleScript passed to `osascript -e` for Apple Terminal.
+#[cfg(any(target_os = "macos", test))]
+fn macos_terminal_applescript(command: &TerminalCommand, cwd: &Path) -> String {
+    let inner = macos_terminal_inner_script(command, cwd);
+    // AppleScript string literals are double-quoted, so backslashes and double
+    // quotes from the shell script must be escaped (backslashes first).
+    let escaped = inner.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("tell application \"Terminal\"\n    activate\n    do script \"{escaped}\"\nend tell")
 }
 
 #[cfg(test)]
@@ -428,5 +481,49 @@ mod tests {
         let shell = shell_command(&["jcode".to_string(), "it's ok".to_string()]);
         #[cfg(unix)]
         assert_eq!(shell, "'jcode' 'it'\"'\"'s ok'");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn macos_terminal_inner_script_runs_jcode() {
+        let command = TerminalCommand::new(
+            std::path::PathBuf::from("/usr/local/bin/jcode"),
+            vec!["--resume".to_string(), "abc-123".to_string()],
+        );
+        let script = macos_terminal_inner_script(&command, Path::new("/work/dir"));
+        assert_eq!(
+            script,
+            "cd '/work/dir' && exec '/usr/local/bin/jcode' '--resume' 'abc-123'"
+        );
+        // Must actually exec jcode, not the broken `open -a Terminal <file>` form.
+        assert!(script.contains("exec '/usr/local/bin/jcode'"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn macos_terminal_inner_script_injects_fresh_spawn() {
+        let command =
+            TerminalCommand::new(std::path::PathBuf::from("/usr/local/bin/jcode"), vec![])
+                .fresh_spawn();
+        let script = macos_terminal_inner_script(&command, Path::new("/tmp"));
+        assert_eq!(
+            script,
+            "cd '/tmp' && exec env JCODE_FRESH_SPAWN=1 '/usr/local/bin/jcode'"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn macos_terminal_applescript_uses_do_script() {
+        let command = TerminalCommand::new(
+            std::path::PathBuf::from("/usr/local/bin/jcode"),
+            vec!["--resume".to_string(), "abc-123".to_string()],
+        );
+        let applescript = macos_terminal_applescript(&command, Path::new("/work/dir"));
+        assert!(applescript.contains("tell application \"Terminal\""));
+        assert!(applescript.contains("do script"));
+        // The shell's single quotes survive; AppleScript only escapes \\ and ".
+        assert!(applescript.contains("exec \\\"") == false);
+        assert!(applescript.contains("'/usr/local/bin/jcode'"));
     }
 }

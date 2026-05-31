@@ -27,10 +27,29 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Publish the (empty) release up front so each platform build can attach
+      # its own asset the moment it finishes, instead of everyone waiting for
+      # the slowest job. action-gh-release is idempotent: it creates the release
+      # for this tag if missing and updates it otherwise.
+      - name: Create release if missing
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
   build-linux-macos:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    needs: create-release
     timeout-minutes: 60
+    env:
+      # See ci.yml: avoid `if: ${{ secrets.X != '' }}` (Actions validator
+      # rejects `secrets` context in step-level `if:` expressions).
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +79,7 @@ jobs:
           fetch-depth: 0
 
       - name: Configure SSH for cargo git dependencies
-        if: ${{ secrets.DEPLOY_KEY != '' }}
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
@@ -128,9 +147,20 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
 
+      # Attach this platform's asset to the release immediately, so e.g. the
+      # macOS binary is downloadable ~15 min in without waiting for the slower
+      # Windows/Linux x86_64 jobs.
+      - name: Publish asset to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
+
   build-windows:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    needs: create-release
     # Windows x64 release smoke tests compile the e2e harness after the release
     # binary. GitHub-hosted Windows runners sometimes exceed 25 minutes, which
     # cancels otherwise healthy releases before artifacts can be uploaded.
@@ -245,8 +275,15 @@ jobs:
             dist/${{ matrix.artifact }}.tar.gz
             dist/${{ matrix.artifact }}.exe
 
+      - name: Publish asset to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${env:GITHUB_REF_NAME}" "dist/${{ matrix.artifact }}.tar.gz" "dist/${{ matrix.artifact }}.exe" --clobber
+
   release:
-    name: Create Release
+    name: Finalize release
     needs: [build-linux-macos, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -281,19 +318,14 @@ jobs:
           PY
           cat SHA256SUMS
 
-      - name: Create GitHub Release
+      # Per-platform assets were already attached by their own build jobs as
+      # they finished; here we only add the cross-cutting checksums file.
+      - name: Upload checksums to release
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            SHA256SUMS
-            artifacts/jcode-linux-x86_64/*.tar.gz
-            artifacts/jcode-linux-aarch64/*.tar.gz
-            artifacts/jcode-macos-aarch64/*.tar.gz
-            artifacts/jcode-macos-x86_64/*.tar.gz
-            artifacts/jcode-windows-*/**/*.tar.gz
-            artifacts/jcode-windows-*/**/*.exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS --clobber
 
       - name: Upload SHA256SUMS as workflow artifact (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}

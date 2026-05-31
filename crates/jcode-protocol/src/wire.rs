@@ -939,6 +939,8 @@ pub enum ServerEvent {
         compacted_total: usize,
         compacted_visible: usize,
         compacted_remaining: usize,
+        #[serde(default)]
+        compacted_hidden_prompts: usize,
     },
 
     /// Side panel state changed for the active session

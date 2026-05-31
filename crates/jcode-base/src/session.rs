@@ -1,0 +1,1472 @@
+use crate::id::{extract_session_name, new_id, new_memorable_session_id};
+use crate::message::{ContentBlock, Message, Role};
+use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
+pub use crate::storage::{active_session_ids, find_active_session_id_by_pid};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::Path;
+mod crash;
+mod journal;
+mod memory_profile;
+mod model;
+mod persistence;
+mod render;
+mod storage_paths;
+pub use crash::{
+    CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
+    find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
+};
+pub use jcode_session_types::{
+    EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
+    StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
+};
+use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
+pub use memory_profile::SessionMemoryProfileSnapshot;
+use memory_profile::{
+    ContentBlockMemoryStats, SessionMemoryProfileCache, summarize_blocks, summarize_message_content,
+};
+use model::SESSION_CONTEXT_PREFIX;
+pub use model::{StoredReplayEvent, StoredReplayEventKind};
+pub use render::{
+    RenderedCompactedHistoryInfo, RenderedImage, RenderedImageSource, RenderedMessage,
+    has_rendered_images, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history, summarize_tool_calls,
+};
+pub use storage_paths::session_journal_path_from_snapshot;
+#[cfg(test)]
+pub(crate) use storage_paths::session_path_in_dir;
+use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
+pub use storage_paths::{session_exists, session_journal_path, session_path};
+
+fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
+    messages.iter().map(StoredMessage::to_message).collect()
+}
+
+fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
+    message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.trim_start()),
+            _ => None,
+        })
+        .is_some_and(|text| text.starts_with("<system-reminder>"))
+}
+
+fn is_visible_conversation_message(message: &StoredMessage) -> bool {
+    message.display_role.is_none() && !is_internal_system_reminder_message(message)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub messages: Vec<StoredMessage>,
+    /// Persisted compacted-view state so reload/resume can continue using the
+    /// active summary + recent tail instead of re-sending the full transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<StoredCompactionState>,
+    /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    /// Stable provider/profile key for session-source filtering (e.g. "openai",
+    /// "opencode", "opencode-go").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
+    /// Model identifier for this session (e.g., "gpt-5.2-codex")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Optional fixed model to use for subagents launched from this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
+    /// Last requested `/improve` mode for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub improve_mode: Option<SessionImproveMode>,
+    /// Whether automatic end-of-turn review is enabled for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autoreview_enabled: Option<bool>,
+    /// Whether automatic end-of-turn judging is enabled for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autojudge_enabled: Option<bool>,
+    /// Whether this session is a canary session (testing new builds)
+    #[serde(default)]
+    pub is_canary: bool,
+    /// Build hash this session is testing (if canary)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testing_build: Option<String>,
+    /// Working directory (for self-dev detection)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// Memorable short name (e.g., "fox", "oak")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
+    /// Session exit status - why it ended (if not active)
+    #[serde(default)]
+    pub status: SessionStatus,
+    /// PID of the process that last owned this session (for crash detection)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pid: Option<u32>,
+    /// Last time the session was marked active
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<DateTime<Utc>>,
+    /// Whether this is a debug/test session (created via debug socket)
+    #[serde(default)]
+    pub is_debug: bool,
+    /// Whether this session has been saved/bookmarked by the user
+    #[serde(default)]
+    pub saved: bool,
+    /// Optional user-provided label for saved sessions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_label: Option<String>,
+    /// Environment snapshots for post-mortem debugging
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_snapshots: Vec<EnvSnapshot>,
+    /// Memory injection events (for replay visualization)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_injections: Vec<StoredMemoryInjection>,
+    /// Non-conversation UI/state events persisted for higher-fidelity replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replay_events: Vec<StoredReplayEvent>,
+    #[serde(skip)]
+    persist_state: SessionPersistState,
+    #[serde(skip)]
+    provider_messages_cache: Vec<Message>,
+    #[serde(skip)]
+    provider_message_prefix_hashes_cache: Vec<u64>,
+    #[serde(skip)]
+    provider_messages_cache_len: usize,
+    #[serde(skip)]
+    provider_messages_cache_mode: PersistVectorMode,
+    #[serde(skip)]
+    memory_profile_cache: SessionMemoryProfileCache,
+    #[serde(skip)]
+    memory_profile_dirty: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStartupStub {
+    id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    compaction: Option<StoredCompactionState>,
+    #[serde(default)]
+    provider_session_id: Option<String>,
+    #[serde(default)]
+    provider_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    subagent_model: Option<String>,
+    #[serde(default)]
+    improve_mode: Option<SessionImproveMode>,
+    #[serde(default)]
+    autoreview_enabled: Option<bool>,
+    #[serde(default)]
+    autojudge_enabled: Option<bool>,
+    #[serde(default)]
+    is_canary: bool,
+    #[serde(default)]
+    testing_build: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    status: SessionStatus,
+    #[serde(default)]
+    last_pid: Option<u32>,
+    #[serde(default)]
+    last_active_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    is_debug: bool,
+    #[serde(default)]
+    saved: bool,
+    #[serde(default)]
+    save_label: Option<String>,
+}
+
+const MAX_SESSION_JOURNAL_BYTES: u64 = 512 * 1024;
+
+/// Max number of environment snapshots to retain per session
+const MAX_ENV_SNAPSHOTS: usize = 8;
+
+fn current_working_dir_string() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let trimmed = v.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn default_is_test_session() -> bool {
+    env_flag_enabled("JCODE_TEST_SESSION")
+}
+
+pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
+    let normalized_name = provider_name.trim().to_ascii_lowercase();
+    if normalized_name == "jcode" {
+        return Some("jcode".to_string());
+    }
+
+    if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
+        let runtime_provider = runtime_provider.trim().to_ascii_lowercase();
+        if !runtime_provider.is_empty() && runtime_provider != "openai-compatible" {
+            return Some(runtime_provider);
+        }
+    }
+
+    if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
+        let namespace = namespace.trim().to_ascii_lowercase();
+        if !namespace.is_empty() {
+            return Some(namespace);
+        }
+    }
+
+    if let Ok(active) = std::env::var("JCODE_ACTIVE_PROVIDER") {
+        let active = active.trim().to_ascii_lowercase();
+        if !active.is_empty() {
+            return Some(active);
+        }
+    }
+
+    let fallback = match normalized_name.as_str() {
+        "anthropic" | "claude" | "claude cli" => "claude",
+        "openai" => "openai",
+        "github copilot" | "copilot" => "copilot",
+        "openrouter" => "openrouter",
+        "cursor" => "cursor",
+        "gemini" => "gemini",
+        "antigravity" => "antigravity",
+        "" => return None,
+        other => other,
+    };
+
+    Some(fallback.to_string())
+}
+
+impl Session {
+    fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
+        let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
+        session.custom_title = stub.custom_title;
+        session.created_at = stub.created_at;
+        session.updated_at = stub.updated_at;
+        session.compaction = stub.compaction;
+        session.provider_session_id = stub.provider_session_id;
+        session.provider_key = stub.provider_key;
+        session.model = stub.model;
+        session.reasoning_effort = stub.reasoning_effort;
+        session.subagent_model = stub.subagent_model;
+        session.improve_mode = stub.improve_mode;
+        session.autoreview_enabled = stub.autoreview_enabled;
+        session.autojudge_enabled = stub.autojudge_enabled;
+        session.is_canary = stub.is_canary;
+        session.testing_build = stub.testing_build;
+        session.working_dir = stub.working_dir;
+        session.short_name = stub.short_name;
+        session.status = stub.status;
+        session.last_pid = stub.last_pid;
+        session.last_active_at = stub.last_active_at;
+        session.is_debug = stub.is_debug;
+        session.saved = stub.saved;
+        session.save_label = stub.save_label;
+        session.messages.clear();
+        session.env_snapshots.clear();
+        session.memory_injections.clear();
+        session.replay_events.clear();
+        session.rebuild_memory_profile_cache();
+        session.reset_persist_state(true);
+        session
+    }
+
+    fn session_from_remote_startup_snapshot(snapshot: RemoteStartupSessionSnapshot) -> Self {
+        let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
+        session.custom_title = snapshot.custom_title;
+        session.created_at = snapshot.created_at;
+        session.updated_at = snapshot.updated_at;
+        session.messages = snapshot.messages;
+        session.compaction = snapshot.compaction;
+        session.provider_session_id = snapshot.provider_session_id;
+        session.provider_key = snapshot.provider_key;
+        session.model = snapshot.model;
+        session.reasoning_effort = snapshot.reasoning_effort;
+        session.subagent_model = snapshot.subagent_model;
+        session.improve_mode = snapshot.improve_mode;
+        session.autoreview_enabled = snapshot.autoreview_enabled;
+        session.autojudge_enabled = snapshot.autojudge_enabled;
+        session.is_canary = snapshot.is_canary;
+        session.testing_build = snapshot.testing_build;
+        session.working_dir = snapshot.working_dir;
+        session.short_name = snapshot.short_name;
+        session.status = snapshot.status;
+        session.last_pid = snapshot.last_pid;
+        session.last_active_at = snapshot.last_active_at;
+        session.is_debug = snapshot.is_debug;
+        session.saved = snapshot.saved;
+        session.save_label = snapshot.save_label;
+        session.replay_events.clear();
+        session.env_snapshots.clear();
+        session.memory_injections.clear();
+        session.mark_memory_profile_dirty();
+        session.reset_persist_state(true);
+        session.reset_provider_messages_cache();
+        session
+    }
+
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let message_stats =
+            summarize_message_content(self.messages.iter().map(|message| &message.content));
+
+        let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
+        let provider_cache_stats = summarize_message_content(
+            self.provider_messages_cache
+                .iter()
+                .map(|message| &message.content),
+        );
+        let provider_messages_cache_json_bytes: usize = self
+            .provider_messages_cache
+            .iter()
+            .map(estimate_json_bytes)
+            .sum();
+        let env_snapshots_json_bytes: usize =
+            self.env_snapshots.iter().map(estimate_json_bytes).sum();
+        let memory_injections_json_bytes: usize =
+            self.memory_injections.iter().map(estimate_json_bytes).sum();
+        let replay_events_json_bytes: usize =
+            self.replay_events.iter().map(estimate_json_bytes).sum();
+        let compaction_json_bytes = self
+            .compaction
+            .as_ref()
+            .map(estimate_json_bytes)
+            .unwrap_or(0);
+        let compaction_summary_bytes = self
+            .compaction
+            .as_ref()
+            .map(|c| c.summary_text.len())
+            .unwrap_or(0);
+        let compaction_encrypted_bytes = self
+            .compaction
+            .as_ref()
+            .and_then(|c| c.openai_encrypted_content.as_ref())
+            .map(|text| text.len())
+            .unwrap_or(0);
+
+        serde_json::json!({
+            "session_id": self.id,
+            "messages": {
+                "count": self.messages.len(),
+                "json_bytes": session_message_json_bytes,
+                "memory": message_stats.to_json(),
+            },
+            "compaction": {
+                "present": self.compaction.is_some(),
+                "covers_up_to_turn": self
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.covers_up_to_turn)
+                    .unwrap_or(0),
+                "original_turn_count": self
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.original_turn_count)
+                    .unwrap_or(0),
+                "compacted_count": self
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.compacted_count)
+                    .unwrap_or(0),
+                "json_bytes": compaction_json_bytes,
+                "summary_text_bytes": compaction_summary_bytes,
+                "encrypted_content_bytes": compaction_encrypted_bytes,
+            },
+            "env_snapshots": {
+                "count": self.env_snapshots.len(),
+                "json_bytes": env_snapshots_json_bytes,
+            },
+            "memory_injections": {
+                "count": self.memory_injections.len(),
+                "json_bytes": memory_injections_json_bytes,
+            },
+            "replay_events": {
+                "count": self.replay_events.len(),
+                "json_bytes": replay_events_json_bytes,
+            },
+            "provider_messages_cache": {
+                "count": self.provider_messages_cache.len(),
+                "source_len": self.provider_messages_cache_len,
+                "mode": persist_vector_mode_label(self.provider_messages_cache_mode),
+                "json_bytes": provider_messages_cache_json_bytes,
+                "memory": provider_cache_stats.to_json(),
+            },
+            "totals": {
+                "payload_text_bytes": message_stats.payload_text_bytes(),
+                "json_bytes": session_message_json_bytes
+                    + provider_messages_cache_json_bytes
+                    + env_snapshots_json_bytes
+                    + memory_injections_json_bytes
+                    + replay_events_json_bytes
+                    + compaction_json_bytes,
+                "canonical_transcript_json_bytes": session_message_json_bytes,
+                "provider_cache_json_bytes": provider_messages_cache_json_bytes,
+                "canonical_tool_result_bytes": message_stats.tool_result_bytes,
+                "provider_cache_tool_result_bytes": provider_cache_stats.tool_result_bytes,
+                "canonical_large_blob_bytes": message_stats.large_block_bytes,
+                "provider_cache_large_blob_bytes": provider_cache_stats.large_block_bytes,
+            }
+        })
+    }
+
+    fn journal_meta(&self) -> SessionJournalMeta {
+        SessionJournalMeta {
+            parent_id: self.parent_id.clone(),
+            title: self.title.clone(),
+            custom_title: self.custom_title.clone(),
+            updated_at: self.updated_at,
+            compaction: self.compaction.clone(),
+            provider_session_id: self.provider_session_id.clone(),
+            provider_key: self.provider_key.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            subagent_model: self.subagent_model.clone(),
+            improve_mode: self.improve_mode,
+            autoreview_enabled: self.autoreview_enabled,
+            autojudge_enabled: self.autojudge_enabled,
+            is_canary: self.is_canary,
+            testing_build: self.testing_build.clone(),
+            working_dir: self.working_dir.clone(),
+            short_name: self.short_name.clone(),
+            status: self.status.clone(),
+            last_pid: self.last_pid,
+            last_active_at: self.last_active_at,
+            is_debug: self.is_debug,
+            saved: self.saved,
+            save_label: self.save_label.clone(),
+        }
+    }
+
+    fn reset_persist_state(&mut self, snapshot_exists: bool) {
+        self.persist_state = SessionPersistState {
+            snapshot_exists,
+            messages_len: self.messages.len(),
+            env_snapshots_len: self.env_snapshots.len(),
+            memory_injections_len: self.memory_injections.len(),
+            replay_events_len: self.replay_events.len(),
+            messages_mode: PersistVectorMode::Clean,
+            env_snapshots_mode: PersistVectorMode::Clean,
+            memory_injections_mode: PersistVectorMode::Clean,
+            replay_events_mode: PersistVectorMode::Clean,
+            last_meta: Some(self.journal_meta()),
+        };
+    }
+
+    fn reset_provider_messages_cache(&mut self) {
+        self.provider_messages_cache.clear();
+        self.provider_message_prefix_hashes_cache.clear();
+        self.provider_messages_cache_len = 0;
+        self.provider_messages_cache_mode = PersistVectorMode::Full;
+        self.memory_profile_cache.provider_cache_count = 0;
+        self.memory_profile_cache.provider_cache_json_bytes = 0;
+        self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
+    }
+
+    fn push_provider_message_cache_entry(&mut self, message: Message) {
+        let message_hash = crate::message::stable_message_hash(&message);
+        let prefix_hash = self
+            .provider_message_prefix_hashes_cache
+            .last()
+            .copied()
+            .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
+            .unwrap_or(message_hash);
+        self.memory_profile_cache.provider_cache_count += 1;
+        self.memory_profile_cache.provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache
+            .provider_cache_stats
+            .merge_from(&summarize_blocks(&message.content));
+        self.provider_messages_cache.push(message);
+        self.provider_message_prefix_hashes_cache.push(prefix_hash);
+    }
+
+    fn mark_memory_profile_dirty(&mut self) {
+        self.memory_profile_dirty = true;
+    }
+
+    fn rebuild_memory_profile_cache(&mut self) {
+        let message_stats =
+            summarize_message_content(self.messages.iter().map(|message| &message.content));
+        let provider_cache_stats = summarize_message_content(
+            self.provider_messages_cache
+                .iter()
+                .map(|message| &message.content),
+        );
+
+        self.memory_profile_cache = SessionMemoryProfileCache {
+            messages_count: self.messages.len(),
+            messages_json_bytes: self.messages.iter().map(estimate_json_bytes).sum(),
+            message_stats,
+            env_snapshots_count: self.env_snapshots.len(),
+            env_snapshots_json_bytes: self.env_snapshots.iter().map(estimate_json_bytes).sum(),
+            memory_injections_count: self.memory_injections.len(),
+            memory_injections_json_bytes: self
+                .memory_injections
+                .iter()
+                .map(estimate_json_bytes)
+                .sum(),
+            replay_events_count: self.replay_events.len(),
+            replay_events_json_bytes: self.replay_events.iter().map(estimate_json_bytes).sum(),
+            provider_cache_count: self.provider_messages_cache.len(),
+            provider_cache_json_bytes: self
+                .provider_messages_cache
+                .iter()
+                .map(estimate_json_bytes)
+                .sum(),
+            provider_cache_stats,
+        };
+        self.memory_profile_dirty = false;
+    }
+
+    fn ensure_memory_profile_cache(&mut self) {
+        if self.memory_profile_dirty {
+            self.rebuild_memory_profile_cache();
+        }
+    }
+
+    pub fn memory_profile_snapshot(&mut self) -> SessionMemoryProfileSnapshot {
+        self.ensure_memory_profile_cache();
+        let compaction_json_bytes = self
+            .compaction
+            .as_ref()
+            .map(estimate_json_bytes)
+            .unwrap_or(0);
+
+        SessionMemoryProfileSnapshot {
+            message_count: self.memory_profile_cache.messages_count,
+            provider_cache_message_count: self.memory_profile_cache.provider_cache_count,
+            env_snapshot_count: self.memory_profile_cache.env_snapshots_count,
+            memory_injection_count: self.memory_profile_cache.memory_injections_count,
+            replay_event_count: self.memory_profile_cache.replay_events_count,
+            payload_text_bytes: self.memory_profile_cache.message_stats.payload_text_bytes(),
+            total_json_bytes: self.memory_profile_cache.messages_json_bytes
+                + self.memory_profile_cache.provider_cache_json_bytes
+                + self.memory_profile_cache.env_snapshots_json_bytes
+                + self.memory_profile_cache.memory_injections_json_bytes
+                + self.memory_profile_cache.replay_events_json_bytes
+                + compaction_json_bytes,
+            provider_cache_json_bytes: self.memory_profile_cache.provider_cache_json_bytes,
+            canonical_tool_result_bytes: self.memory_profile_cache.message_stats.tool_result_bytes,
+            provider_cache_tool_result_bytes: self
+                .memory_profile_cache
+                .provider_cache_stats
+                .tool_result_bytes,
+            canonical_large_blob_bytes: self.memory_profile_cache.message_stats.large_block_bytes,
+            provider_cache_large_blob_bytes: self
+                .memory_profile_cache
+                .provider_cache_stats
+                .large_block_bytes,
+        }
+    }
+
+    fn mark_messages_append_dirty(&mut self) {
+        if self.persist_state.messages_mode != PersistVectorMode::Full {
+            self.persist_state.messages_mode = PersistVectorMode::Append;
+        }
+        if self.provider_messages_cache_mode != PersistVectorMode::Full {
+            self.provider_messages_cache_mode = PersistVectorMode::Append;
+        }
+    }
+
+    fn mark_messages_full_dirty(&mut self) {
+        self.persist_state.messages_mode = PersistVectorMode::Full;
+        self.provider_messages_cache_mode = PersistVectorMode::Full;
+    }
+
+    fn mark_env_snapshots_append_dirty(&mut self) {
+        if self.persist_state.env_snapshots_mode != PersistVectorMode::Full {
+            self.persist_state.env_snapshots_mode = PersistVectorMode::Append;
+        }
+    }
+
+    fn mark_env_snapshots_full_dirty(&mut self) {
+        self.persist_state.env_snapshots_mode = PersistVectorMode::Full;
+    }
+
+    fn mark_memory_injections_append_dirty(&mut self) {
+        if self.persist_state.memory_injections_mode != PersistVectorMode::Full {
+            self.persist_state.memory_injections_mode = PersistVectorMode::Append;
+        }
+    }
+
+    fn mark_replay_events_append_dirty(&mut self) {
+        if self.persist_state.replay_events_mode != PersistVectorMode::Full {
+            self.persist_state.replay_events_mode = PersistVectorMode::Append;
+        }
+    }
+
+    fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
+        self.parent_id = meta.parent_id;
+        self.title = meta.title;
+        self.custom_title = meta.custom_title;
+        self.updated_at = meta.updated_at;
+        self.compaction = meta.compaction;
+        self.provider_session_id = meta.provider_session_id;
+        self.provider_key = meta.provider_key;
+        self.model = meta.model;
+        self.reasoning_effort = meta.reasoning_effort;
+        self.subagent_model = meta.subagent_model;
+        self.improve_mode = meta.improve_mode;
+        self.autoreview_enabled = meta.autoreview_enabled;
+        self.autojudge_enabled = meta.autojudge_enabled;
+        self.is_canary = meta.is_canary;
+        self.testing_build = meta.testing_build;
+        self.working_dir = meta.working_dir;
+        self.short_name = meta.short_name;
+        self.status = meta.status;
+        self.last_pid = meta.last_pid;
+        self.last_active_at = meta.last_active_at;
+        self.is_debug = meta.is_debug;
+        self.saved = meta.saved;
+        self.save_label = meta.save_label;
+        self.mark_memory_profile_dirty();
+    }
+
+    pub fn create_with_id(
+        session_id: String,
+        parent_id: Option<String>,
+        title: Option<String>,
+    ) -> Self {
+        let now = Utc::now();
+        let is_debug = default_is_test_session();
+        // Try to extract short name from ID if it's a memorable ID
+        let short_name = extract_session_name(&session_id).map(|s| s.to_string());
+        let mut session = Self {
+            id: session_id,
+            parent_id,
+            title,
+            custom_title: None,
+            created_at: now,
+            updated_at: now,
+            messages: Vec::new(),
+            compaction: None,
+            provider_session_id: None,
+            provider_key: None,
+            model: None,
+            reasoning_effort: None,
+            subagent_model: None,
+            improve_mode: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            is_canary: false,
+            testing_build: None,
+            working_dir: current_working_dir_string(),
+            short_name,
+            status: SessionStatus::Active,
+            last_pid: Some(std::process::id()),
+            last_active_at: Some(now),
+            is_debug,
+            saved: false,
+            save_label: None,
+            env_snapshots: Vec::new(),
+            memory_injections: Vec::new(),
+            replay_events: Vec::new(),
+            persist_state: SessionPersistState::default(),
+            provider_messages_cache: Vec::new(),
+            provider_message_prefix_hashes_cache: Vec::new(),
+            provider_messages_cache_len: 0,
+            provider_messages_cache_mode: PersistVectorMode::Full,
+            memory_profile_cache: SessionMemoryProfileCache::default(),
+            memory_profile_dirty: false,
+        };
+        session.reset_persist_state(false);
+        session
+    }
+
+    pub fn create(parent_id: Option<String>, title: Option<String>) -> Self {
+        // Issue #99: top-level user sessions can be auto-titled via
+        // `jcode --name <title>` (translated to `JCODE_SESSION_NAME`). Only
+        // apply when the caller didn't pass an explicit title and there is
+        // no parent (subagents/spawned children should not inherit the env).
+        let title = title.or_else(|| {
+            if parent_id.is_none() {
+                std::env::var("JCODE_SESSION_NAME")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        });
+        let now = Utc::now();
+        let (id, short_name) = new_memorable_session_id();
+        let is_debug = default_is_test_session();
+        let mut session = Self {
+            id,
+            parent_id,
+            title,
+            custom_title: None,
+            created_at: now,
+            updated_at: now,
+            messages: Vec::new(),
+            compaction: None,
+            provider_session_id: None,
+            provider_key: None,
+            model: None,
+            reasoning_effort: None,
+            subagent_model: None,
+            improve_mode: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            is_canary: false,
+            testing_build: None,
+            working_dir: current_working_dir_string(),
+            short_name: Some(short_name),
+            status: SessionStatus::Active,
+            last_pid: Some(std::process::id()),
+            last_active_at: Some(now),
+            is_debug,
+            saved: false,
+            save_label: None,
+            env_snapshots: Vec::new(),
+            memory_injections: Vec::new(),
+            replay_events: Vec::new(),
+            persist_state: SessionPersistState::default(),
+            provider_messages_cache: Vec::new(),
+            provider_message_prefix_hashes_cache: Vec::new(),
+            provider_messages_cache_len: 0,
+            provider_messages_cache_mode: PersistVectorMode::Full,
+            memory_profile_cache: SessionMemoryProfileCache::default(),
+            memory_profile_dirty: false,
+        };
+        session.reset_persist_state(false);
+        session
+    }
+
+    /// Mark this session as a debug/test session
+    pub fn set_debug(&mut self, is_debug: bool) {
+        self.is_debug = is_debug;
+    }
+
+    /// Save/bookmark this session with an optional label
+    pub fn mark_saved(&mut self, label: Option<String>) {
+        self.saved = true;
+        if label.is_some() {
+            self.save_label = label;
+        }
+    }
+
+    /// Remove the saved/bookmark status
+    pub fn unmark_saved(&mut self) {
+        self.saved = false;
+        self.save_label = None;
+    }
+
+    /// Set or clear the user-provided display title.
+    ///
+    /// This intentionally does not change the immutable session id, memorable
+    /// short name, generated title, provider session id, or saved/bookmark label.
+    pub fn rename_title(&mut self, title: Option<String>) {
+        self.custom_title = title.and_then(|title| {
+            let title = title.trim();
+            (!title.is_empty()).then(|| title.to_string())
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Get the title users should see for this session: custom rename first,
+    /// then the generated/imported title, if one exists.
+    pub fn display_title(&self) -> Option<&str> {
+        fn non_empty_trimmed(title: Option<&str>) -> Option<&str> {
+            title.map(str::trim).filter(|title| !title.is_empty())
+        }
+
+        non_empty_trimmed(self.custom_title.as_deref())
+            .or_else(|| non_empty_trimmed(self.title.as_deref()))
+    }
+
+    /// Get a visible label for title-oriented surfaces, falling back to the
+    /// memorable session name when there is no generated or custom title.
+    pub fn display_title_or_name(&self) -> &str {
+        self.display_title().unwrap_or_else(|| self.display_name())
+    }
+
+    /// Record an environment snapshot for post-mortem debugging
+    pub fn record_env_snapshot(&mut self, snapshot: EnvSnapshot) {
+        self.memory_profile_cache.env_snapshots_count += 1;
+        self.memory_profile_cache.env_snapshots_json_bytes += estimate_json_bytes(&snapshot);
+        self.env_snapshots.push(snapshot);
+        if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
+            let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
+            self.env_snapshots.drain(0..excess);
+            self.mark_memory_profile_dirty();
+            self.mark_env_snapshots_full_dirty();
+        } else {
+            self.mark_env_snapshots_append_dirty();
+        }
+    }
+
+    pub fn has_session_context_message(&self) -> bool {
+        self.messages.iter().any(|message| {
+            message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => text.starts_with(SESSION_CONTEXT_PREFIX),
+                _ => false,
+            })
+        })
+    }
+
+    /// Persist an immutable session-context snapshot as the first provider-visible
+    /// transcript item for new sessions. Existing non-empty sessions are left
+    /// untouched so their historical context is never rewritten with newer state.
+    pub fn ensure_initial_session_context_message(&mut self) -> bool {
+        if !self.messages.is_empty() || self.has_session_context_message() {
+            return false;
+        }
+
+        // Capture the cwd at the moment the immutable session-context message is
+        // first inserted. A Session may be constructed before CLI startup, TUI
+        // launch, or tests finish changing the process cwd; using the older
+        // constructor snapshot here can produce a stale "Working directory" and
+        // git status in the model-visible context.
+        if let Some(current_dir) = current_working_dir_string() {
+            self.working_dir = Some(current_dir);
+        }
+
+        let context =
+            crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
+        let wrapped = format!("<system-reminder>\n{}\n</system-reminder>", context.trim());
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: wrapped,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        true
+    }
+
+    /// Refresh the initial immutable session-context message if the session has
+    /// not started a real conversation yet. This covers remote/client-server
+    /// startup where the server creates an Agent before the subscribing client
+    /// sends the terminal working directory that tools will use.
+    pub fn refresh_initial_session_context_message(&mut self) -> bool {
+        if self.messages.iter().any(is_visible_conversation_message) {
+            return false;
+        }
+
+        let Some(message) = self.messages.iter_mut().find(|message| {
+            message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => text.starts_with(SESSION_CONTEXT_PREFIX),
+                _ => false,
+            })
+        }) else {
+            return false;
+        };
+
+        let context =
+            crate::prompt::build_session_context(self.working_dir.as_deref().map(Path::new));
+        let wrapped = format!("<system-reminder>\n{}\n</system-reminder>", context.trim());
+        for block in &mut message.content {
+            if let ContentBlock::Text { text, .. } = block
+                && text.starts_with(SESSION_CONTEXT_PREFIX)
+            {
+                if *text == wrapped {
+                    return false;
+                }
+                *text = wrapped;
+                self.mark_memory_profile_dirty();
+                self.mark_messages_full_dirty();
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Get the display name for this session (short memorable name if available)
+    pub fn display_name(&self) -> &str {
+        self.short_name
+            .as_deref()
+            .or_else(|| extract_session_name(&self.id))
+            .unwrap_or(&self.id)
+    }
+
+    /// Mark this session as a canary tester
+    pub fn set_canary(&mut self, build_hash: &str) {
+        self.is_canary = true;
+        self.testing_build = Some(build_hash.to_string());
+    }
+
+    /// Clear canary status
+    pub fn clear_canary(&mut self) {
+        self.is_canary = false;
+        self.testing_build = None;
+    }
+
+    /// Set the session status
+    pub fn set_status(&mut self, status: SessionStatus) {
+        self.status = status;
+    }
+
+    /// Mark session as closed normally
+    pub fn mark_closed(&mut self) {
+        self.status = SessionStatus::Closed;
+        unregister_active_pid(&self.id);
+    }
+
+    /// Mark session as crashed
+    pub fn mark_crashed(&mut self, message: Option<String>) {
+        self.status = SessionStatus::Crashed { message };
+        unregister_active_pid(&self.id);
+    }
+
+    /// Mark session as having an error
+    pub fn mark_error(&mut self, message: String) {
+        self.status = SessionStatus::Error { message };
+    }
+
+    /// Mark session as active (e.g., when resuming)
+    pub fn mark_active(&mut self) {
+        self.status = SessionStatus::Active;
+        let pid = std::process::id();
+        self.last_pid = Some(pid);
+        self.last_active_at = Some(Utc::now());
+        register_active_pid(&self.id, pid);
+    }
+
+    /// Mark session as active for a specific PID
+    pub fn mark_active_with_pid(&mut self, pid: u32) {
+        self.status = SessionStatus::Active;
+        self.last_pid = Some(pid);
+        self.last_active_at = Some(Utc::now());
+        register_active_pid(&self.id, pid);
+    }
+
+    /// Detect if an active session likely crashed (process no longer running)
+    /// Returns true if status was updated.
+    pub fn detect_crash(&mut self) -> bool {
+        if self.status != SessionStatus::Active {
+            return false;
+        }
+
+        if let Some(pid) = self.last_pid {
+            if !crash::is_pid_running(pid) {
+                self.mark_crashed(Some(format!(
+                    "Process {} exited unexpectedly (no shutdown signal captured)",
+                    pid
+                )));
+                return true;
+            }
+        } else {
+            // No PID info (older sessions): fall back to age heuristic
+            let age = Utc::now().signed_duration_since(self.updated_at);
+            if age.num_seconds() > 120 {
+                self.mark_crashed(Some(
+                    "Stale active session (possible abrupt termination)".to_string(),
+                ));
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if this session is working on the jcode repository
+    pub fn is_self_dev(&self) -> bool {
+        if let Some(ref dir) = self.working_dir {
+            // Check if working dir contains jcode source
+            let path = std::path::Path::new(dir);
+            path.join("Cargo.toml").exists()
+                && path.join("src/main.rs").exists()
+                && std::fs::read_to_string(path.join("Cargo.toml"))
+                    .map(|s| s.contains("name = \"jcode\""))
+                    .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    pub fn redacted_for_export(&self) -> Self {
+        let mut redacted = self.clone();
+        if let Some(title) = redacted.title.as_mut() {
+            *title = crate::message::redact_secrets(title);
+        }
+        if let Some(title) = redacted.custom_title.as_mut() {
+            *title = crate::message::redact_secrets(title);
+        }
+        if let Some(compaction) = redacted.compaction.as_mut() {
+            compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
+        }
+        for msg in &mut redacted.messages {
+            for block in &mut msg.content {
+                match block {
+                    ContentBlock::Text { text, .. } | ContentBlock::Reasoning { text } => {
+                        *text = crate::message::redact_secrets(text);
+                    }
+                    ContentBlock::AnthropicThinking { thinking, .. } => {
+                        *thinking = crate::message::redact_secrets(thinking);
+                    }
+                    ContentBlock::OpenAIReasoning { summary, .. } => {
+                        for item in summary {
+                            *item = crate::message::redact_secrets(item);
+                        }
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        *content = crate::message::redact_secrets(content);
+                    }
+                    ContentBlock::ToolUse { input, .. } => redact_json_value(input),
+                    ContentBlock::Image { .. } => {}
+                    ContentBlock::OpenAICompaction { .. } => {}
+                }
+            }
+        }
+        for event in &mut redacted.replay_events {
+            match &mut event.kind {
+                StoredReplayEventKind::DisplayMessage { title, content, .. } => {
+                    if let Some(title) = title.as_mut() {
+                        *title = crate::message::redact_secrets(title);
+                    }
+                    *content = crate::message::redact_secrets(content);
+                }
+                StoredReplayEventKind::SwarmStatus { members } => {
+                    for member in members {
+                        if let Some(detail) = member.detail.as_mut() {
+                            *detail = crate::message::redact_secrets(detail);
+                        }
+                    }
+                }
+                StoredReplayEventKind::SwarmPlan { items, reason, .. } => {
+                    if let Some(reason) = reason.as_mut() {
+                        *reason = crate::message::redact_secrets(reason);
+                    }
+                    for item in items {
+                        item.content = crate::message::redact_secrets(&item.content);
+                    }
+                }
+            }
+        }
+        redacted
+    }
+
+    pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {
+        let mut totals = crate::protocol::TokenUsageTotals::default();
+        for message in &self.messages {
+            let Some(usage) = message.token_usage.as_ref() else {
+                continue;
+            };
+            totals.messages_with_token_usage = totals.messages_with_token_usage.saturating_add(1);
+            totals.input_tokens = totals.input_tokens.saturating_add(usage.input_tokens);
+            totals.output_tokens = totals.output_tokens.saturating_add(usage.output_tokens);
+            if usage.cache_read_input_tokens.is_some()
+                || usage.cache_creation_input_tokens.is_some()
+            {
+                totals.cache_reported_input_tokens = totals
+                    .cache_reported_input_tokens
+                    .saturating_add(usage.input_tokens);
+            }
+            totals.cache_read_input_tokens = totals
+                .cache_read_input_tokens
+                .saturating_add(usage.cache_read_input_tokens.unwrap_or(0));
+            totals.cache_creation_input_tokens = totals
+                .cache_creation_input_tokens
+                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0));
+        }
+        totals
+    }
+
+    pub fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
+        self.add_message_ext_with_display_role(role, content, None, None, None)
+    }
+
+    pub fn add_message_with_duration(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        tool_duration_ms: Option<u64>,
+    ) -> String {
+        self.add_message_ext_with_display_role(role, content, tool_duration_ms, None, None)
+    }
+
+    pub fn add_message_with_display_role(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        display_role: Option<StoredDisplayRole>,
+    ) -> String {
+        self.add_message_ext_with_display_role(role, content, None, None, display_role)
+    }
+
+    pub fn add_message_ext(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        tool_duration_ms: Option<u64>,
+        token_usage: Option<StoredTokenUsage>,
+    ) -> String {
+        self.add_message_ext_with_display_role(role, content, tool_duration_ms, token_usage, None)
+    }
+
+    pub fn add_message_ext_with_display_role(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        tool_duration_ms: Option<u64>,
+        token_usage: Option<StoredTokenUsage>,
+        display_role: Option<StoredDisplayRole>,
+    ) -> String {
+        let id = new_id("message");
+        self.append_stored_message(StoredMessage {
+            id: id.clone(),
+            role,
+            content,
+            display_role,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms,
+            token_usage,
+        });
+        id
+    }
+
+    pub fn append_stored_message(&mut self, message: StoredMessage) {
+        self.memory_profile_cache.messages_count += 1;
+        self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache
+            .message_stats
+            .merge_from(&summarize_blocks(&message.content));
+        self.messages.push(message);
+        self.mark_messages_append_dirty();
+    }
+
+    pub fn insert_message(&mut self, index: usize, message: StoredMessage) {
+        self.messages.insert(index, message);
+        self.mark_memory_profile_dirty();
+        self.mark_messages_full_dirty();
+    }
+
+    pub fn replace_messages(&mut self, messages: Vec<StoredMessage>) {
+        self.messages = messages;
+        self.mark_memory_profile_dirty();
+        self.mark_messages_full_dirty();
+    }
+
+    pub fn truncate_messages(&mut self, len: usize) {
+        if len < self.messages.len() {
+            self.messages.truncate(len);
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+    }
+
+    pub fn visible_conversation_message_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|message| is_visible_conversation_message(message))
+            .count()
+    }
+
+    pub fn visible_conversation_messages(&self) -> Vec<&StoredMessage> {
+        self.messages
+            .iter()
+            .filter(|message| is_visible_conversation_message(message))
+            .collect()
+    }
+
+    pub fn stored_len_for_visible_conversation_message(
+        &self,
+        visible_index: usize,
+    ) -> Option<usize> {
+        if visible_index == 0 {
+            return None;
+        }
+
+        let mut count = 0usize;
+        for (stored_index, message) in self.messages.iter().enumerate() {
+            if is_visible_conversation_message(message) {
+                count += 1;
+                if count == visible_index {
+                    return Some(stored_index + 1);
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a memory injection event for replay visualization
+    pub fn record_memory_injection(
+        &mut self,
+        summary: String,
+        content: String,
+        count: u32,
+        age_ms: u64,
+        memory_ids: Vec<String>,
+    ) {
+        let injection = StoredMemoryInjection {
+            summary,
+            content,
+            count,
+            memory_ids,
+            age_ms: Some(age_ms),
+            before_message: Some(self.messages.len()),
+            timestamp: Utc::now(),
+        };
+        self.memory_profile_cache.memory_injections_count += 1;
+        self.memory_profile_cache.memory_injections_json_bytes += estimate_json_bytes(&injection);
+        self.memory_injections.push(injection);
+        self.mark_memory_injections_append_dirty();
+    }
+
+    pub fn injected_memory_ids(&self) -> Vec<String> {
+        let mut ids = HashSet::new();
+        for injection in &self.memory_injections {
+            ids.extend(injection.memory_ids.iter().cloned());
+        }
+        ids.into_iter().collect()
+    }
+
+    pub fn record_replay_display_message(
+        &mut self,
+        role: impl Into<String>,
+        title: Option<String>,
+        content: impl Into<String>,
+    ) {
+        let event = StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind: StoredReplayEventKind::DisplayMessage {
+                role: role.into(),
+                title,
+                content: content.into(),
+            },
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
+        self.mark_replay_events_append_dirty();
+    }
+
+    pub fn record_swarm_status_event(&mut self, members: Vec<crate::protocol::SwarmMemberStatus>) {
+        let kind = StoredReplayEventKind::SwarmStatus { members };
+        if self
+            .replay_events
+            .last()
+            .is_some_and(|last| last.kind == kind)
+        {
+            return;
+        }
+        let event = StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind,
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
+        self.mark_replay_events_append_dirty();
+    }
+
+    pub fn record_swarm_plan_event(
+        &mut self,
+        swarm_id: String,
+        version: u64,
+        items: Vec<crate::plan::PlanItem>,
+        participants: Vec<String>,
+        reason: Option<String>,
+    ) {
+        let kind = StoredReplayEventKind::SwarmPlan {
+            swarm_id,
+            version,
+            items,
+            participants,
+            reason,
+        };
+        if self
+            .replay_events
+            .last()
+            .is_some_and(|last| last.kind == kind)
+        {
+            return;
+        }
+        let event = StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind,
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
+        self.mark_replay_events_append_dirty();
+    }
+
+    pub fn provider_messages(&mut self) -> &[Message] {
+        let needs_full_rebuild = self.provider_messages_cache_mode == PersistVectorMode::Full
+            || self.provider_messages_cache_len > self.messages.len();
+
+        if needs_full_rebuild {
+            self.provider_messages_cache.clear();
+            self.provider_message_prefix_hashes_cache.clear();
+            self.provider_messages_cache.reserve(self.messages.len());
+            self.provider_message_prefix_hashes_cache
+                .reserve(self.messages.len());
+            for index in 0..self.messages.len() {
+                let message = self.messages[index].to_message();
+                self.push_provider_message_cache_entry(message);
+            }
+            self.provider_messages_cache_len = self.messages.len();
+            self.provider_messages_cache_mode = PersistVectorMode::Clean;
+            return &self.provider_messages_cache;
+        }
+
+        if self.provider_messages_cache_mode == PersistVectorMode::Append
+            && self.provider_messages_cache_len < self.messages.len()
+        {
+            let appended_len = self.messages.len() - self.provider_messages_cache_len;
+            self.provider_messages_cache.reserve(appended_len);
+            self.provider_message_prefix_hashes_cache
+                .reserve(appended_len);
+            for index in self.provider_messages_cache_len..self.messages.len() {
+                let message = self.messages[index].to_message();
+                self.push_provider_message_cache_entry(message);
+            }
+            self.provider_messages_cache_len = self.messages.len();
+            self.provider_messages_cache_mode = PersistVectorMode::Clean;
+        }
+
+        &self.provider_messages_cache
+    }
+
+    pub fn provider_message_prefix_hashes(&mut self) -> &[u64] {
+        let _ = self.provider_messages();
+        &self.provider_message_prefix_hashes_cache
+    }
+
+    pub fn messages_for_provider_uncached(&self) -> Vec<Message> {
+        stored_messages_to_messages(&self.messages)
+    }
+
+    pub fn messages_for_provider(&mut self) -> Vec<Message> {
+        self.provider_messages().to_vec()
+    }
+
+    /// Drop heavyweight transcript vectors after remote startup has rendered the
+    /// optimistic local history. The authoritative transcript comes from the
+    /// server once the connection is established, so keeping another owned copy
+    /// in the client only inflates memory during idle remote sessions.
+    pub fn strip_transcript_for_remote_client(&mut self) {
+        self.messages.clear();
+        self.compaction = None;
+        self.env_snapshots.clear();
+        self.memory_injections.clear();
+        self.replay_events.clear();
+        self.rebuild_memory_profile_cache();
+        self.reset_provider_messages_cache();
+        self.reset_persist_state(true);
+    }
+
+    /// Remove all ToolUse content blocks from a specific message.
+    /// Used when tool calls are discarded (e.g. due to truncated output / max_tokens).
+    pub fn remove_tool_use_blocks(&mut self, message_id: &str) {
+        for msg in &mut self.messages {
+            if msg.id == *message_id {
+                msg.content
+                    .retain(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+                self.mark_memory_profile_dirty();
+                self.mark_messages_full_dirty();
+                break;
+            }
+        }
+    }
+}
+
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = crate::message::redact_secrets(s);
+        }
+        serde_json::Value::Array(values) => {
+            for entry in values {
+                redact_json_value(entry);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for entry in map.values_mut() {
+                redact_json_value(entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteStartupSessionSnapshot {
+    id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    messages: Vec<StoredMessage>,
+    #[serde(default)]
+    compaction: Option<StoredCompactionState>,
+    #[serde(default)]
+    provider_session_id: Option<String>,
+    #[serde(default)]
+    provider_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    subagent_model: Option<String>,
+    #[serde(default)]
+    improve_mode: Option<SessionImproveMode>,
+    #[serde(default)]
+    autoreview_enabled: Option<bool>,
+    #[serde(default)]
+    autojudge_enabled: Option<bool>,
+    #[serde(default)]
+    is_canary: bool,
+    #[serde(default)]
+    testing_build: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    status: SessionStatus,
+    #[serde(default)]
+    last_pid: Option<u32>,
+    #[serde(default)]
+    last_active_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    is_debug: bool,
+    #[serde(default)]
+    saved: bool,
+    #[serde(default)]
+    save_label: Option<String>,
+}
+
+#[cfg(test)]
+#[path = "session_tests/mod.rs"]
+mod tests;

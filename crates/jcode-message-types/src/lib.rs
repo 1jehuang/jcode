@@ -117,6 +117,23 @@ pub enum ContentBlock {
     Reasoning {
         text: String,
     },
+    /// Anthropic signed thinking content. Anthropic requires the signature when
+    /// replaying thinking blocks in future request context.
+    AnthropicThinking {
+        thinking: String,
+        signature: String,
+    },
+    /// OpenAI Responses reasoning item. When `store=false`, OpenAI returns
+    /// encrypted reasoning content so clients can replay reasoning state in
+    /// future turns by sending the native reasoning item back in `input`.
+    OpenAIReasoning {
+        id: String,
+        summary: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -584,6 +601,15 @@ pub enum StreamEvent {
     ThinkingStart,
     /// Extended thinking delta (reasoning content)
     ThinkingDelta(String),
+    /// Provider signature for the current thinking block.
+    ThinkingSignatureDelta(String),
+    /// Native OpenAI Responses reasoning item for future-turn replay.
+    OpenAIReasoning {
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: Option<String>,
+        status: Option<String>,
+    },
     /// Extended thinking ended
     ThinkingEnd,
     /// Extended thinking completed with duration

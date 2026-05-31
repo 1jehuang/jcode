@@ -79,6 +79,15 @@ pub trait Provider: Send + Sync {
         "unknown".to_string()
     }
 
+    /// Human-readable description of the auth method the active provider will
+    /// actually use for the next request (e.g. "OAuth" or "API key"), or `None`
+    /// when there is no meaningful OAuth-vs-API-key distinction. UI surfaces use
+    /// this to report the auth method accurately instead of inferring it from
+    /// which credentials happen to be configured.
+    fn active_auth_method_label(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Whether this provider path can safely receive `ContentBlock::Image` inputs.
     fn supports_image_input(&self) -> bool {
         false
@@ -430,11 +439,268 @@ pub struct ModelRoute {
     pub cheapness: Option<RouteCheapnessEstimate>,
 }
 
+/// Typed view of [`ModelRoute::api_method`].
+///
+/// The wire format intentionally remains a string so older clients and saved
+/// catalogs continue to round-trip, but routing/picker code should parse it at
+/// module boundaries instead of scattering string comparisons everywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRouteApiMethod {
+    ClaudeOAuth,
+    AnthropicApiKey,
+    OpenAIOAuth,
+    OpenAIApiKey,
+    OpenRouter,
+    OpenAiCompatible { profile_id: Option<String> },
+    Copilot,
+    Cursor,
+    Bedrock,
+    CodeAssistOAuth,
+    AntigravityHttps,
+    RemoteCatalog,
+    Current,
+    Other(String),
+}
+
+impl ModelRouteApiMethod {
+    pub fn parse(value: &str) -> Self {
+        let trimmed = value.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        match lower.as_str() {
+            "claude" | "claude-oauth" => Self::ClaudeOAuth,
+            "api-key" | "claude-api" | "anthropic-api-key" => Self::AnthropicApiKey,
+            "openai" | "openai-oauth" => Self::OpenAIOAuth,
+            "openai-api" | "openai-api-key" => Self::OpenAIApiKey,
+            "openrouter" => Self::OpenRouter,
+            "openai-compatible" => Self::OpenAiCompatible { profile_id: None },
+            "copilot" => Self::Copilot,
+            "cursor" => Self::Cursor,
+            "bedrock" => Self::Bedrock,
+            "code-assist-oauth" => Self::CodeAssistOAuth,
+            "https" => Self::AntigravityHttps,
+            "remote-catalog" => Self::RemoteCatalog,
+            "current" => Self::Current,
+            _ => {
+                if let Some(("openai-compatible", profile_id)) = lower.split_once(':') {
+                    let profile_id = profile_id.trim();
+                    Self::OpenAiCompatible {
+                        profile_id: (!profile_id.is_empty()).then(|| profile_id.to_string()),
+                    }
+                } else {
+                    Self::Other(trimmed.to_string())
+                }
+            }
+        }
+    }
+
+    pub fn profile_id(&self) -> Option<&str> {
+        match self {
+            Self::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => Some(profile_id.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn is_openai_compatible(&self) -> bool {
+        matches!(self, Self::OpenAiCompatible { .. })
+    }
+
+    pub fn is_openrouter(&self) -> bool {
+        matches!(self, Self::OpenRouter)
+    }
+
+    pub fn is_copilot(&self) -> bool {
+        matches!(self, Self::Copilot)
+    }
+
+    pub fn is_cursor(&self) -> bool {
+        matches!(self, Self::Cursor)
+    }
+
+    pub fn is_bedrock(&self) -> bool {
+        matches!(self, Self::Bedrock)
+    }
+
+    pub fn matches_openai_compatible_profile(&self, provider_id: &str) -> bool {
+        self.profile_id()
+            .is_some_and(|profile_id| profile_id.eq_ignore_ascii_case(provider_id))
+    }
+
+    pub fn is_anthropic_credential_route(&self) -> bool {
+        matches!(self, Self::ClaudeOAuth | Self::AnthropicApiKey)
+    }
+
+    pub fn is_openai_credential_route(&self) -> bool {
+        matches!(self, Self::OpenAIOAuth | Self::OpenAIApiKey)
+    }
+
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::ClaudeOAuth | Self::OpenAIOAuth | Self::CodeAssistOAuth => "oauth".to_string(),
+            Self::AnthropicApiKey | Self::OpenAIApiKey | Self::OpenAiCompatible { .. } => {
+                "api key".to_string()
+            }
+            Self::OpenRouter => "openrouter".to_string(),
+            Self::Copilot => "copilot".to_string(),
+            Self::Cursor => "cursor".to_string(),
+            Self::Bedrock => "bedrock".to_string(),
+            Self::AntigravityHttps => "https".to_string(),
+            Self::RemoteCatalog => "remote-catalog".to_string(),
+            Self::Current => "current".to_string(),
+            Self::Other(method) => method
+                .split_once(':')
+                .map(|(method, _)| method)
+                .unwrap_or(method)
+                .to_string(),
+        }
+    }
+}
+
+pub fn normalize_model_route_provider_label(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_', '-'], "")
+}
+
+pub fn model_route_provider_labels_match(route_provider: &str, current_provider: &str) -> bool {
+    let route = normalize_model_route_provider_label(route_provider);
+    let current = normalize_model_route_provider_label(current_provider);
+    if route.is_empty() || current.is_empty() {
+        return false;
+    }
+    if route == current {
+        return true;
+    }
+
+    matches!(
+        (current.as_str(), route.as_str()),
+        ("claude" | "anthropic", "anthropic" | "claude")
+            | ("openai", "openai")
+            | ("gemini" | "google", "gemini" | "google")
+            | ("antigravity", "antigravity")
+            | (
+                "copilot" | "copilotcode" | "githubcopilot",
+                "copilot" | "githubcopilot"
+            )
+            | ("cursor", "cursor")
+            | ("bedrock" | "awsbedrock", "bedrock" | "awsbedrock")
+            | ("openrouter", "openrouter" | "auto")
+    )
+}
+
+pub fn model_route_provider_labels_related(route_provider: &str, login_provider: &str) -> bool {
+    let route = normalize_model_route_provider_label(route_provider);
+    let login = normalize_model_route_provider_label(login_provider);
+    if route.is_empty() || login.is_empty() {
+        return false;
+    }
+    if route == login || route.contains(&login) || login.contains(&route) {
+        return true;
+    }
+    model_route_provider_labels_match(&route, &login)
+}
+
+pub fn model_route_provider_matches_key(
+    route_provider_key: Option<&str>,
+    route_provider_label: &str,
+    desired_provider: &str,
+) -> bool {
+    let desired_provider = desired_provider.trim();
+    if desired_provider.is_empty() {
+        return false;
+    }
+    if let Some(route_provider_key) = route_provider_key
+        && normalize_model_route_provider_label(route_provider_key)
+            == normalize_model_route_provider_label(desired_provider)
+    {
+        return true;
+    }
+    model_route_provider_labels_match(route_provider_label, desired_provider)
+}
+
+pub fn model_route_metadata_is_recommended(
+    model: &str,
+    provider: &str,
+    api_method: &str,
+    available: bool,
+) -> bool {
+    if !available {
+        return false;
+    }
+    let api_method = ModelRouteApiMethod::parse(api_method);
+    match model {
+        "gpt-5.5" => {
+            matches!(&api_method, ModelRouteApiMethod::OpenAIOAuth)
+                && model_route_provider_labels_match(provider, "openai")
+        }
+        "claude-opus-4-8" => {
+            matches!(
+                &api_method,
+                ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey
+            ) && model_route_provider_labels_match(provider, "anthropic")
+        }
+        _ => false,
+    }
+}
+
 impl ModelRoute {
+    pub fn api_method_kind(&self) -> ModelRouteApiMethod {
+        ModelRouteApiMethod::parse(&self.api_method)
+    }
+
     pub fn estimated_reference_cost_micros(&self) -> Option<u64> {
         self.cheapness
             .as_ref()
             .and_then(|estimate| estimate.estimated_reference_cost_micros)
+    }
+}
+
+/// Canonical snapshot of a provider's model catalog at a point in time.
+///
+/// This is the local contract shared by server-side providers, remote clients,
+/// and persisted remote catalog caches. The websocket wire format may still
+/// flatten these fields for backwards compatibility, but internal code should
+/// pass catalog state as this single value instead of loose parallel vectors.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCatalogSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_routes: Vec<ModelRoute>,
+}
+
+impl ModelCatalogSnapshot {
+    pub fn new(
+        provider_name: Option<String>,
+        provider_model: Option<String>,
+        available_models: Vec<String>,
+        model_routes: Vec<ModelRoute>,
+    ) -> Self {
+        Self {
+            provider_name,
+            provider_model,
+            available_models,
+            model_routes,
+        }
+    }
+
+    pub fn from_provider(provider: &dyn Provider) -> Self {
+        Self::new(
+            Some(provider.name().to_string()),
+            Some(provider.model()),
+            provider.available_models_display(),
+            provider.model_routes(),
+        )
+    }
+
+    pub fn has_routes(&self) -> bool {
+        !self.model_routes.is_empty()
     }
 }
 
@@ -605,5 +871,166 @@ mod tests {
     #[test]
     fn canonical_user_agent_identifies_jcode() {
         assert!(JCODE_USER_AGENT.starts_with("jcode/"));
+    }
+
+    #[test]
+    fn model_route_api_method_parser_keeps_profile_identity() {
+        assert_eq!(
+            ModelRouteApiMethod::parse("openai-compatible:cerebras"),
+            ModelRouteApiMethod::OpenAiCompatible {
+                profile_id: Some("cerebras".to_string())
+            }
+        );
+        assert!(
+            ModelRouteApiMethod::parse("openai-compatible:cerebras")
+                .matches_openai_compatible_profile("CEREBRAS")
+        );
+        assert_eq!(
+            ModelRouteApiMethod::parse("openai-api"),
+            ModelRouteApiMethod::OpenAIApiKey
+        );
+        assert_eq!(
+            ModelRouteApiMethod::parse("claude-api"),
+            ModelRouteApiMethod::AnthropicApiKey
+        );
+    }
+
+    #[test]
+    fn model_route_provider_label_matching_uses_aliases_without_substring_false_positives() {
+        assert!(model_route_provider_labels_match("Anthropic", "Claude"));
+        assert!(model_route_provider_labels_match("auto", "OpenRouter"));
+        assert!(model_route_provider_labels_match(
+            "GitHub Copilot",
+            "Copilot"
+        ));
+        assert!(model_route_provider_labels_match("AWS Bedrock", "Bedrock"));
+        assert!(!model_route_provider_labels_match(
+            "OpenRouter/OpenAI",
+            "OpenAI"
+        ));
+        assert!(!model_route_provider_labels_match("OpenAI", "OpenRouter"));
+        assert!(!model_route_provider_labels_match("", ""));
+        assert!(!model_route_provider_labels_related("OpenAI", ""));
+    }
+
+    #[test]
+    fn model_route_provider_key_matching_prefers_explicit_route_key() {
+        assert!(model_route_provider_matches_key(
+            Some("cerebras"),
+            "Cerebras Cloud",
+            "CEREBRAS"
+        ));
+        assert!(model_route_provider_matches_key(
+            None,
+            "Anthropic",
+            "Claude"
+        ));
+        assert!(!model_route_provider_matches_key(
+            Some("cerebras"),
+            "Cerebras",
+            "groq"
+        ));
+    }
+
+    #[test]
+    fn model_route_recommendation_policy_is_provider_aware() {
+        assert!(model_route_metadata_is_recommended(
+            "gpt-5.5",
+            "OpenAI",
+            "openai-oauth",
+            true
+        ));
+        assert!(!model_route_metadata_is_recommended(
+            "gpt-5.5",
+            "OpenAI",
+            "openai-api-key",
+            true
+        ));
+        assert!(!model_route_metadata_is_recommended(
+            "gpt-5.5", "Copilot", "copilot", true
+        ));
+        assert!(!model_route_metadata_is_recommended(
+            "gpt-5.5",
+            "OpenAI",
+            "openai-oauth",
+            false
+        ));
+        assert!(model_route_metadata_is_recommended(
+            "claude-opus-4-8",
+            "Anthropic",
+            "claude-oauth",
+            true
+        ));
+        assert!(model_route_metadata_is_recommended(
+            "claude-opus-4-8",
+            "Anthropic",
+            "claude-api",
+            true
+        ));
+        assert!(!model_route_metadata_is_recommended(
+            "claude-opus-4-8",
+            "Anthropic",
+            "openrouter",
+            true
+        ));
+        assert!(!model_route_metadata_is_recommended(
+            "deepseek/deepseek-v4-pro",
+            "auto",
+            "openrouter",
+            true
+        ));
+    }
+
+    struct SnapshotTestProvider;
+
+    #[async_trait]
+    impl Provider for SnapshotTestProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            unreachable!("snapshot test does not call complete")
+        }
+
+        fn name(&self) -> &str {
+            "snapshot-provider"
+        }
+
+        fn model(&self) -> String {
+            "snapshot-model".to_string()
+        }
+
+        fn available_models_display(&self) -> Vec<String> {
+            vec!["snapshot-model".to_string()]
+        }
+
+        fn model_routes(&self) -> Vec<ModelRoute> {
+            vec![ModelRoute {
+                model: "snapshot-model".to_string(),
+                provider: "Snapshot".to_string(),
+                api_method: "snapshot-api".to_string(),
+                available: true,
+                detail: "test route".to_string(),
+                cheapness: None,
+            }]
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(SnapshotTestProvider)
+        }
+    }
+
+    #[test]
+    fn model_catalog_snapshot_materializes_provider_catalog_contract() {
+        let snapshot = ModelCatalogSnapshot::from_provider(&SnapshotTestProvider);
+
+        assert_eq!(snapshot.provider_name.as_deref(), Some("snapshot-provider"));
+        assert_eq!(snapshot.provider_model.as_deref(), Some("snapshot-model"));
+        assert_eq!(snapshot.available_models, ["snapshot-model"]);
+        assert!(snapshot.has_routes());
+        assert_eq!(snapshot.model_routes[0].api_method, "snapshot-api");
     }
 }

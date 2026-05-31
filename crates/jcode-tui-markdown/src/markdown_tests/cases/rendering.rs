@@ -49,12 +49,21 @@ fn test_table_render_basic() {
 }
 
 #[test]
-fn test_table_width_truncation() {
+fn test_table_width_wraps_without_truncation() {
     let md = "| Column | Value |\n| - | - |\n| very_long_cell_value | 1234567890 |";
     let lines = render_markdown_with_width(md, Some(20));
     let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
 
-    assert!(rendered.iter().any(|l| l.contains('…')));
+    assert!(!rendered.iter().any(|l| l.contains('…')), "{rendered:?}");
+    assert!(
+        rendered.iter().any(|l| l.contains("very_long")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|l| l.contains("_cell_val")),
+        "{rendered:?}"
+    );
+    assert!(rendered.iter().any(|l| l.contains("ue")), "{rendered:?}");
     let max_len = rendered
         .iter()
         .map(|l| l.chars().count())
@@ -64,7 +73,7 @@ fn test_table_width_truncation() {
 }
 
 #[test]
-fn test_table_width_truncation_with_three_columns_stays_within_limit() {
+fn test_table_width_wrapping_with_three_columns_stays_within_limit() {
     let md =
         "| # | Principle | Story Ready |\n| - | - | - |\n| 1 | Customer Obsession | unchecked |";
     let lines = render_markdown_with_width(md, Some(24));
@@ -83,6 +92,22 @@ fn test_table_width_truncation_with_three_columns_stays_within_limit() {
         max_width,
         rendered
     );
+}
+
+#[test]
+fn test_table_width_wrap_keeps_apostrophe_words_intact_when_possible() {
+    let md = "| Movie | Notes |\n| - | - |\n| Test | Anderson's thriller shouldn't truncate |";
+    let lines = render_markdown_with_width(md, Some(32));
+    let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+    assert!(!rendered.iter().any(|l| l.contains('…')), "{rendered:?}");
+    assert!(
+        rendered.iter().any(|l| l.contains("Anderson’s")),
+        "expected apostrophe word to remain intact when it fits: {rendered:?}"
+    );
+
+    let max_width = rendered.iter().map(|line| line.width()).max().unwrap_or(0);
+    assert!(max_width <= 32, "{max_width}: {rendered:?}");
 }
 
 #[test]
@@ -130,8 +155,14 @@ fn test_mermaid_block_detection() {
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
         .collect();
 
-    assert!(text.contains("mermaid"), "Expected code block header: {text}");
-    assert!(text.contains("flowchart LR"), "Expected raw Mermaid source: {text}");
+    assert!(
+        text.contains("mermaid"),
+        "Expected code block header: {text}"
+    );
+    assert!(
+        text.contains("flowchart LR"),
+        "Expected raw Mermaid source: {text}"
+    );
 }
 
 #[test]

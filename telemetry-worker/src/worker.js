@@ -61,7 +61,7 @@ async function insertEvent(env, body) {
   const common = commonEventEntries(body, columns);
 
   if (body.event === "install") {
-    return insertDynamic(env, "events", [
+    return insertEventRow(env, body, [
       ["telemetry_id", body.id],
       ["event", body.event],
       ["version", body.version],
@@ -72,7 +72,7 @@ async function insertEvent(env, body) {
   }
 
   if (body.event === "upgrade") {
-    return insertDynamic(env, "events", [
+    return insertEventRow(env, body, [
       ["telemetry_id", body.id],
       ["event", body.event],
       ["version", body.version],
@@ -84,7 +84,7 @@ async function insertEvent(env, body) {
   }
 
   if (body.event === "auth_success") {
-    return insertDynamic(env, "events", [
+    return insertEventRow(env, body, [
       ["telemetry_id", body.id],
       ["event", body.event],
       ["version", body.version],
@@ -97,7 +97,7 @@ async function insertEvent(env, body) {
   }
 
   if (body.event === "onboarding_step") {
-    return insertDynamic(env, "events", [
+    return insertEventRow(env, body, [
       ["telemetry_id", body.id],
       ["event", body.event],
       ["version", body.version],
@@ -112,7 +112,7 @@ async function insertEvent(env, body) {
   }
 
   if (body.event === "feedback") {
-    return insertDynamic(env, "events", [
+    return insertEventRow(env, body, [
       ["telemetry_id", body.id],
       ["event", body.event],
       ["version", body.version],
@@ -146,7 +146,7 @@ async function insertEvent(env, body) {
     if (columns.has("resumed_session")) {
       values.push(["resumed_session", boolToInt(body.resumed_session)]);
     }
-    return insertDynamic(env, "events", values);
+    return insertEventRow(env, body, values.filter(([name]) => columns.has(name)));
   }
 
   if (body.event === "turn_end") {
@@ -171,8 +171,10 @@ async function insertEvent(env, body) {
       ["turn_end_reason", body.turn_end_reason || null],
       ...common,
     ].filter(([name]) => columns.has(name));
-    await insertDynamic(env, "events", values);
-    await insertTurnDetails(env, body, turnDetailColumns);
+    const inserted = await insertEventRow(env, body, values);
+    if (inserted) {
+      await insertTurnDetails(env, body, turnDetailColumns);
+    }
     return;
   }
 
@@ -271,10 +273,25 @@ async function insertEvent(env, body) {
       ["error_rate_limited", errors.rate_limited || 0],
       ...common,
     ].filter(([name]) => columns.has(name));
-    await insertDynamic(env, 'events', values);
-    await insertSessionDetails(env, body, sessionDetailColumns);
+    const inserted = await insertEventRow(env, body, values);
+    if (inserted) {
+      await insertSessionDetails(env, body, sessionDetailColumns);
+    }
     return;
   }
+}
+
+async function insertEventRow(env, body, entries) {
+  const result = await insertDynamic(env, "events", entries);
+  const inserted = wasInserted(result);
+  if (inserted) {
+    await recordDailyActivity(env, body);
+  }
+  return inserted;
+}
+
+function wasInserted(result) {
+  return (result?.meta?.changes ?? result?.changes ?? 0) > 0;
 }
 
 async function insertTurnDetails(env, body, columns) {
@@ -333,6 +350,85 @@ async function insertTurnDetails(env, body, columns) {
   if (values.length > 1) {
     await insertDynamic(env, 'turn_details', values);
   }
+}
+
+async function recordDailyActivity(env, body) {
+  if (!["session_start", "turn_end", "session_end", "session_crash"].includes(body.event)) {
+    return;
+  }
+
+  const activityDate = new Date().toISOString().slice(0, 10);
+  const meaningful = isMeaningfulLifecycleEvent(body) ? 1 : 0;
+  const release = body.build_channel === "release" ? 1 : 0;
+  const meaningfulRelease = meaningful && release ? 1 : 0;
+  const sessionStartCount = body.event === "session_start" ? 1 : 0;
+  const turnEndCount = body.event === "turn_end" ? 1 : 0;
+  const sessionEndCount = body.event === "session_end" ? 1 : 0;
+  const sessionCrashCount = body.event === "session_crash" ? 1 : 0;
+
+  try {
+    await env.DB.prepare(`
+      INSERT INTO daily_active_users (
+        activity_date,
+        telemetry_id,
+        raw_active,
+        meaningful_active,
+        release_active,
+        meaningful_release_active,
+        session_start_count,
+        turn_end_count,
+        session_end_count,
+        session_crash_count,
+        last_build_channel
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(activity_date, telemetry_id) DO UPDATE SET
+        last_seen_at = datetime('now'),
+        raw_active = 1,
+        meaningful_active = MAX(meaningful_active, excluded.meaningful_active),
+        release_active = MAX(release_active, excluded.release_active),
+        meaningful_release_active = MAX(meaningful_release_active, excluded.meaningful_release_active),
+        session_start_count = session_start_count + excluded.session_start_count,
+        turn_end_count = turn_end_count + excluded.turn_end_count,
+        session_end_count = session_end_count + excluded.session_end_count,
+        session_crash_count = session_crash_count + excluded.session_crash_count,
+        last_build_channel = COALESCE(excluded.last_build_channel, daily_active_users.last_build_channel)
+    `).bind(
+      activityDate,
+      body.id,
+      meaningful,
+      release,
+      meaningfulRelease,
+      sessionStartCount,
+      turnEndCount,
+      sessionEndCount,
+      sessionCrashCount,
+      body.build_channel || null,
+    ).run();
+  } catch (err) {
+    // Older databases may not have the rollup migration yet. Do not reject the
+    // canonical event insert, because raw events remain the source of truth.
+    console.warn("daily activity rollup failed", err?.message || err);
+  }
+}
+
+function isMeaningfulLifecycleEvent(body) {
+  const errors = body.errors || {};
+  return ["session_end", "session_crash"].includes(body.event) && (
+    (body.turns || 0) > 0
+    || boolToInt(body.had_user_prompt) > 0
+    || boolToInt(body.had_assistant_response) > 0
+    || (body.assistant_responses || 0) > 0
+    || (body.tool_calls || 0) > 0
+    || (body.executed_tool_calls || 0) > 0
+    || (body.duration_secs || 0) > 0
+    || (errors.provider_timeout || 0) > 0
+    || (errors.auth_failed || 0) > 0
+    || (errors.tool_error || 0) > 0
+    || (errors.mcp_error || 0) > 0
+    || (errors.rate_limited || 0) > 0
+    || (body.provider_switches || 0) > 0
+    || (body.model_switches || 0) > 0
+  );
 }
 
 async function insertSessionDetails(env, body, columns) {
@@ -454,7 +550,7 @@ async function insertDynamic(env, table, entries) {
   const placeholders = columns.map(() => "?").join(", ");
   const sql = `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
   const values = entries.map(([, value]) => value);
-  await env.DB.prepare(sql).bind(...values).run();
+  return env.DB.prepare(sql).bind(...values).run();
 }
 
 function boolToInt(value) {

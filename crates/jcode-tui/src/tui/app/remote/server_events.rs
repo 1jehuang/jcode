@@ -1,0 +1,1587 @@
+use super::*;
+use crate::tool::selfdev::ReloadContext;
+use crate::tui::TuiState;
+use crate::tui::app as app_mod;
+use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
+
+pub(in crate::tui::app) fn handle_server_event(
+    app: &mut App,
+    event: ServerEvent,
+    remote: &mut impl RemoteEventState,
+) -> bool {
+    let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
+    if app.is_processing {
+        app.last_stream_activity = Some(Instant::now());
+    }
+
+    let had_remote_resume_activity = app.remote_resume_activity.is_some();
+
+    if matches!(
+        &event,
+        ServerEvent::TextDelta { .. }
+            | ServerEvent::TextReplace { .. }
+            | ServerEvent::ToolStart { .. }
+            | ServerEvent::ToolInput { .. }
+            | ServerEvent::ToolExec { .. }
+            | ServerEvent::ToolDone { .. }
+            | ServerEvent::GeneratedImage { .. }
+            | ServerEvent::BatchProgress { .. }
+            | ServerEvent::TokenUsage { .. }
+            | ServerEvent::KvCacheRequest { .. }
+            | ServerEvent::ConnectionType { .. }
+            | ServerEvent::ConnectionPhase { .. }
+            | ServerEvent::StatusDetail { .. }
+            | ServerEvent::MessageEnd
+            | ServerEvent::UpstreamProvider { .. }
+            | ServerEvent::Interrupted
+            | ServerEvent::Done { .. }
+            | ServerEvent::Error { .. }
+    ) {
+        app.remote_resume_activity = None;
+    }
+
+    let call_output_tokens_seen = remote.call_output_tokens_seen();
+
+    match event {
+        ServerEvent::TextDelta { text } => {
+            if let Some(thought_line) = App::extract_thought_line(&text) {
+                if let Some(chunk) = app.stream_buffer.flush() {
+                    app.append_streaming_text(&chunk);
+                }
+                app.insert_thought_line(thought_line);
+                return eager_stream_redraw;
+            }
+            let mut needs_redraw = false;
+            if matches!(
+                app.status,
+                ProcessingStatus::Sending
+                    | ProcessingStatus::Connecting(_)
+                    | ProcessingStatus::Thinking(_)
+            ) || (app.is_processing && matches!(app.status, ProcessingStatus::Idle))
+            {
+                app.status = ProcessingStatus::Streaming;
+                needs_redraw = true;
+            }
+            app.resume_streaming_tps();
+            if let Some(chunk) = app.stream_buffer.push(&text) {
+                app.append_streaming_text(&chunk);
+                needs_redraw = true;
+            }
+            app.last_stream_activity = Some(Instant::now());
+            eager_stream_redraw && needs_redraw
+        }
+        ServerEvent::TextReplace { text } => {
+            app.stream_buffer.flush();
+            app.replace_streaming_text(text);
+            app.resume_streaming_tps();
+            true
+        }
+        ServerEvent::ToolStart { id, name } => {
+            // Tool-call JSON is provider-generated output and is included in output-token
+            // usage. Keep the TPS timer running until the server reports ToolExec; actual
+            // tool execution time is excluded after that point.
+            app.resume_streaming_tps();
+            app.clear_active_experimental_feature_notice();
+            remote.handle_tool_start(&id, &name);
+            app.commit_pending_streaming_assistant_message();
+            if matches!(name.as_str(), "memory") {
+                crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
+            }
+            app.status = ProcessingStatus::RunningTool(name.clone());
+            app.streaming_tool_calls.push(ToolCall {
+                id,
+                name,
+                input: serde_json::Value::Null,
+                intent: None,
+            });
+            eager_stream_redraw
+        }
+        ServerEvent::ToolInput { delta } => {
+            remote.handle_tool_input(&delta);
+            false
+        }
+        ServerEvent::ToolExec { id, name } => {
+            // Provider output generation for this tool call is complete, but final usage
+            // snapshots often arrive later. Keep collecting deltas while excluding tool
+            // runtime from the elapsed TPS denominator.
+            app.pause_streaming_tps(true);
+            let parsed_input = remote.get_current_tool_input();
+            let tool_call = ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: parsed_input.clone(),
+                intent: ToolCall::intent_from_input(&parsed_input),
+            };
+            if let Some(key) = App::experimental_feature_key_for_tool(&tool_call) {
+                app.note_experimental_feature_use(key);
+            }
+            if let Some(tc) = app.streaming_tool_calls.iter_mut().find(|tc| tc.id == id) {
+                tc.input = parsed_input;
+                tc.refresh_intent_from_input();
+            }
+            remote.handle_tool_exec(&id, &name);
+            app.observe_tool_call(&tool_call);
+            eager_stream_redraw
+                || app.side_panel.focused_page_id.as_deref()
+                    == Some(app_mod::observe::OBSERVE_PAGE_ID)
+        }
+        ServerEvent::ToolDone {
+            id,
+            name,
+            output,
+            error,
+        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+        ServerEvent::GeneratedImage {
+            id,
+            path,
+            metadata_path,
+            output_format,
+            revised_prompt,
+        } => super::server_event_handlers::handle_generated_image(
+            app,
+            id,
+            path,
+            metadata_path,
+            output_format,
+            revised_prompt,
+        ),
+        ServerEvent::BatchProgress { progress } => {
+            app.batch_progress = Some(progress);
+            false
+        }
+        ServerEvent::TokenUsage {
+            input,
+            output,
+            cache_read_input,
+            cache_creation_input,
+        } => {
+            let previous_input = app.streaming_input_tokens;
+            let previous_output = app.streaming_output_tokens;
+            let previous_cache_read = app.streaming_cache_read_tokens;
+            let previous_cache_creation = app.streaming_cache_creation_tokens;
+            let was_recorded = app.current_api_usage_recorded;
+            app.accumulate_streaming_output_tokens(output, call_output_tokens_seen);
+            app.streaming_input_tokens = input;
+            app.streaming_output_tokens = output;
+            if cache_read_input.is_some() {
+                app.streaming_cache_read_tokens = cache_read_input;
+            }
+            if cache_creation_input.is_some() {
+                app.streaming_cache_creation_tokens = cache_creation_input;
+            }
+            if app.record_completed_stream_cache_usage() {
+                app.total_input_tokens = app.total_input_tokens.saturating_add(input);
+                app.total_output_tokens = app.total_output_tokens.saturating_add(output);
+                app.last_api_completed = Some(Instant::now());
+                app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
+                app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
+                app.last_turn_input_tokens = (input > 0).then_some(input);
+            } else if was_recorded && app.current_api_usage_recorded {
+                app.total_input_tokens = app
+                    .total_input_tokens
+                    .saturating_add(input.saturating_sub(previous_input));
+                app.total_output_tokens = app
+                    .total_output_tokens
+                    .saturating_add(output.saturating_sub(previous_output));
+
+                let had_cache_telemetry =
+                    previous_cache_read.is_some() || previous_cache_creation.is_some();
+                let has_cache_telemetry = app.streaming_cache_read_tokens.is_some()
+                    || app.streaming_cache_creation_tokens.is_some();
+                if has_cache_telemetry {
+                    let reported_delta = if had_cache_telemetry {
+                        input.saturating_sub(previous_input)
+                    } else {
+                        input
+                    };
+                    app.total_cache_reported_input_tokens = app
+                        .total_cache_reported_input_tokens
+                        .saturating_add(reported_delta);
+                    app.total_cache_read_tokens = app.total_cache_read_tokens.saturating_add(
+                        app.streaming_cache_read_tokens
+                            .unwrap_or(0)
+                            .saturating_sub(previous_cache_read.unwrap_or(0)),
+                    );
+                    app.total_cache_creation_tokens =
+                        app.total_cache_creation_tokens.saturating_add(
+                            app.streaming_cache_creation_tokens
+                                .unwrap_or(0)
+                                .saturating_sub(previous_cache_creation.unwrap_or(0)),
+                        );
+                    app.last_cache_reported_input_tokens = Some(input);
+                    app.last_cache_read_tokens = Some(app.streaming_cache_read_tokens.unwrap_or(0));
+                }
+
+                if let Some(baseline) = app.kv_cache_baseline.as_mut() {
+                    baseline.input_tokens = input;
+                    baseline.completed_at = Instant::now();
+                }
+                app.cache_next_optimal_input_tokens = Some(input);
+                app.last_api_completed = Some(Instant::now());
+                app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
+                app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
+                app.last_turn_input_tokens = (input > 0).then_some(input);
+            }
+            eager_stream_redraw && matches!(app.status, ProcessingStatus::Streaming)
+        }
+        ServerEvent::KvCacheRequest {
+            system_static_hash,
+            tools_hash,
+            messages_hash,
+            message_hashes,
+            message_count,
+            tool_count,
+            system_static_chars,
+            tools_json_chars,
+            messages_json_chars,
+            ephemeral_hash,
+            ephemeral_chars,
+            ephemeral_message_count,
+        } => {
+            remote.reset_call_output_tokens_seen();
+            app.begin_remote_kv_cache_request(app_mod::KvCacheRequestSignature {
+                system_static_hash,
+                tools_hash,
+                messages_hash,
+                message_hashes,
+                message_count,
+                tool_count,
+                system_static_chars,
+                tools_json_chars,
+                messages_json_chars,
+                ephemeral_hash,
+                ephemeral_chars,
+                ephemeral_message_count,
+            });
+            false
+        }
+        ServerEvent::ConnectionType { connection } => {
+            app.connection_type = Some(connection);
+            app.update_terminal_title();
+            false
+        }
+        ServerEvent::Pong { .. } => false,
+        ServerEvent::ConnectionPhase { phase } => {
+            let cp = match phase.as_str() {
+                "authenticating" => crate::message::ConnectionPhase::Authenticating,
+                "connecting" => crate::message::ConnectionPhase::Connecting,
+                "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
+                "streaming" => crate::message::ConnectionPhase::Streaming,
+                _ if phase.starts_with("retrying (") && phase.ends_with(')') => {
+                    let inner = &phase[10..phase.len() - 1];
+                    let (attempt, max) = inner
+                        .split_once('/')
+                        .and_then(|(a, m)| Some((a.parse::<u32>().ok()?, m.parse::<u32>().ok()?)))
+                        .unwrap_or((1, 1));
+                    crate::message::ConnectionPhase::Retrying { attempt, max }
+                }
+                _ => crate::message::ConnectionPhase::Connecting,
+            };
+            app.status = if matches!(cp, crate::message::ConnectionPhase::Streaming) {
+                app.resume_streaming_tps();
+                ProcessingStatus::Streaming
+            } else {
+                ProcessingStatus::Connecting(cp)
+            };
+            eager_stream_redraw
+        }
+        ServerEvent::StatusDetail { detail } => {
+            app.status_detail = Some(detail);
+            eager_stream_redraw
+        }
+        ServerEvent::MessageEnd => {
+            app.pause_streaming_tps(true);
+            app.stream_message_ended = true;
+            true
+        }
+        ServerEvent::UpstreamProvider { provider } => {
+            app.upstream_provider = Some(provider);
+            false
+        }
+        ServerEvent::Ack { id } => {
+            let _ = app.acknowledge_pending_soft_interrupt(id);
+            false
+        }
+        ServerEvent::Interrupted => {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
+                app.remote_session_id,
+                app.current_message_id,
+                app.is_processing,
+                app.status,
+                app.streaming_text.len(),
+                app.pending_soft_interrupts.len(),
+                app.queued_messages.len()
+            ));
+            let keep_pending_retry = app
+                .rate_limit_pending_message
+                .as_ref()
+                .is_some_and(|pending| pending.auto_retry && app.rate_limit_reset.is_some());
+            if !keep_pending_retry {
+                app.clear_pending_remote_retry();
+            }
+            let recovered_local = recover_local_interleave_to_queue(app, "interrupt");
+            if let Some(chunk) = app.stream_buffer.flush() {
+                app.append_streaming_text(&chunk);
+            }
+            if !app.streaming_text.is_empty() {
+                let content = app.take_streaming_text();
+                app.push_display_message(DisplayMessage {
+                    role: "assistant".to_string(),
+                    content,
+                    tool_calls: Vec::new(),
+                    duration_secs: app.display_turn_duration_secs(),
+                    title: None,
+                    tool_data: None,
+                });
+            }
+            app.clear_streaming_render_state();
+            app.stream_buffer.clear();
+            app.streaming_tool_calls.clear();
+            app.batch_progress = None;
+            app.thought_line_inserted = false;
+            app.thinking_prefix_emitted = false;
+            app.thinking_buffer.clear();
+            if recovered_local || !app.pending_soft_interrupts.is_empty() {
+                crate::logging::info(&format!(
+                    "Preserving {} pending soft interrupt(s) across interrupt",
+                    app.pending_soft_interrupts.len()
+                ));
+            }
+            app.schedule_queued_dispatch_after_interrupt();
+            app.push_display_message(DisplayMessage::system("Interrupted"));
+            app.is_processing = false;
+            app.status = ProcessingStatus::Idle;
+            app.stream_message_ended = false;
+            app.processing_started = None;
+            app.current_message_id = None;
+            remote.clear_pending();
+            remote.reset_call_output_tokens_seen();
+            let auto_poked = app.schedule_auto_poke_followup_if_needed()
+                || app.schedule_overnight_poke_followup_if_needed();
+            if !auto_poked {
+                app.clear_visible_turn_started();
+            }
+            auto_poked
+        }
+        ServerEvent::Done { id } => {
+            let mut auto_poked = false;
+            let mut completed_current_message = false;
+            crate::logging::info(&format!(
+                "Client received Done id={}, current_message_id={:?}",
+                id, app.current_message_id
+            ));
+            let has_resumed_turn_evidence = had_remote_resume_activity
+                || app.stream_message_ended
+                || app.has_streaming_footer_stats()
+                || !app.streaming_text.is_empty()
+                || !app.streaming_tool_calls.is_empty()
+                || matches!(
+                    app.status,
+                    ProcessingStatus::Streaming | ProcessingStatus::RunningTool(_)
+                );
+            let completes_resumed_turn =
+                app.current_message_id.is_none() && app.is_processing && has_resumed_turn_evidence;
+            if app.current_message_id == Some(id) || completes_resumed_turn {
+                if completes_resumed_turn {
+                    crate::logging::info(&format!(
+                        "Treating Done id={} as completion for resumed remote activity",
+                        id
+                    ));
+                }
+                completed_current_message = true;
+                app.clear_pending_remote_retry();
+                if let Some(chunk) = app.stream_buffer.flush() {
+                    app.append_streaming_text(&chunk);
+                }
+                app.pause_streaming_tps(false);
+                if !app.streaming_text.is_empty() {
+                    let duration = app.display_turn_duration_secs();
+                    let content = app.take_streaming_text();
+                    app.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls: vec![],
+                        duration_secs: duration,
+                        title: None,
+                        tool_data: None,
+                    });
+                    app.push_turn_footer(duration);
+                } else if app.has_streaming_footer_stats() {
+                    let duration = app.display_turn_duration_secs();
+                    app.push_turn_footer(duration);
+                }
+                crate::tui::mermaid::clear_streaming_preview_diagram();
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.stream_message_ended = false;
+                app.processing_started = None;
+                app.replay_processing_started_ms = None;
+                app.replay_elapsed_override = None;
+                app.remote_resume_activity = None;
+                app.batch_progress = None;
+                app.streaming_tool_calls.clear();
+                app.current_message_id = None;
+                app.thought_line_inserted = false;
+                app.thinking_prefix_emitted = false;
+                app.thinking_buffer.clear();
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                app.note_runtime_memory_event_force("turn_completed", "remote_turn_finished");
+                auto_poked = app.schedule_auto_poke_followup_if_needed()
+                    || app.schedule_overnight_poke_followup_if_needed();
+                if !auto_poked {
+                    app.clear_visible_turn_started();
+                }
+            } else if app.is_processing {
+                let is_stale = app.current_message_id.is_some_and(|mid| id < mid);
+                if is_stale {
+                    crate::logging::info(&format!(
+                        "Ignoring stale Done id={} (current_message_id={:?}), likely from Subscribe/ResumeSession",
+                        id, app.current_message_id
+                    ));
+                } else {
+                    crate::logging::info(&format!(
+                        "Ignoring unrelated Done id={} while processing current_message_id={:?}; preserving active/queued turn",
+                        id, app.current_message_id
+                    ));
+                }
+            }
+            completed_current_message || auto_poked
+        }
+        ServerEvent::Error {
+            message,
+            retry_after_secs,
+            ..
+        } => {
+            let reset_duration = retry_after_secs
+                .map(Duration::from_secs)
+                .or_else(|| parse_rate_limit_error(&message));
+            if let Some(reset_duration) = reset_duration {
+                app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                if let Some(is_system) = app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .map(|pending| pending.is_system)
+                {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "⏳ Rate limit hit. Will auto-retry in {} seconds...",
+                        reset_duration.as_secs()
+                    )));
+                    if is_system {
+                        app.set_status_notice("Rate limited; queued system retry");
+                    } else {
+                        app.set_status_notice("Rate limited; queued retry");
+                    }
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                    app.stream_message_ended = false;
+                    app.processing_started = None;
+                    app.clear_visible_turn_started();
+                    app.current_message_id = None;
+                    remote.clear_pending();
+                    remote.reset_call_output_tokens_seen();
+                    return false;
+                }
+            }
+            let is_failover_prompt =
+                crate::provider::parse_failover_prompt_message(&message).is_some();
+            app.push_display_message(DisplayMessage {
+                role: "error".to_string(),
+                content: message.clone(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            app.is_processing = false;
+            app.status = ProcessingStatus::Idle;
+            app.stream_message_ended = false;
+            let recovered_local = recover_local_interleave_to_queue(app, "request error");
+            crate::tui::mermaid::clear_streaming_preview_diagram();
+            app.thought_line_inserted = false;
+            app.thinking_prefix_emitted = false;
+            app.thinking_buffer.clear();
+            if recovered_local || !app.pending_soft_interrupts.is_empty() {
+                crate::logging::info(&format!(
+                    "Preserving {} pending soft interrupt(s) across remote error",
+                    app.pending_soft_interrupts.len()
+                ));
+            }
+            remote.clear_pending();
+            remote.reset_call_output_tokens_seen();
+            if crate::network_retry::classify_message(&message).is_some()
+                && app.schedule_pending_remote_network_wait(&message)
+            {
+                return false;
+            }
+            if app.auto_poke_incomplete_todos
+                && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
+            {
+                if crate::tui::app::commands::is_auto_poke_connectivity_error(&message) {
+                    crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
+                        app, &message,
+                    );
+                    return false;
+                }
+                if app.schedule_pending_remote_retry_with_limit(
+                    "⚠ Remote request failed with a likely non-retryable error.",
+                    2,
+                ) {
+                    return false;
+                }
+                crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(app, &message);
+                return false;
+            }
+            if app.stop_overnight_auto_poke_for_non_retryable_error(&message) {
+                return false;
+            }
+            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
+            {
+                app.clear_pending_remote_retry();
+                return app.schedule_auto_poke_followup_if_needed()
+                    || app.schedule_overnight_poke_followup_if_needed();
+            }
+            false
+        }
+        ServerEvent::SessionId { session_id } => {
+            remote.set_session_id(session_id.clone());
+            app.remote_session_id = Some(session_id.clone());
+            crate::set_current_session(&session_id);
+            app.note_client_focus(true);
+            app.update_terminal_title();
+            false
+        }
+        ServerEvent::SessionCloseRequested { reason } => {
+            app.push_display_message(DisplayMessage::system(format!(
+                "Session close requested by coordinator: {reason}"
+            )));
+            app.set_status_notice("Session close requested by coordinator".to_string());
+            app.should_quit = true;
+            true
+        }
+        ServerEvent::SessionRenamed {
+            session_id,
+            title,
+            display_title,
+        } => {
+            crate::tui::session_picker::invalidate_session_list_cache();
+            let active_session_id = app
+                .remote_session_id
+                .as_deref()
+                .or(app.resume_session_id.as_deref())
+                .unwrap_or(app.session.id.as_str());
+            if active_session_id == session_id {
+                app.session.rename_title(title.clone());
+                if title.is_none()
+                    && app.session.title.is_none()
+                    && display_title != app.session.display_name()
+                {
+                    app.session.title = Some(display_title.clone());
+                }
+                app.update_terminal_title();
+                if title.is_some() {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Renamed session to {}.",
+                        display_title
+                    )));
+                    app.set_status_notice("Session renamed");
+                } else {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Cleared custom name. Session title is now {}.",
+                        display_title
+                    )));
+                    app.set_status_notice("Session name cleared");
+                }
+                true
+            } else {
+                false
+            }
+        }
+        ServerEvent::Reloading { .. } => {
+            app.append_reload_message("🔄 Server reload initiated...");
+            false
+        }
+        ServerEvent::ReloadProgress {
+            step,
+            message,
+            success,
+            output,
+        } => {
+            let mut content = if let Some(ok) = success {
+                let status_icon = if ok { "✓" } else { "✗" };
+                format!("[{}] {} {}", step, status_icon, message)
+            } else {
+                format!("[{}] {}", step, message)
+            };
+
+            if let Some(out) = output
+                && !out.is_empty()
+            {
+                content.push('\n');
+                for line in out.lines() {
+                    content.push_str("  ");
+                    content.push_str(line);
+                    content.push('\n');
+                }
+            }
+
+            app.append_reload_message(&content);
+
+            if step == "verify" || step == "git" {
+                app.reload_info.push(message.clone());
+            }
+
+            app.status_notice = Some((format!("Reload: {}", message), std::time::Instant::now()));
+            false
+        }
+        ServerEvent::History {
+            messages,
+            images,
+            session_id,
+            provider_name,
+            provider_model,
+            subagent_model,
+            autoreview_enabled,
+            autojudge_enabled,
+            available_models,
+            available_model_routes,
+            mcp_servers,
+            skills,
+            total_tokens,
+            all_sessions,
+            client_count,
+            is_canary,
+            server_version,
+            server_name,
+            server_icon,
+            server_has_update,
+            was_interrupted,
+            reload_recovery,
+            connection_type,
+            status_detail,
+            upstream_provider,
+            reasoning_effort,
+            service_tier,
+            compaction_mode,
+            activity,
+            token_usage_totals,
+            side_panel,
+            ..
+        } => {
+            let prev_session_id = app.remote_session_id.clone();
+            let history_message_count = messages.len();
+            let history_mcp_count = mcp_servers.len();
+            let history_model = provider_model.clone();
+            remote.set_session_id(session_id.clone());
+            app.remote_session_id = Some(session_id.clone());
+            crate::set_current_session(&session_id);
+            app.note_client_focus(true);
+            let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
+
+            if session_changed {
+                app.rate_limit_pending_message = None;
+                app.rate_limit_reset = None;
+                app.connection_type = None;
+                app.status_detail = None;
+                app.clear_display_messages();
+                app.clear_streaming_render_state();
+                app.streaming_tool_calls.clear();
+                app.thought_line_inserted = false;
+                app.thinking_prefix_emitted = false;
+                app.thinking_buffer.clear();
+                app.streaming_input_tokens = 0;
+                app.streaming_output_tokens = 0;
+                app.streaming_cache_read_tokens = None;
+                app.streaming_cache_creation_tokens = None;
+                app.current_api_usage_recorded = false;
+                app.total_cache_reported_input_tokens = 0;
+                app.total_cache_read_tokens = 0;
+                app.total_cache_creation_tokens = 0;
+                app.total_cache_optimal_input_tokens = 0;
+                app.last_cache_reported_input_tokens = None;
+                app.last_cache_read_tokens = None;
+                app.last_cache_optimal_input_tokens = None;
+                app.cache_next_optimal_input_tokens = None;
+                app.kv_cache_baseline = None;
+                app.pending_kv_cache_request = None;
+                app.kv_cache_turn_number = None;
+                app.kv_cache_turn_call_index = 0;
+                app.kv_cache_miss_samples.clear();
+                app.processing_started = None;
+                app.clear_visible_turn_started();
+                app.replay_processing_started_ms = None;
+                app.replay_elapsed_override = None;
+                app.reset_streaming_tps();
+                app.last_stream_activity = None;
+                app.stream_message_ended = false;
+                app.remote_resume_activity = None;
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.follow_chat_bottom();
+                if prev_session_id.is_some() {
+                    app.queued_messages.clear();
+                    app.interleave_message = None;
+                    app.clear_pending_soft_interrupt_tracking();
+                }
+                app.remote_total_tokens = None;
+                app.remote_token_usage_totals = None;
+                app.remote_side_pane_images.clear();
+                app.remote_swarm_members.clear();
+                app.swarm_plan_items.clear();
+                app.swarm_plan_version = None;
+                app.swarm_plan_swarm_id = None;
+                remote.reset_call_output_tokens_seen();
+            }
+            let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+            );
+            app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            app.clear_remote_startup_phase();
+            app.session.subagent_model = subagent_model;
+            app.session.autoreview_enabled = autoreview_enabled;
+            app.session.autojudge_enabled = autojudge_enabled;
+            app.autoreview_enabled =
+                autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
+            app.autojudge_enabled =
+                autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
+            if upstream_provider.is_some() {
+                app.upstream_provider = upstream_provider;
+            }
+            if session_changed || connection_type.is_some() {
+                app.connection_type = connection_type;
+            }
+            if session_changed || status_detail.is_some() {
+                app.status_detail = status_detail;
+            }
+            app.remote_reasoning_effort = reasoning_effort;
+            app.remote_service_tier = service_tier;
+            app.remote_compaction_mode = Some(compaction_mode);
+            app.set_side_panel_snapshot(side_panel);
+            app.remote_side_pane_images = images;
+            app.persist_remote_model_catalog_cache();
+            app.remote_skills = skills;
+            app.invalidate_command_candidates_cache();
+            app.remote_sessions = all_sessions;
+            app.remote_client_count = client_count;
+            app.remote_is_canary = is_canary;
+            app.remote_server_version = server_version;
+            app.remote_server_has_update = server_has_update;
+            let history_total_tokens = total_tokens.or_else(|| {
+                token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
+            });
+            if session_changed || history_total_tokens.is_some() {
+                app.remote_total_tokens = history_total_tokens;
+            }
+            if session_changed || token_usage_totals.is_some() {
+                app.remote_token_usage_totals = token_usage_totals;
+            }
+            if token_usage_totals.is_some() {
+                app.total_input_tokens = 0;
+                app.total_output_tokens = 0;
+                app.total_cache_reported_input_tokens = 0;
+                app.total_cache_read_tokens = 0;
+                app.total_cache_creation_tokens = 0;
+                app.total_cache_optimal_input_tokens = 0;
+            }
+            if let Some(totals) = token_usage_totals {
+                crate::logging::info(&format!(
+                    "Remote history token totals: session={} messages_with_usage={} input={} output={} cache_reported={} cache_read={} cache_write={}",
+                    session_id,
+                    totals.messages_with_token_usage,
+                    totals.input_tokens,
+                    totals.output_tokens,
+                    totals.cache_reported_input_tokens,
+                    totals.cache_read_input_tokens,
+                    totals.cache_creation_input_tokens
+                ));
+            }
+            crate::tui::workspace_client::sync_after_history(&session_id, &app.remote_sessions);
+
+            if server_has_update == Some(true) && !app.pending_server_reload {
+                app.pending_server_reload = true;
+                app.set_status_notice("Server update available");
+            }
+            app.remote_server_short_name = server_name;
+            if let Some(icon) = server_icon {
+                app.remote_server_icon = Some(icon);
+            }
+
+            app.update_terminal_title();
+
+            if !mcp_servers.is_empty() {
+                app.mcp_server_names = mcp_servers
+                    .iter()
+                    .filter_map(|s| {
+                        let (name, count_str) = s.split_once(':')?;
+                        let count = count_str.parse::<usize>().unwrap_or(0);
+                        Some((name.to_string(), count))
+                    })
+                    .collect();
+            }
+
+            let should_apply_history_payload = session_changed || !remote.has_loaded_history();
+            if should_apply_history_payload {
+                if let Some(activity) = activity.filter(|activity| activity.is_processing) {
+                    let current_tool_name = activity.current_tool_name.clone();
+                    app.is_processing = true;
+                    if app.processing_started.is_none() {
+                        app.processing_started = Some(Instant::now());
+                    }
+                    if app.last_stream_activity.is_none() {
+                        app.last_stream_activity = Some(Instant::now());
+                    }
+                    app.remote_resume_activity = Some(RemoteResumeActivity {
+                        session_id: session_id.clone(),
+                        observed_at: Instant::now(),
+                        current_tool_name: current_tool_name.clone(),
+                    });
+                    app.status = match current_tool_name {
+                        Some(tool_name) => ProcessingStatus::RunningTool(tool_name),
+                        None => ProcessingStatus::Thinking(Instant::now()),
+                    };
+                } else {
+                    app.remote_resume_activity = None;
+                }
+            }
+            if should_apply_history_payload {
+                crate::logging::info(&format!(
+                    "[TIMING] remote bootstrap: history after {}ms (session={}, resumed={}, messages={}, mcp_servers={}, model={})",
+                    app.app_started.elapsed().as_millis(),
+                    session_id,
+                    app.resume_session_id.is_some(),
+                    history_message_count,
+                    history_mcp_count,
+                    history_model.as_deref().unwrap_or("<none>")
+                ));
+                remote.mark_history_loaded();
+                if messages.is_empty() && !session_changed && !app.display_messages().is_empty() {
+                    crate::logging::info(
+                        "Preserving locally restored display history for metadata-only History bootstrap",
+                    );
+                } else {
+                    let restored_messages = messages
+                        .into_iter()
+                        .map(|msg| DisplayMessage {
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: msg.tool_calls.unwrap_or_default(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: msg.tool_data,
+                        })
+                        .collect();
+                    app.replace_display_messages(restored_messages);
+                }
+
+                if history_matches_pending_startup_prompt(app) {
+                    crate::logging::info(
+                        "Reload-restored startup prompt already present in server history; skipping client resubmit",
+                    );
+                    app.submit_input_on_startup = false;
+                    app.input.clear();
+                    app.cursor_pos = 0;
+                    app.pending_images.clear();
+                    app.set_status_notice("Reload complete - prompt preserved");
+                }
+                app.note_runtime_memory_event_force("history_loaded", "remote_history_applied");
+                if let Some(notice) = app.pending_remote_rewind_notice.take() {
+                    let content = if notice.undo {
+                        "✓ Undid rewind. Restored the messages removed by the last rewind."
+                            .to_string()
+                    } else {
+                        format!(
+                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
+                            notice.message_index.unwrap_or_default(),
+                            notice.changed_messages,
+                            if notice.changed_messages == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                    };
+                    app.push_display_message(DisplayMessage::system(content));
+                }
+            } else {
+                crate::logging::info(
+                    "Ignoring duplicate History event for active session after local state was restored",
+                );
+            }
+
+            app.maybe_show_catchup_after_history(&session_id);
+
+            let should_consume_pending_reload_status = match app
+                .pending_reload_reconnect_status
+                .as_ref()
+            {
+                Some(PendingReloadReconnectStatus::AwaitingHistory {
+                    session_id: Some(expected),
+                }) => expected == &session_id,
+                Some(PendingReloadReconnectStatus::AwaitingHistory { session_id: None }) => true,
+                _ => false,
+            };
+            let pending_reload_reconnect_status = if should_consume_pending_reload_status {
+                app.pending_reload_reconnect_status.take()
+            } else {
+                None
+            };
+
+            let reload_recovery = reload_recovery.or_else(|| {
+                ReloadContext::recovery_directive(None, was_interrupted == Some(true), "", None)
+            });
+            if let Some(reload_recovery) = reload_recovery
+                && !app.display_messages.is_empty()
+            {
+                let continuation_message = reload_recovery.continuation_message;
+                crate::logging::info(&format!(
+                    "History payload requested reload recovery continuation: session={} was_interrupted={:?}",
+                    session_id, was_interrupted
+                ));
+                if let Some(notice) = reload_recovery.reconnect_notice
+                    && !app.reload_info.iter().any(|existing| existing == &notice)
+                {
+                    app.reload_info.push(notice);
+                }
+                let already_queued = app
+                    .hidden_queued_system_messages
+                    .iter()
+                    .any(|queued| queued == &continuation_message)
+                    || app
+                        .rate_limit_pending_message
+                        .as_ref()
+                        .and_then(|pending| pending.system_reminder.as_ref())
+                        .is_some_and(|queued| queued == &continuation_message);
+                if already_queued {
+                    crate::logging::info(&format!(
+                        "History payload reload recovery continuation already queued/in-flight: session={}",
+                        session_id
+                    ));
+                } else {
+                    app.push_display_message(DisplayMessage::system(
+                        "Reload complete - continuing because a recovery directive was pending."
+                            .to_string(),
+                    ));
+                    app.hidden_queued_system_messages.push(continuation_message);
+                }
+            } else if pending_reload_reconnect_status.is_some() {
+                let message = match was_interrupted {
+                    Some(false) => {
+                        "Reload complete - no continuation needed because the previous response had already finished."
+                    }
+                    Some(true) => {
+                        "Reload complete - no continuation queued because no recovery directive was available for the interrupted turn."
+                    }
+                    None => {
+                        "Reload complete - no continuation needed because the server did not report an interrupted turn."
+                    }
+                };
+                crate::logging::info(&format!(
+                    "History payload completed reload reconnect without continuation: session={} was_interrupted={:?}",
+                    session_id, was_interrupted
+                ));
+                app.push_display_message(DisplayMessage::system(message.to_string()));
+            }
+
+            false
+        }
+        ServerEvent::CompactedHistory {
+            session_id,
+            messages,
+            images,
+            compacted_total,
+            compacted_visible,
+            compacted_remaining,
+            compacted_hidden_prompts,
+            ..
+        } => {
+            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+                crate::logging::info(&format!(
+                    "Ignoring compacted history for inactive session {}",
+                    session_id
+                ));
+                return false;
+            }
+            let restored_messages = messages
+                .into_iter()
+                .map(|msg| DisplayMessage {
+                    role: msg.role,
+                    content: msg.content,
+                    tool_calls: msg.tool_calls.unwrap_or_default(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: msg.tool_data,
+                })
+                .collect();
+            app.apply_compacted_history_window(
+                restored_messages,
+                images,
+                compacted_total,
+                compacted_visible,
+                compacted_remaining,
+                compacted_hidden_prompts,
+            );
+            true
+        }
+        ServerEvent::SidePanelState { snapshot } => {
+            app.set_side_panel_snapshot(snapshot);
+            false
+        }
+        ServerEvent::SwarmStatus { members } => {
+            if app.swarm_enabled {
+                app.remote_swarm_members = members;
+                persist_swarm_status_snapshot(app);
+            } else {
+                app.remote_swarm_members.clear();
+            }
+            false
+        }
+        ServerEvent::SwarmPlan {
+            swarm_id,
+            version,
+            items,
+            participants,
+            reason,
+            summary,
+            ..
+        } => {
+            let snapshot = RemoteSwarmPlanSnapshot {
+                swarm_id: swarm_id.clone(),
+                version,
+                items: items.clone(),
+                participants: participants.clone(),
+                reason: reason.clone(),
+                summary,
+            };
+            let notice = snapshot.status_notice();
+            app.swarm_plan_swarm_id = Some(snapshot.swarm_id.clone());
+            app.swarm_plan_version = Some(snapshot.version);
+            app.swarm_plan_items = snapshot.items.clone();
+            persist_swarm_plan_snapshot(
+                app,
+                snapshot.swarm_id,
+                snapshot.version,
+                snapshot.items,
+                snapshot.participants,
+                snapshot.reason,
+            );
+            app.set_status_notice(notice);
+            false
+        }
+        ServerEvent::SwarmPlanProposal {
+            swarm_id,
+            proposer_session,
+            proposer_name,
+            summary,
+            ..
+        } => {
+            let proposer =
+                proposer_name.unwrap_or_else(|| proposer_session.chars().take(8).collect());
+            let message = format!(
+                "Plan proposal received in swarm {}\nFrom: {}\nSummary: {}",
+                swarm_id, proposer, summary
+            );
+            app.push_display_message(DisplayMessage::system(message.clone()));
+            persist_replay_display_message(app, "system", None, &message);
+            app.set_status_notice("Plan proposal received");
+            false
+        }
+        ServerEvent::McpStatus { servers } => {
+            app.mcp_server_names = servers
+                .iter()
+                .filter_map(|s| {
+                    let (name, count_str) = s.split_once(':')?;
+                    let count = count_str.parse::<usize>().unwrap_or(0);
+                    Some((name.to_string(), count))
+                })
+                .collect();
+            false
+        }
+        ServerEvent::ModelChanged {
+            model,
+            provider_name,
+            error,
+            ..
+        } => {
+            app.remote_model_switch_in_flight = false;
+            if let Some(err) = error {
+                if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
+                    super::input_dispatch::restore_prepared_remote_input(app, prepared);
+                }
+                app.push_display_message(DisplayMessage::error(
+                    crate::tui::app::model_context::model_switch_failure_message(&err, true),
+                ));
+                app.set_status_notice("Model switch failed");
+            } else {
+                app.update_context_limit_for_model(&model);
+                app.remote_provider_model = Some(model.clone());
+                app.clear_remote_startup_phase();
+                if let Some(ref pname) = provider_name {
+                    app.remote_provider_name = Some(pname.clone());
+                }
+                app.invalidate_model_picker_cache();
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Switched to model: {}",
+                    model
+                )));
+                app.set_status_notice(format!("Model → {}", model));
+            }
+            false
+        }
+        ServerEvent::AvailableModelsUpdated {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+        } => {
+            let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+                provider_name,
+                provider_model,
+                available_models,
+                available_model_routes,
+            );
+            if let Some((before_models, before_routes)) =
+                app.pending_remote_model_refresh_snapshot.take()
+            {
+                let summary = crate::provider::summarize_model_catalog_refresh(
+                    before_models,
+                    model_catalog_snapshot.available_models.clone(),
+                    before_routes,
+                    model_catalog_snapshot.model_routes.clone(),
+                );
+                app.push_display_message(DisplayMessage::system(
+                    app_mod::model_context::format_model_refresh_summary(&summary),
+                ));
+                app.set_status_notice(format!(
+                    "Model list refreshed: +{} models, +{} routes, ~{} changed",
+                    summary.models_added, summary.routes_added, summary.routes_changed
+                ));
+            }
+            let provider_meta_changed =
+                app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            app.persist_remote_model_catalog_cache();
+            if provider_meta_changed {
+                app.update_terminal_title();
+            }
+            false
+        }
+        ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
+            if let Some(err) = error {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set effort: {}",
+                    err
+                )));
+            } else {
+                app.remote_reasoning_effort = effort.clone();
+                let label = effort
+                    .as_deref()
+                    .map(app_mod::effort_display_label)
+                    .unwrap_or("default");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Reasoning effort → {}",
+                    label
+                )));
+                app.set_status_notice(format!("Effort: {}", label));
+            }
+            false
+        }
+        ServerEvent::ServiceTierChanged {
+            service_tier,
+            error,
+            ..
+        } => {
+            if let Some(err) = error {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set fast mode: {}",
+                    err
+                )));
+            } else {
+                app.remote_service_tier = service_tier.clone();
+                let enabled = service_tier.as_deref() == Some("priority");
+                let label = service_tier
+                    .as_deref()
+                    .map(app_mod::service_tier_display_label)
+                    .unwrap_or("Standard");
+                let applies_next_request = app.is_processing;
+                app.push_display_message(DisplayMessage::system(
+                    app_mod::fast_mode_success_message(enabled, label, applies_next_request),
+                ));
+                app.set_status_notice(app_mod::fast_mode_status_notice(
+                    enabled,
+                    applies_next_request,
+                ));
+            }
+            false
+        }
+        ServerEvent::TransportChanged {
+            transport, error, ..
+        } => {
+            if let Some(err) = error {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set transport: {}",
+                    err
+                )));
+            } else {
+                app.remote_transport = transport.clone();
+                let label = transport.as_deref().unwrap_or("unknown");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Transport → {}",
+                    label
+                )));
+                app.set_status_notice(format!("Transport: {}", label));
+            }
+            false
+        }
+        ServerEvent::CompactionModeChanged { mode, error, .. } => {
+            if let Some(err) = error {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set compaction mode: {}",
+                    err
+                )));
+            } else {
+                let label = mode.as_str();
+                app.remote_compaction_mode = Some(mode);
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Compaction mode → {}",
+                    label
+                )));
+                app.set_status_notice(format!("Compaction: {}", label));
+            }
+            false
+        }
+        ServerEvent::SoftInterruptInjected {
+            content,
+            display_role,
+            point,
+            tools_skipped,
+        } => {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_EVENT_RECEIVED kind=soft_interrupt_injected session={:?} point={} display_role={:?} tools_skipped={:?} content_bytes={} content_chars={} pending_soft_interrupts={}",
+                app.remote_session_id,
+                point,
+                display_role,
+                tools_skipped,
+                content.len(),
+                content.chars().count(),
+                app.pending_soft_interrupts.len()
+            ));
+            if let Some(chunk) = app.stream_buffer.flush() {
+                app.append_streaming_text(&chunk);
+            }
+            if !app.streaming_text.is_empty() {
+                let duration = app.display_turn_duration_secs();
+                let flushed = app.take_streaming_text();
+                app.push_display_message(DisplayMessage {
+                    role: "assistant".to_string(),
+                    content: flushed,
+                    tool_calls: vec![],
+                    duration_secs: duration,
+                    title: None,
+                    tool_data: None,
+                });
+                app.push_turn_footer(duration);
+            }
+            app.mark_soft_interrupt_injected(&content);
+            let role = display_role.unwrap_or_else(|| "user".to_string());
+            app.push_display_message(DisplayMessage {
+                role,
+                content: content.clone(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            if let Some(n) = tools_skipped {
+                app.set_status_notice(format!("⚡ {} tool(s) skipped", n));
+            }
+            false
+        }
+        ServerEvent::MemoryInjected {
+            count,
+            prompt,
+            display_prompt,
+            prompt_chars: _,
+            computed_age_ms,
+        } => {
+            if app.memory_enabled {
+                let plural = if count == 1 { "memory" } else { "memories" };
+                let display_prompt = if let Some(display_prompt) = display_prompt {
+                    display_prompt.clone()
+                } else if prompt.trim().is_empty() {
+                    "# Memory\n\n## Notes\n1. (content unavailable from server event)".to_string()
+                } else {
+                    prompt.clone()
+                };
+                crate::memory::record_injected_prompt(&prompt, count, computed_age_ms);
+                let summary = if count == 1 {
+                    "🧠 auto-recalled 1 memory".to_string()
+                } else {
+                    format!("🧠 auto-recalled {} memories", count)
+                };
+                app.push_display_message(DisplayMessage::memory(summary, display_prompt));
+                app.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
+            }
+            false
+        }
+        ServerEvent::MemoryActivity { activity } => {
+            if app.memory_enabled {
+                crate::memory::apply_remote_activity_snapshot(&activity);
+            }
+            false
+        }
+        ServerEvent::Notification {
+            from_session,
+            from_name,
+            notification_type,
+            message,
+        } => {
+            let sender = from_name
+                .clone()
+                .or_else(|| crate::id::extract_session_name(&from_session).map(str::to_string))
+                .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
+
+            let background_task_scope = matches!(
+                &notification_type,
+                crate::protocol::NotificationType::Message {
+                    scope: Some(scope),
+                    ..
+                } if scope == "background_task"
+            );
+
+            let runtime_activity_scope = match &notification_type {
+                crate::protocol::NotificationType::Message {
+                    scope: Some(scope), ..
+                } if matches!(
+                    scope.as_str(),
+                    "auth_activity" | "catalog_activity" | "background_activity"
+                ) =>
+                {
+                    Some(scope.as_str())
+                }
+                _ => None,
+            };
+
+            if background_task_scope {
+                let presentation =
+                    present_swarm_notification(&sender, &notification_type, &message);
+                if crate::message::parse_background_task_progress_notification_markdown(&message)
+                    .is_some()
+                {
+                    app.upsert_background_task_progress_message(message.clone());
+                } else {
+                    app.push_display_message(DisplayMessage::background_task(message.clone()));
+                }
+                persist_replay_display_message(app, "background_task", None, &message);
+                app.set_status_notice(presentation.status_notice);
+                return false;
+            }
+
+            if let Some(scope) = runtime_activity_scope {
+                if scope == "catalog_activity"
+                    && let Some(progress) =
+                        crate::message::parse_background_task_progress_notification_markdown(
+                            &message,
+                        )
+                {
+                    let status_notice = progress.summary.clone();
+                    app.upsert_background_task_progress_message(message.clone());
+                    persist_replay_display_message(app, "background_task", None, &message);
+                    app.set_status_notice(status_notice);
+                    return false;
+                } else if scope == "background_activity" {
+                    app.push_display_message(DisplayMessage::background_task(message.clone()));
+                    persist_replay_display_message(app, "background_task", None, &message);
+                } else {
+                    app.push_display_message(DisplayMessage::system(message.clone()));
+                    persist_replay_display_message(app, "system", None, &message);
+                }
+                app.set_status_notice(runtime_activity_status_notice(&message));
+                return false;
+            }
+
+            let presentation = present_swarm_notification(&sender, &notification_type, &message);
+            app.push_display_message(DisplayMessage::swarm(
+                presentation.title.clone(),
+                presentation.message.clone(),
+            ));
+            persist_replay_display_message(
+                app,
+                "swarm",
+                Some(presentation.title.clone()),
+                &presentation.message,
+            );
+            app.set_status_notice(presentation.status_notice);
+            false
+        }
+        ServerEvent::Transcript { text, mode } => {
+            apply_transcript_event(app, text, mode);
+            false
+        }
+        ServerEvent::InputShellResult { result } => {
+            app.push_display_message(DisplayMessage::system(
+                crate::message::format_input_shell_result_markdown(&result),
+            ));
+            app.set_status_notice(crate::message::input_shell_status_notice(&result));
+            false
+        }
+        ServerEvent::Compaction {
+            trigger,
+            pre_tokens,
+            post_tokens,
+            tokens_saved,
+            duration_ms,
+            messages_dropped,
+            messages_compacted,
+            summary_chars,
+            active_messages,
+        } => {
+            app.handle_compaction_event(crate::compaction::CompactionEvent {
+                trigger,
+                pre_tokens,
+                post_tokens,
+                tokens_saved,
+                duration_ms,
+                messages_dropped,
+                messages_compacted,
+                summary_chars,
+                active_messages,
+            });
+            false
+        }
+        ServerEvent::SplitResponse {
+            new_session_id,
+            new_session_name,
+            ..
+        } => {
+            if crate::tui::workspace_client::handle_split_response(&new_session_id) {
+                finish_remote_split_launch(app);
+                app.pending_split_request = false;
+                app.pending_split_startup_message = None;
+                app.pending_split_parent_session_id = None;
+                app.pending_split_prompt = None;
+                app.pending_split_model_override = None;
+                app.pending_split_provider_key_override = None;
+                app.pending_split_label = None;
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Added {} to workspace.",
+                    new_session_name,
+                )));
+                app.set_status_notice(format!("Workspace + {}", new_session_name));
+                return false;
+            }
+            finish_remote_split_launch(app);
+            app.pending_split_request = false;
+            let startup_message = app.pending_split_startup_message.take();
+            let parent_session_id_override = app.pending_split_parent_session_id.take();
+            let startup_prompt = app.pending_split_prompt.take();
+            let model_override = app.pending_split_model_override.take();
+            let provider_key_override = app.pending_split_provider_key_override.take();
+            let split_label = app.pending_split_label.take();
+            if let Some(startup_message) = startup_message {
+                app_mod::commands::prepare_review_spawned_session(
+                    &new_session_id,
+                    startup_message,
+                    model_override,
+                    provider_key_override,
+                    split_label.clone().map(|label| label.to_ascii_lowercase()),
+                    parent_session_id_override,
+                );
+            } else if let Some(startup_prompt) = startup_prompt {
+                App::save_startup_submission_for_session(
+                    &new_session_id,
+                    startup_prompt.content,
+                    startup_prompt.images,
+                );
+            }
+            let exe = app_mod::launch_client_executable();
+            let cwd = crate::session::Session::load(&new_session_id)
+                .ok()
+                .and_then(|session| session.working_dir)
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_dir())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let socket = std::env::var("JCODE_SOCKET").ok();
+            match spawn_in_new_terminal(&exe, &new_session_id, &cwd, socket.as_deref()) {
+                Ok(true) => {
+                    if let Some(label) = split_label.as_deref() {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "🔍 {} launched in {}.",
+                            label, new_session_name,
+                        )));
+                        app.set_status_notice(format!("{} launched", label));
+                    } else {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "✂ Split → {} (opened in new window)",
+                            new_session_name,
+                        )));
+                        app.set_status_notice(format!("Split → {}", new_session_name));
+                    }
+                }
+                Ok(false) => {
+                    if let Some(label) = split_label.as_deref() {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "🔍 {} session {} created.\n\nNo terminal found. Resume manually:\n  jcode --resume {}",
+                            label, new_session_name, new_session_id,
+                        )));
+                        app.set_status_notice(format!("{} session created", label));
+                    } else {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "✂ Split → {}\n\nNo terminal found. Resume manually:\n  jcode --resume {}",
+                            new_session_name, new_session_id,
+                        )));
+                    }
+                }
+                Err(e) => {
+                    if let Some(label) = split_label.as_deref() {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "{} session {} was created but failed to open a window: {}\n\nResume manually: jcode --resume {}",
+                            label, new_session_name, e, new_session_id,
+                        )));
+                        app.set_status_notice(format!("{} open failed", label));
+                    } else {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Split created {} but failed to open window: {}\n\nResume manually: jcode --resume {}",
+                            new_session_name, e, new_session_id,
+                        )));
+                    }
+                }
+            }
+            false
+        }
+        ServerEvent::CompactResult {
+            message, success, ..
+        } => {
+            if success {
+                app.push_display_message(DisplayMessage::system(message));
+                app.set_status_notice("Compacting context");
+            } else {
+                app.push_display_message(DisplayMessage::system(message));
+                app.set_status_notice("Compaction failed");
+            }
+            false
+        }
+        ServerEvent::StdinRequest { .. } => {
+            app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
+            false
+        }
+        _ => false,
+    }
+}
+
+fn runtime_activity_status_notice(message: &str) -> String {
+    message
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then_some(line)
+        })
+        .unwrap_or("Jcode activity")
+        .trim_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
+}
