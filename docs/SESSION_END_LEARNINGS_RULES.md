@@ -98,9 +98,32 @@ the session ended and that capture ran, so the ambient runner has an auditable
 trail and can pick up any follow-up. The directive is data only and is never
 treated as executable instructions.
 
+### Rule 9: Write task artifact files at the end of major tasks
+Every jcode agent (primary, swarm subagents, ambient, server) MUST write durable
+artifact files to disk at the end of any major task, the same way memex/memory
+files are written. A "major task" is multi-step work, research, a feature, a
+debugging session, or anything spanning many tool calls.
+
+- Write a short markdown artifact capturing: what the task was, what was done,
+  key decisions + rationale, files touched, how it was verified, and any
+  follow-ups or known gaps.
+- Location: `docs/<TOPIC>.md` for shareable references that belong with the repo;
+  or scratch planning files (`task_plan.md`, `findings.md`, `progress.md`) in the
+  working directory for in-progress working memory. Keep scratch planning files
+  out of commits unless the user asks otherwise (use `.git/info/exclude`).
+- Content discipline mirrors Rules 2-3 and 6: durable, useful-weeks-later content
+  only. No line-by-line diffs, commit hashes, or transient build noise (that
+  lives in git history).
+- This complements the automatic session-end memory capture (Rules 1-8); it does
+  not replace it. The agent writes the human-readable artifact; the pipeline
+  writes the structured memory.
+- Enforced via the agent system prompt (`crates/jcode-base/src/prompt/system_prompt.md`,
+  "Task artifacts" section), which every agent surface embeds through
+  `build_system_prompt_split`.
+
 ## Enforcement model
 
-These rules are enforced at three layers:
+These rules are enforced at four layers:
 
 1. **Pipeline** - the existing `run_final_extraction` already runs on teardown
    across TUI, server, comm, and desktop disconnect paths. The rules document
@@ -110,6 +133,9 @@ These rules are enforced at three layers:
    these guarantees.
 3. **Ambient directive seed** - Rule 8 wires an on-exit directive so the ambient
    task is explicit and auditable rather than implicit.
+4. **Agent system prompt** - Rule 9 is instructed to every agent via the
+   "Task artifacts" section of `crates/jcode-base/src/prompt/system_prompt.md`,
+   which all agent surfaces embed through `build_system_prompt_split`.
 
 ## Verification
 

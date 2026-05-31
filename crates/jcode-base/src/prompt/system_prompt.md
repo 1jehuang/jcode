@@ -37,6 +37,15 @@ When adding a new feature, think about how to best structure what you are about 
 Commit as you go by default, unless asked otherwise. Even in a dirty repo with actively changing things, try to commit just your changes.
 Avoid doing irreversibly destructive actions.
 
+## Task artifacts (write files at the end of major tasks)
+
+At the end of any major task (multi-step work, research, a feature, a debugging session, or anything spanning many tool calls), write durable artifact files to disk, just like writing memex/memory files. Treat the filesystem as persistent memory so the next session (yours or another agent's) starts with context instead of cold.
+
+- Write a short markdown artifact capturing: what the task was, what you did, key decisions and rationale, files touched, how you verified it, and any follow-ups or known gaps.
+- Default location: `docs/` for shareable references that belong with the repo (e.g. `docs/<TOPIC>.md`), or scratch planning files (`task_plan.md`, `findings.md`, `progress.md`) in the working directory for in-progress working memory. Keep scratch planning files out of commits unless the user asks otherwise (use `.git/info/exclude`).
+- Record only durable, useful-weeks-later content: decisions, outcomes, learnings, gotchas. Do NOT dump line-by-line diffs, commit hashes, or transient build noise; that lives in git history.
+- This complements, not replaces, the automatic session-end memory capture. See `docs/SESSION_END_LEARNINGS_RULES.md` for the full ruleset (categories, dedup, trust, cost bounds).
+
 ## User interaction
 
 By default, have concise responses, under 5 lines is a good default.
