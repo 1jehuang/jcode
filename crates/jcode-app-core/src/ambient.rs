@@ -12,7 +12,8 @@ pub mod runner;
 pub mod scheduler;
 
 pub use directives::{
-    UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
+    UserDirective, add_directive, has_pending_directives, load_directives,
+    record_session_end_directive, take_pending_directives,
 };
 pub use manager::AmbientManager;
 pub use persistence::{AmbientLock, ScheduledQueue};

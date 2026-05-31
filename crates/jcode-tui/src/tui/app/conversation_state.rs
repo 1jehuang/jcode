@@ -446,6 +446,13 @@ impl App {
             self.session.id.clone(),
             self.session.working_dir.clone(),
         );
+
+        // Rule 8 (docs/SESSION_END_LEARNINGS_RULES.md): when the ambient
+        // subsystem is active, leave an auditable data-only marker that the
+        // session-end capture ran. Best-effort; never blocks or fails teardown.
+        if crate::config::config().ambient.enabled {
+            let _ = crate::ambient::record_session_end_directive(&self.session.id);
+        }
     }
 
     pub(super) fn memory_prompt_signature(prompt: &str) -> String {
