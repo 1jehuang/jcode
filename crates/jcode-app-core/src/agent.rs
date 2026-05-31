@@ -101,6 +101,7 @@ impl Agent {
     }
 
     /// Access the current agent's DCP plugin for tool execution
+    #[cfg(feature = "dcp")]
     pub(crate) fn get_current_dcp() -> Option<Arc<Mutex<crate::dcp_plugin::DcpPlugin>>> {
         CURRENT_AGENT.with(|cell| {
             cell.get().and_then(|ptr| {
