@@ -135,7 +135,7 @@ impl Tool for DcpCompressTool {
         let mut session = crate::session::Session::load(&ctx.session_id)
             .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?;
         let messages = session.provider_messages();
-        let dcp_messages = crate::dcp_bridge::jcode_to_dcp(&messages);
+        let dcp_messages = crate::dcp_bridge::jcode_to_dcp(messages);
 
         let result = dcp
             .pruner_mut()

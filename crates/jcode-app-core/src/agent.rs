@@ -654,7 +654,7 @@ impl Agent {
         let messages = {
             let all_messages = self.session.provider_messages();
             if let Some(dcp) = &mut self.dcp {
-                let output = dcp.transform(&all_messages).unwrap_or_else(|e| {
+                let output = dcp.transform(all_messages).unwrap_or_else(|e| {
                     logging::warn(&format!("DCP transform failed: {e}"));
                     crate::dcp_plugin::DcpTransformOutput {
                         messages: all_messages.to_vec(),

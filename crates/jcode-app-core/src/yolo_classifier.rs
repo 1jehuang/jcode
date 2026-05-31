@@ -140,6 +140,7 @@ impl YoloClassifier {
     }
 
     /// Get or create the global YOLO classifier instance.
+    #[allow(clippy::collapsible_if)]
     pub fn get_or_init() -> Arc<YoloClassifier> {
         // Fast path: already initialized
         if let Ok(guard) = YOLO_CLASSIFIER.lock() {
