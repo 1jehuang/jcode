@@ -187,7 +187,8 @@ async fn stream_response(
 
     let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
 
-    let sse_chunk_timeout = crate::provider::sse_timeout::chunk_timeout(180);
+    let idle_timeout_secs = crate::provider::sse_timeout::chunk_timeout_secs(180);
+    let sse_chunk_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
     loop {
         let event = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {

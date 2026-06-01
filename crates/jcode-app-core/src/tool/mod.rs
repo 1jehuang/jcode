@@ -884,6 +884,7 @@ impl Registry {
                 // under the current config fingerprint; prune servers that are
                 // no longer configured. (#206 Phase 2)
                 {
+                    #[allow(clippy::type_complexity)]
                     let (live_by_server, config_snapshot): (
                         std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>,
                         Vec<(String, crate::mcp::McpServerConfig)>,
