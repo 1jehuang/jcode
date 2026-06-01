@@ -91,7 +91,10 @@ fn update_reports_change_only_on_diff() {
     let mut cache = McpSchemaCache::default();
     let config = cfg("node", &["s.js"]);
 
-    assert!(cache.update("srv", &config, vec![tool("a")]), "new entry changes");
+    assert!(
+        cache.update("srv", &config, vec![tool("a")]),
+        "new entry changes"
+    );
     assert!(
         !cache.update("srv", &config, vec![tool("a")]),
         "identical re-update must not be marked changed"

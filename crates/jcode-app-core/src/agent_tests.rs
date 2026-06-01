@@ -940,9 +940,8 @@ async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
     // Once MCP tools are present in the locked snapshot, subsequent turns must
     // return the *same* stable snapshot so provider prompt-cache hits stay warm
     // (the whole point of locked_tools). The #206 fix must not flap.
-    let names = |defs: &[ToolDefinition]| -> Vec<String> {
-        defs.iter().map(|t| t.name.clone()).collect()
-    };
+    let names =
+        |defs: &[ToolDefinition]| -> Vec<String> { defs.iter().map(|t| t.name.clone()).collect() };
     let stable_a = agent.tool_definitions().await;
     let stable_b = agent.tool_definitions().await;
     assert_eq!(
@@ -1025,8 +1024,7 @@ async fn mcp_late_registration_rebuild_happens_at_most_once() {
         "explicit unlock must re-arm the one-shot guard"
     );
     let after_unlock = agent.tool_definitions().await;
-    let unlocked_names: Vec<String> =
-        after_unlock.iter().map(|t| t.name.clone()).collect();
+    let unlocked_names: Vec<String> = after_unlock.iter().map(|t| t.name.clone()).collect();
     assert!(
         unlocked_names.iter().any(|n| n == "mcp__test__second"),
         "after explicit unlock, the second-wave MCP tool must finally surface"

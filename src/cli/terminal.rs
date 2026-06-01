@@ -50,11 +50,7 @@ impl TuiRuntimeGuard {
     /// Normal teardown for the interactive client: restore unless we are about
     /// to exec a follow-up process (reload/rebuild/update), in which case the
     /// next process inherits the terminal modes.
-    pub fn finish_for_run_result(
-        mut self,
-        run_result: &crate::tui::RunResult,
-        extra_exec: bool,
-    ) {
+    pub fn finish_for_run_result(mut self, run_result: &crate::tui::RunResult, extra_exec: bool) {
         cleanup_tui_runtime_for_run_result(&self.state, run_result, extra_exec);
         self.armed = false;
     }

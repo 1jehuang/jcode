@@ -122,8 +122,11 @@ pub fn create_mcp_tools_from_cached(
         .iter()
         .map(|tool_def| {
             let prefixed_name = format!("mcp__{}__{}", server_name, tool_def.name);
-            let mcp_tool =
-                McpTool::new(server_name.to_string(), tool_def.clone(), Arc::clone(&manager));
+            let mcp_tool = McpTool::new(
+                server_name.to_string(),
+                tool_def.clone(),
+                Arc::clone(&manager),
+            );
             (prefixed_name, Arc::new(mcp_tool) as Arc<dyn Tool>)
         })
         .collect()

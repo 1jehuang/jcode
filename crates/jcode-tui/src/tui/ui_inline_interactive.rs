@@ -170,7 +170,9 @@ fn model_picker_keybind_hint(picker: &crate::tui::InlineInteractiveState) -> Opt
             .iter()
             .any(|entry| matches!(entry.action, crate::tui::PickerAction::Model));
     if is_runtime_model_picker {
-        Some(" keys: Ctrl+D set default · Ctrl+F toggle favorite · Shift+Tab switch active model to next favorite")
+        Some(
+            " keys: Ctrl+D set default · Ctrl+F toggle favorite · Shift+Tab switch active model to next favorite",
+        )
     } else {
         None
     }

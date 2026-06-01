@@ -3,8 +3,9 @@
   "tracked_files": {
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1203,
     "crates/jcode-base/src/live_tests.rs": 2628,
-    "crates/jcode-base/src/provider/openrouter_tests.rs": 1508,
-    "crates/jcode-base/src/provider/tests/model_resolution.rs": 1331,
+    "crates/jcode-base/src/provider/anthropic_tests.rs": 1210,
+    "crates/jcode-base/src/provider/openrouter_tests.rs": 1619,
+    "crates/jcode-base/src/provider/tests/model_resolution.rs": 1565,
     "crates/jcode-base/src/session_tests/cases.rs": 1569,
     "crates/jcode-desktop/src/main_tests.rs": 10090,
     "crates/jcode-desktop/src/session_launch/tests.rs": 1207,
@@ -12,8 +13,8 @@
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1208,
     "crates/jcode-tui/src/tui/app/tests/remote_startup_input_02/part_01.rs": 1410,
     "crates/jcode-tui/src/tui/app/tests/state_model_poke_02/part_01.rs": 1225,
-    "crates/jcode-tui/src/tui/app/tests/state_model_poke_03.rs": 2326,
-    "src/cli/commands_tests.rs": 1354,
+    "crates/jcode-tui/src/tui/app/tests/state_model_poke_03.rs": 2357,
+    "src/cli/commands_tests.rs": 1350,
     "tests/e2e/test_support/mod.rs": 1325
   },
   "version": 1

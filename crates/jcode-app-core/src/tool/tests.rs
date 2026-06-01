@@ -523,10 +523,7 @@ fn closest_tool_names_suggests_near_misses() {
     assert_eq!(s.first().map(String::as_str), Some("todo"));
 
     let s = Registry::closest_tool_names("end_ambient_cyle", &available);
-    assert!(
-        s.iter().any(|n| n == "end_ambient_cycle"),
-        "got {s:?}"
-    );
+    assert!(s.iter().any(|n| n == "end_ambient_cycle"), "got {s:?}");
 
     // Case-insensitive containment.
     let s = Registry::closest_tool_names("Bash", &available);

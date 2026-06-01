@@ -834,8 +834,7 @@ impl Registry {
                             .into_iter()
                             .map(|(name, count)| format!("{}:{}", name, count))
                             .collect();
-                        let _ =
-                            tx.send(crate::protocol::ServerEvent::McpStatus { servers });
+                        let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
                     }
                 }
             }

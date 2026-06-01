@@ -1167,8 +1167,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     Some((name.to_string(), count))
                 })
                 .collect();
-            let new_tool_total: usize =
-                app.mcp_server_names.iter().map(|(_, count)| count).sum();
+            let new_tool_total: usize = app.mcp_server_names.iter().map(|(_, count)| count).sum();
             // When MCP tools first become available (servers finished
             // connecting), the next turn rebuilds the tool snapshot once to
             // expose them — a single intentional prompt-cache miss we accept so

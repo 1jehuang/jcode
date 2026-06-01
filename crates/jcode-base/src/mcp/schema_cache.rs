@@ -107,11 +107,7 @@ impl McpSchemaCache {
     /// Return cached tools for `server` only if the cached fingerprint matches
     /// the current config. A mismatch means the server was reconfigured, so the
     /// stale schemas must not be advertised.
-    pub fn tools_for(
-        &self,
-        server: &str,
-        config: &McpServerConfig,
-    ) -> Option<&[McpToolDef]> {
+    pub fn tools_for(&self, server: &str, config: &McpServerConfig) -> Option<&[McpToolDef]> {
         let entry = self.servers.get(server)?;
         if entry.fingerprint == fingerprint_config(config) {
             Some(&entry.tools)
@@ -132,14 +128,15 @@ impl McpSchemaCache {
         let fingerprint = fingerprint_config(config);
         let changed = match self.servers.get(server) {
             Some(existing) => {
-                existing.fingerprint != fingerprint
-                    || !tool_defs_equal(&existing.tools, &tools)
+                existing.fingerprint != fingerprint || !tool_defs_equal(&existing.tools, &tools)
             }
             None => true,
         };
         if changed {
-            self.servers
-                .insert(server.to_string(), CachedServerSchemas { fingerprint, tools });
+            self.servers.insert(
+                server.to_string(),
+                CachedServerSchemas { fingerprint, tools },
+            );
         }
         changed
     }
@@ -173,10 +170,7 @@ impl McpSchemaCache {
                 }
             }
             Err(err) => {
-                crate::logging::error(&format!(
-                    "MCP schema cache: failed to serialize: {}",
-                    err
-                ));
+                crate::logging::error(&format!("MCP schema cache: failed to serialize: {}", err));
             }
         }
     }
@@ -193,7 +187,13 @@ fn tool_defs_equal(a: &[McpToolDef], b: &[McpToolDef]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let key = |t: &McpToolDef| (t.name.clone(), t.description.clone(), t.input_schema.to_string());
+    let key = |t: &McpToolDef| {
+        (
+            t.name.clone(),
+            t.description.clone(),
+            t.input_schema.to_string(),
+        )
+    };
     let mut a_keys: Vec<_> = a.iter().map(key).collect();
     let mut b_keys: Vec<_> = b.iter().map(key).collect();
     a_keys.sort();

@@ -1490,7 +1490,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         if !spans.is_empty() {
             spans.push(sep());
         }
-        spans.push(Span::styled(provider, Style::default().fg(rgb(140, 160, 210))));
+        spans.push(Span::styled(
+            provider,
+            Style::default().fg(rgb(140, 160, 210)),
+        ));
     }
 
     // Access method (auth)
@@ -1547,7 +1550,9 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     frame.render_widget(Paragraph::new(aligned_line), area);
 }
 
-fn overscroll_auth_label(method: crate::tui::info_widget::AuthMethod) -> Option<(&'static str, Color)> {
+fn overscroll_auth_label(
+    method: crate::tui::info_widget::AuthMethod,
+) -> Option<(&'static str, Color)> {
     use crate::tui::info_widget::AuthMethod;
     match method {
         AuthMethod::Unknown => None,

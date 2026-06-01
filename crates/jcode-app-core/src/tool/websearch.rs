@@ -408,11 +408,7 @@ impl WebSearchTool {
     /// the user controls (or a public one they trust), it sidesteps the TLS
     /// fingerprinting / IP-reputation blocks that DuckDuckGo and Bing apply to
     /// scraped requests on some hosts (see issue #270).
-    async fn search_searxng(
-        &self,
-        query: &str,
-        num_results: usize,
-    ) -> Result<Vec<SearchResult>> {
+    async fn search_searxng(&self, query: &str, num_results: usize) -> Result<Vec<SearchResult>> {
         let config = crate::config::config();
         let base = config
             .websearch

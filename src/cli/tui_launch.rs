@@ -13,8 +13,7 @@ use crate::{
 use super::hot_exec::{execute_requested_action, has_requested_action};
 
 use super::terminal::{
-    init_tui_runtime, print_session_resume_hint, set_current_session,
-    spawn_session_signal_watchers,
+    init_tui_runtime, print_session_resume_hint, set_current_session, spawn_session_signal_watchers,
 };
 
 pub(crate) use crate::session_launch::resumed_window_title;

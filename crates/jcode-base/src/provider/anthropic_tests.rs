@@ -539,7 +539,9 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
                 data: "AAAA".to_string(),
             },
             ContentBlock::Text {
-                text: format!("[Attached image associated with the preceding tool result: {label}]"),
+                text: format!(
+                    "[Attached image associated with the preceding tool result: {label}]"
+                ),
                 cache_control: None,
             },
         ],
