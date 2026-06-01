@@ -103,7 +103,7 @@ required-features = ["dev-bins"]
 # reproducible and doesn't accidentally pick up in-flight changes. Bump the
 # `rev` value (or switch to a `tag = "vX.Y.Z"`) when you want to pull a newer
 # CASR snapshot.
-casr = { git = "https://github.com/quangdang46/cross_agent_session_resumer", package = "cross_agent_session_resumer", rev = "f8c7921ebd5033aad70c56d61784213603e9e3cc" }
+casr = { git = "https://github.com/quangdang46/cross_agent_session_resumer", package = "cross_agent_session_resumer", rev = "23a58b8b6b9bf15a8c01c41aae2f97f8a05f2b1c" }
 
 # File picker for `@<path>` autocomplete in the TUI input.
 # Provides a long-lived FilePicker with background scan, gitignore-aware walk,
