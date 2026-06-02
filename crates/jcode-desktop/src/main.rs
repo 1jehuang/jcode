@@ -107,13 +107,13 @@ const DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(25)
 const DESKTOP_RELOAD_HANDOFF_TIMEOUT: Duration = Duration::from_secs(8);
 const DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 const DESKTOP_RELOAD_MAX_RESTORED_DIMENSION: u32 = 32_768;
-const OUTER_PADDING: f32 = 8.0;
-const GAP: f32 = 6.0;
+const OUTER_PADDING: f32 = 12.0;
+const GAP: f32 = 10.0;
 const STATUS_BAR_HEIGHT: f32 = 30.0;
 const FOCUSED_BORDER_WIDTH: f32 = 2.0;
 const UNFOCUSED_BORDER_WIDTH: f32 = 1.5;
-const PANEL_RADIUS: f32 = 8.0;
-const STATUS_RADIUS: f32 = 7.0;
+const PANEL_RADIUS: f32 = 12.0;
+const STATUS_RADIUS: f32 = 9.0;
 const ROUNDED_CORNER_SEGMENTS: usize = 6;
 const PANEL_FIT_TOLERANCE: f32 = 0.15;
 const STATUS_PREVIEW_LANE_RADIUS: i32 = 2;
@@ -158,7 +158,7 @@ const SCROLL_MOMENTUM_DECAY_PER_SECOND: f32 = 7.0;
 const SCROLL_MOMENTUM_MAX_VELOCITY: f32 = 72.0;
 const SCROLL_MOMENTUM_STOP_VELOCITY: f32 = 0.08;
 const SCROLL_FRAME_MAX_DT_SECONDS: f32 = 0.050;
-const SINGLE_SESSION_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(150);
+const SINGLE_SESSION_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(90);
 const SINGLE_SESSION_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 8;
 const SINGLE_SESSION_BODY_TEXT_WINDOW_AFTER_LINES: usize = 16;
 const SINGLE_SESSION_STREAMING_BODY_TEXT_WINDOW_BEFORE_LINES: usize = 2;
@@ -508,13 +508,13 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-const BACKGROUND_TOP_LEFT: [f32; 4] = [0.858, 0.910, 1.000, 1.0];
-const BACKGROUND_TOP_RIGHT: [f32; 4] = [0.945, 0.884, 1.000, 1.0];
-const BACKGROUND_BOTTOM_RIGHT: [f32; 4] = [0.846, 0.972, 0.910, 1.0];
-const BACKGROUND_BOTTOM_LEFT: [f32; 4] = [0.930, 0.950, 0.988, 1.0];
-const FOCUS_RING_COLOR: [f32; 4] = [0.165, 0.185, 0.225, 0.94];
-const NAV_STATUS_COLOR: [f32; 4] = [0.184, 0.204, 0.251, 1.0];
-const INSERT_STATUS_COLOR: [f32; 4] = [0.310, 0.435, 0.376, 1.0];
+const BACKGROUND_TOP_LEFT: [f32; 4] = [0.890, 0.930, 1.000, 1.0];
+const BACKGROUND_TOP_RIGHT: [f32; 4] = [0.960, 0.910, 1.000, 1.0];
+const BACKGROUND_BOTTOM_RIGHT: [f32; 4] = [0.875, 0.980, 0.930, 1.0];
+const BACKGROUND_BOTTOM_LEFT: [f32; 4] = [0.945, 0.960, 0.995, 1.0];
+const FOCUS_RING_COLOR: [f32; 4] = [0.135, 0.155, 0.205, 0.90];
+const NAV_STATUS_COLOR: [f32; 4] = [0.145, 0.165, 0.220, 1.0];
+const INSERT_STATUS_COLOR: [f32; 4] = [0.245, 0.395, 0.340, 1.0];
 const STATUS_PREVIEW_ACTIVE_GROUP_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.16];
 const STATUS_PREVIEW_EMPTY_FOCUSED_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.50];
 const STATUS_PREVIEW_VIEWPORT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.78];
@@ -536,13 +536,13 @@ const TOOL_RUNNING_TEXT_COLOR: [f32; 4] = [0.045, 0.265, 0.640, 1.0];
 const TOOL_SUCCESS_TEXT_COLOR: [f32; 4] = [0.035, 0.360, 0.220, 1.0];
 const TOOL_FAILED_TEXT_COLOR: [f32; 4] = [0.560, 0.070, 0.095, 1.0];
 const TOOL_PENDING_TEXT_COLOR: [f32; 4] = [0.320, 0.345, 0.405, 1.0];
-const TOOL_CARD_BACKGROUND_COLOR: [f32; 4] = [0.985, 0.990, 1.000, 0.56];
-const TOOL_CARD_ACTIVE_BACKGROUND_COLOR: [f32; 4] = [0.890, 0.945, 1.000, 0.62];
-const TOOL_CARD_SUCCESS_BACKGROUND_COLOR: [f32; 4] = [0.875, 0.975, 0.925, 0.46];
-const TOOL_CARD_FAILED_BACKGROUND_COLOR: [f32; 4] = [1.000, 0.900, 0.910, 0.54];
-const TOOL_CARD_GROUP_BACKGROUND_COLOR: [f32; 4] = [0.945, 0.930, 1.000, 0.40];
-const TOOL_CARD_BORDER_COLOR: [f32; 4] = [0.105, 0.165, 0.295, 0.16];
-const TOOL_CARD_ACTIVE_BORDER_COLOR: [f32; 4] = [0.000, 0.260, 0.720, 0.28];
+const TOOL_CARD_BACKGROUND_COLOR: [f32; 4] = [0.985, 0.990, 1.000, 0.68];
+const TOOL_CARD_ACTIVE_BACKGROUND_COLOR: [f32; 4] = [0.890, 0.945, 1.000, 0.72];
+const TOOL_CARD_SUCCESS_BACKGROUND_COLOR: [f32; 4] = [0.875, 0.975, 0.925, 0.56];
+const TOOL_CARD_FAILED_BACKGROUND_COLOR: [f32; 4] = [1.000, 0.900, 0.910, 0.64];
+const TOOL_CARD_GROUP_BACKGROUND_COLOR: [f32; 4] = [0.945, 0.930, 1.000, 0.50];
+const TOOL_CARD_BORDER_COLOR: [f32; 4] = [0.105, 0.165, 0.295, 0.22];
+const TOOL_CARD_ACTIVE_BORDER_COLOR: [f32; 4] = [0.000, 0.260, 0.720, 0.36];
 const TOOL_TIMELINE_RAIL_COLOR: [f32; 4] = [0.105, 0.165, 0.295, 0.20];
 const TOOL_TIMELINE_ACTIVE_RAIL_COLOR: [f32; 4] = [0.000, 0.260, 0.720, 0.46];
 const TOOL_OUTPUT_DRAWER_COLOR: [f32; 4] = [0.030, 0.055, 0.095, 0.070];
@@ -562,10 +562,10 @@ const WELCOME_AURORA_MINT: [f32; 4] = [0.220, 0.840, 0.660, 0.115];
 const WELCOME_AURORA_WARM: [f32; 4] = [1.000, 0.620, 0.360, 0.075];
 const WELCOME_HANDWRITING_COLOR: [f32; 4] = [0.012, 0.080, 0.250, 0.94];
 const NATIVE_SPINNER_HEAD_COLOR: [f32; 4] = [0.000, 0.260, 0.720, 1.0];
-const CODE_BLOCK_BACKGROUND_COLOR: [f32; 4] = [0.075, 0.095, 0.135, 0.075];
-const INLINE_CODE_BACKGROUND_COLOR: [f32; 4] = [0.075, 0.095, 0.135, 0.135];
-const QUOTE_CARD_BACKGROUND_COLOR: [f32; 4] = [0.520, 0.330, 0.760, 0.070];
-const TABLE_CARD_BACKGROUND_COLOR: [f32; 4] = [0.080, 0.460, 0.520, 0.060];
+const CODE_BLOCK_BACKGROUND_COLOR: [f32; 4] = [0.075, 0.095, 0.135, 0.105];
+const INLINE_CODE_BACKGROUND_COLOR: [f32; 4] = [0.075, 0.095, 0.135, 0.175];
+const QUOTE_CARD_BACKGROUND_COLOR: [f32; 4] = [0.520, 0.330, 0.760, 0.090];
+const TABLE_CARD_BACKGROUND_COLOR: [f32; 4] = [0.080, 0.460, 0.520, 0.085];
 const ERROR_CARD_BACKGROUND_COLOR: [f32; 4] = [0.850, 0.170, 0.170, 0.105];
 const OVERLAY_SELECTION_BACKGROUND_COLOR: [f32; 4] = [0.280, 0.470, 0.780, 0.115];
 const STATUS_PREVIEW_ACCENTS: [[f32; 3]; 8] = [
@@ -3202,9 +3202,70 @@ fn run_resize_render_benchmark(frames: usize) -> Result<()> {
             ^ body_glyphs
     });
 
+    let mut workspace_resize_cards = benchmark_workspace_session_cards(16);
+    for (index, card) in workspace_resize_cards.iter_mut().enumerate() {
+        card.transcript_messages = vec![
+            workspace::SessionTranscriptMessage {
+                role: "user".to_string(),
+                content: format!("resize prompt {index}"),
+            },
+            workspace::SessionTranscriptMessage {
+                role: "assistant".to_string(),
+                content: format!(
+                    "resize response {index}: representative workspace transcript content that wraps while the window is resized"
+                ),
+            },
+        ];
+    }
+    let workspace_resize_app = Workspace::from_session_cards(workspace_resize_cards);
+    let mut workspace_resize_font_system = benchmark_font_system();
+    let mut workspace_resize_text_pane_cache = HashMap::new();
+    let (workspace_resize_samples, workspace_resize_checksum) =
+        benchmark_frame_samples(frames, |frame| {
+            let size = sizes[frame];
+            let layout = workspace_render_layout(&workspace_resize_app, size, Some(size));
+            let panes = build_workspace_single_session_text_panes(
+                &mut workspace_resize_text_pane_cache,
+                &workspace_resize_app,
+                size,
+                layout,
+                None,
+                &mut workspace_resize_font_system,
+            );
+            let pane_count = panes.len();
+            let areas = workspace_single_session_text_areas(&panes);
+            let area_count = areas.len();
+            drop(areas);
+            drop(panes);
+            let mut vertices =
+                Vec::with_capacity(workspace_vertex_capacity_hint(&workspace_resize_app));
+            build_vertices_into(
+                WorkspaceVertexBuildParams {
+                    workspace: &workspace_resize_app,
+                    size,
+                    render_layout: layout,
+                    focus_pulse: 0.0,
+                    space_hold_progress: None,
+                    surface_frames: None,
+                    exiting_surfaces: &HashMap::new(),
+                    workspace_panel_cache: Some(&workspace_resize_text_pane_cache),
+                    status_color: workspace_status_bar_target_color(&workspace_resize_app),
+                    status_text_frame: None,
+                },
+                &mut vertices,
+            );
+            pane_count ^ area_count ^ vertices.len() ^ workspace_resize_app.surfaces.len()
+        });
+
     let optimized_p95 = percentile_ms(&optimized_samples, 0.95);
     let optimized_max = max_sample_ms(&optimized_samples);
-    let passes_resize_cpu_budget = optimized_p95 <= target_p95_ms && optimized_max <= target_max_ms;
+    let workspace_resize_p95 = percentile_ms(&workspace_resize_samples, 0.95);
+    let workspace_resize_max = max_sample_ms(&workspace_resize_samples);
+    let passes_workspace_resize_budget =
+        workspace_resize_p95 <= target_p95_ms && workspace_resize_max <= target_max_ms;
+    let passes_resize_cpu_budget = optimized_p95 <= target_p95_ms
+        && optimized_max <= target_max_ms
+        && passes_workspace_resize_budget;
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
@@ -3212,7 +3273,8 @@ fn run_resize_render_benchmark(frames: usize) -> Result<()> {
             "target_p95_ms": target_p95_ms,
             "target_repeated_max_ms": target_max_ms,
             "passes_resize_cpu_budget": passes_resize_cpu_budget,
-            "scenario": "large transcript continuous resize CPU layout path",
+            "passes_workspace_resize_budget": passes_workspace_resize_budget,
+            "scenario": "large transcript and workspace continuous resize CPU layout paths",
             "size_range": {
                 "min_width": sizes.iter().map(|size| size.width).min().unwrap_or_default(),
                 "max_width": sizes.iter().map(|size| size.width).max().unwrap_or_default(),
@@ -3223,6 +3285,7 @@ fn run_resize_render_benchmark(frames: usize) -> Result<()> {
             "optimized_body_buffer_rebuilds": optimized_body_rebuilds,
             "legacy": benchmark_samples_json("legacy_resize_full_text_relayout", &legacy_samples, legacy_checksum),
             "optimized": benchmark_samples_json("optimized_resize_cached_visible_body", &optimized_samples, optimized_checksum),
+            "workspace_multi_pane": benchmark_samples_json("workspace_multi_pane_resize_reflow", &workspace_resize_samples, workspace_resize_checksum),
         }))?
     );
     Ok(())
@@ -4299,6 +4362,8 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
     let mut workspace_layout_ms = 0.0;
     let mut workspace_vertices_ms = 0.0;
     let mut workspace_visible_surfaces = 0usize;
+    let mut workspace_navigation_font_system = benchmark_font_system();
+    let mut workspace_navigation_text_pane_cache = HashMap::new();
     let (workspace_navigation_ms, workspace_navigation_checksum) =
         benchmark_phase(frames, |frame| {
             let key = if frame % 2 == 0 { "l" } else { "h" };
@@ -4306,12 +4371,40 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             let phase_started = Instant::now();
             let layout = workspace_render_layout(&workspace_app, size, Some(size));
             workspace_layout_ms += phase_started.elapsed().as_secs_f64() * 1000.0;
+            let panes = build_workspace_single_session_text_panes(
+                &mut workspace_navigation_text_pane_cache,
+                &workspace_app,
+                size,
+                layout,
+                None,
+                &mut workspace_navigation_font_system,
+            );
+            let pane_count = panes.len();
+            drop(panes);
             let phase_started = Instant::now();
-            let vertices = build_vertices(&workspace_app, size, layout, 0.0, None);
+            let mut vertices = Vec::with_capacity(workspace_vertex_capacity_hint(&workspace_app));
+            build_vertices_into(
+                WorkspaceVertexBuildParams {
+                    workspace: &workspace_app,
+                    size,
+                    render_layout: layout,
+                    focus_pulse: 0.0,
+                    space_hold_progress: None,
+                    surface_frames: None,
+                    exiting_surfaces: &HashMap::new(),
+                    workspace_panel_cache: Some(&workspace_navigation_text_pane_cache),
+                    status_color: workspace_status_bar_target_color(&workspace_app),
+                    status_text_frame: None,
+                },
+                &mut vertices,
+            );
             workspace_vertices_ms += phase_started.elapsed().as_secs_f64() * 1000.0;
             workspace_visible_surfaces +=
                 workspace_visible_surface_count(&workspace_app, size, layout);
-            vertices.len() ^ (workspace_app.focused_id as usize) ^ workspace_app.surfaces.len()
+            vertices.len()
+                ^ pane_count
+                ^ (workspace_app.focused_id as usize)
+                ^ workspace_app.surfaces.len()
         });
 
     let mut workspace_full_app =
@@ -4414,6 +4507,295 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         (key as usize) ^ frame ^ large_app.messages.len()
     });
 
+    let mut workspace_focus_app =
+        Workspace::from_session_cards(benchmark_workspace_session_cards(128));
+    let workspace_focus_layout = workspace_render_layout(&workspace_focus_app, size, Some(size));
+    let mut workspace_focus_font_system = benchmark_font_system();
+    let mut workspace_focus_text_pane_cache = HashMap::new();
+    let _ = build_workspace_single_session_text_panes(
+        &mut workspace_focus_text_pane_cache,
+        &workspace_focus_app,
+        size,
+        workspace_focus_layout,
+        None,
+        &mut workspace_focus_font_system,
+    );
+    let (workspace_focus_pulse_ms, workspace_focus_pulse_checksum) =
+        benchmark_phase(frames, |frame| {
+            let key = match frame % 4 {
+                0 => "l",
+                1 => "j",
+                2 => "h",
+                _ => "k",
+            };
+            let _ = workspace_focus_app.handle_key(KeyInput::Character(key.to_string()));
+            let layout = workspace_render_layout(&workspace_focus_app, size, Some(size));
+            let focus_pulse = 0.35 + 0.45 * ((frame as f32) * 0.19).sin().abs();
+            let mut vertices =
+                Vec::with_capacity(workspace_vertex_capacity_hint(&workspace_focus_app));
+            build_vertices_into(
+                WorkspaceVertexBuildParams {
+                    workspace: &workspace_focus_app,
+                    size,
+                    render_layout: layout,
+                    focus_pulse,
+                    space_hold_progress: None,
+                    surface_frames: None,
+                    exiting_surfaces: &HashMap::new(),
+                    workspace_panel_cache: Some(&workspace_focus_text_pane_cache),
+                    status_color: workspace_status_bar_target_color(&workspace_focus_app),
+                    status_text_frame: None,
+                },
+                &mut vertices,
+            );
+            vertices.len() ^ workspace_focus_app.focused_id as usize
+        });
+
+    let mut workspace_transition_app =
+        Workspace::from_session_cards(benchmark_workspace_session_cards(128));
+    let mut workspace_transition_animator = SurfaceTransitionAnimator::default();
+    let mut workspace_transition_exit_cache = HashMap::new();
+    let transition_base_layout =
+        workspace_render_layout(&workspace_transition_app, size, Some(size));
+    let transition_targets = workspace_surface_transition_targets(
+        &workspace_transition_app,
+        size,
+        transition_base_layout,
+    );
+    let transition_start = Instant::now();
+    let _ = workspace_transition_animator.frame(transition_targets, transition_start);
+    let mut workspace_transition_font_system = benchmark_font_system();
+    let mut workspace_transition_text_pane_cache = HashMap::new();
+    let _ = build_workspace_single_session_text_panes(
+        &mut workspace_transition_text_pane_cache,
+        &workspace_transition_app,
+        size,
+        transition_base_layout,
+        None,
+        &mut workspace_transition_font_system,
+    );
+    let (workspace_surface_transition_ms, workspace_surface_transition_checksum) =
+        benchmark_phase(frames, |frame| {
+            if frame == 0 || frame % 20 == 0 {
+                let _ = workspace_transition_app.handle_key(KeyInput::Character("l".to_string()));
+            } else if frame % 20 == 10 {
+                let _ = workspace_transition_app.handle_key(KeyInput::Character("h".to_string()));
+            }
+            let layout = workspace_render_layout(&workspace_transition_app, size, Some(size));
+            let targets =
+                workspace_surface_transition_targets(&workspace_transition_app, size, layout);
+            let now = transition_start + Duration::from_millis((frame as u64 + 1) * 8);
+            let surface_frames = WorkspaceSurfaceTransitionFrames::new(
+                workspace_transition_animator.frame(targets, now),
+                workspace_transition_animator.is_animating(),
+            );
+            update_workspace_surface_exit_cache(
+                &mut workspace_transition_exit_cache,
+                &workspace_transition_app,
+                &surface_frames,
+            );
+            let mut vertices =
+                Vec::with_capacity(workspace_vertex_capacity_hint(&workspace_transition_app));
+            build_vertices_into(
+                WorkspaceVertexBuildParams {
+                    workspace: &workspace_transition_app,
+                    size,
+                    render_layout: layout,
+                    focus_pulse: 0.0,
+                    space_hold_progress: None,
+                    surface_frames: Some(&surface_frames),
+                    exiting_surfaces: &workspace_transition_exit_cache,
+                    workspace_panel_cache: Some(&workspace_transition_text_pane_cache),
+                    status_color: workspace_status_bar_target_color(&workspace_transition_app),
+                    status_text_frame: None,
+                },
+                &mut vertices,
+            );
+            vertices.len() ^ surface_frames.frames.len() ^ usize::from(surface_frames.animating)
+        });
+
+    let mut selection_drag_app = desktop_scroll_benchmark_app_with_turns(120);
+    let selection_body_lines =
+        single_session_rendered_body_lines_for_tick(&selection_drag_app, size, 0);
+    if let Some(metrics) = single_session_body_scroll_metrics_for_total_lines(
+        &selection_drag_app,
+        size,
+        selection_body_lines.len(),
+    ) {
+        selection_drag_app.body_scroll_lines = metrics.max_scroll_lines as f32 / 2.0;
+    }
+    selection_drag_app.begin_selection(SelectionPoint { line: 0, column: 0 });
+    let (selection_drag_ms, selection_drag_checksum) = benchmark_phase(frames, |frame| {
+        let viewport = single_session_body_viewport_from_lines(
+            &selection_drag_app,
+            size,
+            0.0,
+            &selection_body_lines,
+        );
+        let line = (frame * 3).min(viewport.lines.len().saturating_sub(1));
+        selection_drag_app.update_selection(SelectionPoint {
+            line,
+            column: viewport
+                .lines
+                .get(line)
+                .map(|line| line.text.len())
+                .unwrap_or_default(),
+        });
+        let vertices = build_single_session_vertices_with_cached_body(
+            &selection_drag_app,
+            size,
+            0.0,
+            frame as u64,
+            0.0,
+            1.0,
+            &selection_body_lines,
+        );
+        viewport.lines.len() ^ vertices.len()
+    });
+
+    let mut streaming_scroll_app = app.clone();
+    streaming_scroll_app.streaming_response.clear();
+    let mut streaming_scroll_body_lines =
+        single_session_rendered_body_lines_for_tick(&streaming_scroll_app, size, 0);
+    let (streaming_while_scrolling_ms, streaming_while_scrolling_checksum) =
+        benchmark_phase(frames, |frame| {
+            streaming_scroll_app
+                .streaming_response
+                .push(benchmark_typing_char(frame));
+            if frame % 13 == 0 {
+                streaming_scroll_app.streaming_response.push('\n');
+            }
+            streaming_scroll_app.scroll_body_lines(if frame % 2 == 0 { 1 } else { -1 });
+            streaming_scroll_body_lines = single_session_rendered_body_lines_for_tick(
+                &streaming_scroll_app,
+                size,
+                frame as u64,
+            );
+            let viewport = single_session_body_viewport_from_lines(
+                &streaming_scroll_app,
+                size,
+                benchmark_smooth_scroll_lines(frame),
+                &streaming_scroll_body_lines,
+            );
+            let vertices = build_single_session_vertices_with_cached_body(
+                &streaming_scroll_app,
+                size,
+                0.0,
+                frame as u64,
+                benchmark_smooth_scroll_lines(frame),
+                1.0,
+                &streaming_scroll_body_lines,
+            );
+            streaming_scroll_body_lines.len() ^ viewport.lines.len() ^ vertices.len()
+        });
+
+    let mut many_tools_app = desktop_scroll_benchmark_app_with_turns(16);
+    for index in 0..320usize {
+        let id = Some(format!("tool-{index}"));
+        many_tools_app.apply_session_event(session_launch::DesktopSessionEvent::ToolStarted {
+            id: id.clone(),
+            name: "bash".to_string(),
+        });
+        many_tools_app.apply_session_event(session_launch::DesktopSessionEvent::ToolInput {
+            id: id.clone(),
+            delta: format!("echo card {index}\n"),
+        });
+        many_tools_app.apply_session_event(session_launch::DesktopSessionEvent::ToolExecuting {
+            id: id.clone(),
+            name: "bash".to_string(),
+        });
+        many_tools_app.apply_session_event(session_launch::DesktopSessionEvent::ToolFinished {
+            id,
+            name: "bash".to_string(),
+            summary: format!("output line for tool card {index}\n"),
+            is_error: false,
+        });
+    }
+    let many_tools_body_lines =
+        single_session_rendered_body_lines_for_tick(&many_tools_app, size, 0);
+    if let Some(metrics) = single_session_body_scroll_metrics_for_total_lines(
+        &many_tools_app,
+        size,
+        many_tools_body_lines.len(),
+    ) {
+        many_tools_app.body_scroll_lines = metrics.max_scroll_lines as f32 / 2.0;
+    }
+    let (many_tool_cards_ms, many_tool_cards_checksum) = benchmark_phase(frames, |frame| {
+        many_tools_app.scroll_body_lines(if frame % 2 == 0 { 4 } else { -4 });
+        let viewport = single_session_body_viewport_from_lines(
+            &many_tools_app,
+            size,
+            0.0,
+            &many_tools_body_lines,
+        );
+        let vertices = build_single_session_vertices_with_cached_body(
+            &many_tools_app,
+            size,
+            0.0,
+            frame as u64,
+            0.0,
+            1.0,
+            &many_tools_body_lines,
+        );
+        many_tools_body_lines.len() ^ viewport.lines.len() ^ vertices.len()
+    });
+
+    let mut large_composer_app = app.clone();
+    large_composer_app.scroll_body_to_bottom();
+    large_composer_app.draft = (0..40).map(|index| format!("large pasted paragraph {index}: lorem ipsum dolor sit amet, consectetur adipiscing elit. ")).collect::<String>();
+    large_composer_app.draft_cursor = large_composer_app.draft.len();
+    let large_composer_body_lines =
+        single_session_rendered_body_lines_for_tick(&large_composer_app, size, 0);
+    let mut large_composer_font_system = benchmark_font_system();
+    let mut large_composer_previous_key = None;
+    let mut large_composer_buffers: Vec<Buffer> = Vec::new();
+    let (large_composer_draft_ms, large_composer_draft_checksum) =
+        benchmark_phase(frames, |frame| {
+            large_composer_app.draft.push(benchmark_typing_char(frame));
+            if frame % 41 == 0 {
+                large_composer_app.draft.push('\n');
+            }
+            large_composer_app.draft_cursor = large_composer_app.draft.len();
+            let key = single_session_text_key_for_tick_with_rendered_body(
+                &large_composer_app,
+                size,
+                frame as u64,
+                0.0,
+                &large_composer_body_lines,
+            );
+            let previous_key = large_composer_previous_key.take();
+            let old_buffers = std::mem::take(&mut large_composer_buffers);
+            large_composer_buffers = single_session_text_buffers_from_key_reusing_unchanged(
+                &key,
+                previous_key.as_ref(),
+                old_buffers,
+                true,
+                size,
+                &mut large_composer_font_system,
+            );
+            large_composer_previous_key = Some(key);
+            let areas = single_session_text_areas_for_app_with_cached_body(
+                &large_composer_app,
+                &large_composer_buffers,
+                size,
+                0.0,
+                &large_composer_body_lines,
+            );
+            let vertices = build_single_session_vertices_with_cached_body(
+                &large_composer_app,
+                size,
+                0.0,
+                frame as u64,
+                0.0,
+                1.0,
+                &large_composer_body_lines,
+            );
+            large_composer_app.draft.len()
+                ^ large_composer_buffers.len()
+                ^ areas.len()
+                ^ vertices.len()
+        });
+
     let target_budget_ms = duration_ms(DESKTOP_120FPS_FRAME_BUDGET);
     let critical_phase_means_ms = [
         visible_whole_line_text_ms / frames as f64,
@@ -4430,6 +4812,10 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         action_visible_ms / frames as f64,
         workspace_navigation_ms / frames as f64,
         workspace_full_frame_ms / frames as f64,
+        workspace_focus_pulse_ms / frames as f64,
+        workspace_surface_transition_ms / frames as f64,
+        streaming_while_scrolling_ms / frames as f64,
+        many_tool_cards_ms / frames as f64,
         large_scroll_ms / frames as f64,
         large_cache_key_ms / frames as f64,
     ];
@@ -4450,6 +4836,12 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             "passes_long_streaming_body_wrap_budget": (long_streaming_body_wrap_ms / frames as f64) <= target_budget_ms,
             "passes_long_streaming_line_count_budget": (long_streaming_line_count_ms / frames as f64) <= target_budget_ms,
             "passes_long_unbroken_streaming_wrap_budget": (long_unbroken_streaming_wrap_ms / frames as f64) <= target_budget_ms,
+            "passes_workspace_focus_pulse_budget": (workspace_focus_pulse_ms / frames as f64) <= target_budget_ms,
+            "passes_workspace_surface_transition_budget": (workspace_surface_transition_ms / frames as f64) <= target_budget_ms,
+            "passes_selection_drag_budget": (selection_drag_ms / frames as f64) <= 16.0,
+            "passes_streaming_while_scrolling_budget": (streaming_while_scrolling_ms / frames as f64) <= target_budget_ms,
+            "passes_many_tool_cards_budget": (many_tool_cards_ms / frames as f64) <= target_budget_ms,
+            "passes_large_composer_draft_budget": (large_composer_draft_ms / frames as f64) <= 16.0,
             "event_delivery": {
                 "previous_background_poll_interval_ms": duration_ms(BACKGROUND_POLL_INTERVAL),
                 "backend_redraw_frame_interval_ms": duration_ms(BACKEND_REDRAW_FRAME_INTERVAL),
@@ -4582,6 +4974,42 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
                     workspace_full_frame_ms,
                     frames,
                     workspace_full_frame_checksum,
+                ),
+                benchmark_phase_json(
+                    "workspace_focus_pulse_animation",
+                    workspace_focus_pulse_ms,
+                    frames,
+                    workspace_focus_pulse_checksum,
+                ),
+                benchmark_phase_json(
+                    "workspace_surface_enter_exit_transition",
+                    workspace_surface_transition_ms,
+                    frames,
+                    workspace_surface_transition_checksum,
+                ),
+                benchmark_phase_json(
+                    "selection_drag_large_transcript",
+                    selection_drag_ms,
+                    frames,
+                    selection_drag_checksum,
+                ),
+                benchmark_phase_json(
+                    "streaming_while_scrolling",
+                    streaming_while_scrolling_ms,
+                    frames,
+                    streaming_while_scrolling_checksum,
+                ),
+                benchmark_phase_json(
+                    "many_tool_cards_scroll",
+                    many_tool_cards_ms,
+                    frames,
+                    many_tool_cards_checksum,
+                ),
+                benchmark_phase_json(
+                    "large_composer_draft_edit",
+                    large_composer_draft_ms,
+                    frames,
+                    large_composer_draft_checksum,
                 ),
                 benchmark_phase_json(
                     "large_transcript_scroll_visible_body_only",
@@ -5610,10 +6038,11 @@ impl DesktopHotReloader {
     }
 
     fn drain_app_worker_messages(&mut self) -> DesktopWorkerDrain {
-        let Some(worker) = self.app_worker.as_ref() else {
+        let Some(worker) = self.app_worker.as_mut() else {
             return DesktopWorkerDrain::default();
         };
         let mut drained = DesktopWorkerDrain::default();
+        let mut should_drop_worker = false;
         while let Some(message) = worker.try_recv() {
             match message {
                 Ok(DesktopWorkerToHostMessage::Ready(ready)) => {
@@ -5656,9 +6085,35 @@ impl DesktopHotReloader {
                     desktop_log::error(format_args!(
                         "jcode-desktop: failed to read app worker message: {error:#}"
                     ));
+                    should_drop_worker = true;
                     break;
                 }
             }
+        }
+        if !should_drop_worker {
+            match worker.try_wait() {
+                Ok(Some(status)) => {
+                    desktop_log::warn(format_args!(
+                        "jcode-desktop: app worker process exited unexpectedly: {status}"
+                    ));
+                    should_drop_worker = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    desktop_log::warn(format_args!(
+                        "jcode-desktop: failed to poll app worker process: {error:#}"
+                    ));
+                    should_drop_worker = true;
+                }
+            }
+        }
+        if should_drop_worker
+            && let Some(worker) = self.app_worker.take()
+            && let Err(error) = worker.kill()
+        {
+            desktop_log::warn(format_args!(
+                "jcode-desktop: failed to clean up stopped app worker: {error:#}"
+            ));
         }
         drained
     }
@@ -7784,7 +8239,22 @@ fn single_session_text_buffer_cache_key(
     app.text_scale().to_bits().hash(&mut hasher);
     app.header_title().hash(&mut hasher);
     app.welcome_hero_text().hash(&mut hasher);
-    app.inline_widget_styled_lines().hash(&mut hasher);
+    // Use the render-time styled lines (which honor the reveal animation) so the
+    // text buffer cache key matches the content actually placed into the buffer.
+    // Hashing the pre-reveal lines here while the buffer is built from the
+    // reveal-aware lines causes a stale buffer: the picker chrome re-renders every
+    // frame but the glyph text is never re-prepared as the reveal progresses.
+    app.render_inline_widget_styled_lines().hash(&mut hasher);
+    // The inline-widget card grows via a reveal animation, and the glyph text is
+    // vertically clipped to the animating card bounds. Quantize the reveal
+    // progress into the cache key so the text buffer is re-prepared across the
+    // whole animation; otherwise the text is prepared once early (while the card
+    // is still small and clips everything but the first line) and never refreshed,
+    // leaving stale/partial text under fully-rendered chrome.
+    if app.render_inline_widget_kind().is_some() {
+        let reveal_bucket = (app.render_inline_widget_reveal_progress() * 32.0).round() as u32;
+        reveal_bucket.hash(&mut hasher);
+    }
     app.composer_text().hash(&mut hasher);
     hasher.finish()
 }
@@ -8754,7 +9224,9 @@ struct Canvas {
     primitive_vertices_cache_key: Option<u64>,
     primitive_vertices_cache: Vec<Vertex>,
     primitive_frame_vertices: Vec<Vertex>,
+    primitive_caret_vertices: Vec<Vertex>,
     primitive_workspace_vertices: Vec<Vertex>,
+    primitive_workspace_vertices_cache_key: Option<u64>,
     app_mode_transition: AppModeTransitionState,
     app_mode_transition_vertices: Vec<Vertex>,
     single_session_scroll_motion: SingleSessionScrollMotion,
@@ -8781,6 +9253,7 @@ struct Canvas {
     single_session_streaming_text_opacity_bits: Option<u32>,
     single_session_streaming_text_buffer: Option<Buffer>,
     single_session_body_text_scroll_start: Option<usize>,
+    single_session_body_text_top_offset_bits: Option<u32>,
     single_session_body_text_window_start: Option<usize>,
     single_session_body_text_window_end: Option<usize>,
     welcome_hero_reveal_key: Option<String>,
@@ -8820,7 +9293,13 @@ impl Canvas {
             .copied()
             .find(|format| format.is_srgb())
             .unwrap_or(capabilities.formats[0]);
-        let present_mode = if capabilities.present_modes.contains(&PresentMode::Fifo) {
+        // Prefer Mailbox for low-latency presentation (latest frame replaces any
+        // queued frame, so scroll/redraw updates show up on the very next vblank
+        // without tearing). Fall back to Fifo (hard vsync) and finally to whatever
+        // the surface advertises first.
+        let present_mode = if capabilities.present_modes.contains(&PresentMode::Mailbox) {
+            PresentMode::Mailbox
+        } else if capabilities.present_modes.contains(&PresentMode::Fifo) {
             PresentMode::Fifo
         } else {
             capabilities.present_modes[0]
@@ -8841,7 +9320,10 @@ impl Canvas {
             present_mode,
             alpha_mode,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // One in-flight frame keeps input-to-photon latency low. With 2+ the
+            // GPU/compositor can queue an extra frame, adding ~16ms of perceived
+            // scroll lag on a 60Hz display.
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
         startup_trace.mark("surface configured");
@@ -8888,7 +9370,9 @@ impl Canvas {
             primitive_vertices_cache_key: None,
             primitive_vertices_cache: Vec::new(),
             primitive_frame_vertices: Vec::new(),
+            primitive_caret_vertices: Vec::new(),
             primitive_workspace_vertices: Vec::new(),
+            primitive_workspace_vertices_cache_key: None,
             app_mode_transition: AppModeTransitionState::default(),
             app_mode_transition_vertices: Vec::new(),
             single_session_scroll_motion: SingleSessionScrollMotion::default(),
@@ -8915,6 +9399,7 @@ impl Canvas {
             single_session_streaming_text_opacity_bits: None,
             single_session_streaming_text_buffer: None,
             single_session_body_text_scroll_start: None,
+            single_session_body_text_top_offset_bits: None,
             single_session_body_text_window_start: None,
             single_session_body_text_window_end: None,
             welcome_hero_reveal_key: None,
@@ -8956,6 +9441,7 @@ impl Canvas {
         self.primitive_vertices_cache_key = None;
         self.primitive_vertices_cache.clear();
         self.primitive_frame_vertices.clear();
+        self.primitive_caret_vertices.clear();
         self.workspace_text_pane_cache.clear();
         self.app_mode_transition.clear();
         self.app_mode_transition_vertices.clear();
@@ -9020,6 +9506,7 @@ impl Canvas {
                 self.single_session_text_key = None;
                 self.single_session_text_buffers.clear();
                 self.single_session_body_text_scroll_start = None;
+                self.single_session_body_text_top_offset_bits = None;
                 self.single_session_body_text_window_start = None;
                 self.single_session_body_text_window_end = None;
                 return;
@@ -9069,12 +9556,23 @@ impl Canvas {
             self.single_session_text_cache_key = Some(text_cache_key);
             if !can_reuse_body_buffer {
                 self.single_session_body_text_scroll_start = None;
+                self.single_session_body_text_top_offset_bits = None;
                 self.single_session_body_text_window_start = None;
                 self.single_session_body_text_window_end = None;
             }
             self.text_needs_prepare = true;
         }
         self.sync_single_session_body_text_window(app, render_size, &viewport);
+        self.sync_single_session_body_text_top_offset(viewport.top_offset_pixels);
+    }
+
+    fn sync_single_session_body_text_top_offset(&mut self, top_offset_pixels: f32) {
+        let bits = top_offset_pixels.to_bits();
+        if self.single_session_body_text_top_offset_bits == Some(bits) {
+            return;
+        }
+        self.single_session_body_text_top_offset_bits = Some(bits);
+        self.text_needs_prepare = true;
     }
 
     fn sync_single_session_body_text_window(
@@ -9112,6 +9610,7 @@ impl Canvas {
             self.single_session_body_text_window_start = Some(window_start);
             self.single_session_body_text_window_end = Some(window_end);
             self.single_session_body_text_scroll_start = None;
+            self.single_session_body_text_top_offset_bits = None;
             self.sync_single_session_body_text_scroll(viewport.start_line, window_start);
         }
         self.sync_single_session_streaming_text_buffer(app, render_size, viewport);
@@ -9494,6 +9993,7 @@ impl Canvas {
                     self.single_session_streaming_base_len = self.single_session_body_lines.len();
                     self.single_session_streaming_base_key = Some(base_key);
                     self.single_session_body_text_scroll_start = None;
+                    self.single_session_body_text_top_offset_bits = None;
                     self.single_session_body_text_window_start = None;
                     self.single_session_body_text_window_end = None;
                 } else {
@@ -9503,6 +10003,7 @@ impl Canvas {
                     self.single_session_streaming_base_len = 0;
                     self.single_session_body_key = Some(key);
                     self.single_session_body_text_scroll_start = None;
+                    self.single_session_body_text_top_offset_bits = None;
                     self.single_session_body_text_window_start = None;
                     self.single_session_body_text_window_end = None;
                     return (key, true);
@@ -10339,26 +10840,78 @@ impl Canvas {
                 let status_color = workspace_status_color_for_frame
                     .unwrap_or_else(|| workspace_status_bar_target_color(workspace));
                 let status_text_frame = workspace_status_text_frame.as_ref();
-                build_vertices_into(
-                    WorkspaceVertexBuildParams {
+                // When nothing is animating, the assembled workspace vertex
+                // buffer is a pure function of the workspace content state, so
+                // we can reuse the previously built buffer and skip rebuilding
+                // ~100k vertices every redraw.
+                let workspace_geometry_cache_key = (!animation_active).then(|| {
+                    workspace_primitive_vertices_cache_key(
                         workspace,
-                        size: self.size,
+                        self.size,
                         render_layout,
                         focus_pulse,
-                        space_hold_progress: workspace_space_hold_progress,
-                        surface_frames: workspace_surface_frames_for_frame.as_ref(),
-                        exiting_surfaces: &self.workspace_surface_exit_cache,
-                        workspace_panel_cache: Some(&self.workspace_text_pane_cache),
+                        workspace_space_hold_progress,
                         status_color,
                         status_text_frame,
-                    },
-                    &mut self.primitive_workspace_vertices,
-                );
-                frame_profile.checkpoint("vertices_geometry");
-                (
-                    Cow::Borrowed(self.primitive_workspace_vertices.as_slice()),
-                    animation_active,
-                )
+                        &self.workspace_text_pane_cache,
+                    )
+                });
+                if let Some(cache_key) = workspace_geometry_cache_key {
+                    if self.primitive_workspace_vertices_cache_key == Some(cache_key)
+                        && !self.primitive_workspace_vertices.is_empty()
+                    {
+                        primitive_geometry_cache_hit = true;
+                        frame_profile.checkpoint("vertices_geometry");
+                        (
+                            Cow::Borrowed(self.primitive_workspace_vertices.as_slice()),
+                            animation_active,
+                        )
+                    } else {
+                        self.primitive_workspace_vertices_cache_key = Some(cache_key);
+                        build_vertices_into(
+                            WorkspaceVertexBuildParams {
+                                workspace,
+                                size: self.size,
+                                render_layout,
+                                focus_pulse,
+                                space_hold_progress: workspace_space_hold_progress,
+                                surface_frames: workspace_surface_frames_for_frame.as_ref(),
+                                exiting_surfaces: &self.workspace_surface_exit_cache,
+                                workspace_panel_cache: Some(&self.workspace_text_pane_cache),
+                                status_color,
+                                status_text_frame,
+                            },
+                            &mut self.primitive_workspace_vertices,
+                        );
+                        frame_profile.checkpoint("vertices_geometry");
+                        (
+                            Cow::Borrowed(self.primitive_workspace_vertices.as_slice()),
+                            animation_active,
+                        )
+                    }
+                } else {
+                    self.primitive_workspace_vertices_cache_key = None;
+                    build_vertices_into(
+                        WorkspaceVertexBuildParams {
+                            workspace,
+                            size: self.size,
+                            render_layout,
+                            focus_pulse,
+                            space_hold_progress: workspace_space_hold_progress,
+                            surface_frames: workspace_surface_frames_for_frame.as_ref(),
+                            exiting_surfaces: &self.workspace_surface_exit_cache,
+                            workspace_panel_cache: Some(&self.workspace_text_pane_cache),
+                            status_color,
+                            status_text_frame,
+                        },
+                        &mut self.primitive_workspace_vertices,
+                    );
+                    frame_profile.checkpoint("vertices_geometry");
+                    (
+                        Cow::Borrowed(self.primitive_workspace_vertices.as_slice()),
+                        animation_active,
+                    )
+                }
             }
         };
         frame_profile.checkpoint("vertices");
@@ -10366,16 +10919,16 @@ impl Canvas {
             && single_session_caret_visible_for_frame(single_session, spinner_tick)
         {
             if single_session_issue_layout_for_frame.visible() {
-                let mut caret_vertices = Vec::new();
+                self.primitive_caret_vertices.clear();
                 push_single_session_caret(
-                    &mut caret_vertices,
+                    &mut self.primitive_caret_vertices,
                     single_session,
                     single_session_render_size,
                     text_buffers.get(2),
                 );
                 append_child_vertices_to_parent_with_opacity(
                     vertices.to_mut(),
-                    &caret_vertices,
+                    &self.primitive_caret_vertices,
                     single_session_render_size,
                     single_session_issue_layout_for_frame.chat,
                     self.size,
@@ -10392,12 +10945,10 @@ impl Canvas {
         }
         frame_profile.checkpoint("caret");
         if let Some(mode_transition_frame) = self.app_mode_transition.frame(app.mode(), now) {
-            let previous_vertices = self.app_mode_transition.previous_vertices().to_vec();
-            let current_vertices = vertices.as_ref().to_vec();
             compose_app_mode_transition_vertices(
                 &mut self.app_mode_transition_vertices,
-                &previous_vertices,
-                &current_vertices,
+                self.app_mode_transition.previous_vertices(),
+                vertices.as_ref(),
                 mode_transition_frame,
             );
             vertices = Cow::Borrowed(self.app_mode_transition_vertices.as_slice());
@@ -11394,32 +11945,6 @@ fn nearest_hero_stroke_progress(
     (best_progress, best_distance_sq.sqrt())
 }
 
-fn build_vertices(
-    workspace: &Workspace,
-    size: PhysicalSize<u32>,
-    render_layout: WorkspaceRenderLayout,
-    focus_pulse: f32,
-    space_hold_progress: Option<f32>,
-) -> Vec<Vertex> {
-    let mut vertices = Vec::with_capacity(workspace_vertex_capacity_hint(workspace));
-    build_vertices_into(
-        WorkspaceVertexBuildParams {
-            workspace,
-            size,
-            render_layout,
-            focus_pulse,
-            space_hold_progress,
-            surface_frames: None,
-            exiting_surfaces: &HashMap::new(),
-            workspace_panel_cache: None,
-            status_color: workspace_status_bar_target_color(workspace),
-            status_text_frame: None,
-        },
-        &mut vertices,
-    );
-    vertices
-}
-
 fn reserve_workspace_vertex_capacity(vertices: &mut Vec<Vertex>, workspace: &Workspace) {
     let hint = workspace_vertex_capacity_hint(workspace);
     if vertices.capacity() < hint {
@@ -11576,6 +12101,80 @@ fn workspace_panel_size(rect: Rect) -> PhysicalSize<u32> {
     )
 }
 
+/// Identity key for the fully-assembled workspace primitive vertex buffer.
+///
+/// This is only meaningful (and only consulted) when no workspace animation is
+/// active, in which case the viewport layout, focus pulse, surface transitions
+/// and status transitions are all settled and therefore pure functions of the
+/// workspace content state. Hashing the inputs lets idle frames reuse the
+/// previously assembled vertex buffer instead of re-transforming ~100k vertices
+/// every redraw.
+#[allow(clippy::too_many_arguments)]
+fn workspace_primitive_vertices_cache_key(
+    workspace: &Workspace,
+    size: PhysicalSize<u32>,
+    render_layout: WorkspaceRenderLayout,
+    focus_pulse: f32,
+    space_hold_progress: Option<f32>,
+    status_color: [f32; 4],
+    status_text_frame: Option<&StatusTextTransitionFrame>,
+    panel_cache: &HashMap<u64, CachedWorkspaceSingleSessionTextPane>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    size.width.hash(&mut hasher);
+    size.height.hash(&mut hasher);
+    render_layout.column_width.to_bits().hash(&mut hasher);
+    render_layout.scroll_offset.to_bits().hash(&mut hasher);
+    render_layout
+        .vertical_scroll_offset
+        .to_bits()
+        .hash(&mut hasher);
+    focus_pulse.to_bits().hash(&mut hasher);
+    space_hold_progress.map(f32::to_bits).hash(&mut hasher);
+    for channel in status_color {
+        channel.to_bits().hash(&mut hasher);
+    }
+    if let Some(frame) = status_text_frame {
+        frame.current.text.hash(&mut hasher);
+        frame.current.opacity.to_bits().hash(&mut hasher);
+        frame.current.y_offset_pixels.to_bits().hash(&mut hasher);
+        if let Some(previous) = &frame.previous {
+            previous.text.hash(&mut hasher);
+            previous.opacity.to_bits().hash(&mut hasher);
+            previous.y_offset_pixels.to_bits().hash(&mut hasher);
+        } else {
+            0u8.hash(&mut hasher);
+        }
+    }
+    workspace.zoomed.hash(&mut hasher);
+    (workspace.mode == InputMode::Insert).hash(&mut hasher);
+    workspace.focused_id.hash(&mut hasher);
+    workspace.detail_scroll.hash(&mut hasher);
+    workspace.current_workspace().hash(&mut hasher);
+    for surface in &workspace.surfaces {
+        surface.id.hash(&mut hasher);
+        workspace_surface_kind_key(surface.kind).hash(&mut hasher);
+        surface.lane.hash(&mut hasher);
+        surface.column.hash(&mut hasher);
+        surface.color_index.hash(&mut hasher);
+        surface.title.hash(&mut hasher);
+        surface.body_lines.hash(&mut hasher);
+        surface.detail_lines.hash(&mut hasher);
+        surface.session_id.hash(&mut hasher);
+        // Cached panel vertex generation differentiates rendered transcript
+        // content for session surfaces.
+        if let Some(entry) = panel_cache.get(&surface.id) {
+            entry.identity_key.hash(&mut hasher);
+        }
+    }
+    if workspace.mode == InputMode::Insert {
+        workspace.draft.hash(&mut hasher);
+        workspace.draft_cursor.hash(&mut hasher);
+        workspace.pending_images.len().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn workspace_single_session_app_for_surface(
     workspace: &Workspace,
     surface: &workspace::Surface,
@@ -11709,7 +12308,7 @@ fn build_workspace_single_session_text_panes<'a>(
     if workspace.zoomed {
         if let Some(surface) = workspace.focused_surface()
             && surface.kind == workspace::SurfaceKind::Session
-            && let Some(app) = workspace_single_session_app_for_surface(workspace, surface)
+            && surface.session_id.is_some()
         {
             let target_rect = Rect {
                 x: OUTER_PADDING,
@@ -11719,16 +12318,17 @@ fn build_workspace_single_session_text_panes<'a>(
             };
             let rect = workspace_transitioned_surface_rect(surface_frames, surface.id, target_rect);
             let panel_size = workspace_panel_size(rect);
-            visible_surface_ids.push(surface.id);
-            refresh_workspace_text_pane_cache_entry(
+            if refresh_workspace_text_pane_cache_entry(
                 cache,
                 surface.id,
                 workspace_surface_text_pane_identity_key(workspace, surface, panel_size),
-                app,
                 rect,
                 panel_size,
                 font_system,
-            );
+                || workspace_single_session_app_for_surface(workspace, surface),
+            ) {
+                visible_surface_ids.push(surface.id);
+            }
         }
         retain_workspace_text_pane_cache_for_workspace(cache, workspace);
         return workspace_text_panes_from_cache(cache, &visible_surface_ids);
@@ -11743,21 +12343,22 @@ fn build_workspace_single_session_text_panes<'a>(
             if surface.kind != workspace::SurfaceKind::Session {
                 return;
             }
-            let Some(app) = workspace_single_session_app_for_surface(workspace, surface) else {
+            if surface.session_id.is_none() {
                 return;
-            };
+            }
             let rect = workspace_transitioned_surface_rect(surface_frames, surface.id, target_rect);
             let panel_size = workspace_panel_size(rect);
-            visible_surface_ids.push(surface.id);
-            refresh_workspace_text_pane_cache_entry(
+            if refresh_workspace_text_pane_cache_entry(
                 cache,
                 surface.id,
                 workspace_surface_text_pane_identity_key(workspace, surface, panel_size),
-                app,
                 rect,
                 panel_size,
                 font_system,
-            );
+                || workspace_single_session_app_for_surface(workspace, surface),
+            ) {
+                visible_surface_ids.push(surface.id);
+            }
         },
     );
 
@@ -11820,19 +12421,22 @@ fn refresh_workspace_text_pane_cache_entry(
     cache: &mut HashMap<u64, CachedWorkspaceSingleSessionTextPane>,
     surface_id: u64,
     identity_key: u64,
-    app: SingleSessionApp,
     rect: Rect,
     panel_size: PhysicalSize<u32>,
     font_system: &mut FontSystem,
-) {
+    build_app: impl FnOnce() -> Option<SingleSessionApp>,
+) -> bool {
     if let Some(entry) = cache.get_mut(&surface_id)
         && entry.identity_key == identity_key
     {
-        entry.app = app;
         entry.rect = rect;
         entry.size = panel_size;
-        return;
+        return true;
     }
+
+    let Some(app) = build_app() else {
+        return false;
+    };
 
     let rendered_body_lines = single_session_rendered_body_lines_for_tick(&app, panel_size, 0);
     let key = single_session_text_key_for_tick_with_rendered_body(
@@ -11849,7 +12453,7 @@ fn refresh_workspace_text_pane_cache_entry(
         entry.app = app;
         entry.rect = rect;
         entry.size = panel_size;
-        return;
+        return true;
     }
 
     let child_vertices = build_single_session_vertices_with_cached_body(
@@ -11875,6 +12479,7 @@ fn refresh_workspace_text_pane_cache_entry(
             child_vertices,
         },
     );
+    true
 }
 
 fn workspace_text_panes_from_cache<'a>(
@@ -12027,17 +12632,32 @@ fn build_vertices_into(params: WorkspaceVertexBuildParams<'_>, vertices: &mut Ve
             let rect = workspace_transitioned_surface_rect(surface_frames, surface.id, target_rect);
             let opacity = workspace_transitioned_surface_opacity(surface_frames, surface.id);
             let start_index = vertices.len();
-            if surface.kind == workspace::SurfaceKind::Session
-                && let Some(app) = workspace_single_session_app_for_surface(workspace, surface)
-            {
-                push_workspace_single_session_panel(
-                    vertices,
-                    &app,
-                    rect,
-                    size,
-                    focus_pulse,
-                    opacity,
-                );
+            if surface.kind == workspace::SurfaceKind::Session {
+                if let Some(entry) = workspace_panel_cache.and_then(|cache| cache.get(&surface.id))
+                {
+                    if focus_pulse > 0.001 {
+                        push_surface(vertices, rect, surface.color_index, true, focus_pulse, size);
+                    }
+                    append_child_vertices_to_parent_with_opacity(
+                        vertices,
+                        &entry.child_vertices,
+                        entry.size,
+                        rect,
+                        size,
+                        opacity,
+                    );
+                } else if let Some(app) =
+                    workspace_single_session_app_for_surface(workspace, surface)
+                {
+                    push_workspace_single_session_panel(
+                        vertices,
+                        &app,
+                        rect,
+                        size,
+                        focus_pulse,
+                        opacity,
+                    );
+                }
             } else {
                 push_surface(vertices, rect, surface.color_index, true, focus_pulse, size);
                 let draft = focused_panel_draft(workspace, surface.id);
@@ -12070,10 +12690,18 @@ fn build_vertices_into(params: WorkspaceVertexBuildParams<'_>, vertices: &mut Ve
             let opacity = workspace_transitioned_surface_opacity(surface_frames, surface.id);
             let start_index = vertices.len();
             if surface.kind == workspace::SurfaceKind::Session {
-                if surface_pulse <= 0.001
-                    && let Some(entry) =
-                        workspace_panel_cache.and_then(|cache| cache.get(&surface.id))
+                if let Some(entry) = workspace_panel_cache.and_then(|cache| cache.get(&surface.id))
                 {
+                    if surface_pulse > 0.001 {
+                        push_surface(
+                            vertices,
+                            rect,
+                            surface.color_index,
+                            focused,
+                            surface_pulse,
+                            size,
+                        );
+                    }
                     append_child_vertices_to_parent_with_opacity(
                         vertices,
                         &entry.child_vertices,

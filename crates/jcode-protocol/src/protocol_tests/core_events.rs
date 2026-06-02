@@ -275,6 +275,38 @@ fn test_generated_image_event_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_side_pane_images_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::SidePaneImages {
+        session_id: "session_active".to_string(),
+        images: vec![jcode_session_types::RenderedImage {
+            media_type: "image/png".to_string(),
+            data: "base64-data".to_string(),
+            label: Some("openclaw.png".to_string()),
+            source: jcode_session_types::RenderedImageSource::ToolResult {
+                tool_name: "read".to_string(),
+            },
+        }],
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"side_pane_images\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::SidePaneImages { session_id, images } = decoded else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(session_id, "session_active");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].media_type, "image/png");
+    assert_eq!(images[0].label.as_deref(), Some("openclaw.png"));
+    assert_eq!(
+        images[0].source,
+        jcode_session_types::RenderedImageSource::ToolResult {
+            tool_name: "read".to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn test_interrupted_event_roundtrip() -> Result<()> {
     let event = ServerEvent::Interrupted;
     let json = encode_event(&event);
@@ -428,6 +460,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         compacted_total: 128,
         compacted_visible: 64,
         compacted_remaining: 64,
+        compacted_hidden_prompts: 3,
     };
     let json = encode_event(&event);
     assert!(json.contains("\"type\":\"compacted_history\""));

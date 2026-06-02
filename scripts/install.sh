@@ -182,6 +182,23 @@ if [ "$(uname -s)" = "Darwin" ]; then
   fi
 fi
 
+# Retire any background server still running the old binary so the freshly
+# installed version is picked up without the user having to kill a daemon by
+# hand (issue #291). We use the graceful `server reload` path, which hands live
+# headless/swarm sessions to a newly-exec'd server instead of dropping them, and
+# only reloads when the running server is genuinely older than what we just
+# installed (so a newer/dev daemon is never downgraded). This is best-effort:
+# it must never fail the install, and it is skipped when no server is running.
+if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
+  reload_bin="$launcher_path"
+  [ -x "$reload_bin" ] || reload_bin="$stable_dir/$bin_name"
+  if [ -x "$reload_bin" ]; then
+    if "$reload_bin" server reload </dev/null >/dev/null 2>&1; then
+      info "Reloaded the running jcode server onto $VERSION (if one was active)."
+    fi
+  fi
+fi
+
 if [ "$IS_WINDOWS" = true ]; then
   win_install_dir=$(cygpath -w "$INSTALL_DIR" 2>/dev/null || echo "$INSTALL_DIR")
   echo ""
@@ -242,9 +259,9 @@ else
 
   if [ "$(uname -s)" = "Darwin" ]; then
     if [ "${mac_hotkey_ready:-false}" = true ]; then
-      info "Global hotkey ready: Cmd+; opens jcode in your preferred terminal"
+      info "Global hotkey ready: Cmd+; launches a new jcode from anywhere, system-wide"
     else
-      info "Tip: run 'jcode setup-hotkey' to enable Cmd+; launch on macOS"
+      info "Tip: run 'jcode setup-hotkey' so Cmd+; launches jcode system-wide on macOS"
     fi
   fi
 

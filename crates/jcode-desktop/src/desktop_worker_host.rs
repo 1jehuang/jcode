@@ -9,7 +9,7 @@ use crate::desktop_protocol::{
 };
 use anyhow::{Context, Result, anyhow};
 use std::io::{BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 
@@ -94,10 +94,23 @@ impl DesktopWorkerConnection {
         }
     }
 
-    pub(crate) fn kill(mut self) -> Result<()> {
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         self.child
-            .kill()
-            .context("failed to kill desktop app worker")?;
+            .try_wait()
+            .context("failed to poll desktop app worker")
+    }
+
+    pub(crate) fn kill(mut self) -> Result<()> {
+        match self.child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => self
+                .child
+                .kill()
+                .context("failed to kill desktop app worker")?,
+            Err(error) => {
+                return Err(error).context("failed to poll desktop app worker before kill");
+            }
+        }
         if let Some(reader_thread) = self.reader_thread.take() {
             let _ = reader_thread.join();
         }

@@ -1,0 +1,217 @@
+use crate::message::{ContentBlock, ToolCall};
+use crate::tool::ToolOutput;
+
+pub(super) const MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY: usize = 512 * 1024;
+
+pub(super) fn cap_tool_output_for_history(tool_name: &str, mut output: ToolOutput) -> ToolOutput {
+    if output.output.chars().count() <= MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY {
+        return output;
+    }
+
+    let original_chars = output.output.chars().count();
+    let kept = crate::util::truncate_str(&output.output, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY);
+    output.output = format!(
+        "{}\n\n[Tool output truncated by jcode: tool `{}` produced {} chars; kept first {} chars to protect the remote protocol, session history, and prompt cache. Redirect large logs to a file and read targeted sections.]",
+        kept, tool_name, original_chars, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY,
+    );
+    output
+}
+
+pub(super) fn cap_sdk_tool_content_for_history(tool_name: &str, content: String) -> String {
+    if content.chars().count() <= MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY {
+        return content;
+    }
+    let original_chars = content.chars().count();
+    let kept = crate::util::truncate_str(&content, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY);
+    format!(
+        "{}\n\n[Tool output truncated by jcode: tool `{}` produced {} chars; kept first {} chars to protect the remote protocol, session history, and prompt cache. Redirect large logs to a file and read targeted sections.]",
+        kept, tool_name, original_chars, MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY,
+    )
+}
+
+/// Build rendered side-pane images from a tool output's attached images.
+///
+/// This mirrors how `render_messages_and_images` derives images from persisted
+/// session history (source = ToolResult), so live-streamed images match what a
+/// later History reload would produce. `tool_name` and `tool_input` provide the
+/// label fallback (e.g. the `read` tool's `file_path`).
+pub(super) fn tool_output_side_pane_images(
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    output: &ToolOutput,
+) -> Vec<jcode_session_types::RenderedImage> {
+    if output.images.is_empty() {
+        return Vec::new();
+    }
+    let fallback_label = tool_input
+        .get("file_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    output
+        .images
+        .iter()
+        .map(|img| jcode_session_types::RenderedImage {
+            media_type: img.media_type.clone(),
+            data: img.data.clone(),
+            label: img
+                .label
+                .as_ref()
+                .map(|label| label.trim().to_string())
+                .filter(|label| !label.is_empty())
+                .or_else(|| fallback_label.clone()),
+            source: jcode_session_types::RenderedImageSource::ToolResult {
+                tool_name: tool_name.to_string(),
+            },
+        })
+        .collect()
+}
+
+pub(super) fn tool_output_to_content_blocks(
+    tool_use_id: String,
+    output: ToolOutput,
+) -> Vec<ContentBlock> {
+    let mut blocks = vec![ContentBlock::ToolResult {
+        tool_use_id,
+        content: output.output,
+        is_error: None,
+    }];
+    for img in output.images {
+        blocks.push(ContentBlock::Image {
+            media_type: img.media_type,
+            data: img.data,
+        });
+        if let Some(label) = img.label.filter(|label| !label.trim().is_empty()) {
+            blocks.push(ContentBlock::Text {
+                text: format!(
+                    "[Attached image associated with the preceding tool result: {}]",
+                    label
+                ),
+                cache_control: None,
+            });
+        }
+    }
+    blocks
+}
+
+/// Issue #164: dedup helper for tool_calls accumulated during a streamed
+/// turn. Returns true if `tool` was inserted, false if a duplicate
+/// `tool_use_id` was already present (caller should log + skip).
+///
+/// The streaming layer can yield the same ToolUseEnd twice on reconnect
+/// or partial replay. Without dedup, both copies execute — visible in the
+/// transcript as duplicated tool calls and confusing the model on the
+/// next turn.
+pub(super) fn push_dedup_by_id(tool_calls: &mut Vec<ToolCall>, tool: ToolCall) -> bool {
+    if tool_calls.iter().any(|existing| existing.id == tool.id) {
+        return false;
+    }
+    tool_calls.push(tool);
+    true
+}
+
+pub(super) fn print_tool_summary(tool: &ToolCall) {
+    match tool.name.as_str() {
+        "bash" => {
+            if let Some(cmd) = tool.input.get("command").and_then(|v| v.as_str()) {
+                let short = if cmd.len() > 60 {
+                    format!("{}...", crate::util::truncate_str(cmd, 60))
+                } else {
+                    cmd.to_string()
+                };
+                println!("$ {}", short);
+            }
+        }
+        "read" | "write" | "edit" => {
+            if let Some(path) = tool.input.get("file_path").and_then(|v| v.as_str()) {
+                println!("{}", path);
+            }
+        }
+        "glob" | "grep" => {
+            if let Some(pattern) = tool.input.get("pattern").and_then(|v| v.as_str()) {
+                println!("'{}'", pattern);
+            }
+        }
+        "ls" => {
+            let path = tool
+                .input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            println!("{}", path);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_tool_output_leaves_small_output_unchanged() {
+        let output = ToolOutput::new("short output");
+        let capped = cap_tool_output_for_history("bash", output.clone());
+        assert_eq!(capped.output, output.output);
+    }
+
+    #[test]
+    fn cap_tool_output_adds_visible_truncation_notice() {
+        let output = ToolOutput::new("x".repeat(MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY + 10));
+        let capped = cap_tool_output_for_history("bash", output);
+        assert!(capped.output.len() < MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY + 1_000);
+        assert!(capped.output.contains("Tool output truncated by jcode"));
+        assert!(capped.output.contains("tool `bash` produced"));
+        assert!(capped.output.contains("Redirect large logs to a file"));
+    }
+
+    #[test]
+    fn cap_sdk_tool_content_adds_same_notice() {
+        let capped = cap_sdk_tool_content_for_history(
+            "custom",
+            "y".repeat(MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY + 10),
+        );
+        assert!(capped.contains("Tool output truncated by jcode"));
+        assert!(capped.contains("tool `custom` produced"));
+    }
+
+    fn fake_tool(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: serde_json::Value::Null,
+            intent: None,
+        }
+    }
+
+    #[test]
+    fn push_dedup_by_id_inserts_new_tool() {
+        let mut calls: Vec<ToolCall> = Vec::new();
+        assert!(push_dedup_by_id(&mut calls, fake_tool("t1", "bash")));
+        assert!(push_dedup_by_id(&mut calls, fake_tool("t2", "read")));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "t1");
+        assert_eq!(calls[1].id, "t2");
+    }
+
+    #[test]
+    fn push_dedup_by_id_skips_duplicate() {
+        // Issue #164: same tool_use_id from streaming reconnect must be dropped.
+        let mut calls: Vec<ToolCall> = vec![fake_tool("t1", "bash")];
+        let inserted = push_dedup_by_id(&mut calls, fake_tool("t1", "bash"));
+        assert!(!inserted, "duplicate id must not be pushed");
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn push_dedup_by_id_treats_different_names_with_same_id_as_duplicate() {
+        // The id is authoritative; same id with different name still rejects.
+        // (This matches provider semantics — id is the primary key for tool calls.)
+        let mut calls: Vec<ToolCall> = vec![fake_tool("t1", "bash")];
+        let inserted = push_dedup_by_id(&mut calls, fake_tool("t1", "read"));
+        assert!(!inserted);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+    }
+}

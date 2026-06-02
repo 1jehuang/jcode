@@ -56,7 +56,6 @@ pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
         "Agent" => "subagent",
         "ScheduleWakeup" => "schedule",
         "Skill" => "skill_manage",
-        // ToolSearch intentionally has no direct local analogue yet.
         _ => name,
     }
     .to_string()

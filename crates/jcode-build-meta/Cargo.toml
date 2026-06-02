@@ -1,0 +1,19 @@
+[package]
+name = "jcode-build-meta"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Single source of truth for compile-time build/version metadata.
+#
+# The build script computes the same JCODE_* values that historically lived in
+# the root crate's build.rs and emits them via `cargo:rustc-env`. Downstream
+# code reads them through the `pub const` accessors below (e.g.
+# `jcode_build_meta::VERSION`) instead of `env!("JCODE_VERSION")`, so any crate
+# in the workspace can depend on this leaf crate and obtain identical values
+# without duplicating the build script (which would double-increment the dev
+# patch counter).
+
+[dependencies]
+
+[build-dependencies]

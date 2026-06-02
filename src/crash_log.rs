@@ -53,8 +53,8 @@ pub fn write_crash_log(
         chrono::Utc::now().to_rfc3339()
     ));
     content.push_str(&format!("pid:            {}\n", std::process::id()));
-    content.push_str(&format!("version:        {}\n", env!("JCODE_VERSION")));
-    content.push_str(&format!("git_hash:       {}\n", env!("JCODE_GIT_HASH")));
+    content.push_str(&format!("version:        {}\n", jcode_build_meta::VERSION));
+    content.push_str(&format!("git_hash:       {}\n", jcode_build_meta::GIT_HASH));
     content.push_str(&format!("os:             {}\n", std::env::consts::OS));
     content.push_str(&format!("arch:           {}\n", std::env::consts::ARCH));
     if let Some(sid) = session_id {
@@ -170,7 +170,7 @@ mod tests {
         assert!(body.contains("test panic"));
         assert!(body.contains("sess_test_xyz"));
         assert!(body.contains("jcode --resume sess_test_xyz"));
-        assert!(body.contains(env!("JCODE_VERSION")));
+        assert!(body.contains(jcode_build_meta::VERSION));
 
         if let Some(p) = prev {
             crate::env::set_var("JCODE_HOME", p);

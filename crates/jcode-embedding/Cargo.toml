@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "http2", "system-proxy", "rustls-tls"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 tract-hir = "0.21"
 tract-onnx = "0.21"

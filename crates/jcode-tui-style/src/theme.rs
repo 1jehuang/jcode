@@ -55,7 +55,12 @@ pub fn header_session_color() -> Color {
 // spinner-only renderer patches one status cell between full TUI redraws. This
 // sequence should read as a circular spin, not a grow/recede pulse.
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const STATIC_ACTIVITY_INDICATOR: &str = "•";
+
+/// Frame rate for the low-cost "liveness" spinner used when decorative
+/// animations are disabled (Minimal tier, SSH, WSL, etc.). The spinner should
+/// still visibly advance roughly once per second so streaming/tool activity
+/// reads as alive instead of frozen, without paying for full-rate animation.
+pub const LIVENESS_INDICATOR_FPS: f32 = 1.5;
 
 pub fn spinner_frame_index(elapsed: f32, fps: f32) -> usize {
     ((elapsed * fps) as usize) % SPINNER_FRAMES.len()
@@ -73,7 +78,8 @@ pub fn activity_indicator_frame_index(
     if enable_decorative_animations {
         spinner_frame_index(elapsed, fps)
     } else {
-        0
+        // Keep ticking at a slow rate instead of freezing on a single frame.
+        spinner_frame_index(elapsed, LIVENESS_INDICATOR_FPS)
     }
 }
 
@@ -82,11 +88,7 @@ pub fn activity_indicator(
     fps: f32,
     enable_decorative_animations: bool,
 ) -> &'static str {
-    if enable_decorative_animations {
-        spinner_frame(elapsed, fps)
-    } else {
-        STATIC_ACTIVITY_INDICATOR
-    }
+    SPINNER_FRAMES[activity_indicator_frame_index(elapsed, fps, enable_decorative_animations)]
 }
 
 /// Convert HSL to RGB (h in 0-360, s and l in 0-1)
@@ -209,5 +211,18 @@ mod tests {
         assert_eq!(spinner_frame(0.0, fps), "⠋");
         assert_eq!(spinner_frame(0.9, fps), "⠏");
         assert_eq!(spinner_frame(1.0, fps), "⠋");
+    }
+
+    #[test]
+    fn activity_indicator_still_advances_without_decorative_animations() {
+        // With decorative animations disabled the indicator must keep ticking at
+        // the slow liveness rate (roughly once per second) instead of freezing.
+        let first = activity_indicator(0.0, 12.5, false);
+        let later = activity_indicator(1.0, 12.5, false);
+        assert!(SPINNER_FRAMES.contains(&first));
+        assert_ne!(
+            first, later,
+            "liveness spinner should advance within one second"
+        );
     }
 }

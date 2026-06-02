@@ -20,6 +20,60 @@ pub async fn run() -> Result<()> {
     logging::cleanup_old_logs();
     startup_profile::mark("log_cleanup");
     logging::info("jcode starting");
+
+    // Wire config-reload reactions without making config depend on auth/bus:
+    // when the config cache reloads, invalidate the auth-status cache and
+    // broadcast a models-updated event.
+    crate::config::on_config_reloaded(crate::auth::AuthStatus::invalidate_cache);
+    crate::config::on_config_reloaded(|| crate::bus::Bus::global().publish_models_updated());
+
+    // Invert the legacy provider_catalog -> auth dependency: provider_catalog
+    // consults registered fallback resolvers, and auth (the higher layer)
+    // registers its external-CLI credential scan here.
+    crate::provider_catalog::register_api_key_fallback_resolver(
+        crate::auth::external::load_api_key_for_env,
+    );
+
+    // Invert the legacy safety -> notifications dependency: safety raises a
+    // permission request and the notifications layer (which depends on safety
+    // types) delivers it via the dispatcher registered here.
+    crate::safety::register_permission_notifier(|action, description, request_id| {
+        crate::notifications::NotificationDispatcher::new().dispatch_permission_request(
+            action,
+            description,
+            request_id,
+        );
+    });
+
+    // Invert the legacy memory -> skill dependency: memory collects synthetic
+    // entries from registered providers, and skill (the higher layer that
+    // depends on MemoryEntry) registers its registry->memory adapter here.
+    crate::memory::register_synthetic_entry_provider(|| {
+        crate::skill::SkillRegistry::shared_snapshot()
+            .list()
+            .into_iter()
+            .map(|skill| skill.as_memory_entry())
+            .collect()
+    });
+
+    // Invert the legacy server -> tui dependency: the TUI session picker owns
+    // the session-list cache and registers its invalidator here, so the server
+    // can drop the cache (e.g. after a rename) without referencing tui.
+    crate::session_list_cache::register_invalidator(
+        crate::tui::session_picker::invalidate_session_list_cache,
+    );
+
+    // Invert the legacy tui -> cli dependency for shared-server spawning: the
+    // CLI owns the provider-bootstrap spawn logic and registers it here, so the
+    // TUI reconnect loop can request a replacement server via server_spawn
+    // without referencing cli.
+    crate::server_spawn::register_default_server_spawner(Box::new(|| {
+        Box::pin(async {
+            dispatch::spawn_server(&crate::cli::provider_init::ProviderChoice::Auto, None, None)
+                .await
+        })
+    }));
+
     crate::platform::raise_nofile_limit_best_effort(8_192);
     startup_profile::mark("nofile_limit");
 
@@ -174,6 +228,23 @@ fn parse_and_prepare_args() -> Result<Args> {
         crate::env::set_var("JCODE_SANDBOX_ROOT", &canonical);
     }
 
+    // --permission-mode → dcg_bridge global mode. When unspecified we leave
+    // the default (`Mode::Default`, set by the bridge's LazyLock) untouched
+    // so behavior matches the legacy AUTO_ALLOWED-based classify.
+    //
+    // `--dangerously-skip-permissions` is the Claude Code compatibility alias
+    // for `--permission-mode bypass-permissions`. Explicit `--permission-mode`
+    // wins when both are set.
+    if let Some(mode) = args.permission_mode {
+        crate::dcg_bridge::set_mode(mode.into_dcg_mode());
+    } else if args.dangerously_skip_permissions {
+        crate::dcg_bridge::set_mode(dcg_core::Mode::BypassPermissions);
+    } else if let Ok(env_mode) = std::env::var("JCODE_PERMISSION_MODE")
+        && let Some(mode) = dcg_core::Mode::parse(env_mode.trim())
+    {
+        crate::dcg_bridge::set_mode(mode);
+    }
+
     // JCODE_MODEL fallback: when --model is not passed on the CLI,
     // read JCODE_MODEL from the env so users can `export JCODE_MODEL=...`
     // in their shell profile and have it apply to every jcode invocation.
@@ -191,7 +262,7 @@ fn parse_and_prepare_args() -> Result<Args> {
         server::set_socket_path(socket);
     }
 
-    crate::process_title::set_initial_title(&args);
+    crate::cli::proctitle::set_initial_title(&args);
 
     Ok(args)
 }
@@ -240,7 +311,7 @@ fn spawn_background_update_check(args: &Args) {
                 && update_available
             {
                 Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                    current: env!("JCODE_VERSION").to_string(),
+                    current: jcode_build_meta::VERSION.to_string(),
                     latest: "latest source".to_string(),
                 }));
                 if auto_update {

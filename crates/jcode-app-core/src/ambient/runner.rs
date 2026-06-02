@@ -1,0 +1,1121 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
+
+//! Background ambient mode runner.
+//!
+//! Spawned by the server when ambient mode is enabled. Manages the lifecycle of
+//! ambient cycles: scheduling, spawning agent sessions, handling results, and
+//! providing status for the TUI widget and debug socket.
+
+use crate::agent::Agent;
+use crate::ambient::{
+    self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
+    CycleStatus, ScheduleTarget, ScheduledItem,
+};
+use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
+use crate::config::config;
+use crate::logging;
+use crate::memory::MemoryManager;
+use crate::notifications::NotificationDispatcher;
+use crate::provider::Provider;
+use crate::safety::SafetySystem;
+use crate::session::Session;
+use crate::tool;
+use crate::tool::ambient as ambient_tools;
+use chrono::Utc;
+use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
+use std::sync::Arc;
+use tokio::sync::{Notify, RwLock};
+
+const MAX_IDLE_POLL_SECS: u64 = 30;
+
+/// Shared ambient runner state, accessible from the server, debug socket, and TUI.
+#[derive(Clone)]
+pub struct AmbientRunnerHandle {
+    inner: Arc<AmbientRunnerInner>,
+}
+
+struct AmbientRunnerInner {
+    /// Current snapshot of ambient state (for queries)
+    state: RwLock<AmbientState>,
+    /// Queue item count for widget
+    queue_count: RwLock<usize>,
+    /// Next queue item context preview
+    next_queue_preview: RwLock<Option<String>>,
+    /// Wake notify (nudge the loop to re-check sooner)
+    wake_notify: Notify,
+    /// Whether the runner loop is active
+    running: RwLock<bool>,
+    /// Safety system shared with ambient tools
+    safety: Arc<SafetySystem>,
+    /// Notification dispatcher for push/email/desktop alerts
+    notifier: NotificationDispatcher,
+    /// Number of active user sessions (for pause logic)
+    active_user_sessions: RwLock<usize>,
+    /// Soft interrupt queue for the currently-running ambient agent (if any).
+    /// Telegram replies push messages here so they arrive mid-cycle.
+    active_cycle_queue: RwLock<Option<SoftInterruptQueue>>,
+}
+
+impl AmbientRunnerHandle {
+    pub fn new(safety: Arc<SafetySystem>) -> Self {
+        let state = AmbientState::load().unwrap_or_default();
+        Self {
+            inner: Arc::new(AmbientRunnerInner {
+                state: RwLock::new(state),
+                queue_count: RwLock::new(0),
+                next_queue_preview: RwLock::new(None),
+                wake_notify: Notify::new(),
+                running: RwLock::new(false),
+                safety,
+                notifier: NotificationDispatcher::new(),
+                active_user_sessions: RwLock::new(0),
+                active_cycle_queue: RwLock::new(None),
+            }),
+        }
+    }
+
+    /// Nudge the ambient loop to check sooner (e.g., after session close/crash).
+    pub fn nudge(&self) {
+        self.inner.wake_notify.notify_one();
+    }
+
+    /// Check if the runner loop is active.
+    pub async fn is_running(&self) -> bool {
+        *self.inner.running.read().await
+    }
+
+    /// Get current ambient state snapshot.
+    pub async fn state(&self) -> AmbientState {
+        self.inner.state.read().await.clone()
+    }
+
+    /// Get a reference to the safety system (for debug socket permission commands).
+    pub fn safety(&self) -> &Arc<SafetySystem> {
+        &self.inner.safety
+    }
+
+    /// Inject a message from an external channel (Telegram, Discord, etc.)
+    /// into the active ambient cycle as a user message.
+    /// If a cycle is running, the message goes in via soft interrupt (immediate).
+    /// If no cycle is running, the message is saved as a directive and a cycle is triggered.
+    /// Returns true if injected into active cycle, false if queued as directive.
+    pub async fn inject_message(&self, text: &str, source: &str) -> bool {
+        let queue = self.inner.active_cycle_queue.read().await;
+        if let Some(ref q) = *queue
+            && let Ok(mut q) = q.lock()
+        {
+            q.push(SoftInterruptMessage {
+                content: format!("[{} message from user]\n{}", source, text),
+                urgent: false,
+                source: SoftInterruptSource::User,
+            });
+            logging::info(&format!(
+                "{} message injected into active ambient cycle: {}",
+                source,
+                crate::util::truncate_str(text, 60)
+            ));
+            return true;
+        }
+        drop(queue);
+
+        // No active cycle — save as directive and trigger a wake
+        let source_id = format!("{}_{}", source, chrono::Utc::now().timestamp());
+        if let Err(e) = ambient::add_directive(text.to_string(), source_id) {
+            logging::error(&format!("Failed to save {} directive: {}", source, e));
+        }
+        self.trigger().await;
+        false
+    }
+
+    /// Manually trigger an ambient cycle (returns immediately, cycle runs async).
+    pub async fn trigger(&self) {
+        // Set status to idle so should_run returns true
+        let mut state = self.inner.state.write().await;
+        if matches!(
+            state.status,
+            AmbientStatus::Scheduled { .. } | AmbientStatus::Idle
+        ) {
+            state.status = AmbientStatus::Idle;
+        }
+        drop(state);
+        self.inner.wake_notify.notify_one();
+    }
+
+    /// Stop the ambient loop.
+    pub async fn stop(&self) {
+        let mut state = self.inner.state.write().await;
+        state.status = AmbientStatus::Disabled;
+        let _ = state.save();
+        drop(state);
+        self.inner.wake_notify.notify_one();
+    }
+
+    /// Start (or restart) the ambient loop. If the loop exited due to Disabled
+    /// status, this resets the state to Idle and spawns a new loop task.
+    pub async fn start(&self, provider: Arc<dyn Provider>) -> bool {
+        let already_running = *self.inner.running.read().await;
+        if already_running {
+            return false;
+        }
+        {
+            let mut state = self.inner.state.write().await;
+            state.status = AmbientStatus::Idle;
+            let _ = state.save();
+        }
+        let handle = self.clone();
+        tokio::spawn(async move {
+            handle.run_loop(provider).await;
+        });
+        true
+    }
+
+    /// Get status JSON for debug socket.
+    pub async fn status_json(&self) -> String {
+        let state = self.state().await;
+        let running = self.is_running().await;
+        let active_sessions = *self.inner.active_user_sessions.read().await;
+
+        let (
+            queue_count,
+            next_preview,
+            next_due,
+            overdue_queue_count,
+            reminder_count,
+            next_reminder_preview,
+            next_reminder_due,
+            overdue_reminder_count,
+        ) = match AmbientManager::new() {
+            Ok(mgr) => {
+                let now = Utc::now();
+                let items = mgr.queue().items();
+                let queue_count = items.len();
+                let next_item = items.iter().min_by_key(|item| item.scheduled_for);
+                let overdue_queue_count = items
+                    .iter()
+                    .filter(|item| item.scheduled_for <= now)
+                    .count();
+                let reminder_items: Vec<_> = items
+                    .iter()
+                    .filter(|item| item.target.is_direct_delivery())
+                    .collect();
+                let reminder_count = reminder_items.len();
+                let next_reminder = reminder_items
+                    .iter()
+                    .min_by_key(|item| item.scheduled_for)
+                    .copied();
+                let overdue_reminder_count = reminder_items
+                    .iter()
+                    .filter(|item| item.scheduled_for <= now)
+                    .count();
+
+                (
+                    queue_count,
+                    next_item.map(|item| {
+                        item.task_description
+                            .as_deref()
+                            .unwrap_or(&item.context)
+                            .to_string()
+                    }),
+                    next_item.map(|item| item.scheduled_for.to_rfc3339()),
+                    overdue_queue_count,
+                    reminder_count,
+                    next_reminder.map(|item| {
+                        item.task_description
+                            .as_deref()
+                            .unwrap_or(&item.context)
+                            .to_string()
+                    }),
+                    next_reminder.map(|item| item.scheduled_for.to_rfc3339()),
+                    overdue_reminder_count,
+                )
+            }
+            Err(_) => (0, None, None, 0, 0, None, None, 0),
+        };
+
+        let status_str = match &state.status {
+            AmbientStatus::Idle => "idle".to_string(),
+            AmbientStatus::Running { detail } => format!("running: {}", detail),
+            AmbientStatus::Scheduled { next_wake } => {
+                let until = *next_wake - Utc::now();
+                let mins = until.num_minutes().max(0) as u32;
+                format!(
+                    "scheduled (in {})",
+                    crate::ambient::format_minutes_human(mins)
+                )
+            }
+            AmbientStatus::Paused { reason } => format!("paused: {}", reason),
+            AmbientStatus::Disabled => "disabled".to_string(),
+        };
+
+        serde_json::json!({
+            "enabled": config().ambient.enabled,
+            "status": status_str,
+            "loop_running": running,
+            "total_cycles": state.total_cycles,
+            "last_run": state.last_run.map(|t| t.to_rfc3339()),
+            "last_summary": state.last_summary,
+            "last_memories_modified": state.last_memories_modified,
+            "last_compactions": state.last_compactions,
+            "queue_count": queue_count,
+            "next_queue_preview": next_preview,
+            "next_queue_due": next_due,
+            "overdue_queue_count": overdue_queue_count,
+            "reminder_count": reminder_count,
+            "next_reminder_preview": next_reminder_preview,
+            "next_reminder_due": next_reminder_due,
+            "overdue_reminder_count": overdue_reminder_count,
+            "scheduled_task_count": reminder_count,
+            "next_scheduled_task_preview": next_reminder_preview,
+            "next_scheduled_task_due": next_reminder_due,
+            "overdue_scheduled_task_count": overdue_reminder_count,
+            "active_user_sessions": active_sessions,
+        })
+        .to_string()
+    }
+
+    /// Get queue items JSON for debug socket.
+    pub async fn queue_json(&self) -> String {
+        match AmbientManager::new() {
+            Ok(mgr) => {
+                let items: Vec<serde_json::Value> = mgr
+                    .queue()
+                    .items()
+                    .iter()
+                    .map(|item| {
+                        let (target_kind, target_session_id, target_parent_session_id) =
+                            match &item.target {
+                                ScheduleTarget::Ambient => ("ambient", None, None),
+                                ScheduleTarget::Session { session_id } => {
+                                    ("session", Some(session_id.clone()), None)
+                                }
+                                ScheduleTarget::Spawn { parent_session_id } => {
+                                    ("spawn", None, Some(parent_session_id.clone()))
+                                }
+                            };
+                        let overdue_seconds =
+                            (Utc::now() - item.scheduled_for).num_seconds().max(0);
+                        serde_json::json!({
+                            "id": item.id,
+                            "scheduled_for": item.scheduled_for.to_rfc3339(),
+                            "context": item.context,
+                            "task_description": item.task_description,
+                            "priority": format!("{:?}", item.priority),
+                            "created_at": item.created_at.to_rfc3339(),
+                            "target_kind": target_kind,
+                            "target_session_id": target_session_id,
+                            "target_parent_session_id": target_parent_session_id,
+                            "working_dir": item.working_dir,
+                            "relevant_files": item.relevant_files,
+                            "git_branch": item.git_branch,
+                            "overdue": item.scheduled_for <= Utc::now(),
+                            "overdue_seconds": overdue_seconds,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
+            }
+            Err(e) => format!("{{\"error\": \"{}\"}}", e),
+        }
+    }
+
+    /// Get recent transcript log summaries.
+    pub async fn log_json(&self) -> String {
+        let transcripts_dir = match crate::storage::jcode_dir() {
+            Ok(d) => d.join("ambient").join("transcripts"),
+            Err(e) => return format!("{{\"error\": \"{}\"}}", e),
+        };
+
+        if !transcripts_dir.exists() {
+            return "[]".to_string();
+        }
+
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        if let Ok(dir) = std::fs::read_dir(&transcripts_dir) {
+            let mut files: Vec<_> = dir.flatten().collect();
+            files.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+            files.truncate(20);
+
+            for entry in files {
+                if let Ok(content) = std::fs::read_to_string(entry.path())
+                    && let Ok(transcript) =
+                        serde_json::from_str::<crate::safety::AmbientTranscript>(&content)
+                {
+                    entries.push(serde_json::json!({
+                        "session_id": transcript.session_id,
+                        "started_at": transcript.started_at.to_rfc3339(),
+                        "ended_at": transcript.ended_at.map(|t| t.to_rfc3339()),
+                        "status": format!("{:?}", transcript.status),
+                        "summary": transcript.summary,
+                        "memories_modified": transcript.memories_modified,
+                        "compactions": transcript.compactions,
+                    }));
+                }
+            }
+        }
+
+        serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    async fn wait_for_request_done(
+        client: &mut crate::server::Client,
+        request_id: u64,
+    ) -> anyhow::Result<()> {
+        loop {
+            match client.read_event().await? {
+                crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
+                crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
+                    anyhow::bail!(message)
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    async fn notify_live_session(&self, session_id: &str, message: &str) -> anyhow::Result<()> {
+        let mut client = crate::server::Client::connect().await?;
+        let request_id = client.notify_session(session_id, message).await?;
+        Self::wait_for_request_done(&mut client, request_id).await
+    }
+
+    async fn resume_dead_session_with_reminder(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let session = Session::load(session_id)?;
+        let cycle_provider = provider.fork();
+        let registry = tool::Registry::new(cycle_provider.clone()).await;
+        if session.is_canary {
+            registry.register_selfdev_tools().await;
+        }
+        // Issue #89: ambient cycles previously skipped MCP registration, so
+        // user-installed MCP tools were invisible to the cycle agent —
+        // contributing to "cycles always end Incomplete" when the agent
+        // expected a tool that wasn't available. Register MCP tools the
+        // same way the main session does, then log a tool-count summary
+        // so future debugging of empty-registry issues is one log line.
+        registry
+            .register_mcp_tools(None, None, Some(format!("ambient:{}", session.id)))
+            .await;
+        let tool_count = registry.definitions(None).await.len();
+        logging::info(&format!(
+            "Ambient cycle (session {}): {} tools registered",
+            session.id, tool_count
+        ));
+
+        let mut agent = Agent::new(cycle_provider, registry);
+        agent.set_debug(session.is_debug);
+        agent.restore_session(session_id)?;
+
+        let reminder = ambient::format_scheduled_session_message(item);
+        let _ = agent.run_once_capture(&reminder).await?;
+        agent.mark_closed();
+        Ok(())
+    }
+
+    async fn spawn_session_for_scheduled_item(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+        parent_session_id: &str,
+    ) -> anyhow::Result<String> {
+        let mut child = match Session::load(parent_session_id) {
+            Ok(parent) => {
+                let mut child = Session::create(
+                    Some(parent_session_id.to_string()),
+                    Some(
+                        item.task_description
+                            .clone()
+                            .unwrap_or_else(|| "Scheduled task".to_string()),
+                    ),
+                );
+                child.replace_messages(parent.messages.clone());
+                child.compaction = parent.compaction.clone();
+                child.provider_key = parent.provider_key.clone();
+                child.model = parent.model.clone();
+                child.subagent_model = parent.subagent_model.clone();
+                child.improve_mode = parent.improve_mode;
+                child.autoreview_enabled = parent.autoreview_enabled;
+                child.autojudge_enabled = parent.autojudge_enabled;
+                child.is_canary = parent.is_canary;
+                child.testing_build = parent.testing_build.clone();
+                child.is_debug = parent.is_debug;
+                child.memory_injections = parent.memory_injections.clone();
+                child.replay_events = parent.replay_events.clone();
+                child.working_dir = item.working_dir.clone().or(parent.working_dir.clone());
+                child
+            }
+            Err(err) => {
+                logging::warn(&format!(
+                    "Ambient runner: failed to load parent session {} for spawned scheduled task {}; creating a fresh child instead: {}",
+                    parent_session_id, item.id, err
+                ));
+                let mut child = Session::create(
+                    Some(parent_session_id.to_string()),
+                    Some(
+                        item.task_description
+                            .clone()
+                            .unwrap_or_else(|| "Scheduled task".to_string()),
+                    ),
+                );
+                child.working_dir = item.working_dir.clone();
+                child
+            }
+        };
+        child.status = crate::session::SessionStatus::Closed;
+        child.save()?;
+
+        let child_session_id = child.id.clone();
+        let child_is_canary = child.is_canary;
+        let child_is_debug = child.is_debug;
+        let cycle_provider = provider.fork();
+        let registry = tool::Registry::new(cycle_provider.clone()).await;
+        if child_is_canary {
+            registry.register_selfdev_tools().await;
+        }
+        // Issue #89: register MCP tools for ambient cycles (same as main session).
+        registry
+            .register_mcp_tools(None, None, Some("ambient:scheduled-child".to_string()))
+            .await;
+        let tool_count = registry.definitions(None).await.len();
+        logging::info(&format!(
+            "Ambient scheduled cycle (child of {}): {} tools registered",
+            parent_session_id, tool_count
+        ));
+
+        let mut agent = Agent::new_with_session(cycle_provider, registry, child, None);
+        agent.set_debug(child_is_debug);
+        if item.working_dir.is_some() {
+            agent.set_working_dir_for_pending_context(item.working_dir.clone());
+        }
+
+        let reminder = ambient::format_scheduled_session_message(item);
+        let _ = agent.run_once_capture(&reminder).await?;
+        agent.mark_closed();
+        Ok(child_session_id)
+    }
+
+    async fn deliver_scheduled_direct_item(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+    ) -> anyhow::Result<()> {
+        match &item.target {
+            ScheduleTarget::Ambient => Ok(()),
+            ScheduleTarget::Session { session_id } => {
+                let reminder = ambient::format_scheduled_session_message(item);
+                match self.notify_live_session(session_id, &reminder).await {
+                    Ok(()) => {
+                        logging::info(&format!(
+                            "Ambient runner: delivered scheduled task {} to live session {}",
+                            item.id, session_id
+                        ));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        logging::info(&format!(
+                            "Ambient runner: live delivery for {} fell back to headless resume: {}",
+                            session_id, err
+                        ));
+                        self.resume_dead_session_with_reminder(provider, item, session_id)
+                            .await
+                    }
+                }
+            }
+            ScheduleTarget::Spawn { parent_session_id } => {
+                let spawned_session_id = self
+                    .spawn_session_for_scheduled_item(provider, item, parent_session_id)
+                    .await?;
+                logging::info(&format!(
+                    "Ambient runner: spawned scheduled task {} into child session {} from {}",
+                    item.id, spawned_session_id, parent_session_id
+                ));
+                Ok(())
+            }
+        }
+    }
+
+    async fn deliver_ready_direct_items(
+        &self,
+        provider: &Arc<dyn Provider>,
+        items: Vec<ScheduledItem>,
+    ) {
+        for item in items {
+            if let Err(e) = self.deliver_scheduled_direct_item(provider, &item).await {
+                logging::error(&format!(
+                    "Ambient runner: failed to deliver scheduled direct item {}: {}",
+                    item.id, e
+                ));
+            }
+        }
+    }
+
+    /// Start the background ambient loop. Call from a tokio::spawn.
+    pub async fn run_loop(self, provider: Arc<dyn Provider>) {
+        {
+            let mut running = self.inner.running.write().await;
+            *running = true;
+        }
+        logging::info("Ambient runner: starting background loop");
+
+        let ambient_enabled = config().ambient.enabled;
+
+        // Spawn reply pollers only when ambient mode is enabled; scheduled
+        // session-targeted scheduled tasks should still work without the ambient-only reply
+        // infrastructure.
+        if ambient_enabled {
+            let safety_config = config().safety.clone();
+            if safety_config.email_reply_enabled
+                && safety_config.email_imap_host.is_some()
+                && safety_config.email_enabled
+            {
+                let imap_config = safety_config.clone();
+                tokio::spawn(async move {
+                    crate::notifications::imap_reply_loop(imap_config).await;
+                });
+                logging::info("Ambient runner: IMAP reply poller spawned");
+            }
+
+            // Spawn reply pollers for all configured message channels
+            // (Telegram, Discord, etc.)
+            let channel_registry = crate::channel::ChannelRegistry::from_config(&safety_config);
+            channel_registry.spawn_reply_loops(&self);
+        }
+
+        let amb_config = &config().ambient;
+
+        // Issue #90: when [ambient].provider_profile is set, log it. Full
+        // wiring (constructing sub-agents with the named profile) requires
+        // refactoring the cycle's provider injection — landing in a
+        // follow-up. Until then, the field is documented and forward-compat
+        // so users can configure it ahead of time.
+        if let Some(profile) = &amb_config.provider_profile {
+            logging::info(&format!(
+                "Ambient runner: [ambient.provider_profile] = {profile:?} (wiring in follow-up; \
+                 cycles currently use the parent session's provider)"
+            ));
+        }
+
+        let scheduler_config = AmbientSchedulerConfig {
+            min_interval_minutes: amb_config.min_interval_minutes,
+            max_interval_minutes: amb_config.max_interval_minutes,
+            pause_on_active_session: amb_config.pause_on_active_session,
+            ..Default::default()
+        };
+        let mut scheduler = AdaptiveScheduler::new(scheduler_config);
+
+        // Initialize safety system for ambient tools
+        ambient_tools::init_safety_system(Arc::clone(&self.inner.safety));
+
+        loop {
+            // Check state
+            let state = { self.inner.state.read().await.clone() };
+
+            let ambient_allowed =
+                ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
+
+            if ambient_allowed {
+                // Update scheduler's user-active state
+                let active_sessions = *self.inner.active_user_sessions.read().await;
+                scheduler.set_user_active(active_sessions > 0);
+
+                // Check if we should pause
+                if scheduler.should_pause() {
+                    let mut s = self.inner.state.write().await;
+                    s.status = AmbientStatus::Paused {
+                        reason: "user session active".to_string(),
+                    };
+                    drop(s);
+
+                    // Sleep until nudged or 60s
+                    tokio::select! {
+                        _ = self.inner.wake_notify.notified() => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
+                    }
+                    continue;
+                }
+
+                // Drop stale permission requests whose originating session is no longer active.
+                match self
+                    .inner
+                    .safety
+                    .expire_dead_session_requests("ambient_runner_gc")
+                {
+                    Ok(expired) if !expired.is_empty() => {
+                        logging::info(&format!(
+                            "Ambient runner: expired {} stale permission request(s)",
+                            expired.len()
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        logging::warn(&format!(
+                            "Ambient runner: failed to expire stale permission requests: {}",
+                            e
+                        ));
+                    }
+                }
+            }
+
+            // Load manager to check should_run and update queue info
+            let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
+                Ok(mut mgr) => {
+                    let ready_direct_items = mgr.take_ready_direct_items();
+                    let next_direct_due = mgr
+                        .queue()
+                        .items()
+                        .iter()
+                        .filter(|item| item.target.is_direct_delivery())
+                        .map(|item| item.scheduled_for)
+                        .min();
+                    // Update queue info for widget
+                    {
+                        let mut qc = self.inner.queue_count.write().await;
+                        *qc = mgr.queue().len();
+                    }
+                    {
+                        let mut qp = self.inner.next_queue_preview.write().await;
+                        *qp = mgr.queue().peek_next().map(|i| i.context.clone());
+                    }
+                    // Also run if there are pending email reply directives
+                    (
+                        ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
+                        ready_direct_items,
+                        next_direct_due,
+                    )
+                }
+                Err(e) => {
+                    logging::error(&format!("Ambient runner: failed to load manager: {}", e));
+                    (false, Vec::new(), None)
+                }
+            };
+
+            if !ready_direct_items.is_empty() {
+                self.deliver_ready_direct_items(&provider, ready_direct_items)
+                    .await;
+            }
+
+            if !should_run {
+                let sleep_secs = if ambient_allowed {
+                    let interval = scheduler
+                        .calculate_interval(None)
+                        .as_secs()
+                        .max(MAX_IDLE_POLL_SECS);
+                    let next_direct_secs = next_direct_due
+                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
+                        .unwrap_or(interval);
+                    interval.min(next_direct_secs.max(1))
+                } else {
+                    next_direct_due
+                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
+                        .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
+                        .unwrap_or(MAX_IDLE_POLL_SECS)
+                };
+
+                logging::info(&format!(
+                    "Ambient runner: not time to run, sleeping {}s",
+                    sleep_secs
+                ));
+
+                tokio::select! {
+                    _ = self.inner.wake_notify.notified() => {
+                        logging::info("Ambient runner: nudged awake");
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {},
+                }
+                continue;
+            }
+
+            // Try to acquire lock
+            let lock = match AmbientLock::try_acquire() {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    logging::info("Ambient runner: another instance holds the lock, waiting");
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    continue;
+                }
+                Err(e) => {
+                    logging::error(&format!("Ambient runner: lock error: {}", e));
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    continue;
+                }
+            };
+
+            // Run a cycle
+            logging::info("Ambient runner: starting ambient cycle");
+            self.set_running_detail("starting cycle").await;
+
+            let cycle_result = self.run_cycle(&provider).await;
+
+            // Clear the soft interrupt queue — cycle is done
+            {
+                let mut aq = self.inner.active_cycle_queue.write().await;
+                *aq = None;
+            }
+
+            match cycle_result {
+                Ok(result) => {
+                    logging::info(&format!(
+                        "Ambient cycle complete: {} memories modified, {} compactions",
+                        result.memories_modified, result.compactions
+                    ));
+
+                    // Update state
+                    if let Ok(mut mgr) = AmbientManager::new() {
+                        let _ = mgr.record_cycle_result(result.clone());
+                    }
+                    let mut s = self.inner.state.write().await;
+                    s.record_cycle(&result);
+                    let _ = s.save();
+
+                    scheduler.on_successful_cycle();
+
+                    // Save transcript
+                    let transcript = crate::safety::AmbientTranscript {
+                        session_id: format!("ambient_{}", Utc::now().format("%Y%m%d_%H%M%S")),
+                        started_at: result.started_at,
+                        ended_at: Some(result.ended_at),
+                        status: match result.status {
+                            CycleStatus::Complete => crate::safety::TranscriptStatus::Complete,
+                            CycleStatus::Interrupted => {
+                                crate::safety::TranscriptStatus::Interrupted
+                            }
+                            CycleStatus::Incomplete => crate::safety::TranscriptStatus::Incomplete,
+                        },
+                        provider: provider.name().to_string(),
+                        model: provider.model(),
+                        actions: Vec::new(),
+                        pending_permissions: self.inner.safety.pending_requests().len(),
+                        summary: Some(result.summary.clone()),
+                        compactions: result.compactions,
+                        memories_modified: result.memories_modified,
+                        conversation: result.conversation.clone(),
+                    };
+                    let _ = self.inner.safety.save_transcript(&transcript);
+
+                    // Send notifications (fire-and-forget)
+                    self.inner.notifier.dispatch_cycle_summary(&transcript);
+
+                    // Post-cycle memory consolidation (fire-and-forget)
+                    tokio::spawn(async move {
+                        let manager = MemoryManager::new();
+                        match manager.backfill_embeddings() {
+                            Ok((backfilled, _failed)) => {
+                                if backfilled > 0 {
+                                    logging::info(&format!(
+                                        "Ambient: backfilled {} embeddings",
+                                        backfilled
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                logging::error(&format!(
+                                    "Ambient: embedding backfill failed: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    logging::error(&format!("Ambient cycle failed: {}", e));
+                    scheduler.on_rate_limit_hit();
+
+                    let mut s = self.inner.state.write().await;
+                    s.status = AmbientStatus::Idle;
+                    let _ = s.save();
+                }
+            }
+
+            // Release lock
+            let _ = lock.release();
+
+            // Calculate next sleep interval
+            let interval = scheduler.calculate_interval(None);
+            let sleep_secs = interval.as_secs().max(30);
+
+            // Update state with scheduled wake
+            {
+                let mut s = self.inner.state.write().await;
+                if matches!(
+                    s.status,
+                    AmbientStatus::Running { .. } | AmbientStatus::Idle
+                ) {
+                    s.status = AmbientStatus::Scheduled {
+                        next_wake: Utc::now() + chrono::Duration::seconds(sleep_secs as i64),
+                    };
+                    let _ = s.save();
+                }
+            }
+
+            logging::info(&format!("Ambient runner: next cycle in {}s", sleep_secs));
+
+            tokio::select! {
+                _ = self.inner.wake_notify.notified() => {
+                    logging::info("Ambient runner: nudged awake after cycle");
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {},
+            }
+        }
+    }
+
+    /// Update the running status detail and persist to disk for waybar.
+    async fn set_running_detail(&self, detail: &str) {
+        let mut s = self.inner.state.write().await;
+        s.status = AmbientStatus::Running {
+            detail: detail.to_string(),
+        };
+        let _ = s.save();
+    }
+
+    /// Build the ambient system prompt and initial message for a cycle.
+    async fn build_cycle_context(
+        &self,
+        provider: &Arc<dyn Provider>,
+    ) -> anyhow::Result<(String, String)> {
+        let state = self.inner.state.read().await.clone();
+
+        let mgr = AmbientManager::new()?;
+        let queue_items: Vec<_> = mgr.queue().items().to_vec();
+
+        let memory_manager = MemoryManager::new();
+        let graph_health = ambient::gather_memory_graph_health(&memory_manager);
+        let recent_sessions = ambient::gather_recent_sessions(state.last_run);
+        let feedback_memories = ambient::gather_feedback_memories(&memory_manager);
+
+        let budget = ambient::ResourceBudget {
+            provider: provider.name().to_string(),
+            tokens_remaining_desc: "unknown (adaptive)".to_string(),
+            window_resets_desc: "unknown".to_string(),
+            user_usage_rate_desc: "estimated from history".to_string(),
+            cycle_budget_desc: "stay under 50k tokens".to_string(),
+        };
+
+        let active_sessions = *self.inner.active_user_sessions.read().await;
+
+        let system_prompt = ambient::build_ambient_system_prompt(
+            &state,
+            &queue_items,
+            &graph_health,
+            &recent_sessions,
+            &feedback_memories,
+            &budget,
+            active_sessions,
+        );
+
+        let initial_message = "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the `todo` tool.".to_string();
+
+        Ok((system_prompt, initial_message))
+    }
+
+    /// Run a single ambient cycle. Returns the cycle result.
+    async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
+        let started_at = Utc::now();
+        let visible = config().ambient.visible;
+
+        self.set_running_detail("gathering context").await;
+        let (system_prompt, initial_message) = self.build_cycle_context(provider).await?;
+
+        // Visible mode: spawn a full TUI instead of running headlessly
+        if visible {
+            return self
+                .run_cycle_visible(started_at, system_prompt, initial_message)
+                .await;
+        }
+
+        // Headless mode: run agent directly
+        self.set_running_detail("setting up tools").await;
+
+        let cycle_provider = provider.fork();
+        let registry = tool::Registry::new(cycle_provider.clone()).await;
+        registry.register_ambient_tools().await;
+        // Issue #89: register MCP tools so user-installed MCP servers are
+        // available to the ambient agent — without this, the cycle agent
+        // could only see built-ins + ambient-specific tools, and would
+        // fail-incomplete when the agent expected an MCP tool.
+        registry
+            .register_mcp_tools(None, None, Some("ambient:proactive".to_string()))
+            .await;
+        let tool_count = registry.definitions(None).await.len();
+        logging::info(&format!(
+            "Ambient proactive cycle: {} tools registered",
+            tool_count
+        ));
+
+        let mut agent = Agent::new(cycle_provider.clone(), registry);
+        agent.set_debug(true);
+        agent.set_system_prompt(&system_prompt);
+        let ambient_session_id = agent.session_id().to_string();
+        ambient_tools::register_ambient_session(ambient_session_id.clone());
+
+        // Clear any previous cycle result
+        ambient_tools::take_cycle_result();
+
+        // Expose the agent's soft interrupt queue so Telegram replies can be injected mid-cycle
+        {
+            let mut aq = self.inner.active_cycle_queue.write().await;
+            *aq = Some(agent.soft_interrupt_queue());
+        }
+
+        self.set_running_detail("running agent").await;
+
+        let run_result = agent.run_once_capture(&initial_message).await;
+
+        // Check if end_ambient_cycle was called
+        if let Some(result) = ambient_tools::take_cycle_result() {
+            ambient_tools::unregister_ambient_session(&ambient_session_id);
+            let conversation = agent.export_conversation_markdown();
+            agent.mark_closed();
+            return Ok(AmbientCycleResult {
+                started_at,
+                ended_at: Utc::now(),
+                conversation: Some(conversation),
+                ..result
+            });
+        }
+
+        // Agent didn't call end_ambient_cycle - try continuation
+        if run_result.is_err() {
+            logging::warn("Ambient cycle: agent error without calling end_ambient_cycle");
+        }
+
+        self.set_running_detail("continuation turn").await;
+        logging::info("Ambient cycle: sending continuation message (no end_ambient_cycle called)");
+        let continuation = "You stopped unexpectedly without calling end_ambient_cycle. \
+            If you are done with your work, call end_ambient_cycle with a summary of \
+            what you accomplished and schedule your next wake. \
+            If you are not done, continue what you were doing.";
+
+        let _ = agent.run_once_capture(continuation).await;
+
+        // Check again
+        if let Some(result) = ambient_tools::take_cycle_result() {
+            ambient_tools::unregister_ambient_session(&ambient_session_id);
+            let conversation = agent.export_conversation_markdown();
+            agent.mark_closed();
+            return Ok(AmbientCycleResult {
+                started_at,
+                ended_at: Utc::now(),
+                conversation: Some(conversation),
+                ..result
+            });
+        }
+
+        // Forced end
+        ambient_tools::unregister_ambient_session(&ambient_session_id);
+        logging::warn("Ambient cycle: forced end after 2 attempts without end_ambient_cycle");
+        let forced = AmbientCycleResult {
+            summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
+                .to_string(),
+            memories_modified: 0,
+            compactions: 0,
+            proactive_work: None,
+            next_schedule: None,
+            started_at,
+            ended_at: Utc::now(),
+            status: CycleStatus::Incomplete,
+            conversation: Some(agent.export_conversation_markdown()),
+        };
+        agent.mark_closed();
+        Ok(forced)
+    }
+
+    /// Run a visible ambient cycle by spawning a full TUI in a kitty window.
+    async fn run_cycle_visible(
+        &self,
+        started_at: chrono::DateTime<Utc>,
+        system_prompt: String,
+        initial_message: String,
+    ) -> anyhow::Result<AmbientCycleResult> {
+        use crate::ambient::VisibleCycleContext;
+
+        self.set_running_detail("launching visible TUI").await;
+
+        // Save context for the spawned process
+        let context = VisibleCycleContext {
+            system_prompt,
+            initial_message,
+        };
+        context.save()?;
+
+        // Clear any previous result file
+        if let Ok(result_path) = VisibleCycleContext::result_path() {
+            let _ = std::fs::remove_file(&result_path);
+        }
+
+        // Find the jcode binary
+        let jcode_bin =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
+
+        // Spawn kitty with `jcode ambient run-visible`
+        logging::info("Ambient visible: spawning kitty with jcode TUI");
+        let child = std::process::Command::new("kitty")
+            .args([
+                "--title",
+                "🤖 jcode ambient cycle",
+                "-e",
+                &jcode_bin.to_string_lossy(),
+                "ambient",
+                "run-visible",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        match child {
+            Ok(mut child) => {
+                self.set_running_detail("waiting for TUI cycle").await;
+
+                // Wait for the kitty process to exit (user closes window or cycle completes)
+                let status = tokio::task::spawn_blocking(move || child.wait()).await?;
+                match status {
+                    Ok(s) => logging::info(&format!("Ambient visible: TUI exited with {}", s)),
+                    Err(e) => logging::warn(&format!("Ambient visible: wait error: {}", e)),
+                }
+
+                // Try to read the cycle result from the file
+                if let Ok(result_path) = VisibleCycleContext::result_path()
+                    && result_path.exists()
+                    && let Ok(result) =
+                        crate::storage::read_json::<AmbientCycleResult>(&result_path)
+                {
+                    let _ = std::fs::remove_file(&result_path);
+                    return Ok(AmbientCycleResult {
+                        started_at,
+                        ended_at: Utc::now(),
+                        ..result
+                    });
+                }
+
+                // No result file — user closed the window without end_ambient_cycle
+                Ok(AmbientCycleResult {
+                    summary: "Visible cycle ended (user closed window)".to_string(),
+                    memories_modified: 0,
+                    compactions: 0,
+                    proactive_work: None,
+                    next_schedule: None,
+                    started_at,
+                    ended_at: Utc::now(),
+                    status: CycleStatus::Incomplete,
+                    conversation: None,
+                })
+            }
+            Err(e) => {
+                logging::warn(&format!(
+                    "Ambient visible: failed to spawn kitty ({}), falling back to headless",
+                    e
+                ));
+                // Fall back to headless mode
+                Err(anyhow::anyhow!("Failed to spawn visible TUI: {}", e))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "runner_tests.rs"]
+mod runner_tests;

@@ -10,6 +10,7 @@ pub use paths::{
     preferred_reload_candidate, release_binary_path, run_selfdev_build, selfdev_binary_path,
     selfdev_build_command, selfdev_build_command_for_target, shared_server_update_candidate,
     update_launcher_symlink_to_current, update_launcher_symlink_to_stable,
+    version_matches_installed_channel,
 };
 pub use source_state::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
@@ -724,6 +725,45 @@ pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>>
     let previous = read_shared_server_version()?;
     update_shared_server_symlink(version)?;
     Ok(previous)
+}
+
+/// Returns true when the `shared-server` channel is merely tracking the
+/// `stable` channel rather than pinned to a deliberately-promoted build (e.g. a
+/// local self-dev binary).
+///
+/// Updates only advance `current`/`stable`, so the long-lived daemon's reload
+/// target (`shared-server`) can drift behind an update. When the channel was
+/// just following stable we want updates to carry it forward automatically;
+/// when it was explicitly promoted to a self-dev build we must leave it alone
+/// so an update never silently wipes that build out from under a force reload.
+///
+/// A never-promoted (missing/empty) shared-server marker counts as "tracking":
+/// there is no deliberate build to protect, so it is safe for updates to begin
+/// populating the channel.
+pub fn shared_server_tracks_stable() -> Result<bool> {
+    let shared = read_shared_server_version()?;
+    let shared = shared.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let Some(shared) = shared else {
+        return Ok(true);
+    };
+    let stable = read_stable_version()?;
+    let stable = stable.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    Ok(stable == Some(shared))
+}
+
+/// Advance the `shared-server` channel to `version`, but only when it is
+/// currently tracking `stable` (see [`shared_server_tracks_stable`]). Returns
+/// `Ok(true)` when the channel was advanced.
+///
+/// Callers in the update path MUST invoke this *before* moving the `stable`
+/// marker, otherwise the pre-update comparison would always disagree.
+pub fn advance_shared_server_if_tracking_stable(version: &str) -> Result<bool> {
+    if shared_server_tracks_stable()? {
+        update_shared_server_symlink(version)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// Install release binary into immutable versions, promote it to stable, and also make it the

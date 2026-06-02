@@ -473,8 +473,24 @@ pub fn all_model_timestamps() -> Vec<(String, u64)> {
     load_disk_cache_entry()
         .into_iter()
         .flat_map(|cache| cache.models)
-        .filter_map(|m| m.created.map(|t| (m.id, t)))
+        .filter_map(|m| normalize_model_created_timestamp(m.created).map(|t| (m.id, t)))
         .collect()
+}
+
+fn normalize_model_created_timestamp(created: Option<u64>) -> Option<u64> {
+    let ts = created?;
+    // Model providers occasionally return malformed `created` values. Avoid
+    // rendering obviously bogus dates such as "Apr 1993" in the model picker.
+    const FIRST_PLAUSIBLE_MODEL_RELEASE_SECS: u64 = 1_577_836_800; // 2020-01-01
+    const ONE_YEAR_SECS: u64 = 365 * 24 * 60 * 60;
+    let now_plus_slack = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_add(ONE_YEAR_SECS))
+        .unwrap_or(u64::MAX);
+
+    (FIRST_PLAUSIBLE_MODEL_RELEASE_SECS..=now_plus_slack)
+        .contains(&ts)
+        .then_some(ts)
 }
 
 pub fn save_disk_cache(models: &[ModelInfo]) {
@@ -899,5 +915,15 @@ mod tests {
         assert!(detail.contains("14tps"));
         assert!(detail.contains("cache"));
         assert!(detail.contains("fp8"));
+    }
+
+    #[test]
+    fn normalize_model_created_timestamp_rejects_implausible_dates() {
+        assert_eq!(normalize_model_created_timestamp(Some(734_658_000)), None);
+        assert_eq!(normalize_model_created_timestamp(Some(1_577_836_799)), None);
+        assert_eq!(
+            normalize_model_created_timestamp(Some(1_735_689_600)),
+            Some(1_735_689_600)
+        );
     }
 }

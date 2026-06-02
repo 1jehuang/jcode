@@ -112,7 +112,7 @@ fn resolve_resume_id_imports_raw_codex_session_ids() {
         .expect("write codex transcript");
 
     let resolved = resolve_resume_id("codex-cli-resume-test").expect("resolve codex id");
-    let imported_id = crate::import::imported_codex_session_id("codex-cli-resume-test");
+    let imported_id = crate::casr_adapter::imported_codex_session_id("codex-cli-resume-test");
     assert_eq!(resolved, imported_id);
 
     let session = crate::session::Session::load(&resolved).expect("load imported session");

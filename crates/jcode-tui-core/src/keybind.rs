@@ -325,19 +325,9 @@ impl ScrollKeys {
             }
         }
 
-        // macOS compatibility fallback: keep historical Cmd+J/K behavior if not explicitly
-        // configured, to preserve usability in terminals forwarding SUPER/META.
-        let mac_command = cfg!(target_os = "macos")
-            && self.up_fallback.is_none()
-            && self.down_fallback.is_none()
-            && (modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META));
-        if mac_command {
-            match code {
-                KeyCode::Char('k') | KeyCode::Char('K') => return Some(-LINE_SCROLL_AMOUNT),
-                KeyCode::Char('j') | KeyCode::Char('J') => return Some(LINE_SCROLL_AMOUNT),
-                _ => {}
-            }
-        }
+        // NOTE: On macOS, Cmd+J / Cmd+K move by prompt (see `prompt_jump`) rather than
+        // line-scrolling. We intentionally do not add a Command line-scroll fallback here so
+        // those keys reach the prompt-jump handler.
         None
     }
 
@@ -363,10 +353,14 @@ impl ScrollKeys {
 
         // macOS compatibility fallback: terminals that forward Command as SUPER/META
         // can use Cmd+[ / Cmd+] for prompt jumps, mirroring Ctrl+[ / Ctrl+].
+        // Cmd+K / Cmd+J also move up / down by prompt on macOS, matching native
+        // expectations for Command-based navigation.
         if modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META) {
             match code {
                 KeyCode::Char('[') => return Some(-1),
                 KeyCode::Char(']') => return Some(1),
+                KeyCode::Char('k') | KeyCode::Char('K') => return Some(-1),
+                KeyCode::Char('j') | KeyCode::Char('J') => return Some(1),
                 _ => {}
             }
         }
@@ -600,21 +594,21 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_amount_cmd_fallback_macos_only() {
+    fn test_scroll_amount_cmd_jk_not_line_scroll() {
+        // Cmd+J / Cmd+K are prompt navigation (see test_prompt_jump_cmd_jk),
+        // so they must never be treated as line scrolling on any platform.
         let mut keys = test_scroll_keys();
         keys.up_fallback = None;
         keys.down_fallback = None;
 
-        let up = keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::SUPER);
-        let down = keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::SUPER);
-
-        if cfg!(target_os = "macos") {
-            assert_eq!(up, Some(-3));
-            assert_eq!(down, Some(3));
-        } else {
-            assert_eq!(up, None);
-            assert_eq!(down, None);
-        }
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::SUPER),
+            None
+        );
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::SUPER),
+            None
+        );
     }
 
     #[test]
@@ -649,6 +643,19 @@ mod tests {
             keys.prompt_jump(KeyCode::Char(']'), KeyModifiers::META),
             Some(1)
         );
+    }
+
+    #[test]
+    fn test_prompt_jump_cmd_jk() {
+        // Cmd+K / Cmd+J move up / down by prompt on macOS (and any terminal that
+        // forwards Command as SUPER/META).
+        let keys = test_scroll_keys();
+        for mods in [KeyModifiers::SUPER, KeyModifiers::META] {
+            assert_eq!(keys.prompt_jump(KeyCode::Char('k'), mods), Some(-1));
+            assert_eq!(keys.prompt_jump(KeyCode::Char('K'), mods), Some(-1));
+            assert_eq!(keys.prompt_jump(KeyCode::Char('j'), mods), Some(1));
+            assert_eq!(keys.prompt_jump(KeyCode::Char('J'), mods), Some(1));
+        }
     }
 
     #[test]

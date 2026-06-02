@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.14.3"
+version = "0.18.4"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -9,12 +9,16 @@ autobins = false
 members = [
     ".",
     "crates/jcode-agent-runtime",
+    "crates/jcode-app-core",
+    "crates/jcode-base",
+    "crates/jcode-tui",
+    "crates/jcode-build-meta",
     "crates/jcode-ambient-types",
     "crates/jcode-auth-types",
     "crates/jcode-embedding",
     "crates/jcode-gateway-types",
-    "crates/jcode-import-core",
     "crates/jcode-pdf",
+    "crates/jcode-logging",
     "crates/jcode-background-types",
     "crates/jcode-batch-types",
     "crates/jcode-build-support",
@@ -54,6 +58,7 @@ members = [
     "crates/jcode-tui-usage-overlay",
     "crates/jcode-update-core",
     "crates/jcode-terminal-launch",
+    "crates/jcode-terminal-image",
     "crates/jcode-tui-workspace",
     "crates/jcode-mobile-core",
     "crates/jcode-mobile-sim",
@@ -93,6 +98,13 @@ path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
+# Cross-provider session conversion engine (resume/import any provider -> jcode).
+# Pinned to a specific commit SHA on the upstream fork so the dependency is
+# reproducible and doesn't accidentally pick up in-flight changes. Bump the
+# `rev` value (or switch to a `tag = "vX.Y.Z"`) when you want to pull a newer
+# CASR snapshot.
+casr = { git = "https://github.com/quangdang46/cross_agent_session_resumer", package = "cross_agent_session_resumer", rev = "23a58b8aedf816faf92d5a791fed3a653162d71c" }
+
 # File picker for `@<path>` autocomplete in the TUI input.
 # Provides a long-lived FilePicker with background scan, gitignore-aware walk,
 # fuzzy matching with typo resistance, and frecency-ranked results.
@@ -110,7 +122,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
@@ -122,6 +134,12 @@ toml = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# Permission modes (Plan / AcceptEdits / BypassPermissions / DontAsk).
+# Git dep from the DCG repo (not crates.io, not local path).
+# v0.6.0-rc.1 ships the Mode + Effect + Engine + Session API;
+# pack-rule evaluation lands in Phase 2.
+dcg-core = { git = "https://github.com/quangdang46/destructive_command_guard", branch = "main" }
 
 # File operations
 glob = "0.3"
@@ -143,7 +161,7 @@ proctitle = "0.1"
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 jcode-embedding = { path = "crates/jcode-embedding", optional = true }
 jcode-gateway-types = { path = "crates/jcode-gateway-types" }
-jcode-import-core = { path = "crates/jcode-import-core" }
+jcode-logging = { path = "crates/jcode-logging" }
 
 # OAuth
 base64 = "0.22"
@@ -175,6 +193,7 @@ jcode-tui-tool-display = { path = "crates/jcode-tui-tool-display" }
 jcode-tui-usage-overlay = { path = "crates/jcode-tui-usage-overlay" }
 jcode-update-core = { path = "crates/jcode-update-core" }
 jcode-terminal-launch = { path = "crates/jcode-terminal-launch" }
+jcode-terminal-image = { path = "crates/jcode-terminal-image" }
 jcode-tui-workspace = { path = "crates/jcode-tui-workspace" }
 jcode-usage-types = { path = "crates/jcode-usage-types" }
 
@@ -196,6 +215,14 @@ jcode-pdf = { path = "crates/jcode-pdf", optional = true }
 jcode-background-types = { path = "crates/jcode-background-types" }
 jcode-batch-types = { path = "crates/jcode-batch-types" }
 jcode-build-support = { path = "crates/jcode-build-support" }
+jcode-build-meta = { path = "crates/jcode-build-meta" }
+# Presentation layer: the terminal UI (`tui`) + offline replay (`video_export`),
+# compiled as a separate rustc unit. It re-exports the application core
+# (`jcode-app-core`, which re-exports `jcode-base`), so the root crate (cli +
+# bin) re-exports everything via `pub use jcode_tui::*`. default-features=false
+# so the root feature set fully controls the downstream features (see
+# [features]).
+jcode-tui = { path = "crates/jcode-tui", default-features = false }
 jcode-compaction-core = { path = "crates/jcode-compaction-core" }
 jcode-config-types = { path = "crates/jcode-config-types" }
 jcode-core = { path = "crates/jcode-core" }
@@ -227,31 +254,35 @@ aws-smithy-types = "1.4.7"
 aws-sdk-bedrock = "1.141.0"
 aws-sdk-sts = "1.103.0"
 
+
 [features]
 # Include local ONNX/tokenizer embeddings in default builds so memory recall,
 # semantic retrieval, and embedding-backed features work out of the box.
 # Use `JCODE_DEV_FEATURE_PROFILE=minimal` for compile-speed probes that need
 # to skip optional default feature stacks.
 default = ["pdf", "embeddings"]
-dev-bins = []
+dev-bins = ["jcode-tui/dev-bins"]
 jemalloc = [
     "dep:tikv-jemallocator",
     "dep:tikv-jemalloc-ctl",
     "dep:tikv-jemalloc-sys",
     "tikv-jemallocator/stats",
     "tikv-jemalloc-ctl/stats",
+    "jcode-tui/jemalloc",
 ]
 jemalloc-prof = [
     "jemalloc",
     "tikv-jemallocator/profiling",
     "tikv-jemalloc-ctl/profiling",
+    "jcode-tui/jemalloc-prof",
 ]
-embeddings = ["dep:jcode-embedding"]
+embeddings = ["dep:jcode-embedding", "jcode-tui/embeddings"]
+dcp = ["jcode-tui/dcp"]
 mmdr-size-api = ["jcode-tui-mermaid/mmdr-size-api"]
-pdf = ["dep:jcode-pdf"]
+pdf = ["dep:jcode-pdf", "jcode-tui/pdf"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_Globalization"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
@@ -287,5 +318,11 @@ codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"
+# Enables the downstream test-support helpers (storage::lock_test_env,
+# auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, the
+# ExternalAuthReviewCandidate read accessors) for the root crate's own cli test
+# target. Feature unification applies this only to test/bench/example builds,
+# never to a normal `cargo build`/release binary.
+jcode-tui = { path = "crates/jcode-tui", features = ["test-support"] }
 
 [build-dependencies]

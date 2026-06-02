@@ -114,7 +114,9 @@ fn effective_openai_compatible_auth_test_model(
                 .then(|| cfg.provider.default_model.clone())
                 .flatten()
         })
-        .or_else(|| crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model)
+        .or_else(|| {
+            crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model
+        })
 }
 
 fn nvidia_nim_model_supports_openai_tools(model: &str) -> bool {
@@ -123,8 +125,7 @@ fn nvidia_nim_model_supports_openai_tools(model: &str) -> bool {
     // visual-model API family. The OpenAI-compatible chat endpoint accepts basic
     // prompts for this model, but tool-enabled smoke has been observed returning
     // a server-side `unhashable type: 'dict'` 500 when sent OpenAI tools.
-    !(normalized.contains("moonshotai/kimi-k2.6")
-        || normalized.contains("moonshotai/kimi-k2-6"))
+    !(normalized.contains("moonshotai/kimi-k2.6") || normalized.contains("moonshotai/kimi-k2-6"))
 }
 
 async fn discover_openai_compatible_validation_model(
@@ -224,6 +225,24 @@ mod nvidia_nim_tool_smoke_tests {
         assert!(detail.contains("FPT model 'FPT.AI-KIE-v1.7'"));
         assert!(detail.contains("vLLM-style endpoint"));
         assert!(detail.contains("Basic provider smoke still validates chat"));
+    }
+
+    #[test]
+    fn allows_cerebras_models_to_attempt_tool_smoke() {
+        assert!(
+            tool_smoke_skip_detail_for_choice(
+                &super::super::provider_init::ProviderChoice::Cerebras,
+                Some("gpt-oss-120b"),
+            )
+            .is_none()
+        );
+        assert!(
+            tool_smoke_skip_detail_for_choice(
+                &super::super::provider_init::ProviderChoice::Cerebras,
+                Some("zai-glm-4.7"),
+            )
+            .is_none()
+        );
     }
 }
 

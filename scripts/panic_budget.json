@@ -1,12 +1,13 @@
 {
-  "total": 15,
+  "total": 16,
   "tracked_files": {
+    "crates/jcode-app-core/src/export.rs": 5,
+    "crates/jcode-app-core/src/yolo_classifier.rs": 1,
+    "crates/jcode-base/src/auth/lifecycle_driver.rs": 2,
+    "crates/jcode-base/src/auth/oauth.rs": 3,
     "crates/jcode-desktop/src/main.rs": 2,
-    "crates/jcode-desktop/src/single_session_render.rs": 1,
-    "src/auth/lifecycle_driver.rs": 2,
-    "src/auth/oauth.rs": 3,
+    "crates/jcode-desktop/src/single_session_render/wrapping.rs": 1,
     "src/cli/commands.rs": 1,
-    "src/export.rs": 5,
     "src/orchestration_api.rs": 1
   },
   "version": 1

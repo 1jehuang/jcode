@@ -923,7 +923,7 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
         "agentInfo": {
             "name": "jcode",
             "title": "Jcode",
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": jcode_build_meta::PKG_VERSION,
         },
         "authMethods": [],
     })

@@ -1,0 +1,46 @@
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Lock files
+*.lock
+
+# Temporary
+last-touched
+*.tmp
+
+# Local history backups
+.br_history/
+
+# DB-family recovery artifacts (truncated WAL/SHM, quarantined sidecars)
+# — same lifecycle as .br_history/, written by recovery paths and
+# `br doctor --repair`. Filename suffix `.truncated-wal` slips past the
+# generic `*.db-wal` glob above, so it needs an explicit entry (#271).
+.br_recovery/
+
+# Sync state (local-only, per-machine)
+.sync.lock
+sync_base.jsonl
+
+# Merge artifacts (temporary files from 3-way merge)
+beads.base.jsonl
+beads.base.meta.json
+beads.left.jsonl
+beads.left.meta.json
+beads.right.jsonl
+beads.right.meta.json
+
+# Daemon runtime files
+daemon.lock
+daemon.log
+daemon.pid
+bd.sock
+sync-state.json
+
+# Worktree redirect file
+redirect
+
+# bv (beads viewer) lock file
+.bv.lock

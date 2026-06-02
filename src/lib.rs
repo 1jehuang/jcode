@@ -6,62 +6,32 @@
     clippy::useless_conversion
 )]
 
-pub mod agent;
-pub mod ambient;
-pub mod ambient_runner;
-pub mod ambient_scheduler;
-pub mod auth;
-pub mod background;
-pub mod browser;
-pub mod build;
-pub mod bus;
-pub mod cache_tracker;
-pub mod catchup;
-pub mod channel;
+//! Root `jcode` crate: the entrypoint + cli layer on top of the `jcode-tui`
+//! presentation crate (which in turn re-exports `jcode-app-core` and
+//! `jcode-base`).
+//!
+//! The presentation modules (`tui`, `video_export`) live in `jcode-tui` and the
+//! non-presentation modules live in `jcode-app-core`; both are re-exported here
+//! via `pub use jcode_tui::*`, so existing `crate::<module>` paths (e.g.
+//! `crate::config`, `crate::server`, `crate::tui`) keep resolving unchanged
+//! across the cli code that was not moved.
+
+// Re-export the presentation layer (and, transitively, the application core)
+// so `crate::tui`, `crate::video_export`, and `crate::<app-core module>` paths
+// resolve.
+pub use jcode_tui::*;
+
+// Cli + entrypoint layer (kept in the root crate).
 pub mod cli;
-pub mod compaction;
-pub mod config;
-pub mod copilot_usage;
 pub mod crash_log;
 pub mod customization;
-pub mod dictation;
-pub mod doctor;
-#[cfg(feature = "embeddings")]
-pub mod embedding;
-#[cfg(not(feature = "embeddings"))]
-pub mod embedding_stub;
-#[cfg(not(feature = "embeddings"))]
-pub use embedding_stub as embedding;
-pub mod env;
-pub mod export;
 pub mod extension_policy;
 pub mod floating_diagram;
-pub mod gateway;
-pub mod gmail;
-pub mod goal;
-pub mod id;
-pub mod import;
-pub mod live_tests;
-pub mod logging;
-pub mod login_qr;
-pub mod mcp;
-pub mod memory;
-pub mod memory_agent;
-pub mod memory_graph;
-pub mod memory_log;
-pub mod memory_types;
-pub mod message;
-pub mod mission;
 pub mod model_failover;
 pub mod model_routing;
-pub mod network_retry;
-pub mod notifications;
 pub mod orchestration_api;
-pub mod overnight;
-pub mod perf;
-pub mod plan;
-pub mod platform;
 pub mod prefix_cache_stable;
+<<<<<<< HEAD
 pub mod process_memory;
 pub mod process_title;
 pub mod prompt;
@@ -85,40 +55,10 @@ pub mod sidecar;
 pub mod skill;
 pub mod skill_disable;
 pub mod skill_distillation;
-pub mod soft_interrupt_store;
-pub mod ssh_remote;
-pub mod startup_profile;
-pub mod stdin_detect;
-pub mod storage;
-pub mod subscription_catalog;
-pub mod telegram;
-pub mod telemetry;
-pub mod terminal_launch;
 pub mod theme;
-pub mod todo;
-pub mod tool;
-pub mod transport;
-pub mod tui;
 pub mod turborag;
-pub mod update;
-pub mod usage;
-pub mod util;
-pub mod video_export;
 
 use anyhow::Result;
-use std::sync::Mutex;
-
-static CURRENT_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
-
-pub fn set_current_session(session_id: &str) {
-    if let Ok(mut guard) = CURRENT_SESSION_ID.lock() {
-        *guard = Some(session_id.to_string());
-    }
-}
-
-pub fn get_current_session() -> Option<String> {
-    CURRENT_SESSION_ID.lock().ok()?.clone()
-}
 
 pub async fn run() -> Result<()> {
     cli::startup::run().await

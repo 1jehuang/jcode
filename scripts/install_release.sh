@@ -87,6 +87,16 @@ echo "Updated stable symlink: $stable_dir/jcode -> $version_dir/jcode"
 echo "Updated current symlink: $current_dir/jcode -> $version_dir/jcode"
 echo "Updated launcher symlink: $install_dir/jcode -> $current_dir/jcode"
 
+# Gracefully reload any running background server onto the binary we just
+# installed (issue #291). `server reload` only reloads when the running daemon
+# is genuinely older, hands live headless/swarm sessions to the new process, and
+# is a no-op when no server is running, so it is safe to call unconditionally.
+if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
+  if "$install_dir/jcode" server reload </dev/null >/dev/null 2>&1; then
+    echo "Reloaded the running jcode server onto $hash (if one was active)."
+  fi
+fi
+
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$install_dir"; then
   echo ""
   echo "Tip: add $install_dir to PATH if needed."

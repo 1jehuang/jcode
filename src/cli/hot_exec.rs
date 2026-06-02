@@ -1,9 +1,7 @@
 use anyhow::Result;
 use std::process::Command as ProcessCommand;
 
-mod rebuild;
-
-pub use rebuild::{hot_rebuild, spawn_background_session_rebuild};
+pub use crate::session_rebuild::{hot_rebuild, spawn_background_session_rebuild};
 
 use crate::{build, tui::RunResult, update};
 
@@ -138,7 +136,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
 
     match update::check_for_update_blocking() {
         Ok(Some(release)) => {
-            let current = env!("JCODE_VERSION");
+            let current = jcode_build_meta::VERSION;
             update::print_centered(&format!(
                 "Update available: {} -> {}",
                 current, release.tag_name
@@ -182,7 +180,10 @@ pub fn hot_update(session_id: &str) -> Result<()> {
             }
         }
         Ok(None) => {
-            update::print_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
+            update::print_centered(&format!(
+                "Already up to date ({})",
+                jcode_build_meta::VERSION
+            ));
         }
         Err(e) => {
             update::print_centered(&format!("✗ Update check failed: {}", e));
@@ -304,7 +305,7 @@ pub fn run_update() -> Result<()> {
             Ok(Some(release)) => {
                 update::print_centered(&format!(
                     "Downloading {} \u{2192} {}...",
-                    env!("JCODE_VERSION"),
+                    jcode_build_meta::VERSION,
                     release.tag_name
                 ));
                 let _path =
@@ -319,7 +320,10 @@ pub fn run_update() -> Result<()> {
                 update::print_centered("Restart jcode to use the new version.");
             }
             Ok(None) => {
-                update::print_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
+                update::print_centered(&format!(
+                    "Already up to date ({})",
+                    jcode_build_meta::VERSION
+                ));
             }
             Err(e) => {
                 anyhow::bail!("Update check failed: {}", e);

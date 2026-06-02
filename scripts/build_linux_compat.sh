@@ -126,10 +126,27 @@ WRAPPER
 	          fi
 	        done
 
-	    (cd /out && tar czf '"$artifact"'.tar.gz '"$artifact"' '"$artifact"'.bin libssl.so* libcrypto.so*)
+		    extra_libs=()
+		    for pattern in libssl.so\* libcrypto.so\*; do
+		      for lib in $pattern; do
+		        [[ -e "$lib" ]] && extra_libs+=("$lib")
+		      done
+		    done
 
-	    chown "$HOST_UID:$HOST_GID" "/out/'"$artifact"'" "/out/'"$artifact"'.bin" "/out/'"$artifact"'.tar.gz" /out/libssl.so* /out/libcrypto.so* 2>/dev/null || true
-	  '
+		    if (( ${#extra_libs[@]} > 0 )); then
+		      (cd /out && tar czf '"$artifact"'.tar.gz '"$artifact"' '"$artifact"'.bin "${extra_libs[@]}")
+		    else
+		      (cd /out && tar czf '"$artifact"'.tar.gz '"$artifact"' '"$artifact"'.bin)
+		    fi
+
+		    chown_inputs=("/out/'"$artifact"'" "/out/'"$artifact"'.bin" "/out/'"$artifact"'.tar.gz")
+		    if (( ${#extra_libs[@]} > 0 )); then
+		      for lib in "${extra_libs[@]}"; do
+		        chown_inputs+=("/out/$lib")
+		      done
+		    fi
+		    chown "$HOST_UID:$HOST_GID" "${chown_inputs[@]}" 2>/dev/null || true
+		  '
 
 echo "Built artifacts:"
 ls -lh "$out_dir/$artifact" "$out_dir/$artifact.tar.gz"

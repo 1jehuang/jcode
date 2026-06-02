@@ -1,4 +1,10 @@
 use super::*;
+// These moved from cli::provider_init to crate::external_auth in the
+// tui->cli layering refactor (a9a82827); provider_init.rs only re-imports the
+// subset it uses, so `super::*` no longer re-exports them to this test module.
+use crate::external_auth::{
+    parse_external_auth_review_selection, pending_external_auth_review_candidates,
+};
 use crate::provider_catalog::{self, resolve_login_selection, resolve_openai_compatible_profile};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -466,6 +472,7 @@ fn apply_login_provider_profile_env_locks_compatible_profile_for_auto_spawn() {
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_OPENROUTER_STATIC_MODELS",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
@@ -555,6 +562,7 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_FORCE_PROVIDER",
@@ -844,11 +852,12 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
 
     let candidates = pending_external_auth_review_candidates().expect("candidates");
     assert!(candidates.iter().any(|candidate| {
-        candidate.source_name == "OpenCode auth.json"
-            && candidate.provider_summary.contains("OpenAI/Codex")
+        candidate.source_name() == "OpenCode auth.json"
+            && candidate.provider_summary().contains("OpenAI/Codex")
     }));
     assert!(candidates.iter().any(|candidate| {
-        candidate.source_name == "Codex auth.json" && candidate.provider_summary == "OpenAI/Codex"
+        candidate.source_name() == "Codex auth.json"
+            && candidate.provider_summary() == "OpenAI/Codex"
     }));
 
     if let Some(prev_home) = prev_home {
