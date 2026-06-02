@@ -11,6 +11,13 @@ pub(crate) enum TranscriptModeArg {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ExportFormatArg {
+    Markdown,
+    Json,
+    Html,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum GoogleAccessTierArg {
     Full,
     Readonly,
@@ -24,6 +31,48 @@ pub(crate) enum ProviderAuthArg {
     ApiKey,
     /// Do not send authentication, useful for localhost model servers
     None,
+}
+
+/// Mirror of `dcg_core::Mode` exposed as a CLI value-enum.
+///
+/// jcode passes the parsed value into [`crate::dcg_bridge::set_mode`] at
+/// startup. The `default` variant matches Claude Code's "rule-based"
+/// behavior; `plan` is read-only; `accept-edits` auto-allows in-tree
+/// file ops; `bypass-permissions` is the escape hatch.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum PermissionModeArg {
+    /// Standard rule-based decision flow. Unmatched intents fall through
+    /// to allow / prompt depending on jcode's existing logic.
+    Default,
+    /// Read-only enforcement: only `Effect::Read`/`Effect::Fs` actions
+    /// auto-allow; everything else is denied without a prompt.
+    Plan,
+    /// Auto-allow file ops (`Read`/`Edit`/`Write`) inside the working
+    /// directory; prompt on network / spawn / irreversible / protected
+    /// paths.
+    AcceptEdits,
+    /// Restricted-surface mode: only explicitly allow-listed actions
+    /// pass; everything else is denied without prompting.
+    DontAsk,
+    /// Skip permission evaluation entirely.
+    BypassPermissions,
+    /// Reserved for a future LLM classifier; today routes identically
+    /// to `default`.
+    Auto,
+}
+
+impl PermissionModeArg {
+    pub(crate) fn into_dcg_mode(self) -> dcg_core::Mode {
+        match self {
+            Self::Default => dcg_core::Mode::Default,
+            Self::Plan => dcg_core::Mode::Plan,
+            Self::AcceptEdits => dcg_core::Mode::AcceptEdits,
+            Self::DontAsk => dcg_core::Mode::DontAsk,
+            Self::BypassPermissions => dcg_core::Mode::BypassPermissions,
+            Self::Auto => dcg_core::Mode::Auto,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -47,6 +96,70 @@ pub(crate) struct Args {
     #[arg(long, global = true, default_value = "true")]
     pub(crate) auto_update: bool,
 
+    /// Disable all startup network operations (update check, install/update telemetry,
+    /// provider model-list refresh). Provider API calls during the session itself are
+    /// not affected. Equivalent to setting `JCODE_OFFLINE=1`.
+    #[arg(long, global = true)]
+    pub(crate) offline: bool,
+
+    /// First-run safe evaluation profile: isolated `~/.jcode-safe-eval/` home,
+    /// telemetry off, offline mode, ambient/swarm/selfdev gated. Layered on top of
+    /// any other flags so users can verify jcode behavior before pointing it at a
+    /// real repo + credentials. Equivalent to setting `JCODE_SAFE_EVAL=1`. See
+    /// `docs/SAFE_EVALUATION.md`.
+    #[arg(long = "safe-eval", global = true)]
+    pub(crate) safe_eval: bool,
+
+    /// Issue #110: hardened defaults profile (lighter than --safe-eval).
+    ///
+    /// Equivalent to setting:
+    ///   JCODE_REQUIRE_MCP_TRUST=1   (only trusted MCP servers load)
+    ///   JCODE_EXTENSION_POLICY=trusted (other extensions follow same rule)
+    ///
+    /// Use when running jcode in a CI runner, against an unfamiliar
+    /// repository, or any other context where you want to limit
+    /// extension blast radius without going full safe-eval.
+    #[arg(long = "sandbox", global = true)]
+    pub(crate) sandbox: bool,
+
+    /// Issue #110: filesystem sandbox root. When set, every file-touching
+    /// tool (read, write, edit, multiedit, bash, glob, grep, ...) rejects
+    /// paths that escape this directory tree (absolute paths outside,
+    /// `..` traversal, symlink escape). Equivalent to setting
+    /// `JCODE_SANDBOX_ROOT=<DIR>`.
+    ///
+    /// Examples:
+    ///   jcode --sandbox-root ~/scratch run 'experiment'
+    ///   JCODE_SANDBOX_ROOT=/tmp/safe jcode
+    #[arg(long = "sandbox-root", global = true, value_name = "DIR")]
+    pub(crate) sandbox_root: Option<std::path::PathBuf>,
+
+    /// Replace the built-in system prompt with the given text for this session.
+    /// Higher priority than `.jcode/SYSTEM.md` and the `provider.system_prompt`
+    /// config value. Equivalent to setting `JCODE_SYSTEM_PROMPT`.
+    #[arg(long, global = true)]
+    pub(crate) system_prompt: Option<String>,
+
+    /// Append the given text to the system prompt for this session. Stacks with
+    /// any `.jcode/APPEND_SYSTEM.md` files discovered along the cwd ancestry.
+    /// Equivalent to setting `JCODE_APPEND_SYSTEM_PROMPT`.
+    #[arg(long, global = true)]
+    pub(crate) append_system_prompt: Option<String>,
+
+    /// Comma-separated list of model id patterns to scope `Ctrl+P` / `/scoped-models`
+    /// cycling to. Patterns match by case-insensitive substring or by glob (`*` and
+    /// `?`). Falls back to `provider.scoped_models` config when not given.
+    /// Equivalent to setting `JCODE_SCOPED_MODELS`.
+    #[arg(long = "models", global = true, value_delimiter = ',')]
+    pub(crate) scoped_models: Vec<String>,
+
+    /// Set the human-readable title (display name) of the new session. Visible
+    /// in `jcode --resume` and the session picker. Equivalent to setting
+    /// `JCODE_SESSION_NAME`. Existing sessions are unaffected — use
+    /// `jcode session rename <id> <name>` for those.
+    #[arg(long = "name", alias = "session-name", global = true)]
+    pub(crate) session_name: Option<String>,
+
     /// Log tool inputs/outputs and token usage to stderr
     #[arg(long, global = true)]
     pub(crate) trace: bool,
@@ -54,6 +167,34 @@ pub(crate) struct Args {
     /// Suppress non-error CLI/status output for scripting and wrappers
     #[arg(long, global = true)]
     pub(crate) quiet: bool,
+    /// Skip loading AGENTS.md project/global context files for this session
+    #[arg(long, global = true)]
+    pub(crate) no_context_files: bool,
+
+    /// Disable the built-in tool registry (read, write, edit, bash, glob, grep,
+    /// agentgrep, etc.). Extension and MCP server tools still load. Useful
+    /// for sandboxed testing or strict-policy setups. Equivalent to setting
+    /// `JCODE_NO_BUILTIN_TOOLS=1`.
+    #[arg(long = "no-builtin-tools", visible_alias = "nbt", global = true)]
+    pub(crate) no_builtin_tools: bool,
+
+    /// Issue #14: extension-load policy. Controls which extensions
+    /// (MCP servers, plugin tools, side-loaded extensions) are
+    /// permitted at startup.
+    ///
+    /// Values:
+    ///   - `all` — load everything (DEFAULT)
+    ///   - `trusted` — load only entries that have been explicitly trusted
+    ///     via `jcode mcp trust`
+    ///   - `none` — block all extension loading
+    ///
+    /// Equivalent to setting `JCODE_EXTENSION_POLICY=<value>` in env.
+    #[arg(
+        long = "extension-policy",
+        global = true,
+        value_parser = ["all", "trusted", "none"],
+    )]
+    pub(crate) extension_policy: Option<String>,
 
     /// Resume a session by ID, or list sessions if no ID provided
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
@@ -99,6 +240,29 @@ pub(crate) struct Args {
     /// Hide all built-in tools unless --tools or [tools].enabled opts tools back in.
     #[arg(long, global = true)]
     pub(crate) disable_base_tools: bool,
+
+    /// Permission mode for tool-call gating, mirroring Claude Code.
+    ///
+    /// The choice is forwarded to `dcg_core::Engine::evaluate` via
+    /// `dcg_bridge::set_mode` at startup and observed by every
+    /// `SafetySystem::classify` call. Defaults to `default` (rule-based,
+    /// closest to legacy behavior).
+    ///
+    /// - `default`: rule-based fall-through.
+    /// - `plan`: read-only; writes / spawns / network are denied.
+    /// - `accept-edits`: auto-allow in-tree file ops; prompt on
+    ///   network / spawn / irreversible / protected paths.
+    /// - `dont-ask`: only allow-listed actions pass; never prompt.
+    /// - `bypass-permissions`: skip evaluation (escape hatch).
+    /// - `auto`: reserved (currently routes like `default`).
+    #[arg(long = "permission-mode", global = true, value_enum)]
+    pub(crate) permission_mode: Option<PermissionModeArg>,
+
+    /// Skip all permission prompts (alias for `--permission-mode bypass-permissions`).
+    /// This is the Claude Code compatibility flag. When both this flag and
+    /// `--permission-mode` are set, the explicit `--permission-mode` wins.
+    #[arg(long = "dangerously-skip-permissions", global = true)]
+    pub(crate) dangerously_skip_permissions: bool,
 
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -149,10 +313,6 @@ pub(crate) enum Command {
 
     /// Login to a provider via OAuth, API key, or local credentials
     Login {
-        /// Provider to log in to. Equivalent to --provider for this command, e.g. `jcode login google`.
-        #[arg(value_enum)]
-        provider: Option<ProviderChoice>,
-
         /// Account label for multi-account support (stored labels are auto-numbered)
         #[arg(long, short = 'a')]
         account: Option<String>,
@@ -201,6 +361,27 @@ pub(crate) enum Command {
         /// Environment variable name to store/use for an OpenAI-compatible API key.
         #[arg(long)]
         api_key_env: Option<String>,
+    },
+
+    /// Log out of a provider — clears jcode's local credential cache.
+    ///
+    /// Useful when you delete the provider's own auth file (e.g.
+    /// `~/.claude/.credentials.json`) and want jcode to stop using its
+    /// imported copy. Without this command, jcode silently continues
+    /// using `~/.jcode/auth.json` even after the original is gone.
+    Logout {
+        /// Provider id (e.g. `claude`, `openai`, `gemini`, `copilot`,
+        /// `zai`, etc.). Required unless `--all` is set.
+        #[arg(long, short = 'p')]
+        provider: Option<String>,
+
+        /// Log out of every configured provider.
+        #[arg(long, conflicts_with = "provider")]
+        all: bool,
+
+        /// Skip the confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// Run in simple REPL mode (no TUI)
@@ -269,6 +450,46 @@ pub(crate) enum Command {
     /// Session management commands
     #[command(subcommand)]
     Session(SessionCommand),
+
+    /// Inspect prompt templates discovered from `.jcode/prompts/` and `~/.jcode/prompts/`
+    #[command(subcommand)]
+    Prompts(PromptsCommand),
+
+    /// List or inspect installed skills (`~/.jcode/skills/`,
+    /// `<repo>/.jcode/skills/`, etc.).
+    #[command(subcommand)]
+    Skills(SkillsCommand),
+
+    /// Manage trusted project-local MCP configs (`.jcode/mcp.json`, `.claude/mcp.json`).
+    /// Trust is enforced when `JCODE_REQUIRE_MCP_TRUST=1` (auto-set by `--safe-eval`).
+    #[command(subcommand)]
+    Mcp(McpCommand),
+
+    /// Print a structured environment / config / health report.
+    Doctor {
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export a session to a self-contained Markdown or JSON file.
+    Export {
+        /// Session ID or memorable short name (e.g. `fox`).
+        session: String,
+
+        /// Output file. Defaults to `<slug-or-id>-<timestamp>.<ext>` in cwd.
+        output: Option<std::path::PathBuf>,
+
+        /// Output format (default: markdown).
+        #[arg(long, value_enum, default_value_t = ExportFormatArg::Markdown)]
+        format: ExportFormatArg,
+
+        /// Redact common secret-shaped tokens (sk-..., gho_..., Bearer ...,
+        /// known env-var assignments, z.ai-shape tokens) before writing the
+        /// output. High-precision regex set documented in `src/export.rs`.
+        #[arg(long)]
+        redact: bool,
+    },
 
     /// Ambient mode management
     #[command(subcommand)]
@@ -779,6 +1000,101 @@ pub(crate) enum SessionCommand {
         clear: bool,
 
         /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete a saved session and its journal/sidecar files
+    Delete {
+        /// Session ID or memorable short name (e.g. `fox`).
+        session: String,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(long, short = 'f')]
+        force: bool,
+
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PromptsCommand {
+    /// List all prompt templates discovered from project + user dirs.
+    List {
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the body of one prompt template by name.
+    Show {
+        /// Template name (filename without `.md`). Use `jcode prompts list` to discover names.
+        name: String,
+    },
+
+    /// Scaffold a new prompt template file (stub `.md` with frontmatter).
+    New {
+        /// Template name. Must be ASCII alphanumeric + `-` or `_`.
+        name: String,
+
+        /// Write to `~/.jcode/prompts/` instead of `<cwd>/.jcode/prompts/`.
+        #[arg(long)]
+        user: bool,
+
+        /// Overwrite an existing template of the same name.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SkillsCommand {
+    /// List all discovered skills (built-in + project + repo + user dirs).
+    List {
+        /// Emit JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show a skill's full SKILL.md content by name.
+    Show {
+        /// Skill name. Use `jcode skills list` to discover names.
+        name: String,
+    },
+
+    /// Disable a skill: remove it from the activation pool. Persists
+    /// across sessions in `<JCODE_HOME>/disabled_skills.toml`.
+    Disable {
+        /// Skill name to disable.
+        name: String,
+    },
+
+    /// Re-enable a previously-disabled skill.
+    Enable {
+        /// Skill name to re-enable.
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum McpCommand {
+    /// Mark the current content of <path> as trusted.
+    Trust {
+        /// Path to a project-local MCP config (e.g. `.jcode/mcp.json`).
+        path: std::path::PathBuf,
+    },
+
+    /// Remove a trust entry for <path>.
+    Revoke {
+        /// Path to a previously-trusted MCP config.
+        path: std::path::PathBuf,
+    },
+
+    /// List all trusted project-local MCP config entries.
+    List {
+        /// Emit JSON instead of human-readable output.
         #[arg(long)]
         json: bool,
     },

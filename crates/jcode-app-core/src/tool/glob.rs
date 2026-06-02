@@ -55,7 +55,7 @@ impl Tool for GlobTool {
         let params: GlobInput = serde_json::from_value(input)?;
 
         let base_path = params.path.clone().unwrap_or_else(|| ".".to_string());
-        let base = ctx.resolve_path(Path::new(&base_path));
+        let base = ctx.resolve_path_checked(Path::new(&base_path))?;
         let pattern = params.pattern.clone();
 
         if !base.exists() {

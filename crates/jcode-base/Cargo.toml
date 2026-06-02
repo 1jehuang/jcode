@@ -57,6 +57,9 @@ urlencoding = "2"        # URL encoding for web search
 uuid = { version = "1", features = ["v4", "v5"] }
 proctitle = "0.1"
 
+# DCG permission modes (experiment/dcg-permission-modes)
+dcg-core = { git = "https://github.com/quangdang46/destructive_command_guard", branch = "main" }
+
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 jcode-embedding = { path = "../jcode-embedding", optional = true }
 jcode-gateway-types = { path = "../jcode-gateway-types" }

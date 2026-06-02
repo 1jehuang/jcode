@@ -333,9 +333,17 @@ impl McpConfig {
         // First-run import from Claude Code / Codex CLI
         Self::import_from_external();
 
+        let trust_gated = super::trust::trust_gate_enabled();
+        let trust_store = if trust_gated {
+            super::trust::McpTrustStore::load()
+        } else {
+            super::trust::McpTrustStore::default()
+        };
+
         let mut merged = Self::default();
 
-        // Load jcode's own global config (~/.jcode/mcp.json)
+        // Load jcode's own global config (~/.jcode/mcp.json) — global config
+        // is owned by the user themselves, never gated.
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_mcp = jcode_dir.join("mcp.json");
             if jcode_mcp.exists() {
@@ -345,21 +353,43 @@ impl McpConfig {
             }
         }
 
+        // Helper: load a project-local config, applying trust gating when
+        // active. Returns true if loaded, false if skipped.
+        let load_project_local = |path: &std::path::Path, merged: &mut Self| -> bool {
+            if !path.exists() {
+                return false;
+            }
+            if trust_gated && !trust_store.is_trusted(path) {
+                let hint = if let Ok(canon) = std::fs::canonicalize(path) {
+                    canon.display().to_string()
+                } else {
+                    path.display().to_string()
+                };
+                crate::logging::warn(&format!(
+                    "MCP: skipped untrusted project-local config {hint}. \
+                     Run `jcode mcp trust {hint}` to enable, or unset \
+                     JCODE_REQUIRE_MCP_TRUST."
+                ));
+                eprintln!(
+                    "[mcp] skipped untrusted project-local config {hint}. \
+                     Run `jcode mcp trust {hint}` to enable."
+                );
+                return false;
+            }
+            if let Ok(config) = Self::load_from_file(path) {
+                merged.servers.extend(config.servers);
+                return true;
+            }
+            false
+        };
+
         // Load project-local jcode config (.jcode/mcp.json)
         let local_jcode = std::path::Path::new(".jcode/mcp.json");
-        if local_jcode.exists() {
-            if let Ok(config) = Self::load_from_file(local_jcode) {
-                merged.servers.extend(config.servers);
-            }
-        }
+        load_project_local(local_jcode, &mut merged);
 
         // Fallback: project-local Claude config (.claude/mcp.json) for compatibility
         let local_claude = std::path::Path::new(".claude/mcp.json");
-        if local_claude.exists() {
-            if let Ok(config) = Self::load_from_file(local_claude) {
-                merged.servers.extend(config.servers);
-            }
-        }
+        load_project_local(local_claude, &mut merged);
 
         merged
     }

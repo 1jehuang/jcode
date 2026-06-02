@@ -146,11 +146,18 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
     openai_compatible_profile_by_id(profile_id)?;
     let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
 
-    let source_matches = cache
+    let cached_base = cache
         .source_api_base
         .as_deref()
-        .and_then(normalize_api_base)
-        == normalize_api_base(&resolved.api_base);
+        .and_then(normalize_api_base);
+    let resolved_base = normalize_api_base(&resolved.api_base);
+    // Require both sides to normalize successfully before comparing.
+    // Otherwise `None == None` would pass and select a model from a cache
+    // entry that may belong to a completely different endpoint.
+    let source_matches = match (cached_base, resolved_base) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
     if !source_matches {
         return None;
     }
@@ -182,6 +189,50 @@ fn apply_profile_key_based_endpoint_overrides(
         .filter(|key| !key.is_empty())
         .map(ToString::to_string)
         .or_else(|| load_env_value_from_env_or_config(profile.api_key_env, profile.env_file));
+
+    // Issue #176-followup: MiniMax keys starting with `sk-cp-` originally
+    // shipped exclusively against MiniMax's China API. As of 2026 Q2,
+    // MiniMax's *global* console also issues `sk-cp-`-prefixed keys, so the
+    // prefix is no longer a reliable region signal — global users were
+    // getting auto-routed to `api.minimaxi.com` and seeing
+    // "invalid api key (2049)" 401s.
+    //
+    // Resolution order:
+    //
+    //   1. JCODE_MINIMAX_REGION env var (case-insensitive). Accepted values:
+    //        "global"   → force `api.minimax.io` (catalog default).
+    //        "china"    → force `api.minimaxi.com`.
+    //      Anything else falls through to (2).
+    //
+    //   2. The `sk-cp-` prefix heuristic — preserved for backwards
+    //      compatibility with existing China-region users who never set the
+    //      env var. Routes to China.
+    //
+    //   3. Catalog default (`api.minimax.io` global).
+    let region_override = std::env::var("JCODE_MINIMAX_REGION")
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase());
+
+    match region_override.as_deref() {
+        Some("global") | Some("international") | Some("io") => {
+            // Catalog default is global; nothing to do — but log so users
+            // know the override took effect.
+            return;
+        }
+        Some("china") | Some("cn") | Some("minimaxi") => {
+            resolved.api_base = MINIMAX_CHINA_API_BASE.to_string();
+            resolved.setup_url = MINIMAX_CHINA_SETUP_URL.to_string();
+            return;
+        }
+        Some(other) if !other.is_empty() => {
+            eprintln!(
+                "Warning: ignoring invalid JCODE_MINIMAX_REGION={other:?}. \
+                 Valid values: global, china."
+            );
+            // Fall through to the prefix heuristic for backwards compat.
+        }
+        _ => {}
+    }
 
     if key
         .as_deref()

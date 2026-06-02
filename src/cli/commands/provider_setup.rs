@@ -175,6 +175,7 @@ pub(crate) fn configure_provider_profile(
         provider_routing: options.provider_routing,
         model_catalog: options.model_catalog,
         allow_provider_pinning: options.provider_routing,
+        headers: std::collections::BTreeMap::new(),
         models: vec![NamedProviderModelConfig {
             id: model.clone(),
             context_window: options.context_window,

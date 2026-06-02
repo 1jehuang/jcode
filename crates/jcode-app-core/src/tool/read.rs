@@ -152,7 +152,7 @@ impl Tool for ReadTool {
         let params: ReadInput = serde_json::from_value(input)?;
         let range = normalize_read_range(&params)?;
 
-        let path = ctx.resolve_path(Path::new(&params.file_path));
+        let path = ctx.resolve_path_checked(Path::new(&params.file_path))?;
 
         // Check if file exists
         if !path.exists() {

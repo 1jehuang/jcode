@@ -765,8 +765,14 @@ pub fn run_setup_launcher() -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        eprintln!("Launcher setup is currently only supported on macOS.");
-        Ok(())
+        // `setup-launcher` is a macOS-only command today (it installs a
+        // `jcode.app` bundle so Spotlight/Launchpad/Dock can launch jcode).
+        // Bail with a non-zero exit so scripted wrappers (installers, CI,
+        // shell aliases) can detect the no-op instead of treating the
+        // diagnostic eprintln as a successful install.
+        anyhow::bail!(
+            "`jcode setup-launcher` is currently only supported on macOS. On Windows use `Start Menu > jcode` after running scripts/install.ps1; on Linux create a .desktop file under ~/.local/share/applications/."
+        );
     }
 }
 

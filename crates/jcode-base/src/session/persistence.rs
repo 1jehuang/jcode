@@ -203,6 +203,48 @@ impl Session {
         Ok(session)
     }
 
+    /// Issue #2: fork the current session into a brand-new session
+    /// that contains the same messages but a fresh ID, parent_id
+    /// pointing at the original, and `Active` status. The original
+    /// session is not modified.
+    ///
+    /// The fork is **NOT** saved automatically; caller saves so
+    /// errors propagate cleanly to the UI layer.
+    pub fn fork(&self, title: Option<String>) -> Self {
+        let now = Utc::now();
+        let (id, short_name) = crate::session::new_memorable_session_id();
+
+        Self {
+            id,
+            parent_id: Some(self.id.clone()),
+            title: title.or_else(|| self.title.clone()),
+            custom_title: None,
+            created_at: now,
+            updated_at: now,
+            messages: self.messages.clone(),
+            compaction: self.compaction.clone(),
+            provider_session_id: None, // start a fresh provider thread
+            provider_key: self.provider_key.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            subagent_model: self.subagent_model.clone(),
+            improve_mode: self.improve_mode,
+            autoreview_enabled: self.autoreview_enabled,
+            autojudge_enabled: self.autojudge_enabled,
+            is_canary: self.is_canary,
+            testing_build: self.testing_build.clone(),
+            working_dir: self.working_dir.clone(),
+            short_name: Some(short_name),
+            status: crate::session::SessionStatus::Active,
+            last_pid: Some(std::process::id()),
+            last_active_at: Some(now),
+            is_debug: self.is_debug,
+            saved: false,
+            save_label: None,
+            ..Self::create(Some(self.id.clone()), None)
+        }
+    }
+
     pub fn save(&mut self) -> Result<()> {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;

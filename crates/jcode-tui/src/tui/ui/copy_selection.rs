@@ -32,7 +32,7 @@ pub(super) fn copy_point_from_snapshot(
     Some(crate::tui::CopySelectionPoint {
         pane: snapshot.pane,
         abs_line,
-        column: clamp_display_col(&text, rel_col).max(copy_start),
+        column: clamp_display_col(text, rel_col).max(copy_start),
     })
 }
 
@@ -76,14 +76,14 @@ pub(super) fn copy_selection_text_from_raw_lines(
             out.push_str(text);
             continue;
         }
-        let line_width = line_display_width(&text);
+        let line_width = line_display_width(text);
         let start_col = if raw_line == start.raw_line {
-            clamp_display_col(&text, start.column)
+            clamp_display_col(text, start.column)
         } else {
             0
         };
         let end_col = if raw_line == end.raw_line {
-            clamp_display_col(&text, end.column)
+            clamp_display_col(text, end.column)
         } else {
             line_width
         };
@@ -92,11 +92,11 @@ pub(super) fn copy_selection_text_from_raw_lines(
             continue;
         }
 
-        let slice = display_col_slice(&text, start_col, end_col);
+        let slice = display_col_slice(text, start_col, end_col);
         if raw_line == start.raw_line {
             out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
         }
-        out.push_str(&slice);
+        out.push_str(slice);
     }
 
     Some(out)
@@ -108,7 +108,7 @@ pub(super) fn link_target_from_snapshot(
 ) -> Option<String> {
     let raw_point = raw_selection_point(snapshot, point)?;
     let raw_text = snapshot.raw_plain_line(raw_point.raw_line)?;
-    link_target_for_display_column(&raw_text, raw_point.column)
+    link_target_for_display_column(raw_text, raw_point.column)
 }
 
 fn raw_selection_point(
@@ -121,7 +121,7 @@ fn raw_selection_point(
         .wrapped_copy_offset(point.abs_line)
         .unwrap_or(0)
         .min(wrapped_text.width());
-    let local_col = clamp_display_col(&wrapped_text, point.column).max(display_copy_start);
+    let local_col = clamp_display_col(wrapped_text, point.column).max(display_copy_start);
     let segment_width = map.end_col.saturating_sub(map.start_col);
     Some(RawSelectionPoint {
         raw_line: map.raw_line,

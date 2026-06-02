@@ -200,14 +200,12 @@ fn root_package_version(repo_root: &Path) -> Option<String> {
             in_package = trimmed == "[package]";
             continue;
         }
-        if in_package {
-            if let Some(rest) = trimmed.strip_prefix("version") {
-                let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('=') {
-                    let value = rest.trim().trim_matches('"').to_string();
-                    if !value.is_empty() {
-                        return Some(value);
-                    }
+        if in_package && let Some(rest) = trimmed.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let value = rest.trim().trim_matches('"').to_string();
+                if !value.is_empty() {
+                    return Some(value);
                 }
             }
         }

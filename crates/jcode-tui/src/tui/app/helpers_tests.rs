@@ -1,7 +1,10 @@
+#[cfg(all(unix, not(target_os = "macos")))]
+use super::native_clipboard_commands_for_env;
 use super::{
     build_resume_command, clear_ambient_info_cache_for_tests, extract_bracketed_system_message,
     format_countdown_until, gather_ambient_info, inferred_reasoning_efforts,
     partition_queued_messages, pretty_model_display_name, resume_invocation_args,
+    should_prefer_osc52_for_env, write_osc52_clipboard_to,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -325,4 +328,52 @@ fn pretty_model_display_name_handles_empty_and_unknown() {
         pretty_model_display_name("some-new-model"),
         "Some New Model"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #65 / upstream PR #68 — clipboard backends and
+// OSC 52 fallback. These exercise the pure helpers and avoid touching the
+// real clipboard/process state.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn native_clipboard_commands_prefer_wayland_before_x11() {
+    let commands = native_clipboard_commands_for_env(
+        Some(std::ffi::OsStr::new("wayland-0")),
+        Some(std::ffi::OsStr::new(":0")),
+    );
+    let programs = commands
+        .iter()
+        .map(|command| command.program)
+        .collect::<Vec<_>>();
+
+    assert_eq!(programs, vec!["wl-copy", "xclip", "xsel"]);
+    assert_eq!(commands[0].args, &["--type", "text/plain;charset=utf-8"]);
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn native_clipboard_commands_are_empty_without_display_env() {
+    assert!(native_clipboard_commands_for_env(None, None).is_empty());
+}
+
+#[test]
+fn osc52_clipboard_writer_emits_base64_bel_sequence() {
+    let mut output = Vec::new();
+    write_osc52_clipboard_to(b"hello", &mut output).expect("write osc52");
+    assert_eq!(output, b"\x1b]52;c;aGVsbG8=\x07");
+}
+
+#[test]
+fn ssh_sessions_prefer_osc52_clipboard() {
+    assert!(should_prefer_osc52_for_env(
+        Some(std::ffi::OsStr::new("1 2 3 4")),
+        None
+    ));
+    assert!(should_prefer_osc52_for_env(
+        None,
+        Some(std::ffi::OsStr::new("/dev/pts/1"))
+    ));
+    assert!(!should_prefer_osc52_for_env(None, None));
 }

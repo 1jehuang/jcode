@@ -98,6 +98,12 @@ path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
+# File picker for `@<path>` autocomplete in the TUI input.
+# Provides a long-lived FilePicker with background scan, gitignore-aware walk,
+# fuzzy matching with typo resistance, and frecency-ranked results.
+# Pinned with `=` because the crate is still 0.1.x — minor bumps may break API.
+ffs-search = "=0.1.3"
+
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
@@ -121,6 +127,12 @@ toml = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# Permission modes (Plan / AcceptEdits / BypassPermissions / DontAsk).
+# Git dep from the DCG repo (not crates.io, not local path).
+# v0.6.0-rc.1 ships the Mode + Effect + Engine + Session API;
+# pack-rule evaluation lands in Phase 2.
+dcg-core = { git = "https://github.com/quangdang46/destructive_command_guard", branch = "main" }
 
 # File operations
 glob = "0.3"
@@ -148,6 +160,7 @@ jcode-logging = { path = "crates/jcode-logging" }
 # OAuth
 base64 = "0.22"
 sha2 = "0.10"
+hashline = { version = "0.2", default-features = false, features = ["sha256-anchors"] }
 rand = "0.9.3"
 hex = "0.4"
 url = "2"
@@ -235,6 +248,7 @@ aws-smithy-types = "1.4.7"
 aws-sdk-bedrock = "1.141.0"
 aws-sdk-sts = "1.103.0"
 
+
 [features]
 # Include local ONNX/tokenizer embeddings in default builds so memory recall,
 # semantic retrieval, and embedding-backed features work out of the box.
@@ -257,11 +271,12 @@ jemalloc-prof = [
     "jcode-tui/jemalloc-prof",
 ]
 embeddings = ["dep:jcode-embedding", "jcode-tui/embeddings"]
-mmdr-size-api = ["jcode-tui/mmdr-size-api"]
+dcp = ["jcode-tui/dcp"]
+mmdr-size-api = ["jcode-tui-mermaid/mmdr-size-api"]
 pdf = ["dep:jcode-pdf", "jcode-tui/pdf"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_Globalization"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

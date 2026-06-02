@@ -1408,6 +1408,17 @@ fn test_context_limit_gpt_5_4() {
 }
 
 #[test]
+fn test_context_limit_deepseek() {
+    // Issue #81 / upstream PR #92: DeepSeek family defaults to 1M.
+    assert_eq!(
+        context_limit_for_model("deepseek-v4-flash"),
+        Some(1_000_000)
+    );
+    assert_eq!(context_limit_for_model("deepseek-chat"), Some(1_000_000));
+    assert_eq!(context_limit_for_model("deepseek-coder"), Some(1_000_000));
+}
+
+#[test]
 fn test_context_limit_respects_provider_hint() {
     assert_eq!(
         context_limit_for_model_with_provider("gpt-5.4", Some("openai")),

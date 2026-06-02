@@ -192,10 +192,26 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(limit);
     }
 
+    // Issue #81: DeepSeek V4 / chat models default to 1M context.
+    // Upstream PR 1jehuang/jcode#92 for the same fallback.
+    if model.starts_with("deepseek") {
+        return Some(1_000_000);
+    }
+
     if model.starts_with("gemini-2.0-flash")
         || model.starts_with("gemini-2.5")
         || model.starts_with("gemini-3")
     {
+        return Some(1_000_000);
+    }
+
+    // DeepSeek's current generation (deepseek-v4 / deepseek-v4-flash and the
+    // deepseek-coder variants) advertises a 1M-token context window via the
+    // platform's published rate-limit metadata. Older models also accept up to
+    // 1M tokens through the same /v1/chat/completions endpoint, so it's safe
+    // to advertise as a default fallback. Cached/online catalog hits still
+    // override this via the cached_context_limit hook above.
+    if model.starts_with("deepseek") {
         return Some(1_000_000);
     }
 
@@ -256,6 +272,35 @@ mod tests {
         assert_eq!(
             context_limit_for_model_with_provider("gemini-2.5-pro", Some("copilot")),
             Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn context_limit_falls_back_to_1m_for_deepseek_models() {
+        // Regression for issue #87: DeepSeek's current generation advertises a
+        // 1M-token context window. Without an explicit branch the function
+        // returned `None` and downstream callers had to either hard-code a
+        // smaller default or wait for a /models cache fill before showing
+        // accurate usage bars.
+        assert_eq!(
+            context_limit_for_model_with_provider("deepseek-v4", None),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("deepseek-v4-flash", None),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("deepseek-chat", None),
+            Some(1_000_000)
+        );
+        // Cached values must still take precedence so OAuth/online catalog
+        // hits can override the static fallback.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache("deepseek-v4", None, |m| (m
+                == "deepseek-v4")
+                .then_some(64_000)),
+            Some(64_000)
         );
     }
 

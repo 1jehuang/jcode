@@ -708,8 +708,22 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
     let config_dir = legacy_copilot_config_dir();
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create {}", config_dir.display()))?;
-    crate::platform::set_directory_permissions_owner_only(&config_dir)
-        .with_context(|| format!("Failed to secure {}", config_dir.display()))?;
+    // Issue #46: on WSL2 / network mounts / FAT filesystems, the
+    // owner-only permission tightening can fail because the underlying
+    // filesystem doesn't support POSIX modes. The previous code returned
+    // those errors via `?`, which killed the entire login flow even
+    // though the directory was created successfully and the rest of the
+    // OS-level access controls (e.g. NTFS ACLs on DrvFs) protected the
+    // file just fine. Degrade chmod failures to a warning so the token
+    // gets saved, and surface the cause in the log for users who want
+    // to investigate.
+    if let Err(e) = crate::platform::set_directory_permissions_owner_only(&config_dir) {
+        crate::logging::warn(&format!(
+            "Could not tighten perms on {} (kept default mode; common on WSL2 / DrvFs / FAT): {}",
+            config_dir.display(),
+            e
+        ));
+    }
 
     let hosts_path = config_dir.join("hosts.json");
 

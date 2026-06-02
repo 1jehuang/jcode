@@ -60,6 +60,18 @@ pub async fn connect_socket(path: &std::path::Path) -> Result<Stream> {
                 path.display()
             )
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // Unix: the socket file doesn't exist. Windows: the named pipe
+            // doesn't exist (the underlying error is ERROR_FILE_NOT_FOUND /
+            // os error 2, which surfaces as `The system cannot find the file
+            // specified.`). Both mean the same thing in practice: no jcode
+            // server is currently listening. Wrap the raw OS error in a
+            // message the user can act on.
+            anyhow::bail!(
+                "No jcode server is running. Start one with `jcode serve` (or run `jcode` to launch the TUI), then try again. (Tried {})",
+                path.display()
+            )
+        }
         Err(err) if err.raw_os_error() == Some(libc::EMFILE) => Err(anyhow::anyhow!(
             "{} ({})",
             err,

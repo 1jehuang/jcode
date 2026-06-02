@@ -20,6 +20,20 @@
 //!
 //!   (`ContinuePrompt` is retained as a legacy phase for replay/test fixtures
 //!   but is no longer entered by the live flow.)
+//!                        to log in right inside the TUI (the fresh install
+//!                        no longer runs a blocking CLI login). Skipped
+//!                        entirely when credentials already exist.
+//!   2. `ModelSelect`   - let them pick a model.
+//!   3. `ContinuePrompt` - if we detect an external Codex or Claude Code
+//!                        OAuth login, ask whether they want to continue
+//!                        where they last left off. Auto-selects "Yes" after
+//!                        [`AUTO_ADVANCE`] if they don't choose.
+//!   4. `TranscriptPick` - render their recent external transcripts in a
+//!                        resume-style picker (single select). Auto-selects
+//!                        the most recent after [`AUTO_ADVANCE`].
+//!   5. `Suggestions`   - the existing prompt-suggestion cards. Reached when
+//!                        they answer "No", when there is no external OAuth,
+//!                        or as the terminal resting state.
 //!
 //! If anything fails along the continue path (no transcripts, load error,
 //! resume failure) we fall back to seeding the input with a prompt that asks

@@ -114,6 +114,10 @@ impl SystemProfile {
     pub fn is_wsl_windows_terminal(&self) -> bool {
         self.is_wsl && self.is_windows_terminal()
     }
+
+    pub fn is_vscode_terminal(&self) -> bool {
+        self.terminal == "vscode"
+    }
 }
 
 static PROFILE: OnceLock<SystemProfile> = OnceLock::new();
@@ -205,6 +209,17 @@ pub fn tui_policy_for(
         enable_keyboard_enhancement = false;
         simplified_model_picker = true;
         linked_side_panel_refresh_interval = std::time::Duration::from_millis(1000);
+    }
+
+    if profile.is_vscode_terminal() {
+        // VSCode / VSCodium / Cursor / Windsurf integrated terminal (xterm.js)
+        // translates keys via the OS keyboard layout *before* sending escape
+        // sequences. Enabling crossterm keyboard enhancement causes crossterm
+        // to reconstruct shifted characters using a hardcoded US layout, which
+        // breaks international keyboards (e.g. Finnish Shift+7 = '/' becomes
+        // '&'). Disable enhancement here so the layout-translated characters
+        // pass through untouched. See issue #55 / upstream PR #55.
+        enable_keyboard_enhancement = false;
     }
 
     match profile.tier {
@@ -770,6 +785,36 @@ mod tests {
         assert_eq!(policy.redraw_fps, 60);
         assert_eq!(policy.animation_fps, 1);
         assert!(!policy.enable_decorative_animations);
+    }
+
+    #[test]
+    fn test_tui_policy_disables_keyboard_enhancement_on_vscode_terminal() {
+        // Regression for issue #55: VSCode's xterm.js layer translates keys
+        // via the OS keyboard layout before sending escape sequences, and
+        // crossterm's keyboard enhancement reconstructs shifted characters
+        // assuming a US layout, breaking non-US keyboards.
+        let profile = SystemProfile {
+            load_avg_1m: Some(0.2),
+            cpu_count: Some(8),
+            available_memory_mb: Some(8192),
+            total_memory_mb: Some(16384),
+            is_ssh: false,
+            is_wsl: false,
+            terminal: "vscode".to_string(),
+            tier: PerformanceTier::Full,
+        };
+        let mut display = crate::config::DisplayConfig::default();
+        display.redraw_fps = 60;
+        display.animation_fps = 60;
+        let policy = tui_policy_for(&profile, &display);
+        assert!(
+            !policy.enable_keyboard_enhancement,
+            "keyboard enhancement must be off in VSCode terminal so non-US \
+             layouts are not US-mapped"
+        );
+        // Other capabilities should not be globally crippled — only the
+        // keyboard enhancement is the issue.
+        assert!(policy.enable_focus_change);
     }
 
     #[test]

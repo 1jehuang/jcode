@@ -163,3 +163,45 @@ cargo test -p jcode --lib provider::bedrock::tests::bedrock_live_smoke_test -- -
 - SSO token errors: run `aws sso login --profile <profile>`.
 - API key auth: set `AWS_BEARER_TOKEN_BEDROCK` and `AWS_REGION`.
 - Missing region: set `AWS_REGION` or `JCODE_BEDROCK_REGION`.
+
+## Application Inference Profiles (AIPs)
+
+Issue [#143](https://github.com/quangdang46/jcode/issues/143) enables jcode
+to talk to Bedrock through an **Application Inference Profile** ARN, e.g.
+
+```
+arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/budget-prod-1
+```
+
+AIPs let you tag and budget Bedrock invocations with custom metadata. Pass
+the full ARN as the model and jcode will route through it transparently.
+
+### Capability hint
+
+AIP ARNs do not carry the underlying foundation model name in the ARN, so
+jcode cannot tell whether the AIP routes to Claude Sonnet 4 (which supports
+tool use + vision + 200k context) or, say, an Amazon Nova Lite (which does
+not). Without a hint, jcode falls back to a defensive "no tools, no vision"
+default.
+
+Set `JCODE_BEDROCK_AIP_MODEL_HINT` to tell jcode which underlying model the
+AIP routes to:
+
+```bash
+export JCODE_BEDROCK_AIP_MODEL_HINT=claude-sonnet-4
+jcode --provider bedrock --model "$AIP_ARN" run "hello"
+```
+
+Recognized hint values are anything `BedrockProvider::model_info()` would
+match — see `src/provider/bedrock.rs` for the full list. Common values:
+
+- `claude-sonnet-4`, `claude-opus-4`
+- `claude-3-7-sonnet`, `claude-3-5-sonnet`
+- `claude-3-5-haiku`, `claude-3-haiku`
+- `amazon.nova-pro`, `amazon.nova-lite`
+- substring of any other Bedrock-hosted model
+
+The hint only affects jcode's *internal* capability detection (whether to
+attach tools, count vision blocks, set the context window). The actual
+inference still happens through the AIP, with whatever real model AWS
+routes you to.

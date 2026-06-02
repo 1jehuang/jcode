@@ -782,7 +782,7 @@ fn grouped_u64(value: u64) -> String {
     let raw = value.to_string();
     let mut grouped = String::with_capacity(raw.len() + raw.len() / 3);
     for (index, ch) in raw.chars().enumerate() {
-        if index > 0 && (raw.len() - index) % 3 == 0 {
+        if index > 0 && (raw.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(ch);
@@ -828,7 +828,7 @@ fn human_count(value: u64) -> String {
 }
 
 fn bold_count(value: u64) -> String {
-    format!("{}", human_count(value))
+    human_count(value)
 }
 
 fn bold_count_usize(value: usize) -> String {
@@ -847,7 +847,7 @@ fn opt_usize(value: Option<usize>) -> String {
 
 fn opt_string(value: Option<&str>) -> String {
     value
-        .map(|value| format!("{}", value))
+        .map(str::to_string)
         .unwrap_or_else(|| "None".to_string())
 }
 
@@ -1678,7 +1678,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     None => "none",
                 };
                 format!(
-                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
+                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active artifact: {} ({})\n- compacted messages: {}\n- active messages: {}\n- artifact chars: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
                     mode,
                     if app.provider.uses_jcode_compaction() {
                         "yes"

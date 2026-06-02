@@ -14,6 +14,7 @@ mod glob;
 mod gmail;
 mod goal;
 mod grep;
+pub mod hashline_edit;
 mod invalid;
 mod ls;
 mod lsp;
@@ -34,6 +35,9 @@ mod webfetch;
 mod websearch;
 mod write;
 
+#[cfg(feature = "dcp")]
+mod dcp_compress;
+
 use crate::compaction::CompactionManager;
 use crate::provider::Provider;
 use crate::skill::SkillRegistry;
@@ -42,6 +46,7 @@ use jcode_message_types::ToolDefinition;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
@@ -99,6 +104,8 @@ pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
+    #[cfg(feature = "dcp")]
+    dcp: Option<Arc<Mutex<crate::dcp_plugin::DcpPlugin>>>,
 }
 
 impl Clone for Registry {
@@ -109,6 +116,8 @@ impl Clone for Registry {
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            #[cfg(feature = "dcp")]
+            dcp: self.dcp.clone(),
         }
     }
 }
@@ -145,6 +154,8 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            #[cfg(feature = "dcp")]
+            dcp: None,
         }
     }
 
@@ -172,6 +183,12 @@ impl Registry {
                 side_panel::SidePanelTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "hashline_edit",
+                hashline_edit::HashlineEditTool::new,
+            );
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
@@ -271,31 +288,65 @@ impl Registry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
             compaction: compaction.clone(),
+            #[cfg(feature = "dcp")]
+            dcp: None,
         };
         let registry_struct_ms = registry_struct_start.elapsed().as_millis();
 
         let base_start = std::time::Instant::now();
-        let mut tools_map = Self::base_tools(&skills);
+        // Issue #23: when JCODE_NO_BUILTIN_TOOLS=1 is set, skip the built-in
+        // tool registry. Extension and MCP tools (added separately) still
+        // load. This is useful for sandbox testing or when users want a
+        // strictly user-provided tool surface.
+        let no_builtin = matches!(
+            std::env::var("JCODE_NO_BUILTIN_TOOLS")
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("1") | Some("true") | Some("yes") | Some("on")
+        );
+        let mut tools_map = if no_builtin {
+            crate::logging::info(
+                "JCODE_NO_BUILTIN_TOOLS=1 — skipping built-in tool registry (MCP + extension tools still load)",
+            );
+            HashMap::new()
+        } else {
+            Self::base_tools(&skills)
+        };
         let base_ms = base_start.elapsed().as_millis();
 
-        // Per-session tools that need provider/registry references
+        // Per-session tools that need provider/registry references — also
+        // gated by the no-builtin flag so disabling really means disabling.
         let session_tools_start = std::time::Instant::now();
-        Self::insert_tool(
-            &mut tools_map,
-            "subagent",
-            task::SubagentTool::new(provider, registry.clone()),
-        );
-        Self::insert_tool(
-            &mut tools_map,
-            "batch",
-            batch::BatchTool::new(registry.clone()),
-        );
-        Self::insert_tool(
-            &mut tools_map,
-            "conversation_search",
-            conversation_search::ConversationSearchTool::new(compaction),
-        );
+        if !no_builtin {
+            Self::insert_tool(
+                &mut tools_map,
+                "subagent",
+                task::SubagentTool::new(provider, registry.clone()),
+            );
+            Self::insert_tool(
+                &mut tools_map,
+                "batch",
+                batch::BatchTool::new(registry.clone()),
+            );
+            Self::insert_tool(
+                &mut tools_map,
+                "conversation_search",
+                conversation_search::ConversationSearchTool::new(compaction),
+            );
+        }
         let session_tools_ms = session_tools_start.elapsed().as_millis();
+
+        // Register DCP tools if feature is enabled
+        #[cfg(feature = "dcp")]
+        {
+            use dcp_compress::{DcpCompressTool, DcpDecompressTool, DcpRecompressTool};
+            Self::insert_tool(&mut tools_map, "dcp_compress", DcpCompressTool::new());
+            Self::insert_tool(&mut tools_map, "dcp_decompress", DcpDecompressTool::new());
+            Self::insert_tool(&mut tools_map, "dcp_recompress", DcpRecompressTool::new());
+        }
 
         let write_start = std::time::Instant::now();
         *registry.tools.write().await = tools_map;
@@ -833,6 +884,7 @@ impl Registry {
                 // under the current config fingerprint; prune servers that are
                 // no longer configured. (#206 Phase 2)
                 {
+                    #[allow(clippy::type_complexity)]
                     let (live_by_server, config_snapshot): (
                         std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>,
                         Vec<(String, crate::mcp::McpServerConfig)>,
@@ -963,6 +1015,18 @@ impl Registry {
     /// Get shared access to the compaction manager
     pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
         self.compaction.clone()
+    }
+
+    /// Get shared access to the DCP plugin (if enabled)
+    #[cfg(feature = "dcp")]
+    pub fn dcp(&self) -> Option<Arc<Mutex<crate::dcp_plugin::DcpPlugin>>> {
+        self.dcp.clone()
+    }
+
+    /// Set the DCP plugin (called by Agent after construction)
+    #[cfg(feature = "dcp")]
+    pub fn set_dcp(&mut self, dcp: crate::dcp_plugin::DcpPlugin) {
+        self.dcp = Some(Arc::new(Mutex::new(dcp)));
     }
 }
 

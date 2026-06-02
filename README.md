@@ -263,7 +263,7 @@ versions tested for this corrected memory rerun:
 ## Memory (Agent memory)
 
 Jcode embeds each turn/response as a semantic vector. Every turn does queries a graph of memories to efficiently find related memory entries via a cosine similarity check. The embedding hits are fed into the conversation, or optionally uses a memory sideagent which verifies the memories are relevant, and potentially does more work for information retreival before injecting into the conversation. This results in a human like memory system which allows the agent to automatically recall relevant information to the conversation without actively calling memory tools or being a token burner. 
-ot 
+
 To have memories which are retrieved, they must also be extracted and stored. Every so often (semantic drift, K turns since last extraction, session end, etc), memories are extracted via a memory sideagent, and put into the memory graph. 
 
 The harness also provides explicit memory tools to allow the agent to actively search or store the memory without relying on a passive background process. The harness also provides session search for traditional RAG on previous sessions. 
@@ -613,6 +613,22 @@ jcode dictate
 jcode supports interactive TUI use, non-interactive runs, persistent server/client workflows,
 and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
 
+### Context File Control
+
+Skip loading project `AGENTS.md` and global `~/.AGENTS.md` context files for a session:
+
+```bash
+# CLI flag (preferred)
+jcode --no-context-files
+
+# Or via environment variable
+JCODE_NO_CONTEXT_FILES=1 jcode
+
+# Both work identically; the CLI flag sets the env var internally
+```
+
+This is useful when you want to test with a clean context or run sessions without project instructions.
+
 <div align="center">
 
   <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/workflow.mp4">
@@ -678,6 +694,8 @@ Notes:
 - [Windows Notes](docs/WINDOWS.md)
 - [Wrappers and Shell Integration](docs/WRAPPERS.md)
 - [Refactoring Notes](docs/REFACTORING.md)
+- [Configuration files reference](docs/CONFIG_REFERENCE.md)
+- [Z.AI Coding Plan quickstart](docs/ZAI_CODING_PLAN.md)
 
 ---
 
@@ -774,6 +792,59 @@ brew tap 1jehuang/jcode
 brew install jcode
 ```
 
+### Nix flake
+
+```bash
+# Run without installing
+nix run github:quangdang46/jcode
+
+# Install into the user profile
+nix profile install github:quangdang46/jcode
+
+# Drop into a development shell with the pinned toolchain + clippy/fmt/sccache
+nix develop github:quangdang46/jcode
+```
+
+The flake exposes:
+
+- `packages.default` / `packages.jcode` — the release binary, built with
+  [`crane`](https://github.com/ipetkov/crane) for cached dep builds.
+- `devShells.default` — Rust nightly + `cargo-nextest`, `cargo-watch`,
+  `sccache`, and `rust-analyzer`.
+- `checks.jcode-clippy` / `checks.jcode-fmt` — guardrail equivalents of the
+  existing CI gates, runnable via `nix flake check`.
+
+### Verifying release artifacts
+
+Each release publishes a single `SHA256SUMS` manifest covering every
+Linux, macOS, and Windows asset attached to the release. Verify a
+download before installing:
+
+```bash
+VERSION=v0.12.0
+ARTIFACT=jcode-linux-x86_64.tar.gz   # or jcode-macos-aarch64.tar.gz, jcode-windows-x86_64.tar.gz, etc.
+
+curl -LO "https://github.com/quangdang46/jcode/releases/download/${VERSION}/${ARTIFACT}"
+curl -LO "https://github.com/quangdang46/jcode/releases/download/${VERSION}/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Expected output:
+
+```
+jcode-linux-x86_64.tar.gz: OK
+```
+
+`SHA256SUMS` is generated in the release workflow from the actual
+artifacts uploaded to the run, so it is always synchronized with the
+binaries you can download.
+
+> 💡 **Windows SmartScreen / macOS Gatekeeper warnings**: jcode binaries
+> are not yet code-signed (see [#56](https://github.com/quangdang46/jcode/issues/56)
+> for context). After verifying the SHA256 checksum, see
+> [docs/RELEASE_SIGNING.md](docs/RELEASE_SIGNING.md) for how to suppress
+> the OS-level warning per-platform.
+
 ### From Source (all platforms)
 
 ```bash
@@ -807,6 +878,7 @@ scripts/install_release.sh
 | **Linux** x86_64 / aarch64 | Fully supported |
 | **macOS** Apple Silicon & Intel | Supported |
 | **Windows** x86_64 | Supported (native + WSL2) |
+| **FreeBSD** x86_64 / aarch64 | Build from source — see [BUILD_FREEBSD.md](docs/BUILD_FREEBSD.md) |
 | **Termux** aarch64 / x86_64 | Supported with `pkg install glibc patchelf` |
 
 </div>

@@ -49,6 +49,7 @@ pub enum AppRuntimeMode {
     TestHarness,
 }
 
+mod at_picker;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod catchup;
@@ -554,11 +555,24 @@ pub struct App {
     compacted_history_lazy: CompactedHistoryLazyState,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
+    /// Lazy-initialized `@<path>` picker. Created on first @-keystroke when
+    /// `session.working_dir` is set. `RefCell` because creation needs to
+    /// happen behind `&self` calls (e.g. `command_suggestions`).
+    at_picker: RefCell<crate::tui::app::at_picker::AtPickerSlot>,
     cursor_pos: usize,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,
     active_skill: Option<String>,
+    /// Issue #85: Plan Mode (read-only). When `true`, the next slash
+    /// command tap on `/plan` re-enables write tools. While active,
+    /// write-class tools (write/edit/bash/etc.) are gated off and a
+    /// reminder is injected so the model produces a plan instead of
+    /// executing.
+    plan_mode: bool,
+    /// Current permission mode for tool-call gating (Shift+Tab cycling).
+    /// Synced with `dcg_bridge::GLOBAL_MODE` at startup and on every cycle.
+    permission_mode: dcg_core::Mode,
     is_processing: bool,
     streaming_text: String,
     should_quit: bool,
@@ -968,6 +982,10 @@ pub struct App {
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
+    // Input history for recall (ring buffer, newest at the end)
+    input_history: Vec<String>,
+    // Index into `input_history` while browsing; None when not browsing
+    input_history_index: Option<usize>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
@@ -1140,6 +1158,40 @@ impl App {
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
     const KV_CACHE_MIN_MISSED_TOKENS: u64 = 1_024;
     const KV_CACHE_MAX_MISS_SAMPLES: usize = 12;
+
+    /// Cycle to the next permission mode in the standard order.
+    /// Order: Default → AcceptEdits → Plan → Auto → DontAsk → BypassPermissions → Default
+    pub(super) fn cycle_permission_mode(&mut self) {
+        use dcg_core::Mode;
+        let next = match self.permission_mode {
+            Mode::Default => Mode::AcceptEdits,
+            Mode::AcceptEdits => Mode::Plan,
+            Mode::Plan => Mode::Auto,
+            Mode::Auto => Mode::DontAsk,
+            Mode::DontAsk => Mode::BypassPermissions,
+            Mode::BypassPermissions => Mode::Default,
+        };
+        self.permission_mode = next;
+        crate::dcg_bridge::set_mode(next);
+    }
+
+    /// Set the permission mode explicitly (from `/permission-mode` slash command).
+    pub(super) fn set_permission_mode(&mut self, mode: dcg_core::Mode) {
+        self.permission_mode = mode;
+        crate::dcg_bridge::set_mode(mode);
+    }
+
+    /// Human-readable label for the current permission mode.
+    pub(super) fn permission_mode_label(&self) -> &'static str {
+        match self.permission_mode {
+            dcg_core::Mode::Default => "default",
+            dcg_core::Mode::AcceptEdits => "acceptEdits",
+            dcg_core::Mode::Plan => "plan",
+            dcg_core::Mode::Auto => "auto",
+            dcg_core::Mode::DontAsk => "dontAsk",
+            dcg_core::Mode::BypassPermissions => "bypassPermissions",
+        }
+    }
 
     pub(super) fn begin_kv_cache_request(
         &mut self,

@@ -12,11 +12,14 @@ fn normalize_ratio_value(raw: f32) -> f32 {
     if !raw.is_finite() {
         return 0.0;
     }
-    if raw > 1.0 {
-        (raw / 100.0).clamp(0.0, 1.0)
-    } else {
-        raw.clamp(0.0, 1.0)
-    }
+    // The ChatGPT `wham/usage` endpoint (and equivalent OpenAI account usage
+    // endpoints) always report `used_percent` as a value in `[0, 100]`. The
+    // previous implementation tried to auto-detect ratio-vs-percent based on
+    // `raw > 1.0`, which incorrectly mapped the legitimate response
+    // `used_percent: 1` (1% used) to a ratio of `1.0` (100% used). Treating
+    // the value as a percent unconditionally avoids that misclassification
+    // and matches the documented API contract.
+    (raw / 100.0).clamp(0.0, 1.0)
 }
 
 fn normalize_percent(raw: f32) -> f32 {

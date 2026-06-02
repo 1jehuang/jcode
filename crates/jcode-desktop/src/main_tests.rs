@@ -9293,7 +9293,7 @@ fn inline_widget_card_never_overlaps_body_clip_during_reveal() {
     for size in sizes {
         let body_base_bottom = single_session_body_bottom(size);
         for kind in kinds {
-            let visible_lines = kind.visible_line_limit().min(8).max(1);
+            let visible_lines = kind.visible_line_limit().clamp(1, 8);
             for activity_reserved_height in [0.0, 22.0] {
                 for reveal_progress in reveal_steps {
                     let Some((body_bottom, card_top)) =

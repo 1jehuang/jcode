@@ -6,6 +6,7 @@ fn make_ctx() -> ToolContext {
         message_id: "test-msg".to_string(),
         tool_call_id: "test-call".to_string(),
         working_dir: Some(std::env::temp_dir()),
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,

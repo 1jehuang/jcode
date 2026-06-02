@@ -30,7 +30,7 @@ pub(super) fn edit_input_in_external_editor(app: &mut App) {
             }
             app.set_status_notice("Prompt edited in $EDITOR");
         }
-        Err(err) => app.set_status_notice(&format!("Failed to open $EDITOR: {err}")),
+        Err(err) => app.set_status_notice(format!("Failed to open $EDITOR: {err}")),
     }
 }
 
@@ -97,6 +97,233 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
 
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
+}
+
+/// Issue #4 follow-up: expand `/<prompt-name>` (or `/<prompt-name> <args>`)
+/// into the body of a discovered prompt template, when the name is not a
+/// reserved built-in slash command.
+///
+/// Returns:
+///   - `Some(expanded)` when `input` matches `/name[ args]` and a template
+///     `name` exists in project- or user-level prompts.
+///   - `None` when the input is not a slash invocation, the slash name is a
+///     reserved built-in, or no template by that name is discovered.
+///
+/// Args (after the name) are appended to the template body on a new line as
+/// `Args: <rest>`. A future PR can replace this with `{{name}}` / `{{$1}}`
+/// substitution; this MVP keeps it explicit so users see what got injected.
+pub(super) fn expand_prompt_template_invocation(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let body = trimmed.strip_prefix('/')?;
+    if body.is_empty() {
+        return None;
+    }
+    let (name, args) = match body.split_once(char::is_whitespace) {
+        Some((n, rest)) => (n, rest.trim()),
+        None => (body, ""),
+    };
+
+    // Skip reserved built-in slash commands so user templates don't shadow
+    // `/help`, `/quit`, `/export`, etc.
+    let with_slash = format!("/{name}");
+    if super::state_ui_input_helpers::REGISTERED_COMMANDS
+        .iter()
+        .any(|c| c.name() == with_slash)
+    {
+        return None;
+    }
+
+    let template = crate::prompt_templates::find_by_name(name)?;
+    // Issue #4 follow-up: if the template body has YAML frontmatter declaring
+    // `args:`, substitute `{{name}}` placeholders in the body with values
+    // resolved from user input. Otherwise fall back to the previous "append
+    // raw args" behavior so older templates without frontmatter still work.
+    let (frontmatter, body, decls) = crate::prompt_templates::parse_frontmatter(&template.body);
+
+    // Drop the rendered body if frontmatter exists; otherwise use the
+    // original (which may itself begin with --- intended as content).
+    let body = if frontmatter.is_some() {
+        body
+    } else {
+        template.body.clone()
+    };
+
+    let mut out = if !decls.is_empty() {
+        let (positional, named) = crate::prompt_templates::parse_user_args(args);
+        let (bindings, missing) = crate::prompt_templates::bind_args(&decls, &positional, &named);
+        let mut rendered = crate::prompt_templates::substitute_placeholders(&body, &bindings);
+        if !missing.is_empty() {
+            rendered.push_str(&format!(
+                "\n\n[/{name}: missing required arg(s): {}]",
+                missing.join(", ")
+            ));
+        }
+        rendered.trim_end().to_string()
+    } else {
+        // Backwards-compat: no declared args, use legacy "Args: <rest>" trailer.
+        let mut legacy = body.trim_end().to_string();
+        if !args.is_empty() {
+            legacy.push_str("\n\nArgs: ");
+            legacy.push_str(args);
+            legacy.push('\n');
+        }
+        legacy
+    };
+
+    // Strip trailing whitespace consistently.
+    while out.ends_with(['\n', ' ', '\t']) {
+        out.pop();
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod prompt_expansion_tests {
+    use super::*;
+
+    fn write_template(dir: &std::path::Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.md")), body).unwrap();
+    }
+
+    #[test]
+    fn expansion_replaces_slash_with_body() {
+        // Use the user-level prompts dir under JCODE_HOME so the test is
+        // independent of cwd.
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let prompts = temp.path().join("prompts");
+        write_template(&prompts, "qa-checklist", "Please run the QA checklist.");
+
+        let expanded = expand_prompt_template_invocation("/qa-checklist").expect("expanded");
+        assert!(expanded.contains("Please run the QA checklist."));
+
+        let with_args = expand_prompt_template_invocation("/qa-checklist the auth module").unwrap();
+        assert!(with_args.contains("Please run the QA checklist."));
+        assert!(with_args.contains("Args: the auth module"));
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    // Issue #4 follow-up: when frontmatter declares args, expansion must
+    // substitute {{name}} placeholders with bound values.
+    #[test]
+    fn expansion_substitutes_frontmatter_args() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let prompts = temp.path().join("prompts");
+
+        write_template(
+            &prompts,
+            "review-it",
+            "---\n\
+             description: review with focus + target\n\
+             args:\n\
+             - name: focus\n  required: false\n  default: bugs\n\
+             - name: target\n  required: true\n\
+             ---\n\n\
+             Please review the {{target}} for {{focus}}.\n",
+        );
+
+        // Positional fills declared order: focus, target.
+        let out = expand_prompt_template_invocation("/review-it auth src/lib.rs").unwrap();
+        assert!(
+            out.contains("Please review the src/lib.rs for auth."),
+            "expected substitution; got: {out}"
+        );
+
+        // Named overrides positional.
+        let out = expand_prompt_template_invocation("/review-it focus=security target=src/auth.rs")
+            .unwrap();
+        assert!(out.contains("Please review the src/auth.rs for security."));
+
+        // Default kicks in when focus is absent (positional is target).
+        // 1 positional → fills focus first; target then unbound + required → missing arg notice.
+        let out = expand_prompt_template_invocation("/review-it src/foo.rs").unwrap();
+        assert!(out.contains("Please review the {{target}} for src/foo.rs."));
+        assert!(out.contains("missing required arg(s): target"));
+
+        // No args → focus uses default "bugs", target is missing.
+        let out = expand_prompt_template_invocation("/review-it").unwrap();
+        assert!(out.contains("for bugs."));
+        assert!(out.contains("missing required arg(s): target"));
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn expansion_legacy_template_without_frontmatter_still_appends_args() {
+        // Backwards-compat: templates without `---` frontmatter use the old
+        // `Args: <rest>` trailer.
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let prompts = temp.path().join("prompts");
+        write_template(&prompts, "old-style", "No frontmatter here.");
+
+        let out = expand_prompt_template_invocation("/old-style hello world").unwrap();
+        assert!(out.contains("No frontmatter here."));
+        assert!(out.contains("Args: hello world"));
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn expansion_skips_builtin_commands() {
+        // Even if a template named "help" existed, the built-in /help wins.
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        write_template(&temp.path().join("prompts"), "help", "shadowed body");
+
+        assert!(expand_prompt_template_invocation("/help").is_none());
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn expansion_returns_none_for_non_slash_input() {
+        assert!(expand_prompt_template_invocation("hello").is_none());
+        assert!(expand_prompt_template_invocation("/").is_none());
+        assert!(expand_prompt_template_invocation("").is_none());
+    }
+
+    #[test]
+    fn expansion_returns_none_for_unknown_template() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        assert!(expand_prompt_template_invocation("/no-such-template").is_none());
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 }
 
 fn build_input_shell_command(command: &str) -> std::process::Command {
@@ -681,6 +908,7 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
     app.reset_tab_completion();
+    app.reset_input_history_browse();
     app.sync_model_picker_preview_from_input();
 }
 
@@ -937,7 +1165,567 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
             result.replace_range(pos..pos + placeholder.len(), content);
         }
     }
-    result
+    expand_at_path_references(&result, app.session.working_dir.as_deref())
+}
+
+/// Maximum size (in bytes) of a single `@path` reference jcode is willing to
+/// inline before sending to the model. Larger files are kept as a literal
+/// `@path` token plus a one-line note so the agent can still ask for them
+/// via the `read` tool — better than blowing the context window silently.
+const AT_PATH_MAX_BYTES: u64 = 200 * 1024;
+
+/// Maximum directory entries inlined for an `@folder/` mention.
+/// Matches Claude Code's `MAX_DIR_ENTRIES = 1000`.
+const AT_FOLDER_MAX_ENTRIES: usize = 1000;
+
+/// Expand `@<path>` references in user input.
+///
+/// Supported forms:
+///   - `@path/to/file` — inline full content (cap: `AT_PATH_MAX_BYTES`)
+///   - `@"path with spaces"` — quoted path; same expansion rules
+///   - `@path/to/file#L10` or `@path/to/file#L10-20` — line range slice
+///   - `@path/to/folder/` — directory listing (1 level, cap:
+///     `AT_FOLDER_MAX_ENTRIES`)
+///
+/// Email-like tokens (`user@example.com`) are left untouched.
+/// Multiple mentions in a single message are all expanded.
+pub fn expand_at_path_references(input: &str, working_dir: Option<&str>) -> String {
+    if !input.contains('@') {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        // Fast path: copy non-`@` chars verbatim.
+        if bytes[i] != b'@' {
+            // Find the next `@` or end of input and copy that slice.
+            let next = bytes[i + 1..]
+                .iter()
+                .position(|&b| b == b'@')
+                .map(|p| i + 1 + p)
+                .unwrap_or(bytes.len());
+            out.push_str(&input[i..next]);
+            i = next;
+            continue;
+        }
+
+        // We're at an `@`. Validate token-start (start of input or
+        // preceded by whitespace) — anything else (including `,@`,
+        // `(@`, `user@`) is left as a literal `@`.
+        let valid_start = i == 0 || (bytes[i - 1] as char).is_ascii_whitespace();
+        if !valid_start {
+            out.push('@');
+            i += 1;
+            continue;
+        }
+
+        // Parse the token after `@`. Two forms:
+        //   - quoted: `@"..."` — content can include spaces; ends at
+        //     matching `"` or end-of-input.
+        //   - bare:   `@path` — ends at first whitespace.
+        let token_start = i + 1;
+        let (raw_token, token_end, was_quoted) = if bytes.get(token_start) == Some(&b'"') {
+            let inner_start = token_start + 1;
+            let mut j = inner_start;
+            while j < bytes.len() && bytes[j] != b'"' {
+                j += 1;
+            }
+            let closed = j < bytes.len();
+            let token = input[inner_start..j].to_string();
+            let end = if closed { j + 1 } else { j };
+            (token, end, true)
+        } else {
+            let mut j = token_start;
+            while j < bytes.len() && !(bytes[j] as char).is_ascii_whitespace() {
+                j += 1;
+            }
+            (input[token_start..j].to_string(), j, false)
+        };
+
+        // Strip trailing punctuation that's clearly not part of a path
+        // (only for unquoted tokens — quoted paths are taken verbatim).
+        let (token, trail_punct) = if was_quoted {
+            (raw_token.as_str(), "")
+        } else {
+            let trimmed = raw_token.trim_end_matches(|c: char| {
+                matches!(c, '.' | ',' | ')' | ']' | '!' | '?' | ':' | ';')
+            });
+            let trail = &raw_token[trimmed.len()..];
+            (trimmed, trail)
+        };
+
+        if token.is_empty() {
+            // Lone `@` — emit as-is and continue past it.
+            out.push_str(&input[i..token_end]);
+            out.push_str(trail_punct);
+            i = token_end;
+            continue;
+        }
+
+        // Parse optional `#L<n>` or `#L<a>-<b>` line range. The hash must
+        // be in the unquoted suffix; quoted paths can contain `#` literally.
+        let (path_part, line_range, range_was_invalid) = if was_quoted {
+            (token.to_string(), None, false)
+        } else {
+            split_line_range(token)
+        };
+
+        match try_read_at_path(&path_part, working_dir, line_range) {
+            ResolveOutcome::File {
+                display_path,
+                body,
+                range,
+            } => {
+                let header = match range {
+                    Some((a, b)) if a == b => format!("@{display_path} (line {a})"),
+                    Some((a, b)) => format!("@{display_path} (lines {a}-{b})"),
+                    None => format!("@{display_path}"),
+                };
+                let mut suffix = String::new();
+                if range_was_invalid {
+                    suffix.push_str(" _(note: ignored invalid line range, showing full file)_");
+                }
+                out.push_str(&format!(
+                    "\n\n--- {header}{suffix} ---\n{body}\n--- end @{display_path} ---\n\n"
+                ));
+                out.push_str(trail_punct);
+            }
+            ResolveOutcome::Folder {
+                display_path,
+                listing,
+                total_entries,
+                shown_entries,
+            } => {
+                let header = if total_entries > shown_entries {
+                    format!(
+                        "@{display_path} (directory listing, {shown_entries} of {total_entries} entries)"
+                    )
+                } else {
+                    format!("@{display_path} (directory listing, {total_entries} entries)")
+                };
+                out.push_str(&format!(
+                    "\n\n--- {header} ---\n{listing}--- end @{display_path} ---\n\n"
+                ));
+                out.push_str(trail_punct);
+            }
+            ResolveOutcome::TooLarge { display_path, size } => {
+                out.push_str(&format!(
+                    "@{display_path} _(skipped — {size} bytes > {AT_PATH_MAX_BYTES} byte cap; use the read tool)_"
+                ));
+                out.push_str(trail_punct);
+            }
+            ResolveOutcome::Missing => {
+                // Leave the original token verbatim (incl. quotes/range).
+                out.push_str(&input[i..token_end]);
+                out.push_str(trail_punct);
+            }
+        }
+        i = token_end;
+    }
+    out
+}
+
+enum ResolveOutcome {
+    File {
+        display_path: String,
+        body: String,
+        range: Option<(usize, usize)>,
+    },
+    Folder {
+        display_path: String,
+        listing: String,
+        total_entries: usize,
+        shown_entries: usize,
+    },
+    TooLarge {
+        display_path: String,
+        size: u64,
+    },
+    Missing,
+}
+
+/// Split a bare token into (path, optional_range, range_was_invalid).
+///
+/// Recognized forms (case-insensitive `L`):
+///   - `path#L10`     → ("path", Some((10, 10)), false)
+///   - `path#L10-20`  → ("path", Some((10, 20)), false)
+///   - `path#L`       → ("path#L", None, true)        — invalid, treat as path
+///   - `path#Lbad`    → ("path#Lbad", None, true)     — invalid
+///
+/// If no `#L` suffix is present, returns `(path, None, false)`.
+fn split_line_range(token: &str) -> (String, Option<(usize, usize)>, bool) {
+    // Find the LAST `#L` so paths containing `#` work (`@path#with#L1`).
+    let Some(hash_pos) = token.rfind("#L") else {
+        return (token.to_string(), None, false);
+    };
+    let path = &token[..hash_pos];
+    let spec = &token[hash_pos + 2..];
+    if spec.is_empty() {
+        return (token.to_string(), None, true);
+    }
+    if let Some((a_str, b_str)) = spec.split_once('-') {
+        match (a_str.parse::<usize>(), b_str.parse::<usize>()) {
+            (Ok(a), Ok(b)) if a >= 1 && b >= a => {
+                return (path.to_string(), Some((a, b)), false);
+            }
+            _ => return (token.to_string(), None, true),
+        }
+    }
+    match spec.parse::<usize>() {
+        Ok(n) if n >= 1 => (path.to_string(), Some((n, n)), false),
+        _ => (token.to_string(), None, true),
+    }
+}
+
+fn try_read_at_path(
+    token: &str,
+    working_dir: Option<&str>,
+    range: Option<(usize, usize)>,
+) -> ResolveOutcome {
+    let path = std::path::Path::new(token);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Some(cwd) = working_dir {
+        std::path::Path::new(cwd).join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let Ok(meta) = std::fs::metadata(&resolved) else {
+        return ResolveOutcome::Missing;
+    };
+
+    if meta.is_dir() {
+        return read_folder_listing(&resolved, token);
+    }
+
+    if !meta.is_file() {
+        return ResolveOutcome::Missing;
+    }
+
+    let size = meta.len();
+    if size > AT_PATH_MAX_BYTES {
+        return ResolveOutcome::TooLarge {
+            display_path: token.to_string(),
+            size,
+        };
+    }
+
+    let body = match std::fs::read_to_string(&resolved) {
+        Ok(b) => b,
+        Err(_) => return ResolveOutcome::Missing,
+    };
+
+    let (sliced, applied_range) = match range {
+        Some((a, b)) => {
+            let lines: Vec<&str> = body.lines().collect();
+            // Clamp to actual line count; preserve user's reported range.
+            let end = b.min(lines.len()).max(a.min(lines.len()));
+            if a > lines.len() {
+                (String::new(), Some((a, b)))
+            } else {
+                let slice = lines[a - 1..end].join("\n");
+                (slice, Some((a, b)))
+            }
+        }
+        None => (body, None),
+    };
+
+    ResolveOutcome::File {
+        display_path: token.to_string(),
+        body: sliced,
+        range: applied_range,
+    }
+}
+
+/// Build a 1-level directory listing in the format Claude Code uses.
+/// Sort: directories first (alphabetical), then files (alphabetical).
+/// Each directory entry has a trailing `/`.
+fn read_folder_listing(abs: &std::path::Path, display_token: &str) -> ResolveOutcome {
+    let entries = match std::fs::read_dir(abs) {
+        Ok(e) => e,
+        Err(_) => return ResolveOutcome::Missing,
+    };
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            dirs.push(format!("{name_str}/"));
+        } else {
+            files.push(name_str);
+        }
+    }
+    dirs.sort();
+    files.sort();
+    let total = dirs.len() + files.len();
+
+    let mut listing = String::new();
+    let mut shown = 0usize;
+    for entry in dirs.iter().chain(files.iter()) {
+        if shown >= AT_FOLDER_MAX_ENTRIES {
+            break;
+        }
+        listing.push_str(entry);
+        listing.push('\n');
+        shown += 1;
+    }
+    if total > shown {
+        listing.push_str(&format!("… and {} more entries\n", total - shown));
+    }
+
+    // Always present folder paths with a trailing `/` in the marker so
+    // model can distinguish folder mentions from file mentions.
+    let display_path = if display_token.ends_with('/') {
+        display_token.to_string()
+    } else {
+        format!("{display_token}/")
+    };
+
+    ResolveOutcome::Folder {
+        display_path,
+        listing,
+        total_entries: total,
+        shown_entries: shown,
+    }
+}
+
+#[cfg(test)]
+mod at_path_tests {
+    use super::*;
+
+    #[test]
+    fn passes_through_input_with_no_at() {
+        assert_eq!(
+            expand_at_path_references("hello world", None),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn does_not_expand_email_like_tokens() {
+        let out = expand_at_path_references("ping me at user@example.com please", None);
+        assert!(out.contains("user@example.com"));
+        assert!(!out.contains("--- @example.com"));
+    }
+
+    #[test]
+    fn expands_real_file_relative_to_working_dir() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("hello.txt");
+        std::fs::write(&file, "FILE_BODY\nLINE 2").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+
+        let out = expand_at_path_references("review @hello.txt for issues", Some(&cwd));
+        assert!(out.contains("--- @hello.txt ---"));
+        assert!(out.contains("FILE_BODY"));
+        assert!(out.contains("LINE 2"));
+        assert!(out.contains("--- end @hello.txt ---"));
+        // Trailing words are preserved.
+        assert!(out.contains(" for issues"));
+    }
+
+    #[test]
+    fn missing_file_leaves_at_token_literal() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("look at @nope.txt", Some(&cwd));
+        assert_eq!(out, "look at @nope.txt");
+    }
+
+    #[test]
+    fn trailing_punctuation_after_path_is_preserved() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        // "@a.rs." => path is "a.rs", trailing "." preserved.
+        let out = expand_at_path_references("see @a.rs.", Some(&cwd));
+        assert!(out.contains("--- @a.rs ---"));
+        assert!(out.trim_end().ends_with("."));
+    }
+
+    // ---- Phase 5: quoted paths, line ranges, folder listings ----
+
+    #[test]
+    fn quoted_path_with_space_expands() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("my file.txt");
+        std::fs::write(&file, "hello world").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("@\"my file.txt\"", Some(&cwd));
+        assert!(out.contains("--- @my file.txt ---"), "got: {out}");
+        assert!(out.contains("hello world"));
+    }
+
+    #[test]
+    fn line_range_single_line() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.rs");
+        std::fs::write(&file, "line1\nline2\nline3\nline4").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("@a.rs#L2", Some(&cwd));
+        assert!(out.contains("--- @a.rs (line 2) ---"), "got: {out}");
+        assert!(out.contains("line2"));
+        assert!(!out.contains("line1"));
+        assert!(!out.contains("line3"));
+    }
+
+    #[test]
+    fn line_range_multi_line() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.rs");
+        std::fs::write(&file, "a\nb\nc\nd\ne").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("@a.rs#L2-4", Some(&cwd));
+        assert!(out.contains("--- @a.rs (lines 2-4) ---"), "got: {out}");
+        assert!(out.contains("b\nc\nd"));
+        assert!(!out.contains("\na\n") && !out.starts_with("a\n"));
+    }
+
+    #[test]
+    fn invalid_line_range_falls_back_to_full_file_with_note() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.rs");
+        std::fs::write(&file, "x\ny\nz").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("@a.rs#Lbad", Some(&cwd));
+        // The path with `#Lbad` doesn't exist, so the token stays literal.
+        // (Better to keep it as `@a.rs#Lbad` than silently expand to a
+        // different path the user didn't ask for.)
+        assert!(out.contains("@a.rs#Lbad"), "got: {out}");
+    }
+
+    #[test]
+    fn line_range_just_hash_l_treated_as_path() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.rs");
+        std::fs::write(&file, "x").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        // `@a.rs#L` is invalid range → token is `a.rs#L` → file not found
+        // → literal kept.
+        let out = expand_at_path_references("@a.rs#L", Some(&cwd));
+        assert!(out.contains("@a.rs#L"));
+    }
+
+    #[test]
+    fn folder_mention_inlines_listing() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let cwd = temp.path().to_string_lossy().to_string();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/a.rs"), "").unwrap();
+        std::fs::write(temp.path().join("src/b.rs"), "").unwrap();
+        std::fs::create_dir(temp.path().join("src/sub")).unwrap();
+
+        let out = expand_at_path_references("review @src/", Some(&cwd));
+        assert!(out.contains("--- @src/ (directory listing"), "got: {out}");
+        // Sort: directories first, then files, alphabetically.
+        let listing_section = out.split("--- @src/ (directory listing").nth(1).unwrap();
+        let pos_sub = listing_section.find("sub/").unwrap();
+        let pos_a = listing_section.find("a.rs").unwrap();
+        let pos_b = listing_section.find("b.rs").unwrap();
+        assert!(pos_sub < pos_a, "dirs should come before files");
+        assert!(pos_a < pos_b, "files alphabetically sorted");
+        // No file content was inlined — only the listing.
+        assert!(!out.contains("--- end @src/ ---\n\n--- ") || out.matches("--- end").count() == 1);
+    }
+
+    #[test]
+    fn folder_listing_caps_at_max_entries() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let big = temp.path().join("big");
+        std::fs::create_dir(&big).unwrap();
+        for n in 0..(super::AT_FOLDER_MAX_ENTRIES + 50) {
+            std::fs::write(big.join(format!("f{n:05}.txt")), "").unwrap();
+        }
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("@big/", Some(&cwd));
+        // Header announces shown vs total.
+        assert!(
+            out.contains(&format!(
+                "{} of {} entries",
+                super::AT_FOLDER_MAX_ENTRIES,
+                super::AT_FOLDER_MAX_ENTRIES + 50
+            )),
+            "got: {out}"
+        );
+        // Truncation note present.
+        assert!(out.contains("… and 50 more entries"));
+    }
+
+    #[test]
+    fn multiple_mentions_all_expanded() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let cwd = temp.path().to_string_lossy().to_string();
+        std::fs::write(temp.path().join("a.rs"), "AAA").unwrap();
+        std::fs::write(temp.path().join("b.rs"), "BBB").unwrap();
+        std::fs::create_dir(temp.path().join("docs")).unwrap();
+        std::fs::write(temp.path().join("docs/x.md"), "").unwrap();
+
+        let out = expand_at_path_references("see @a.rs and @docs/ then @b.rs", Some(&cwd));
+        assert!(out.contains("AAA"));
+        assert!(out.contains("BBB"));
+        assert!(out.contains("--- @docs/ (directory listing"));
+    }
+
+    #[test]
+    fn email_with_mention_after_only_expands_mention() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let cwd = temp.path().to_string_lossy().to_string();
+        std::fs::write(temp.path().join("real.rs"), "REAL").unwrap();
+        let out = expand_at_path_references("ping user@example.com about @real.rs", Some(&cwd));
+        assert!(out.contains("user@example.com"));
+        assert!(!out.contains("--- @example.com"));
+        assert!(out.contains("REAL"));
+    }
+
+    #[test]
+    fn folder_without_trailing_slash_still_works() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let cwd = temp.path().to_string_lossy().to_string();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        let out = expand_at_path_references("look at @src", Some(&cwd));
+        // No trailing `/` in token, but the marker normalizes to `@src/`.
+        assert!(out.contains("--- @src/ (directory listing"), "got: {out}");
+    }
+
+    #[test]
+    fn line_range_clamped_to_file_length() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.rs");
+        std::fs::write(&file, "x\ny\nz").unwrap();
+        let cwd = temp.path().to_string_lossy().to_string();
+        let out = expand_at_path_references("@a.rs#L1-100", Some(&cwd));
+        assert!(out.contains("--- @a.rs (lines 1-100) ---"), "got: {out}");
+        assert!(out.contains("x\ny\nz"));
+    }
+
+    #[test]
+    fn split_line_range_helper() {
+        use super::split_line_range;
+        assert_eq!(
+            split_line_range("file.rs#L10"),
+            ("file.rs".into(), Some((10, 10)), false)
+        );
+        assert_eq!(
+            split_line_range("file.rs#L5-7"),
+            ("file.rs".into(), Some((5, 7)), false)
+        );
+        assert_eq!(split_line_range("file.rs"), ("file.rs".into(), None, false));
+        // Backwards range → invalid, keep literal.
+        assert_eq!(
+            split_line_range("file.rs#L7-3"),
+            ("file.rs#L7-3".into(), None, true)
+        );
+        // Zero → invalid.
+        assert_eq!(
+            split_line_range("file.rs#L0"),
+            ("file.rs#L0".into(), None, true)
+        );
+    }
 }
 
 pub(super) fn queue_message(app: &mut App) {
@@ -1841,11 +2629,23 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Up | KeyCode::PageUp => {
+            if code == KeyCode::Up
+                && (app.input.is_empty() || app.input_history_index.is_some())
+                && app.input_history_up()
+            {
+                return true;
+            }
             let inc = if code == KeyCode::PageUp { 10 } else { 1 };
             app.scroll_up(inc);
             true
         }
         KeyCode::Down | KeyCode::PageDown => {
+            if code == KeyCode::Down
+                && app.input_history_index.is_some()
+                && app.input_history_down()
+            {
+                return true;
+            }
             let dec = if code == KeyCode::PageDown { 10 } else { 1 };
             app.scroll_down(dec);
             true
@@ -1903,6 +2703,8 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
     app.clear_input_undo_history();
+    app.reset_input_history_browse();
+    app.push_input_history(expanded.clone());
     PreparedInput {
         raw_input,
         expanded,
@@ -2066,6 +2868,15 @@ impl App {
         // Shift+Enter and Alt/Option+Enter insert a newline in the input box.
         if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
             handle_shift_enter(self);
+            return Ok(());
+        }
+
+        // Shift+Tab: cycle permission mode (Shift+Tab cycles through
+        // default → acceptEdits → plan → auto → dontAsk → bypassPermissions → default)
+        if code == KeyCode::Tab && modifiers.contains(KeyModifiers::SHIFT) {
+            self.cycle_permission_mode();
+            let label = self.permission_mode_label();
+            self.set_status_notice(format!("🔒 {} mode", label));
             return Ok(());
         }
 
@@ -2391,7 +3202,7 @@ impl App {
             return;
         }
 
-        let raw_input = std::mem::take(&mut self.input);
+        let mut raw_input = std::mem::take(&mut self.input);
         let input = self.expand_paste_placeholders(&raw_input);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
@@ -2403,6 +3214,7 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
+        self.reset_input_history_browse();
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         // If the previous assistant turn still has visible streamed text that has not yet been
@@ -2425,6 +3237,19 @@ impl App {
             commands::handle_pending_ssh_remote_target(self, name, input);
             return;
         }
+
+        // Issue #4 follow-up: if the user typed `/<name>` (or `/<name> <args>`)
+        // and `<name>` is a discovered prompt template, expand the template
+        // body in-place so the rest of the submit flow treats it as a normal
+        // user message. Built-in slash commands (`/help`, `/quit`, `/export`,
+        // etc.) are checked first below, so this only fires for user-defined
+        // templates.
+        let mut input = expand_prompt_template_invocation(&input).unwrap_or(input);
+
+        // Issue #265 (input history): record submitted input for Up/Down recall.
+        // Done after template expansion so the recall menu shows the
+        // user-typed string, not the expanded body.
+        self.push_input_history(input.clone());
 
         let trimmed = input.trim();
         let handled = commands::handle_help_command(self, trimmed)
@@ -2515,6 +3340,28 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+
+                // Issue #125: previously, `/skill-name` activated the skill
+                // and returned without sending anything to the model. Some
+                // non-Claude providers (zai/GLM, etc.) then stalled on the
+                // following turn because the agent had a large skill-injected
+                // system prompt with no fresh user message to anchor the
+                // conversation.
+                //
+                // Trigger a real turn now with a short instruction the model
+                // can act on. Mirrors what the user would get if they typed
+                // `/skill-name please begin.`. The skill body is already
+                // wired into the system prompt via active_skill in the agent
+                // prompting layer; this just gives the turn a non-empty
+                // user message.
+                let synthesized = format!(
+                    "Please begin applying the `{}` skill that was just activated.",
+                    skill.name
+                );
+                raw_input = synthesized.clone();
+                input = synthesized;
+                // Fall through to the normal user-message path below, which
+                // will push raw_input to display + send `input` to the model.
             } else {
                 self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
@@ -2524,8 +3371,8 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+                return;
             }
-            return;
         }
 
         // Leaving the preview should happen as soon as the user acts on it.

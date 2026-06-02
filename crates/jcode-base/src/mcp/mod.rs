@@ -10,6 +10,7 @@ pub mod pool;
 mod protocol;
 pub mod schema_cache;
 mod tool;
+pub mod trust;
 
 pub use client::{McpClient, McpHandle};
 pub use manager::McpManager;

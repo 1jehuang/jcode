@@ -103,6 +103,32 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(CEREBRAS_PROFILE.api_base, "https://api.cerebras.ai/v1");
     assert_eq!(CEREBRAS_PROFILE.default_model, Some("gpt-oss-120b"));
     assert!(!OPENAI_COMPAT_PROFILE.setup_url.contains("opencode.ai"));
+    // Issue #80: aggregator providers previously pointed users at
+    // `opencode.ai/docs/providers#...` which 404s for jcode. Every preset
+    // should now point at the fork's README OAuth section instead, so
+    // `jcode login --provider <id>` flows surface a useful URL.
+    for profile in [
+        OPENCODE_PROFILE,
+        OPENCODE_GO_PROFILE,
+        ZAI_PROFILE,
+        DEEPSEEK_PROFILE,
+        MINIMAX_PROFILE,
+    ] {
+        assert!(
+            !profile.setup_url.contains("opencode.ai/docs"),
+            "{} setup_url should not point to opencode.ai/docs (got {:?})",
+            profile.id,
+            profile.setup_url
+        );
+    }
+    assert_eq!(
+        OPENCODE_PROFILE.setup_url,
+        "https://github.com/quangdang46/jcode#oauth-and-providers"
+    );
+    assert_eq!(
+        OPENCODE_GO_PROFILE.setup_url,
+        "https://github.com/quangdang46/jcode#oauth-and-providers"
+    );
 }
 
 #[test]
@@ -156,6 +182,120 @@ fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_internatio
     );
     assert_eq!(china.api_base, MINIMAX_CHINA_API_BASE);
     assert_eq!(china.setup_url, MINIMAX_CHINA_SETUP_URL);
+}
+
+#[test]
+fn minimax_token_plan_keys_route_to_china_even_when_openai_api_key_env_is_international() {
+    // Regression for issue #141 (upstream PR #188): users on the MiniMax
+    // China Token Plan reported a `401 authorized_error` because their
+    // `sk-cp-...` keys were being sent to `api.minimax.io`. Our fork
+    // resolves the base URL from the *hint* (the actual key being used to
+    // call the API), not from a stale `OPENAI_API_KEY` env value, so the
+    // auto-switch must still kick in even when an unrelated international
+    // OpenAI key is exported in the shell.
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&["OPENAI_API_KEY"]);
+    crate::env::set_var("OPENAI_API_KEY", "sk-international-not-china");
+
+    let resolved = resolve_openai_compatible_profile_with_api_key_hint(
+        MINIMAX_PROFILE,
+        Some("sk-cp-real-china-token"),
+    );
+    assert_eq!(
+        resolved.api_base, MINIMAX_CHINA_API_BASE,
+        "sk-cp-* keys must route to api.minimaxi.com regardless of an \
+         unrelated international OPENAI_API_KEY in env"
+    );
+    assert_eq!(resolved.setup_url, MINIMAX_CHINA_SETUP_URL);
+}
+
+#[test]
+fn minimax_region_global_override_keeps_international_endpoint_for_sk_cp_keys() {
+    // MiniMax's global console issues sk-cp-prefixed keys too, so the
+    // auto-routing-by-prefix would dump them on api.minimaxi.com and 401.
+    // JCODE_MINIMAX_REGION=global must force the catalog default
+    // (api.minimax.io) regardless of the prefix.
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&["OPENAI_API_KEY", "JCODE_MINIMAX_REGION"]);
+    crate::env::remove_var("OPENAI_API_KEY");
+    crate::env::set_var("JCODE_MINIMAX_REGION", "global");
+
+    let resolved = resolve_openai_compatible_profile_with_api_key_hint(
+        MINIMAX_PROFILE,
+        Some("sk-cp-actually-a-global-key"),
+    );
+    assert_eq!(
+        resolved.api_base, "https://api.minimax.io/v1",
+        "JCODE_MINIMAX_REGION=global must beat the sk-cp- → China heuristic"
+    );
+}
+
+#[test]
+fn minimax_region_china_override_routes_even_without_sk_cp_prefix() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&["OPENAI_API_KEY", "JCODE_MINIMAX_REGION"]);
+    crate::env::remove_var("OPENAI_API_KEY");
+    crate::env::set_var("JCODE_MINIMAX_REGION", "china");
+
+    let resolved = resolve_openai_compatible_profile_with_api_key_hint(
+        MINIMAX_PROFILE,
+        Some("any-non-sk-cp-key"),
+    );
+    assert_eq!(resolved.api_base, MINIMAX_CHINA_API_BASE);
+    assert_eq!(resolved.setup_url, MINIMAX_CHINA_SETUP_URL);
+}
+
+#[test]
+fn minimax_region_invalid_value_falls_through_to_prefix_heuristic() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&["OPENAI_API_KEY", "JCODE_MINIMAX_REGION"]);
+    crate::env::remove_var("OPENAI_API_KEY");
+    crate::env::set_var("JCODE_MINIMAX_REGION", "garbage");
+
+    // Invalid override → prefix heuristic still picks China for sk-cp- keys.
+    let resolved = resolve_openai_compatible_profile_with_api_key_hint(
+        MINIMAX_PROFILE,
+        Some("sk-cp-token-plan"),
+    );
+    assert_eq!(resolved.api_base, MINIMAX_CHINA_API_BASE);
+
+    // And global default for non-prefix keys.
+    let resolved2 = resolve_openai_compatible_profile_with_api_key_hint(
+        MINIMAX_PROFILE,
+        Some("sk-international"),
+    );
+    assert_eq!(resolved2.api_base, "https://api.minimax.io/v1");
+}
+
+#[test]
+fn minimax_region_aliases_accept_io_cn_minimaxi() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&["OPENAI_API_KEY", "JCODE_MINIMAX_REGION"]);
+    crate::env::remove_var("OPENAI_API_KEY");
+
+    for global_alias in ["global", "international", "io", "GLOBAL", "  Global  "] {
+        crate::env::set_var("JCODE_MINIMAX_REGION", global_alias);
+        let resolved = resolve_openai_compatible_profile_with_api_key_hint(
+            MINIMAX_PROFILE,
+            Some("sk-cp-test"),
+        );
+        assert_eq!(
+            resolved.api_base, "https://api.minimax.io/v1",
+            "{global_alias:?} should route to global"
+        );
+    }
+
+    for china_alias in ["china", "cn", "minimaxi", "CHINA"] {
+        crate::env::set_var("JCODE_MINIMAX_REGION", china_alias);
+        let resolved = resolve_openai_compatible_profile_with_api_key_hint(
+            MINIMAX_PROFILE,
+            Some("sk-international-test"),
+        );
+        assert_eq!(
+            resolved.api_base, MINIMAX_CHINA_API_BASE,
+            "{china_alias:?} should route to China"
+        );
+    }
 }
 
 #[test]

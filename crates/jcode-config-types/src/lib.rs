@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Compaction mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -266,6 +267,12 @@ pub enum NamedProviderType {
     #[serde(alias = "openai-compatible", alias = "openai_compatible")]
     #[default]
     OpenAiCompatible,
+    /// Issue #83: Anthropic Messages API-compatible endpoints (Bedrock,
+    /// Vertex Anthropic, custom corporate gateways implementing the
+    /// `/v1/messages` schema). Distinct from OpenAI-compatible chat
+    /// completions because the request/response shape differs.
+    #[serde(alias = "anthropic-compatible", alias = "anthropic_compatible")]
+    AnthropicCompatible,
     OpenRouter,
 }
 
@@ -315,6 +322,12 @@ pub struct NamedProviderConfig {
     pub model_catalog: bool,
     #[serde(default)]
     pub allow_provider_pinning: bool,
+    /// Issue #83: extra HTTP headers to attach to every request to
+    /// this provider. Useful for corporate gateways requiring
+    /// X-Tenant / X-Project / etc. Header values are persisted in
+    /// the config file plaintext — do NOT use for secrets.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<NamedProviderModelConfig>,
 }
@@ -335,6 +348,7 @@ impl Default for NamedProviderConfig {
             provider_routing: false,
             model_catalog: false,
             allow_provider_pinning: false,
+            headers: BTreeMap::new(),
             models: Vec::new(),
         }
     }
@@ -628,6 +642,8 @@ pub struct FeatureConfig {
     pub persist_memory_injections: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
+    /// Enable Dynamic Context Pruning (DCP) feature (default: true)
+    pub dcp_enabled: bool,
 }
 
 impl Default for FeatureConfig {
@@ -638,6 +654,7 @@ impl Default for FeatureConfig {
             message_timestamps: true,
             persist_memory_injections: false,
             update_channel: UpdateChannel::default(),
+            dcp_enabled: true,
         }
     }
 }
@@ -651,6 +668,11 @@ pub enum WebSearchEngine {
     Duckduckgo,
     /// Bing search. Uses the Bing API when configured, otherwise Bing HTML search.
     Bing,
+    /// Exa.ai semantic search — requires `EXA_API_KEY` env var.
+    /// Higher-quality results for code/research queries; no scraping
+    /// fallback, so falls back to DuckDuckGo / Bing if the API key is
+    /// missing or quota-exhausted.
+    Exa,
     /// SearXNG metasearch instance (JSON API). Requires `searxng_url` (or the
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
@@ -662,6 +684,7 @@ impl WebSearchEngine {
         match self {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
+            Self::Exa => "exa",
             Self::Searxng => "searxng",
         }
     }
@@ -670,6 +693,7 @@ impl WebSearchEngine {
         match value.trim().to_ascii_lowercase().as_str() {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
+            "exa" | "exa.ai" | "exa-ai" => Some(Self::Exa),
             "searxng" | "searx" => Some(Self::Searxng),
             _ => None,
         }
@@ -719,6 +743,11 @@ pub struct ProviderConfig {
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,
+    /// Issue #163: list of provider keys to treat as disabled.
+    /// Each entry matches case-insensitively against provider keys
+    /// (e.g. `["copilot", "openrouter"]`). Disabled providers are
+    /// hidden from auth status, login UI, and provider catalog.
+    pub disabled_providers: Vec<String>,
     /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
     pub openai_reasoning_effort: Option<String>,
     /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
@@ -741,6 +770,19 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Custom system prompt to use instead of the default. When set, every
+    /// new agent session is initialized with this string as
+    /// `system_prompt_override`. Useful for forking jcode against a hosted
+    /// model that ships a different default persona, or for project-pinned
+    /// behavior baselines.
+    pub system_prompt: Option<String>,
+
+    /// User-defined ordered list of model id patterns to scope `Ctrl+P` /
+    /// `/scoped-models` cycling to. Patterns match by case-insensitive
+    /// substring or by glob (`*` and `?`). Empty = full provider list. See
+    /// issue #26.
+    pub scoped_models: Vec<String>,
+
     /// Max seconds to wait for streaming data before timing out a request with
     /// no data received. Raise this for slow reasoning models (e.g. DeepSeek)
     /// that think silently for minutes before emitting tokens. Default: 180.
@@ -753,6 +795,7 @@ impl Default for ProviderConfig {
         Self {
             default_model: None,
             default_provider: None,
+            disabled_providers: Vec::new(),
             openai_reasoning_effort: Some("low".to_string()),
             anthropic_reasoning_effort: None,
             openai_transport: None,
@@ -763,6 +806,8 @@ impl Default for ProviderConfig {
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,
+            system_prompt: None,
+            scoped_models: Vec::new(),
             stream_idle_timeout_secs: 180,
         }
     }
@@ -776,6 +821,11 @@ pub struct AmbientConfig {
     pub enabled: bool,
     /// Provider override (default: auto-select)
     pub provider: Option<String>,
+    /// Named provider profile to route ambient work to (e.g. "local-vllm",
+    /// "ollama"). Wins over `provider` when set. Useful for routing ambient
+    /// cycles to a cheap local model while keeping main sessions on a
+    /// premium provider. See #90.
+    pub provider_profile: Option<String>,
     /// Model override (default: provider's strongest)
     pub model: Option<String>,
     /// Allow API key usage (default: false, only OAuth)
@@ -801,6 +851,7 @@ impl Default for AmbientConfig {
         Self {
             enabled: false,
             provider: None,
+            provider_profile: None,
             model: None,
             allow_api_keys: false,
             api_daily_budget: None,
@@ -937,4 +988,18 @@ impl Default for GatewayConfig {
             bind_addr: "0.0.0.0".to_string(),
         }
     }
+}
+
+/// Terminal / shell execution configuration (issue #260 follow-up).
+///
+/// When `shell` is set, the bash tool spawns the named shell instead
+/// of the platform default (`bash` on Unix, `cmd.exe` on Windows).
+/// Useful for users on `nu`, `zsh`, `fish`, or PowerShell who want
+/// shell-specific syntax to work in agent-spawned commands.
+///
+/// Overridden by the `JCODE_SHELL` env var.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TerminalConfig {
+    pub shell: Option<String>,
 }

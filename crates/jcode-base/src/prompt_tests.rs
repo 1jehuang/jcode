@@ -1,4 +1,6 @@
 use super::*;
+use crate::cli::args::Args;
+use clap::Parser;
 
 /// Verify the default system prompt does NOT identify as "Claude Code"
 /// It's fine to say "powered by Claude" but not "Claude Code" (Anthropic's product)
@@ -267,4 +269,217 @@ fn split_prompt_estimated_tokens_is_positive_when_populated() {
     let (split, _info) = build_system_prompt_split(None, &[], false, None, None);
     assert!(split.chars() > 0);
     assert!(split.estimated_tokens() > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #22:
+// - .jcode/SYSTEM.md replaces the default system prompt.
+// - .jcode/APPEND_SYSTEM.md (and the CLI/env equivalents) extend it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn system_prompt_env_var_replaces_default_root() {
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_SYSTEM_PROMPT");
+    crate::env::set_var("JCODE_SYSTEM_PROMPT", "ROOT_FROM_CLI");
+
+    let temp = tempfile::TempDir::new().expect("temp");
+    let resolved = resolve_system_prompt_override(Some(temp.path()));
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", prev);
+    } else {
+        crate::env::remove_var("JCODE_SYSTEM_PROMPT");
+    }
+
+    assert_eq!(resolved.as_deref(), Some("ROOT_FROM_CLI"));
+}
+
+#[test]
+fn project_jcode_system_md_replaces_default_root() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_env = std::env::var_os("JCODE_SYSTEM_PROMPT");
+    crate::env::remove_var("JCODE_SYSTEM_PROMPT");
+
+    let temp = tempfile::TempDir::new().expect("temp");
+    let dot = temp.path().join(".jcode");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("SYSTEM.md"), "PROJECT_ROOT").unwrap();
+
+    let resolved = resolve_system_prompt_override(Some(temp.path()));
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", prev);
+    }
+
+    assert_eq!(resolved.as_deref(), Some("PROJECT_ROOT"));
+}
+
+#[test]
+fn append_system_prompt_collects_env_and_files_in_order() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_env = std::env::var_os("JCODE_APPEND_SYSTEM_PROMPT");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", "FROM_CLI");
+
+    let home_temp = tempfile::TempDir::new().expect("home temp");
+    crate::env::set_var("JCODE_HOME", home_temp.path());
+    let agent_dir = home_temp.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("APPEND_SYSTEM.md"), "FROM_GLOBAL").unwrap();
+
+    let proj_temp = tempfile::TempDir::new().expect("proj temp");
+    let dot = proj_temp.path().join(".jcode");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("APPEND_SYSTEM.md"), "FROM_PROJECT").unwrap();
+
+    let (joined, total) = load_append_system_prompt_files_from_dir(Some(proj_temp.path()));
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", prev);
+    } else {
+        crate::env::remove_var("JCODE_APPEND_SYSTEM_PROMPT");
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    let joined = joined.expect("expected appended content");
+    let global_pos = joined.find("FROM_GLOBAL").expect("global section present");
+    let project_pos = joined
+        .find("FROM_PROJECT")
+        .expect("project section present");
+    let cli_pos = joined.find("FROM_CLI").expect("cli section present");
+    assert!(
+        global_pos < project_pos && project_pos < cli_pos,
+        "expected global < project < cli order in {joined:?}"
+    );
+    assert!(total >= "FROM_GLOBAL".len() + "FROM_PROJECT".len() + "FROM_CLI".len());
+}
+
+#[test]
+fn build_system_prompt_full_uses_jcode_system_md_root() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_env = std::env::var_os("JCODE_SYSTEM_PROMPT");
+    crate::env::remove_var("JCODE_SYSTEM_PROMPT");
+
+    let temp = tempfile::TempDir::new().expect("temp");
+    let dot = temp.path().join(".jcode");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("SYSTEM.md"), "MY_OVERRIDDEN_ROOT").unwrap();
+
+    let (prompt, info) = build_system_prompt_full(None, &[], false, None, Some(temp.path()));
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", prev);
+    }
+
+    assert!(prompt.starts_with("MY_OVERRIDDEN_ROOT"));
+    // Default prompt is much longer; the override is a tiny string.
+    assert!(info.system_prompt_chars < 200);
+    assert!(!prompt.contains(crate::prompt::DEFAULT_SYSTEM_PROMPT));
+}
+
+#[test]
+fn test_context_files_disabled_returns_false_by_default() {
+    let _guard = crate::storage::lock_test_env();
+    // Ensure the env var is NOT set
+    crate::env::remove_var("JCODE_NO_CONTEXT_FILES");
+    assert!(!context_files_disabled());
+}
+
+#[test]
+fn test_context_files_disabled_returns_true_when_env_set() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_val = std::env::var("JCODE_NO_CONTEXT_FILES");
+    // Ensure the env var is set for this test
+    crate::env::set_var("JCODE_NO_CONTEXT_FILES", "1");
+    assert!(context_files_disabled());
+    // Restore previous state
+    match prev_val {
+        Ok(val) => crate::env::set_var("JCODE_NO_CONTEXT_FILES", val),
+        Err(_) => crate::env::remove_var("JCODE_NO_CONTEXT_FILES"),
+    }
+}
+
+#[test]
+fn test_load_agents_md_from_dir_returns_none_when_disabled() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("JCODE_NO_CONTEXT_FILES", "1");
+
+    // Even with a global AGENTS.md present, loading should be skipped
+    std::fs::create_dir_all(temp.path()).unwrap();
+    std::fs::write(temp.path().join("AGENTS.md"), "global agents instructions").unwrap();
+
+    let (content, _info) = load_agents_md_files_from_dir(None);
+    assert!(content.is_none());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::env::remove_var("JCODE_NO_CONTEXT_FILES");
+}
+
+#[test]
+fn test_load_agents_md_from_dir_loads_files_when_not_disabled() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    // Remove any leftover env var
+    crate::env::remove_var("JCODE_NO_CONTEXT_FILES");
+
+    std::fs::create_dir_all(temp.path().join("external")).unwrap();
+    std::fs::write(
+        temp.path().join("external/AGENTS.md"),
+        "global agents instructions",
+    )
+    .unwrap();
+
+    let (content, info) = load_agents_md_files_from_dir(None);
+    assert!(info.has_global_agents_md);
+    assert!(
+        content
+            .as_ref()
+            .map(|c| c.contains("global agents instructions"))
+            .unwrap_or(false)
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_cli_flag_no_short_alias() {
+    // Verify that -c is NOT a valid alias for --no-context-files
+    let result = Args::try_parse_from(["jcode", "-c", "--provider", "openai"]);
+    assert!(
+        result.is_err(),
+        "-c should not be a valid short flag for --no-context-files"
+    );
+}
+
+#[test]
+fn test_cli_flag_no_context_files_parsed() {
+    let args = Args::parse_from(["jcode", "--no-context-files"]);
+    assert!(args.no_context_files);
+
+    // Without the flag, should be false
+    let args2 = Args::parse_from(["jcode"]);
+    assert!(!args2.no_context_files);
+
+    // With subcommand
+    let args3 = Args::parse_from(["jcode", "--no-context-files", "run", "hello"]);
+    assert!(args3.no_context_files);
 }

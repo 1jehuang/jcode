@@ -1,0 +1,8 @@
+{
+  "tool": "read",
+  "args": { "path": "hello.txt" },
+  "setup_files": { "hello.txt": "Hello, world!\n" },
+  "expect": {
+    "output_contains": ["Hello, world!"]
+  }
+}

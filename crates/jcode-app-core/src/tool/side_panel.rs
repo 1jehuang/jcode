@@ -122,7 +122,7 @@ impl Tool for SidePanelTool {
                     .file_path
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("file_path is required for load"))?;
-                let resolved = ctx.resolve_path(Path::new(file_path));
+                let resolved = ctx.resolve_path_checked(Path::new(file_path))?;
                 let page_id = params
                     .page_id
                     .clone()

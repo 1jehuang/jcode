@@ -444,7 +444,23 @@ async fn handle_background_output_line(
     file.flush().await.ok();
 }
 
-fn build_shell_command(cmd_str: &str) -> TokioCommand {
+fn build_shell_command(shell: Option<&str>, cmd_str: &str) -> TokioCommand {
+    // Issue #260 follow-up: when the user configured a custom shell
+    // via `[terminal] shell = "..."` or JCODE_SHELL, just spawn that
+    // shell directly with the command string. The shell handles its
+    // own arg parsing (most shells accept `-c` for inline commands;
+    // PowerShell uses `-Command`; nu uses `-c`). Falls back to the
+    // platform default when shell is None.
+    if let Some(shell_name) = shell {
+        let mut cmd = TokioCommand::new(shell_name);
+        // Use `-c` as a reasonable default. Shells that don't accept
+        // it (e.g. fish-only) should be configured at the script
+        // level. PowerShell users should set shell = "pwsh" and the
+        // tool's input will be POSIX-shell-like; for full PowerShell
+        // syntax, wrap in `pwsh -Command` at the input level.
+        cmd.arg("-c").arg(cmd_str);
+        return cmd;
+    }
     #[cfg(windows)]
     {
         let mut cmd = TokioCommand::new("cmd.exe");
@@ -504,7 +520,7 @@ mod utf8_truncation_tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn build_shell_command_uses_cmd_and_executes_command() {
-        let output = build_shell_command("echo hello-from-cmd")
+        let output = build_shell_command(None, "echo hello-from-cmd")
             .output()
             .await
             .expect("run cmd command");
@@ -643,7 +659,10 @@ impl BashTool {
 
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
-        let mut command = build_shell_command(&params.command);
+        let mut command = build_shell_command(
+            crate::config::config().terminal.shell.as_deref(),
+            &params.command,
+        );
         command
             .kill_on_drop(true)
             .stdout(Stdio::piped())
@@ -1010,7 +1029,7 @@ impl BashTool {
                 notify,
                 wake,
 				move |output_path| async move {
-					let mut cmd = build_shell_command(&command);
+					let mut cmd = build_shell_command(crate::config::config().terminal.shell.as_deref(), &command);
 					#[cfg(unix)]
 					unsafe {
 						cmd.pre_exec(|| {

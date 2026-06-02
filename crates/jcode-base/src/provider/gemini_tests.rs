@@ -353,3 +353,128 @@ fn parses_candidate_finish_message() {
         Some("Response blocked by safety filters")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #126 / upstream PR #162: Gemini's generateContent
+// rejects standard JSON-Schema metadata. MCP servers (notion, supabase, …)
+// emit schemas with $defs/$ref/$schema, which would otherwise crash the call.
+// `gemini_compatible_schema` must inline $ref targets and strip the metadata.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gemini_schema_inlines_refs_and_strips_metadata() {
+    let schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft-07",
+        "$id": "https://example.com/foo.json",
+        "title": "Foo",
+        "type": "object",
+        "$defs": {
+            "Inner": {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "leaf" }
+                }
+            }
+        },
+        "properties": {
+            "inner": { "$ref": "#/$defs/Inner" }
+        }
+    });
+
+    let out = gemini_compatible_schema(&schema);
+    let obj = out.as_object().expect("object root");
+
+    // Metadata keywords are stripped.
+    assert!(!obj.contains_key("$schema"), "$schema should be stripped");
+    assert!(!obj.contains_key("$id"), "$id should be stripped");
+    assert!(!obj.contains_key("title"), "title should be stripped");
+    assert!(
+        !obj.contains_key("$defs"),
+        "$defs should be stripped from root"
+    );
+
+    // $ref is inlined — `inner` should now look like the Inner def.
+    let inner = obj
+        .get("properties")
+        .and_then(|p| p.get("inner"))
+        .and_then(|v| v.as_object())
+        .expect("inner object");
+    assert_eq!(inner.get("type").and_then(|v| v.as_str()), Some("object"));
+    // const → enum conversion still happens after inlining.
+    let kind = inner
+        .get("properties")
+        .and_then(|p| p.get("kind"))
+        .and_then(|v| v.as_object())
+        .expect("kind object");
+    let enum_arr = kind.get("enum").and_then(|v| v.as_array()).expect("enum");
+    assert_eq!(enum_arr.len(), 1);
+    assert_eq!(enum_arr[0].as_str(), Some("leaf"));
+}
+
+#[test]
+fn gemini_schema_resolves_definitions_alias_too() {
+    // Older drafts use `definitions` instead of `$defs`. Both must work.
+    let schema = serde_json::json!({
+        "type": "object",
+        "definitions": {
+            "Bar": { "type": "string" }
+        },
+        "properties": {
+            "bar": { "$ref": "#/definitions/Bar" }
+        }
+    });
+
+    let out = gemini_compatible_schema(&schema);
+    let obj = out.as_object().expect("object root");
+    assert!(!obj.contains_key("definitions"));
+    let bar = obj
+        .get("properties")
+        .and_then(|p| p.get("bar"))
+        .and_then(|v| v.as_object())
+        .expect("bar object");
+    assert_eq!(bar.get("type").and_then(|v| v.as_str()), Some("string"));
+}
+
+#[test]
+fn gemini_schema_falls_back_to_empty_object_on_unresolved_ref() {
+    // Unresolvable $ref must produce a permissive empty object, not a crash
+    // and not a forwarded $ref Gemini would reject.
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "ghost": { "$ref": "#/$defs/DoesNotExist" }
+        }
+    });
+    let out = gemini_compatible_schema(&schema);
+    let ghost = out
+        .get("properties")
+        .and_then(|p| p.get("ghost"))
+        .expect("ghost");
+    let ghost_obj = ghost.as_object().expect("ghost object");
+    assert!(
+        ghost_obj.is_empty(),
+        "unresolved $ref should become an empty object, got {ghost:?}"
+    );
+}
+
+#[test]
+fn gemini_schema_does_not_recurse_forever_on_cycles() {
+    // A self-referential schema must terminate (returns an empty object once
+    // depth limit is exceeded) instead of overflowing the stack.
+    let schema = serde_json::json!({
+        "type": "object",
+        "$defs": {
+            "Loop": {
+                "type": "object",
+                "properties": {
+                    "next": { "$ref": "#/$defs/Loop" }
+                }
+            }
+        },
+        "properties": {
+            "head": { "$ref": "#/$defs/Loop" }
+        }
+    });
+    // Should not panic / overflow.
+    let _ = gemini_compatible_schema(&schema);
+}

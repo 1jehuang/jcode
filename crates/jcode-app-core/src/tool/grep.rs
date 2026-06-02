@@ -72,7 +72,7 @@ impl Tool for GrepTool {
 
         let regex_pattern = params.pattern.clone();
         let base_path_str = params.path.clone().unwrap_or_else(|| ".".to_string());
-        let base = ctx.resolve_path(Path::new(&base_path_str));
+        let base = ctx.resolve_path_checked(Path::new(&base_path_str))?;
         let include = params.include.clone();
 
         if !base.exists() {

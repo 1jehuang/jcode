@@ -266,9 +266,19 @@ Two notable presets are:
 - Login: `jcode login --provider minimax`
 - Stored env file: `~/.config/jcode/minimax.env`
 - API key env var: `OPENAI_API_KEY`
-- Base URL: `https://api.minimax.io/v1`
+- Endpoint auto-selection by API key:
+  - **International** (default): `https://api.minimax.io/v1`
+    - Docs: <https://platform.minimax.io/docs/guides/text-generation>
+  - **China Token Plan** (auto-selected when the key starts with `sk-cp-`):
+    `https://api.minimaxi.com/v1`
+    - Docs: <https://platform.minimaxi.com/docs/llms.txt>
 - Default model hint: `MiniMax-M2.7`
-- Docs: <https://platform.minimax.io/docs/guides/text-generation>
+
+> jcode resolves the MiniMax base URL from the API key prefix. China
+> Token Plan keys (`sk-cp-...`) automatically route to
+> `api.minimaxi.com`, so users on the China platform should not see
+> the upstream `401 / authorized_error` reported when the international
+> endpoint is hit with a Token Plan key.
 
 These are first-class jcode provider presets, not just manual custom endpoint examples.
 You can still use `openai-compatible` for arbitrary custom providers when there is not a built-in preset.

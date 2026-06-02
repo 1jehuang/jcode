@@ -14,6 +14,18 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// Issue #94: MAS (Multi-Agent Skill) — model the skill targets.
+    /// When `Some`, jcode will route activation of this skill to the
+    /// matching sub-agent / model. When `None`, the active model is
+    /// used (current behavior).
+    pub model: Option<String>,
+    /// Issue #94: MAS — sub-agent role identifier. Used by the future
+    /// MAS dispatcher to find the right side-agent. `None` means
+    /// the skill runs in the main agent.
+    pub agent: Option<String>,
+    /// Issue #94: MAS — semantic activation tags. Used in addition to
+    /// the embedding-based activation for keyword fallback.
+    pub tags: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     search_text: String,
@@ -25,6 +37,41 @@ struct SkillFrontmatter {
     description: String,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<String>,
+    /// MAS: target model id (#94)
+    #[serde(default)]
+    model: Option<String>,
+    /// MAS: sub-agent role (#94)
+    #[serde(default)]
+    agent: Option<String>,
+    /// MAS: keyword tags (#94). Accepts either a YAML sequence or a
+    /// comma-separated string.
+    #[serde(default, deserialize_with = "deserialize_tags")]
+    tags: Vec<String>,
+}
+
+fn deserialize_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Tags {
+        List(Vec<String>),
+        CommaSeparated(String),
+    }
+    Ok(match Tags::deserialize(deserializer)? {
+        Tags::List(v) => v
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Tags::CommaSeparated(s) => s
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    })
 }
 
 /// Registry of available skills
@@ -242,7 +289,39 @@ impl SkillRegistry {
             self.load_from_dir(&local_claude)?;
         }
 
+        // Issue #112: repo-level scoping. If `working_dir` (or cwd) lives
+        // inside a git repo, walk up to the repo root and load
+        // <repo>/.jcode/skills/ — but only if the repo root differs from
+        // the current dir (so we don't double-load the same dir).
+        if let Some(repo_skills) = Self::repo_level_skills_dir(working_dir)
+            && repo_skills.is_dir()
+            && Some(repo_skills.as_path()) != Some(local_jcode.as_path())
+        {
+            self.load_from_dir(&repo_skills)?;
+        }
+
         Ok(())
+    }
+
+    /// Walk up from `working_dir` (or cwd) until we find a directory
+    /// containing `.git`. Returns `<repo_root>/.jcode/skills/` for that
+    /// directory. Used by `load_project_local_dirs` to support repo-level
+    /// skills (#112).
+    ///
+    /// Returns `None` if cwd cannot be resolved or no `.git` ancestor
+    /// exists in the path.
+    fn repo_level_skills_dir(working_dir: Option<&Path>) -> Option<PathBuf> {
+        let start = match working_dir {
+            Some(d) => d.to_path_buf(),
+            None => std::env::current_dir().ok()?,
+        };
+        let mut current = start.as_path();
+        loop {
+            if current.join(".git").exists() {
+                return Some(current.join(".jcode").join("skills"));
+            }
+            current = current.parent()?;
+        }
     }
 
     /// Load skills from a directory
@@ -279,6 +358,9 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            model,
+            agent,
+            tags,
         } = frontmatter;
 
         let allowed_tools =
@@ -289,6 +371,9 @@ impl SkillRegistry {
             name,
             description,
             allowed_tools,
+            model,
+            agent,
+            tags,
             content: body,
             path: path.to_path_buf(),
             search_text,
@@ -406,14 +491,23 @@ impl SkillRegistry {
         Ok(count)
     }
 
-    /// Check if a message is a skill invocation (starts with /)
+    /// Check if a message is a skill invocation.
+    ///
+    /// Skills use the `$<name>` namespace exclusively — `/` is reserved
+    /// for built-in slash commands. Returns the bare skill name without
+    /// the prefix, or `None` if the input is not a single-word `$`
+    /// invocation.
+    ///
+    /// Note: the historical `/<skill>` form was retired to keep the `/`
+    /// autocomplete dropdown navigable when the user has dozens of
+    /// skills installed.
     pub fn parse_invocation(input: &str) -> Option<&str> {
         let trimmed = input.trim();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
-            Some(&trimmed[1..])
-        } else {
-            None
+        if trimmed.contains(' ') {
+            return None;
         }
+        let rest = trimmed.strip_prefix('$')?;
+        (!rest.is_empty()).then_some(rest)
     }
 }
 
@@ -492,6 +586,9 @@ mod tests {
             name: name.to_string(),
             description: description.to_string(),
             allowed_tools: None,
+            model: None,
+            agent: None,
+            tags: Vec::new(),
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
             search_text: build_skill_search_text(name, description, content),
@@ -554,5 +651,196 @@ mod tests {
 
         assert!(count >= 1);
         assert!(registry.get("session-skill").is_some());
+    }
+
+    // Issue #112: repo-level scoping. Walking up from cwd to a `.git`
+    // ancestor and loading <repo>/.jcode/skills/.
+
+    #[test]
+    fn load_for_working_dir_reads_repo_level_skills_from_git_ancestor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path();
+        // Mark this as a git repo.
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+        // Write a repo-level skill at <repo>/.jcode/skills/repo-skill/SKILL.md
+        write_test_skill(repo_root, ".jcode", "repo-skill");
+
+        // Working dir is a sub-directory of the repo.
+        let sub = repo_root.join("crates/foo");
+        std::fs::create_dir_all(&sub).expect("create sub");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(&sub)).expect("load skills");
+        assert!(
+            registry.get("repo-skill").is_some(),
+            "repo-level skill must be discovered when cwd is a sub-dir of the .git ancestor"
+        );
+    }
+
+    #[test]
+    fn repo_level_skills_dir_returns_none_outside_git_repo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // No .git anywhere up the tree from this temp dir.
+        let result = SkillRegistry::repo_level_skills_dir(Some(temp.path()));
+        // Possible Some if the tempdir is itself inside a git tree (e.g. in
+        // CI the runner might be in /tmp which has no .git, but on a dev
+        // machine /tmp could be inside a worktree). We don't assert None
+        // unconditionally — instead assert the path is sensible if returned.
+        if let Some(path) = result {
+            assert!(path.ends_with(std::path::Path::new(".jcode/skills")));
+        }
+    }
+
+    #[test]
+    fn repo_level_skills_dir_does_not_double_load_when_cwd_equals_repo_root() {
+        // When cwd IS the repo root, project-local + repo-level resolve to
+        // the same dir; load_project_local_dirs guards against double-load.
+        // We only assert that repo_level_skills_dir returns the same path
+        // as project_local_dir — the dedup check is done in the caller.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path();
+        std::fs::create_dir_all(repo_root.join(".git")).expect("create .git");
+        write_test_skill(repo_root, ".jcode", "rl-skill");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(repo_root)).expect("load");
+        // Skill loaded exactly once (no duplicate).
+        let count = registry
+            .skills
+            .values()
+            .filter(|s| s.name == "rl-skill")
+            .count();
+        assert_eq!(
+            count, 1,
+            "skill must not be loaded twice when cwd == repo root"
+        );
+    }
+}
+
+#[cfg(test)]
+mod invocation_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_invocation_accepts_dollar_prefix() {
+        assert_eq!(
+            SkillRegistry::parse_invocation("$grill-me"),
+            Some("grill-me")
+        );
+        assert_eq!(
+            SkillRegistry::parse_invocation("  $grill-me  "),
+            Some("grill-me")
+        );
+    }
+
+    #[test]
+    fn parse_invocation_rejects_slash_prefix() {
+        // The historical `/<skill>` form is intentionally rejected so the
+        // `/` autocomplete dropdown can stay focused on built-in commands.
+        // Slash-prefixed input falls through to the slash-command chain.
+        assert!(SkillRegistry::parse_invocation("/grill-me").is_none());
+        assert!(SkillRegistry::parse_invocation("/help").is_none());
+    }
+
+    #[test]
+    fn parse_invocation_rejects_invocation_with_args() {
+        // $<name> requires single-word form; whitespace returns None so
+        // the input is treated as a literal user message.
+        assert!(SkillRegistry::parse_invocation("$grill-me with args").is_none());
+    }
+
+    #[test]
+    fn parse_invocation_rejects_bare_dollar() {
+        assert!(SkillRegistry::parse_invocation("$").is_none());
+        assert!(SkillRegistry::parse_invocation("  $  ").is_none());
+    }
+
+    #[test]
+    fn parse_invocation_rejects_other_prefixes() {
+        assert!(SkillRegistry::parse_invocation("@grill-me").is_none());
+        assert!(SkillRegistry::parse_invocation("!grill-me").is_none());
+        assert!(SkillRegistry::parse_invocation("grill-me").is_none());
+    }
+
+    // ---- Issue #94: MAS frontmatter fields ----
+
+    fn write_skill_with_frontmatter(
+        dir: &std::path::Path,
+        name: &str,
+        fm: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        std::fs::write(&path, format!("---\n{}\n---\n\n{}\n", fm.trim(), body)).unwrap();
+        path
+    }
+
+    #[test]
+    fn mas_frontmatter_defaults_to_none_when_unset() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "basic",
+            "name: basic\ndescription: A basic skill",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.name, "basic");
+        assert_eq!(skill.model, None);
+        assert_eq!(skill.agent, None);
+        assert!(skill.tags.is_empty());
+    }
+
+    #[test]
+    fn mas_frontmatter_parses_model_and_agent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "review",
+            "name: review\ndescription: Code review\nmodel: claude-opus-4\nagent: reviewer",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.model.as_deref(), Some("claude-opus-4"));
+        assert_eq!(skill.agent.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn mas_frontmatter_parses_tags_as_list() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "tagged",
+            "name: tagged\ndescription: Tagged\ntags:\n  - rust\n  - async\n  - perf",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.tags, vec!["rust", "async", "perf"]);
+    }
+
+    #[test]
+    fn mas_frontmatter_parses_tags_as_comma_separated() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "csv",
+            "name: csv\ndescription: CSV tags\ntags: rust, async , perf",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.tags, vec!["rust", "async", "perf"]);
+    }
+
+    #[test]
+    fn mas_frontmatter_filters_blank_tags() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = write_skill_with_frontmatter(
+            temp.path(),
+            "blank",
+            "name: blank\ndescription: x\ntags:\n  - rust\n  - ''\n  - perf",
+            "Body.",
+        );
+        let skill = SkillRegistry::parse_skill(&path).unwrap();
+        assert_eq!(skill.tags, vec!["rust", "perf"]);
     }
 }

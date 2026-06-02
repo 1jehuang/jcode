@@ -4,13 +4,18 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Clone, Copy)]
-struct RegisteredCommand {
+pub(super) struct RegisteredCommand {
     name: &'static str,
     help: &'static str,
     hidden: bool,
 }
 
 impl RegisteredCommand {
+    /// Slash command name including the leading `/`.
+    pub(super) fn name(&self) -> &'static str {
+        self.name
+    }
+
     const fn public(name: &'static str, help: &'static str) -> Self {
         Self {
             name,
@@ -36,7 +41,7 @@ impl RegisteredCommand {
     }
 }
 
-const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
+pub(super) const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/commands", "Alias for /help"),
@@ -73,11 +78,16 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/alignment", "Show/change default text alignment"),
     RegisteredCommand::public("/clear", "Clear conversation history"),
     RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
+    RegisteredCommand::public(
+        "/history",
+        "Input history: list, load N, search, delete N, clear",
+    ),
     RegisteredCommand::public("/poke", "Poke model to resume with incomplete todos"),
     RegisteredCommand::public("/plan", "Create a plan-only response in the side panel"),
     RegisteredCommand::public("/improve", "Autonomously improve the repository"),
     RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
     RegisteredCommand::public("/compact", "Compact context"),
+    RegisteredCommand::public("/dcp", "DCP: context, stats, sweep, manual on|off"),
     RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
@@ -120,6 +130,27 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/save", "Bookmark session for easy access"),
     RegisteredCommand::public("/unsave", "Remove bookmark from session"),
     RegisteredCommand::public("/rename", "Rename current session"),
+    RegisteredCommand::public("/export", "Export this session to a Markdown or JSON file"),
+    RegisteredCommand::public(
+        "/share",
+        "Upload this session as a private GitHub gist (requires gh CLI)",
+    ),
+    RegisteredCommand::public(
+        "/plan",
+        "Toggle plan mode (read-only — agent drafts a plan instead of executing)",
+    ),
+    RegisteredCommand::public(
+        "/fork",
+        "Fork this session into a new branch with the same history",
+    ),
+    RegisteredCommand::public(
+        "/settings",
+        "Show active jcode config (provider, features, tools, flags)",
+    ),
+    RegisteredCommand::public(
+        "/doctor",
+        "Print a quick environment diagnostic (build, flags, providers, health)",
+    ),
     RegisteredCommand::public("/split", "Split session into a new window"),
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
@@ -141,6 +172,299 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/zzz", "Secret premium-mode command"),
     RegisteredCommand::hidden("/zstatus", "Secret premium-mode status command"),
 ];
+
+/// Detect whether the input ends in an "active `$` token" — i.e. the
+/// user typed `$` then alphanumeric/dash/underscore characters, and is
+/// still on that token (no whitespace yet after `$`). Returns the
+/// substring starting from the `$` (e.g. `"$gri"`) so the caller can
+/// rank skill candidates against it.
+///
+/// Returns `None` if:
+/// - There's no `$` in the input
+/// - The most recent `$` is not at a token start (preceded by alphanumeric)
+/// - There's whitespace between the `$` and the end of input
+///
+/// Examples:
+///
+/// ```ignore
+/// active_dollar_token("$grill-me")          // Some("$grill-me")
+/// active_dollar_token("fix the auth $gri")  // Some("$gri")
+/// active_dollar_token("xxx $")              // Some("$")
+/// active_dollar_token("xxx $a $b")          // Some("$b")  — last token wins
+/// active_dollar_token("xxx $a hello")       // None       — token ended
+/// active_dollar_token("price = $100")       // None       — preceded by '=' which is OK,
+///                                                          // but we accept it
+/// active_dollar_token("hello world")        // None
+/// ```
+pub(super) fn active_dollar_token(input: &str) -> Option<&str> {
+    // Walk from the END backwards to find the most recent '$'. While
+    // walking we must NOT cross whitespace (whitespace = token boundary
+    // and we'd be in a different token already).
+    let bytes = input.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        let prev = bytes[i - 1];
+        if prev == b'$' {
+            // Found a `$`. Verify it starts a token — i.e. char before
+            // is start-of-input or whitespace.
+            if i == 1 || (bytes[i - 2] as char).is_whitespace() {
+                return Some(&input[i - 1..]);
+            }
+            // `$` is in the middle of an identifier (e.g. "abc$xyz") —
+            // not a skill token.
+            return None;
+        }
+        if (prev as char).is_whitespace() {
+            // Crossed whitespace before finding `$` — no active token.
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// Result of `extract_at_token_at_cursor`: a single `@<path>` token under
+/// the cursor, with byte offsets so callers can do exact replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AtTokenMatch<'a> {
+    /// The text after `@`, with surrounding quotes stripped if quoted.
+    /// Example: `@"foo bar"` → `"foo bar"`.
+    pub query: &'a str,
+    /// Byte offset of the `@` symbol in `input`.
+    pub start: usize,
+    /// Exclusive byte offset where the token ends. For unquoted tokens this
+    /// is the first whitespace (or end of input). For quoted tokens it
+    /// includes the closing `"` if present.
+    pub end: usize,
+    /// `true` if the token uses the `@"..."` quoted form.
+    pub is_quoted: bool,
+}
+
+/// Detect if `cursor` (byte offset) is inside an active `@<path>` token at
+/// any position in `input` (start, middle, or end).
+///
+/// Rules:
+///   - The `@` must be at the start of input or preceded by whitespace.
+///   - The cursor must lie within `[at_pos .. token_end]` inclusive on the
+///     left, exclusive on the right (cursor in trailing whitespace → None).
+///   - Quoted form `@"..."` is supported: token continues through spaces
+///     until the matching closing `"` or end of input. Cursor anywhere
+///     inside the quotes (or on the `@`) is "inside the token".
+///   - Email-like `user@example.com` → None (the `@` is preceded by an
+///     alphanumeric char, not whitespace).
+///
+/// `cursor` is clamped to `input.len()` if out of range. UTF-8 boundary
+/// checks ensure we never split a multibyte char.
+pub(super) fn extract_at_token_at_cursor(input: &str, cursor: usize) -> Option<AtTokenMatch<'_>> {
+    let cursor = cursor.min(input.len());
+    let bytes = input.as_bytes();
+
+    // --- 1. Walk backward from cursor to find the most recent `@`
+    //        that satisfies the start-of-token rule. ----------------
+    let mut at_idx: Option<usize> = None;
+    let mut i = cursor;
+    while i > 0 {
+        // Step back to the previous char boundary.
+        let prev = i - 1;
+        // Quick check: only inspect ASCII bytes. UTF-8 multibyte chars
+        // never contain a 0x40 ('@'), 0x22 ('"'), or whitespace ASCII byte
+        // in continuation positions, so this is safe.
+        let b = bytes[prev];
+        if b == b'@' {
+            // Verify start condition: pos==0 or preceded by whitespace.
+            if prev == 0 {
+                at_idx = Some(prev);
+                break;
+            }
+            // Look at the char before the `@`.
+            let before = bytes[prev - 1];
+            if (before as char).is_ascii_whitespace() {
+                at_idx = Some(prev);
+                break;
+            }
+            // `@` mid-word (like `user@example.com`) — not a token start.
+            return None;
+        }
+        // For the *unquoted* part of the search (cursor → @), if we hit
+        // whitespace we know there's no active token — the cursor is in a
+        // gap or in a non-@ word.
+        //
+        // BUT: we still need to handle quoted tokens that contain spaces.
+        // We can't tell from this side whether a space is inside `@"..."`
+        // or outside. So a hit here doesn't immediately disqualify; we
+        // also try the quoted-detection path below.
+        if (b as char).is_ascii_whitespace() {
+            // Save where we hit whitespace; quoted detection picks up
+            // from before this point.
+            break;
+        }
+        i = prev;
+    }
+
+    // --- 2. If we found an unquoted-style `@`, parse forward. -----
+    if let Some(start) = at_idx {
+        // Determine if this is a quoted token: `@` followed by `"`.
+        let after_at = start + 1;
+        if bytes.get(after_at) == Some(&b'"') {
+            return parse_quoted_token(input, start, cursor);
+        }
+        // Plain unquoted token: include path-like chars until whitespace.
+        let mut end = after_at;
+        while end < bytes.len() && !(bytes[end] as char).is_ascii_whitespace() {
+            end += 1;
+        }
+        if cursor <= end {
+            // SAFETY: end is at a whitespace boundary or end-of-input;
+            // both are UTF-8 safe split points.
+            return Some(AtTokenMatch {
+                query: &input[after_at..end],
+                start,
+                end,
+                is_quoted: false,
+            });
+        }
+        return None;
+    }
+
+    // --- 3. No unquoted match. Try quoted: scan back for the most -
+    //        recent unmatched `@"` whose `@` qualifies as token start.
+    //        This handles cursor inside a quoted token with spaces.
+    let mut j = cursor;
+    while j > 0 {
+        let prev = j - 1;
+        let b = bytes[prev];
+        if b == b'@' {
+            // Must be followed by `"` and pass the start-of-token rule.
+            let starts_quote = bytes.get(prev + 1) == Some(&b'"');
+            let valid_start = prev == 0 || (bytes[prev - 1] as char).is_ascii_whitespace();
+            if starts_quote && valid_start {
+                return parse_quoted_token(input, prev, cursor);
+            }
+            // Hit a non-quoted `@` while scanning backward — abort.
+            return None;
+        }
+        j = prev;
+    }
+
+    None
+}
+
+/// Parse `@"..."` starting at `start` (which points at the `@`). Returns
+/// `Some` only if the cursor is positioned inside the token (after the
+/// `@` and not past the closing quote).
+fn parse_quoted_token(input: &str, start: usize, cursor: usize) -> Option<AtTokenMatch<'_>> {
+    let bytes = input.as_bytes();
+    debug_assert!(bytes.get(start) == Some(&b'@'));
+    debug_assert!(bytes.get(start + 1) == Some(&b'"'));
+
+    let inner_start = start + 2;
+    // Find the closing `"`, scanning forward over arbitrary bytes
+    // (including spaces and UTF-8 sequences — `"` is never a continuation).
+    let mut end = inner_start;
+    let mut closed = false;
+    while end < bytes.len() {
+        if bytes[end] == b'"' {
+            closed = true;
+            break;
+        }
+        end += 1;
+    }
+    let token_end = if closed { end + 1 } else { end };
+    if cursor > token_end {
+        return None;
+    }
+    let inner_end = end;
+    Some(AtTokenMatch {
+        query: &input[inner_start..inner_end],
+        start,
+        end: token_end,
+        is_quoted: true,
+    })
+}
+
+/// Issue #11: detect an active `@<path>` token at the END of the input.
+///
+/// Returns the substring beginning at the most recent `@` that:
+///   - starts the input, OR
+///   - is preceded by whitespace
+///
+/// and that has not yet been terminated by whitespace.
+///
+/// ```text
+/// active_at_token("@src/main.rs")           // Some("@src/main.rs")
+/// active_at_token("look at @docs/READ")     // Some("@docs/READ")
+/// active_at_token("look at @docs/RM done")  // None
+/// active_at_token("email@example.com")      // None — middle of token
+/// ```
+#[cfg(test)]
+pub(super) fn active_at_token(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        let prev = bytes[i - 1];
+        if prev == b'@' {
+            if i == 1 || (bytes[i - 2] as char).is_whitespace() {
+                return Some(&input[i - 1..]);
+            }
+            return None;
+        }
+        if (prev as char).is_whitespace() {
+            return None;
+        }
+        i -= 1;
+    }
+    None
+}
+
+/// Suggest filesystem entries matching a partial `@<query>` token.
+///
+/// Walks the working directory shallowly, returning entries whose
+/// path (relative to `cwd`) starts with `query`. Limits to `limit`
+/// results.
+///
+/// Implementation note: this is intentionally cheap — it only walks
+/// the directory containing the partial path, not the full tree.
+/// `@s` looks at `cwd`. `@src/m` looks inside `cwd/src/`.
+#[cfg(test)]
+pub(super) fn suggest_at_path(cwd: &std::path::Path, query: &str, limit: usize) -> Vec<String> {
+    let q = query.trim_start_matches('@');
+    let (parent_rel, prefix) = match q.rfind('/') {
+        Some(idx) => (&q[..idx + 1], &q[idx + 1..]),
+        None => ("", q),
+    };
+
+    let parent_abs = if parent_rel.is_empty() {
+        cwd.to_path_buf()
+    } else {
+        cwd.join(parent_rel)
+    };
+
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&parent_abs) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        // Skip hidden entries unless user explicitly types `.`
+        if name.starts_with('.') && !prefix.starts_with('.') {
+            continue;
+        }
+        let mut full = format!("@{parent_rel}{name}");
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            full.push('/');
+        }
+        out.push(full);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out.sort();
+    out
+}
 
 impl App {
     /// Find word boundary going backward (for Ctrl+W, Alt+B)
@@ -276,21 +600,13 @@ impl App {
             return cache.candidates.clone();
         }
 
-        fn push_skill_commands(
-            commands: &mut Vec<(String, &'static str)>,
-            seen: &mut std::collections::HashSet<String>,
-            skills: &crate::skill::SkillRegistry,
-        ) {
-            for skill in skills.list() {
-                let command = format!("/{}", skill.name);
-                if seen.insert(command.clone()) {
-                    commands.push((command, "Activate skill"));
-                }
-            }
-        }
-
+        // Issue #N (UX): only show BUILT-IN commands under `/`. Skills move
+        // to the `$` namespace via skill_candidates() so the / autocomplete
+        // dropdown stays navigable when the user has 100+ skills installed.
+        // The legacy `/<skill>` invocation form still works at submit time
+        // for backwards compatibility — it's just hidden from autocomplete.
         let mut seen = std::collections::HashSet::new();
-        let mut commands: Vec<(String, &'static str)> = REGISTERED_COMMANDS
+        let commands: Vec<(String, &'static str)> = REGISTERED_COMMANDS
             .iter()
             .filter(|command| !command.hidden)
             .filter_map(|command| {
@@ -299,22 +615,40 @@ impl App {
             })
             .collect();
 
-        let skills = self.current_skills_snapshot();
-        push_skill_commands(&mut commands, &mut seen, &skills);
-
-        if self.is_remote && !self.remote_skills.is_empty() {
-            for skill in &self.remote_skills {
-                let command = format!("/{skill}");
-                if seen.insert(command.clone()) {
-                    commands.push((command, "Activate skill"));
-                }
-            }
-        }
-
         *self.command_candidates_cache.borrow_mut() = Some(CommandCandidatesCache {
             candidates: commands.clone(),
         });
         commands
+    }
+
+    /// Build the autocomplete list for the `$` (skill) namespace.
+    ///
+    /// Each entry is `($<skill-name>, "Activate skill")`. Includes both
+    /// locally-discovered skills (project + user dirs, see SkillRegistry)
+    /// and remote-session skills when running as a TUI client against a
+    /// shared server.
+    fn skill_candidates(&self) -> Vec<(String, &'static str)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<(String, &'static str)> = Vec::new();
+
+        let skills = self.current_skills_snapshot();
+        for skill in skills.list() {
+            let entry = format!("${}", skill.name);
+            if seen.insert(entry.clone()) {
+                out.push((entry, "Activate skill"));
+            }
+        }
+
+        if self.is_remote && !self.remote_skills.is_empty() {
+            for skill in &self.remote_skills {
+                let entry = format!("${skill}");
+                if seen.insert(entry.clone()) {
+                    out.push((entry, "Activate skill"));
+                }
+            }
+        }
+
+        out
     }
 
     pub(super) fn invalidate_command_candidates_cache(&self) {
@@ -435,7 +769,17 @@ impl App {
     pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim_start();
 
-        // Only show suggestions when input starts with /
+        // Only show suggestions when input starts with `/` (built-in
+        // commands) or `$` (skills, see skill_candidates).
+        // Issue: skill autocomplete should fire even when `$` appears
+        // mid-text, e.g. "fix the auth $gri" → suggest skills matching
+        // "gri*". Find the last `$` that starts a token (preceded by
+        // start-of-input or whitespace), and if found with no whitespace
+        // between it and the cursor, surface skill candidates ranked by
+        // the partial after `$`.
+        if let Some(token) = active_dollar_token(input) {
+            return self.rank_suggestions(&token.to_lowercase(), self.skill_candidates());
+        }
         if !input.starts_with('/') {
             return vec![];
         }
@@ -1011,6 +1355,49 @@ impl App {
     }
 
     /// Get command suggestions based on current input
+    /// Compute `@<path>` suggestions if the cursor currently sits inside
+    /// an active @-token. Returns `None` when no token is active or the
+    /// picker is unavailable.
+    ///
+    /// Each entry is formatted as `@path` (file) or `@path/` (folder), and
+    /// the help text indicates the kind. Folders sort before files within
+    /// the same score band — ffs already handles this internally.
+    fn at_suggestions(&self) -> Option<Vec<(String, &'static str)>> {
+        let m = super::state_ui_input_helpers::extract_at_token_at_cursor(
+            &self.input,
+            self.cursor_pos,
+        )?;
+
+        // Lazy-init: if the picker is missing, try to build one. This
+        // briefly takes a mut borrow on the RefCell.
+        let picker = {
+            let mut slot = self.at_picker.borrow_mut();
+            slot.ensure(self.session.working_dir.as_deref())?
+        };
+
+        let raw = picker.search(m.query, super::at_picker::AT_PICKER_MAX_SUGGESTIONS);
+        if raw.is_empty() {
+            // Picker still warming up or query has no matches. Returning
+            // an empty Vec here would suppress the dropdown and also block
+            // the `/` and `$` fallbacks (which is what we want — once the
+            // user types `@`, we own the dropdown).
+            return Some(Vec::new());
+        }
+
+        let suggestions = raw
+            .into_iter()
+            .map(|s| {
+                let (display, help) = if s.is_directory {
+                    (format!("@{}/", s.display_path), "Folder")
+                } else {
+                    (format!("@{}", s.display_path), "File")
+                };
+                (display, help)
+            })
+            .collect();
+        Some(suggestions)
+    }
+
     pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
         if self
             .inline_interactive_state
@@ -1022,6 +1409,16 @@ impl App {
                 return Vec::new();
             }
         }
+
+        // `@<path>` autocomplete: when the cursor sits inside an @-token
+        // anywhere in the input, return ffs-search file/folder suggestions
+        // formatted as `@path` (file) or `@path/` (folder, drill-in).
+        // This must come BEFORE the `/` and `$` checks because `@` tokens
+        // can appear mid-input and shouldn't be confused with command-mode.
+        if let Some(at) = self.at_suggestions() {
+            return at;
+        }
+
         self.get_suggestions_for(&self.input)
     }
 
@@ -1256,7 +1653,82 @@ impl App {
     }
 
     /// Autocomplete current input - cycles through suggestions on repeated Tab
+    /// If the cursor sits inside an active `@<path>` token AND the picker
+    /// has a current selection, compute the (new_input, new_cursor) pair
+    /// that would result from accepting that selection. Returns `None`
+    /// otherwise so the caller can fall through to other autocomplete
+    /// modes (slash, dollar).
+    fn try_apply_at_completion(&self) -> Option<(String, usize)> {
+        let m = super::state_ui_input_helpers::extract_at_token_at_cursor(
+            &self.input,
+            self.cursor_pos,
+        )?;
+        // Read suggestions WITHOUT mutably re-initializing the picker —
+        // if the user got here by Tab they've already seen the dropdown,
+        // which means init succeeded.
+        let suggestions = self.command_suggestions();
+        if suggestions.is_empty() {
+            return None;
+        }
+        let selected = self
+            .command_suggestion_selected
+            .min(suggestions.len().saturating_sub(1));
+        let (display, help) = &suggestions[selected];
+        // Sanity: only proceed if this is genuinely an @-suggestion (the
+        // dropdown could in theory be showing slash/dollar items if both
+        // happen to coexist, but we've ordered branches so @ wins).
+        if !display.starts_with('@') {
+            return None;
+        }
+        let is_directory = *help == "Folder";
+
+        // Strip the leading `@` from the display to get the bare path.
+        let bare = display.strip_prefix('@').unwrap_or(display);
+        // For folders the display already has trailing `/`; strip it so
+        // we can decide quoting based on the bare path text.
+        let (bare_path, _had_slash) = if is_directory && bare.ends_with('/') {
+            (&bare[..bare.len() - 1], true)
+        } else {
+            (bare, false)
+        };
+
+        let needs_quotes = bare_path.contains(' ');
+        // Build the replacement text. Folders → trailing `/` and KEEP the
+        // token open for drill-in; files → trailing space, close token.
+        let replacement = match (needs_quotes, is_directory) {
+            (true, true) => format!("@\"{bare_path}\"/"),
+            (true, false) => format!("@\"{bare_path}\" "),
+            (false, true) => format!("@{bare_path}/"),
+            (false, false) => format!("@{bare_path} "),
+        };
+
+        let new_input = format!(
+            "{}{}{}",
+            &self.input[..m.start],
+            replacement,
+            &self.input[m.end..]
+        );
+        let new_cursor = m.start + replacement.len();
+        Some((new_input, new_cursor))
+    }
+
     pub fn autocomplete(&mut self) -> bool {
+        // ---- @<path> autocomplete: replace the active @-token in place. ----
+        //
+        // This MUST come before the slash/dollar tab-cycle logic because
+        // @-tokens live in arbitrary positions inside the input (not just
+        // at the start), and the existing logic assumes whole-input
+        // replacement for `/` commands.
+        if let Some(replacement) = self.try_apply_at_completion() {
+            self.remember_input_undo_state();
+            let (new_input, new_cursor) = replacement;
+            self.input = new_input;
+            self.cursor_pos = new_cursor;
+            self.tab_completion_state = None;
+            self.command_suggestion_selected = 0;
+            return true;
+        }
+
         // Get suggestions for current input
         let current_suggestions = self.get_suggestions_for(&self.input);
 
@@ -1271,7 +1743,19 @@ impl App {
                 let next_index = (idx + 1) % base_suggestions.len();
                 let (cmd, _) = &base_suggestions[next_index];
                 self.remember_input_undo_state();
-                self.input = cmd.clone();
+                // Same prefix-preservation fix as the fresh-cycle path below.
+                if cmd.starts_with('$') {
+                    if let Some(token) =
+                        crate::tui::app::state_ui_input_helpers::active_dollar_token(base)
+                    {
+                        let prefix_len = base.len() - token.len();
+                        self.input = format!("{}{cmd}", &base[..prefix_len]);
+                    } else {
+                        self.input = cmd.clone();
+                    }
+                } else {
+                    self.input = cmd.clone();
+                }
                 self.cursor_pos = self.input.len();
                 self.tab_completion_state = Some((base.clone(), next_index));
                 return true;
@@ -1305,7 +1789,28 @@ impl App {
         let (cmd, _) = &current_suggestions[selected];
         let base = self.input.clone();
         self.remember_input_undo_state();
-        self.input = cmd.clone();
+
+        // Bug fix: when the suggestion is a `$<skill>` token and the user
+        // typed it mid-text (e.g. "fix the auth $gri"), replace only the
+        // `$token` at the end of the input, not the whole input. Otherwise
+        // "xxxx $gri" → Tab → "$grill-me" (drops "xxxx ").
+        //
+        // For `/` commands the input always starts with `/` so the whole-
+        // input replacement is correct and unchanged.
+        if cmd.starts_with('$') {
+            if let Some(token) =
+                crate::tui::app::state_ui_input_helpers::active_dollar_token(&self.input)
+            {
+                let prefix_len = self.input.len() - token.len();
+                let prefix = self.input[..prefix_len].to_string();
+                self.input = format!("{prefix}{cmd}");
+            } else {
+                self.input = cmd.clone();
+            }
+        } else {
+            self.input = cmd.clone();
+        }
+
         // If unique match, add trailing space for arg-accepting commands
         if current_suggestions.len() == 1 && Self::command_accepts_args(&self.input) {
             self.input.push(' ');
@@ -1331,6 +1836,8 @@ impl App {
             self.input_undo_stack.remove(0);
         }
         self.input_undo_stack.push(snapshot);
+        // Any manual edit cancels history browsing
+        self.reset_input_history_browse();
     }
 
     pub(super) fn clear_input_undo_history(&mut self) {
@@ -1342,6 +1849,7 @@ impl App {
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
             self.reset_tab_completion();
+            self.reset_input_history_browse();
             self.sync_model_picker_preview_from_input();
             self.set_status_notice("↶ Input restored");
         } else {
@@ -1393,6 +1901,7 @@ impl App {
                 | "/improve"
                 | "/refactor"
                 | "/rewind"
+                | "/history"
                 | "/compact"
                 | "/compact mode"
                 | "/alignment"
@@ -1401,6 +1910,374 @@ impl App {
                 | "/rename"
                 | "/cache"
         )
+    }
+}
+
+#[cfg(test)]
+mod dollar_token_tests {
+    use super::active_dollar_token;
+    use super::{active_at_token, suggest_at_path};
+
+    #[test]
+    fn detects_dollar_at_start_of_input() {
+        assert_eq!(active_dollar_token("$grill-me"), Some("$grill-me"));
+        assert_eq!(active_dollar_token("$"), Some("$"));
+    }
+
+    #[test]
+    fn detects_dollar_after_whitespace() {
+        // "fix the auth $gri" → autocomplete on $gri
+        assert_eq!(active_dollar_token("fix the auth $gri"), Some("$gri"));
+        // Multiple spaces
+        assert_eq!(active_dollar_token("xxx   $foo"), Some("$foo"));
+        // Bare dollar at the end (just typed)
+        assert_eq!(active_dollar_token("xxx $"), Some("$"));
+    }
+
+    #[test]
+    fn last_dollar_wins_when_multiple_tokens() {
+        // $a $b → caller is on $b (last token)
+        assert_eq!(active_dollar_token("$a $b"), Some("$b"));
+        assert_eq!(active_dollar_token("xxx $foo $bar"), Some("$bar"));
+    }
+
+    #[test]
+    fn rejects_when_token_ended_with_whitespace() {
+        // User typed `$foo` then space → token boundary; no active token.
+        assert_eq!(active_dollar_token("$foo "), None);
+        assert_eq!(active_dollar_token("$grill-me hello"), None);
+    }
+
+    #[test]
+    fn rejects_dollar_in_middle_of_identifier() {
+        // Embedded `$` like "abc$xyz" is not a skill token.
+        assert_eq!(active_dollar_token("abc$xyz"), None);
+        assert_eq!(active_dollar_token("price=$100"), None);
+    }
+
+    #[test]
+    fn returns_none_when_no_dollar() {
+        assert_eq!(active_dollar_token(""), None);
+        assert_eq!(active_dollar_token("hello world"), None);
+        assert_eq!(active_dollar_token("/help"), None);
+    }
+
+    // ---- Bug fix: autocomplete must preserve prefix before $token ----
+
+    #[test]
+    fn active_dollar_token_prefix_len_is_correct() {
+        // Verify the prefix-length arithmetic used in autocomplete.
+        let input = "fix the auth $gri";
+        let token = active_dollar_token(input).unwrap();
+        assert_eq!(token, "$gri");
+        let prefix_len = input.len() - token.len();
+        assert_eq!(&input[..prefix_len], "fix the auth ");
+    }
+
+    #[test]
+    fn active_dollar_token_prefix_len_for_bare_dollar() {
+        let input = "xxxx $";
+        let token = active_dollar_token(input).unwrap();
+        assert_eq!(token, "$");
+        let prefix_len = input.len() - token.len();
+        assert_eq!(&input[..prefix_len], "xxxx ");
+    }
+
+    // ---- Issue #11: @<path> token detection + suggestion ----
+
+    #[test]
+    fn at_token_at_start_returns_full() {
+        assert_eq!(active_at_token("@src/main.rs"), Some("@src/main.rs"));
+    }
+
+    #[test]
+    fn at_token_after_whitespace_returns_token() {
+        assert_eq!(active_at_token("look at @docs/READ"), Some("@docs/READ"));
+    }
+
+    #[test]
+    fn at_token_terminated_by_whitespace_returns_none() {
+        assert_eq!(active_at_token("look at @docs done"), None);
+    }
+
+    #[test]
+    fn at_token_in_middle_of_word_is_email_like_returns_none() {
+        // Likely an email address — shouldn't trigger autocomplete.
+        assert_eq!(active_at_token("email@example.com"), None);
+    }
+
+    #[test]
+    fn at_token_empty_after_at_still_matches() {
+        assert_eq!(active_at_token("@"), Some("@"));
+        assert_eq!(active_at_token("hi @"), Some("@"));
+    }
+
+    #[test]
+    fn at_token_no_at_returns_none() {
+        assert_eq!(active_at_token("hello world"), None);
+        assert_eq!(active_at_token(""), None);
+    }
+
+    // ---- extract_at_token_at_cursor: cursor-based detection ----
+    //
+    // Each test uses a sentinel "|" in the input to mark cursor position.
+    // Helper splits on "|" so test cases stay readable.
+
+    fn at(input: &str) -> (String, usize) {
+        let cursor = input.find('|').expect("test input must contain '|'");
+        let mut s = input.to_string();
+        s.remove(cursor);
+        (s, cursor)
+    }
+
+    fn extract<'a>(input: &'a str, cursor: usize) -> Option<super::AtTokenMatch<'a>> {
+        super::extract_at_token_at_cursor(input, cursor)
+    }
+
+    #[test]
+    fn cursor_before_at_returns_none() {
+        let (s, c) = at("|@src");
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn cursor_right_after_at_at_start() {
+        let (s, c) = at("@|src");
+        let m = extract(&s, c).expect("active");
+        // Token extends forward to end of word regardless of cursor.
+        assert_eq!(m.query, "src");
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 4); // "@src"
+        assert!(!m.is_quoted);
+    }
+
+    #[test]
+    fn cursor_at_end_of_token() {
+        let (s, c) = at("@src|");
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "src");
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 4);
+    }
+
+    #[test]
+    fn cursor_in_middle_of_input_inside_token() {
+        let (s, c) = at("look @src| done");
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "src");
+        assert_eq!(m.start, 5);
+        assert_eq!(m.end, 9);
+    }
+
+    #[test]
+    fn cursor_in_whitespace_after_token_returns_none() {
+        let (s, c) = at("look @src |done");
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn cursor_in_next_token_returns_none() {
+        let (s, c) = at("look @src d|one");
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn multiple_tokens_picks_active_one() {
+        let (s, c) = at("@a @b|");
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "b");
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 5);
+    }
+
+    #[test]
+    fn multiple_tokens_picks_first_when_cursor_there() {
+        let (s, c) = at("@a| @b");
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "a");
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 2);
+    }
+
+    #[test]
+    fn three_consecutive_tokens_middle_active() {
+        let (s, c) = at("@a @b| @c");
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "b");
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 5);
+    }
+
+    #[test]
+    fn email_like_never_triggers() {
+        let (s, c) = at("user@exam|ple.com");
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn at_after_punctuation_no_space_rejects() {
+        let (s, c) = at("before,@src|");
+        // `,` is not whitespace → not a valid token start.
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn at_after_paren_with_space_accepts() {
+        let (s, c) = at("( @src|)");
+        let m = extract(&s, c).expect("active");
+        // `)` is not whitespace → token extends through it.
+        // Submission-time `expand_at_path_references` strips trailing
+        // punctuation; here we just verify the token is detected.
+        assert_eq!(m.query, "src)");
+    }
+
+    #[test]
+    fn quoted_path_with_spaces() {
+        let (s, c) = at(r#"@"foo bar|""#);
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "foo bar");
+        assert_eq!(m.start, 0);
+        assert!(m.is_quoted);
+    }
+
+    #[test]
+    fn quoted_path_cursor_in_middle() {
+        let (s, c) = at(r#"@"foo b|ar baz""#);
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "foo bar baz");
+        assert!(m.is_quoted);
+    }
+
+    #[test]
+    fn quoted_path_unclosed() {
+        let (s, c) = at(r#"@"unclosed|"#);
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "unclosed");
+        assert!(m.is_quoted);
+    }
+
+    #[test]
+    fn cursor_after_closing_quote_returns_none() {
+        let (s, c) = at(r#"cmd @"a b" |then"#);
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn slash_separator_works() {
+        let (s, c) = at("@src/|main.rs");
+        let m = extract(&s, c).expect("active");
+        assert_eq!(m.query, "src/main.rs");
+        assert_eq!(m.start, 0);
+    }
+
+    #[test]
+    fn unicode_path() {
+        let (s, c) = at("@日本/|");
+        let m = extract(&s, c).expect("active");
+        assert!(m.query.contains("日本"));
+    }
+
+    #[test]
+    fn empty_input() {
+        assert_eq!(extract("", 0), None);
+    }
+
+    #[test]
+    fn bare_at_at_start() {
+        let m = extract("@", 1).expect("active");
+        assert_eq!(m.query, "");
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 1);
+    }
+
+    #[test]
+    fn cursor_clamped_when_out_of_range() {
+        // Should not panic.
+        let m = extract("@src", 999).expect("active");
+        assert_eq!(m.query, "src");
+    }
+
+    #[test]
+    fn whitespace_between_at_tokens_blocks() {
+        // Cursor sits in whitespace between two tokens — neither is active.
+        let (s, c) = at("@a |@b");
+        assert_eq!(extract(&s, c), None);
+    }
+
+    #[test]
+    fn suggest_at_path_finds_top_level_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "").unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "").unwrap();
+
+        let mut suggestions = suggest_at_path(temp.path(), "@", 10);
+        suggestions.sort();
+        assert!(
+            suggestions.contains(&"@main.rs".to_string()),
+            "got: {:?}",
+            suggestions
+        );
+        assert!(
+            suggestions.contains(&"@src/".to_string()),
+            "directories should have trailing slash: {:?}",
+            suggestions
+        );
+        assert!(suggestions.contains(&"@Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn suggest_at_path_filters_by_prefix() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "").unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(temp.path().join("README.md"), "").unwrap();
+
+        let suggestions = suggest_at_path(temp.path(), "@m", 10);
+        assert_eq!(suggestions, vec!["@main.rs"]);
+
+        let suggestions = suggest_at_path(temp.path(), "@C", 10);
+        assert_eq!(suggestions, vec!["@Cargo.toml"]);
+    }
+
+    #[test]
+    fn suggest_at_path_descends_into_subdirectory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "").unwrap();
+
+        let mut suggestions = suggest_at_path(temp.path(), "@src/", 10);
+        suggestions.sort();
+        assert_eq!(suggestions, vec!["@src/lib.rs", "@src/main.rs"]);
+
+        let suggestions = suggest_at_path(temp.path(), "@src/m", 10);
+        assert_eq!(suggestions, vec!["@src/main.rs"]);
+    }
+
+    #[test]
+    fn suggest_at_path_skips_hidden_unless_dot_typed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join(".env"), "").unwrap();
+        std::fs::write(temp.path().join("public.txt"), "").unwrap();
+
+        // Default: don't suggest dotfiles.
+        let suggestions = suggest_at_path(temp.path(), "@", 10);
+        assert_eq!(suggestions, vec!["@public.txt"]);
+
+        // User explicitly typed '.': suggest dotfiles.
+        let suggestions = suggest_at_path(temp.path(), "@.", 10);
+        assert_eq!(suggestions, vec!["@.env"]);
+    }
+
+    #[test]
+    fn suggest_at_path_respects_limit() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for i in 0..20 {
+            std::fs::write(temp.path().join(format!("f{i:02}.txt")), "").unwrap();
+        }
+        let suggestions = suggest_at_path(temp.path(), "@f", 5);
+        assert_eq!(suggestions.len(), 5);
     }
 }
 

@@ -374,3 +374,131 @@ fn test_install_marker_tracks_current_telemetry_id() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[test]
+fn telemetry_disabled_by_jcode_offline_env() {
+    // Regression for issue #24: --offline / JCODE_OFFLINE must disable startup
+    // telemetry without needing the separate JCODE_NO_TELEMETRY knob.
+    let _lock = lock_test_env();
+    let prev_offline = std::env::var_os("JCODE_OFFLINE");
+    let prev_no = std::env::var_os("JCODE_NO_TELEMETRY");
+    let prev_endpoint = std::env::var_os("JCODE_TELEMETRY_ENDPOINT");
+    // Pin to a working endpoint so the only thing disabling telemetry is offline.
+    crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", "https://example.com/v1/event");
+    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    crate::env::set_var("JCODE_OFFLINE", "1");
+
+    assert!(!super::is_enabled(), "JCODE_OFFLINE must disable telemetry");
+
+    if let Some(p) = prev_offline {
+        crate::env::set_var("JCODE_OFFLINE", p);
+    } else {
+        crate::env::remove_var("JCODE_OFFLINE");
+    }
+    if let Some(p) = prev_no {
+        crate::env::set_var("JCODE_NO_TELEMETRY", p);
+    }
+    if let Some(p) = prev_endpoint {
+        crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", p);
+    } else {
+        crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #73 / upstream PR #77 — telemetry endpoint is
+// now resolved at runtime and absent by default in this fork.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn telemetry_endpoint_returns_none_without_config() {
+    let _lock = lock_test_env();
+    let prev_env = std::env::var_os("JCODE_TELEMETRY_ENDPOINT");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+    crate::env::remove_var("JCODE_OFFLINE");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    assert!(
+        super::telemetry_endpoint().is_none(),
+        "no env, no telemetry.toml → telemetry must be disabled by default"
+    );
+    assert!(!super::is_enabled());
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", prev);
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn telemetry_endpoint_picks_up_env_var() {
+    let _lock = lock_test_env();
+    let prev_env = std::env::var_os("JCODE_TELEMETRY_ENDPOINT");
+    let prev_offline = std::env::var_os("JCODE_OFFLINE");
+    crate::env::remove_var("JCODE_OFFLINE");
+    crate::env::set_var(
+        "JCODE_TELEMETRY_ENDPOINT",
+        "https://example.com/telemetry/v1",
+    );
+
+    assert_eq!(
+        super::telemetry_endpoint().as_deref(),
+        Some("https://example.com/telemetry/v1")
+    );
+    assert!(super::is_enabled());
+
+    // Empty value disables telemetry without the separate JCODE_NO_TELEMETRY knob.
+    crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", "   ");
+    assert!(super::telemetry_endpoint().is_none());
+    assert!(!super::is_enabled());
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", prev);
+    } else {
+        crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+    }
+    if let Some(prev) = prev_offline {
+        crate::env::set_var("JCODE_OFFLINE", prev);
+    }
+}
+
+#[test]
+fn telemetry_endpoint_picks_up_telemetry_toml() {
+    let _lock = lock_test_env();
+    let prev_env = std::env::var_os("JCODE_TELEMETRY_ENDPOINT");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_offline = std::env::var_os("JCODE_OFFLINE");
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+    crate::env::remove_var("JCODE_OFFLINE");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("telemetry.toml"),
+        "endpoint = \"https://collector.example/v1/event\"\n",
+    )
+    .expect("write telemetry.toml");
+
+    assert_eq!(
+        super::telemetry_endpoint().as_deref(),
+        Some("https://collector.example/v1/event")
+    );
+    assert!(super::is_enabled());
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", prev);
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(prev) = prev_offline {
+        crate::env::set_var("JCODE_OFFLINE", prev);
+    }
+}

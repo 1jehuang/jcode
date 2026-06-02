@@ -214,10 +214,10 @@ impl ToggleBinding {
         let default_label = format_binding(&default);
         let (binding, _) = parse_optional(raw, default, &default_label);
         let macos_option_letter = binding.as_ref().and_then(|b| {
-            if b.modifiers == KeyModifiers::ALT {
-                if let KeyCode::Char(c) = b.code {
-                    return Some(c.to_ascii_lowercase());
-                }
+            if b.modifiers == KeyModifiers::ALT
+                && let KeyCode::Char(c) = b.code
+            {
+                return Some(c.to_ascii_lowercase());
             }
             None
         });

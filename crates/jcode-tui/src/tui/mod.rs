@@ -223,6 +223,10 @@ pub trait TuiState {
     }
     /// Whether there is a stashed input (saved via Ctrl+S)
     fn has_stashed_input(&self) -> bool;
+    /// Returns `Some((current, total))` if the user is browsing input history.
+    fn input_history_browse_status(&self) -> Option<(usize, usize)> {
+        None
+    }
     /// Context info (what's loaded in context window - static + dynamic)
     fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Authoritative, freshness-tagged context snapshot used by widgets.

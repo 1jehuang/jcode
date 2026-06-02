@@ -378,7 +378,6 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
         area.height
             .saturating_sub(telemetry_h + body_h + GAP * 2 + 1),
     );
-    let donut_h = donut_h.max(0);
 
     let used = telemetry_h + GAP + donut_h + GAP + body_h;
     let pad_top = area.height.saturating_sub(used) / 2;

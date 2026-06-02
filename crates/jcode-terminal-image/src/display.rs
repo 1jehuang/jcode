@@ -35,6 +35,21 @@ pub enum ImageProtocol {
 impl ImageProtocol {
     /// Detect the best available image protocol for the current terminal
     pub fn detect() -> Self {
+        // User override: JCODE_IMAGE_PROTOCOL=none|kitty|sixel|iterm2
+        // takes priority over auto-detection. Useful when running
+        // inside multiplexers (tmux, Zellij) where the auto-detect
+        // result may not match what your config actually passes
+        // through.
+        if let Ok(forced) = std::env::var("JCODE_IMAGE_PROTOCOL") {
+            match forced.trim().to_ascii_lowercase().as_str() {
+                "none" | "off" | "disabled" => return Self::None,
+                "kitty" | "ghostty" => return Self::Kitty,
+                "sixel" => return Self::Sixel,
+                "iterm" | "iterm2" => return Self::ITerm2,
+                _ => {} // unknown value → fall through to auto-detect
+            }
+        }
+
         // Check for Kitty first (most capable)
         if std::env::var("KITTY_WINDOW_ID").is_ok() {
             return Self::Kitty;
@@ -43,6 +58,24 @@ impl ImageProtocol {
         // Check TERM for kitty or ghostty
         if let Ok(term) = std::env::var("TERM")
             && (term.contains("kitty") || term.contains("ghostty"))
+        {
+            return Self::Kitty;
+        }
+
+        // Issue #148: Zellij multiplexer has Kitty graphics pass-through
+        // (configurable; see https://zellij.dev/documentation/file-formats.html).
+        // Detect by:
+        //   1. ZELLIJ env var set, AND
+        //   2. ZELLIJ_PARENT_TERM is one of the Kitty-protocol-capable terminals.
+        // ZELLIJ_PARENT_TERM is exported by Zellij itself when launched
+        // from a Kitty-protocol-capable host. If the user disabled
+        // pass-through, this will be wrong — they can override with
+        // JCODE_IMAGE_PROTOCOL=none|kitty|sixel|iterm2.
+        if std::env::var("ZELLIJ").is_ok()
+            && let Ok(parent) = std::env::var("ZELLIJ_PARENT_TERM")
+            && (parent.contains("kitty")
+                || parent.contains("ghostty")
+                || parent.contains("wezterm"))
         {
             return Self::Kitty;
         }
@@ -440,5 +473,102 @@ mod tests {
         let (w, h) = calculate_display_size(500, 500, 80, 24);
         assert!(w <= 80);
         assert!(h <= 24);
+    }
+
+    fn save_keys(keys: &[&'static str]) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        keys.iter().map(|k| (*k, std::env::var_os(k))).collect()
+    }
+    fn restore_keys(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (k, v) in saved {
+            unsafe {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+    fn clear_image_env(keys: &[&'static str]) {
+        for k in keys {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+    }
+
+    const IMAGE_ENV_KEYS: &[&str] = &[
+        "JCODE_IMAGE_PROTOCOL",
+        "KITTY_WINDOW_ID",
+        "TERM",
+        "TERM_PROGRAM",
+        "LC_TERMINAL",
+        "ZELLIJ",
+        "ZELLIJ_PARENT_TERM",
+    ];
+
+    #[test]
+    fn jcode_image_protocol_env_overrides_detection() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(IMAGE_ENV_KEYS);
+        clear_image_env(IMAGE_ENV_KEYS);
+
+        unsafe {
+            std::env::set_var("JCODE_IMAGE_PROTOCOL", "none");
+        }
+        assert_eq!(ImageProtocol::detect(), ImageProtocol::None);
+
+        unsafe {
+            std::env::set_var("JCODE_IMAGE_PROTOCOL", "kitty");
+        }
+        assert_eq!(ImageProtocol::detect(), ImageProtocol::Kitty);
+
+        unsafe {
+            std::env::set_var("JCODE_IMAGE_PROTOCOL", "iterm2");
+        }
+        assert_eq!(ImageProtocol::detect(), ImageProtocol::ITerm2);
+
+        // Unknown value falls through to auto-detect.
+        unsafe {
+            std::env::set_var("JCODE_IMAGE_PROTOCOL", "unknown-thing");
+        }
+        unsafe {
+            std::env::set_var("KITTY_WINDOW_ID", "42");
+        }
+        assert_eq!(ImageProtocol::detect(), ImageProtocol::Kitty);
+
+        restore_keys(saved);
+    }
+
+    #[test]
+    fn zellij_with_kitty_parent_detects_as_kitty() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(IMAGE_ENV_KEYS);
+        clear_image_env(IMAGE_ENV_KEYS);
+
+        unsafe {
+            std::env::set_var("ZELLIJ", "1");
+        }
+        unsafe {
+            std::env::set_var("ZELLIJ_PARENT_TERM", "xterm-kitty");
+        }
+        assert_eq!(ImageProtocol::detect(), ImageProtocol::Kitty);
+
+        restore_keys(saved);
+    }
+
+    #[test]
+    fn zellij_without_parent_term_falls_through() {
+        let _lock = crate::storage::lock_test_env();
+        let saved = save_keys(IMAGE_ENV_KEYS);
+        clear_image_env(IMAGE_ENV_KEYS);
+
+        unsafe {
+            std::env::set_var("ZELLIJ", "1");
+        }
+        // No ZELLIJ_PARENT_TERM — fall through to other checks (no
+        // image-capable signal → None).
+        assert_eq!(ImageProtocol::detect(), ImageProtocol::None);
+
+        restore_keys(saved);
     }
 }

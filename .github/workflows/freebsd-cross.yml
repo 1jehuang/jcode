@@ -1,0 +1,77 @@
+name: FreeBSD Cross-Build (best-effort)
+
+# Issue #131: cross-compile jcode for x86_64-unknown-freebsd from a Linux
+# runner using `cross`. Results are uploaded as a workflow artifact so users
+# can download a candidate binary; we do NOT promise it works at runtime
+# because GitHub Actions has no native FreeBSD runner to validate against.
+#
+# Manually dispatched only — never runs on push/tag. To attempt a build:
+#
+#   gh workflow run "FreeBSD Cross-Build (best-effort)" --ref master
+#
+# If the cross-compile succeeds, download the artifact:
+#
+#   gh run download <run-id> -n jcode-freebsd-x86_64
+#
+# and validate on a real FreeBSD box. File issue #131 follow-ups with the
+# results.
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "cargo build profile (release | dev)"
+        type: choice
+        default: release
+        options:
+          - release
+          - dev
+
+permissions:
+  contents: read
+
+jobs:
+  freebsd-cross:
+    name: cross-compile (best-effort)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    # Best-effort — never block the rest of the project's CI.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cross-build for x86_64-unknown-freebsd
+        shell: bash
+        run: |
+          set -e
+          target=x86_64-unknown-freebsd
+          if [ "${{ inputs.profile }}" = "release" ]; then
+            cross build --release --bin jcode --target "${target}"
+            bin="target/${target}/release/jcode"
+          else
+            cross build --bin jcode --target "${target}"
+            bin="target/${target}/debug/jcode"
+          fi
+          ls -lah "${bin}"
+          file "${bin}" || true
+
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jcode-freebsd-x86_64
+          path: |
+            target/x86_64-unknown-freebsd/${{ inputs.profile == 'release' && 'release' || 'debug' }}/jcode
+
+      - name: Notice on failure
+        if: failure()
+        run: |
+          echo "::warning title=Cross-compile failed::Cross-compiling jcode to x86_64-unknown-freebsd from Linux is best-effort. See docs/BUILD_FREEBSD.md for the supported native-build path."

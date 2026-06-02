@@ -141,8 +141,8 @@ impl StatusSpinnerRenderer {
             });
         let total_cells = Some(completed.buffer.content.len());
         let completed_buffer = completed.buffer.clone();
-        // `completed` borrows the terminal; drop it before touching the backend again.
-        drop(completed);
+        // `completed` borrows the terminal; the borrow is released when `completed`
+        // goes out of scope at the end of this block, before we access the backend.
         if sync {
             let _ = crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate);
         }

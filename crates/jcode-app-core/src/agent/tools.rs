@@ -95,6 +95,22 @@ pub(super) fn tool_output_to_content_blocks(
     blocks
 }
 
+/// Issue #164: dedup helper for tool_calls accumulated during a streamed
+/// turn. Returns true if `tool` was inserted, false if a duplicate
+/// `tool_use_id` was already present (caller should log + skip).
+///
+/// The streaming layer can yield the same ToolUseEnd twice on reconnect
+/// or partial replay. Without dedup, both copies execute — visible in the
+/// transcript as duplicated tool calls and confusing the model on the
+/// next turn.
+pub(super) fn push_dedup_by_id(tool_calls: &mut Vec<ToolCall>, tool: ToolCall) -> bool {
+    if tool_calls.iter().any(|existing| existing.id == tool.id) {
+        return false;
+    }
+    tool_calls.push(tool);
+    true
+}
+
 pub(super) fn print_tool_summary(tool: &ToolCall) {
     match tool.name.as_str() {
         "bash" => {
@@ -158,5 +174,44 @@ mod tests {
         );
         assert!(capped.contains("Tool output truncated by jcode"));
         assert!(capped.contains("tool `custom` produced"));
+    }
+
+    fn fake_tool(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: serde_json::Value::Null,
+            intent: None,
+        }
+    }
+
+    #[test]
+    fn push_dedup_by_id_inserts_new_tool() {
+        let mut calls: Vec<ToolCall> = Vec::new();
+        assert!(push_dedup_by_id(&mut calls, fake_tool("t1", "bash")));
+        assert!(push_dedup_by_id(&mut calls, fake_tool("t2", "read")));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "t1");
+        assert_eq!(calls[1].id, "t2");
+    }
+
+    #[test]
+    fn push_dedup_by_id_skips_duplicate() {
+        // Issue #164: same tool_use_id from streaming reconnect must be dropped.
+        let mut calls: Vec<ToolCall> = vec![fake_tool("t1", "bash")];
+        let inserted = push_dedup_by_id(&mut calls, fake_tool("t1", "bash"));
+        assert!(!inserted, "duplicate id must not be pushed");
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn push_dedup_by_id_treats_different_names_with_same_id_as_duplicate() {
+        // The id is authoritative; same id with different name still rejects.
+        // (This matches provider semantics — id is the primary key for tool calls.)
+        let mut calls: Vec<ToolCall> = vec![fake_tool("t1", "bash")];
+        let inserted = push_dedup_by_id(&mut calls, fake_tool("t1", "read"));
+        assert!(!inserted);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
     }
 }

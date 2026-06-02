@@ -155,6 +155,20 @@ impl App {
             return false;
         };
 
+        // Same fix as server_has_newer_binary: if the candidate file
+        // canonicalizes to the same path as the currently running binary,
+        // there is nothing to reload into. This prevents the infinite
+        // reload loop reported in issues #157 and #160 where the stable
+        // channel resolves back to the running versioned binary but with
+        // a freshly-bumped mtime (e.g. after a re-install).
+        if let Ok(candidate_canon) = std::fs::canonicalize(&candidate)
+            && let Ok(current_exe) = std::env::current_exe()
+            && let Ok(current_canon) = std::fs::canonicalize(&current_exe)
+            && candidate_canon == current_canon
+        {
+            return false;
+        }
+
         std::fs::metadata(&candidate)
             .ok()
             .and_then(|m| m.modified().ok())

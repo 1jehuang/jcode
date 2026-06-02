@@ -1,6 +1,6 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::config::WebSearchEngine;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -172,8 +172,87 @@ impl WebSearchTool {
                 self.search_bing(query, num_results, bing, allow_bing_api)
                     .await
             }
+            WebSearchEngine::Exa => self.search_exa(query, num_results).await,
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
         }
+    }
+
+    /// Issue #79: Exa.ai semantic search.
+    ///
+    /// Endpoint: POST https://api.exa.ai/search
+    /// Auth:     x-api-key header (read from EXA_API_KEY env)
+    /// Body:     `{ "query": ..., "numResults": N, "useAutoprompt": true }`
+    ///
+    /// Returns `Err` (with helpful message) if EXA_API_KEY is unset, so the
+    /// caller's fallback chain can move on to DuckDuckGo / Bing.
+    async fn search_exa(&self, query: &str, num_results: usize) -> Result<Vec<SearchResult>> {
+        let api_key = std::env::var("EXA_API_KEY").map_err(|_| {
+            anyhow::anyhow!(
+                "Exa search requires EXA_API_KEY env var. Get one at https://dashboard.exa.ai (free tier: 1k queries/month)."
+            )
+        })?;
+        let api_key = api_key.trim().to_string();
+        if api_key.is_empty() {
+            anyhow::bail!("EXA_API_KEY is set but empty.");
+        }
+
+        let body = serde_json::json!({
+            "query": query,
+            "numResults": num_results,
+            "useAutoprompt": true,
+            "type": "auto",
+        });
+
+        let response = self
+            .client
+            .post("https://api.exa.ai/search")
+            .header("x-api-key", api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("exa: POST /search")?;
+
+        let status = response.status();
+        let text = response.text().await.context("exa: read body")?;
+        if !status.is_success() {
+            anyhow::bail!("Exa search failed ({}): {}", status, text);
+        }
+
+        let json: serde_json::Value =
+            serde_json::from_str(&text).context("exa: parse response JSON")?;
+        let results = json
+            .get("results")
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| anyhow::anyhow!("exa: response missing 'results' array"))?;
+
+        let mut out = Vec::with_capacity(results.len());
+        for item in results {
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(untitled)")
+                .to_string();
+            let url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = item
+                .get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("snippet").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            if !url.is_empty() {
+                out.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+        Ok(out)
     }
 
     async fn search_duckduckgo(
@@ -718,7 +797,55 @@ mod tests {
             Some(WebSearchEngine::Duckduckgo)
         );
         assert_eq!(WebSearchEngine::parse("bing"), Some(WebSearchEngine::Bing));
+        assert_eq!(WebSearchEngine::parse("exa"), Some(WebSearchEngine::Exa));
+        assert_eq!(WebSearchEngine::parse("exa.ai"), Some(WebSearchEngine::Exa));
+        assert_eq!(WebSearchEngine::parse("exa-ai"), Some(WebSearchEngine::Exa));
+        assert_eq!(WebSearchEngine::parse("EXA"), Some(WebSearchEngine::Exa));
         assert_eq!(WebSearchEngine::parse("google"), None);
+    }
+
+    #[test]
+    fn exa_engine_as_str_is_lowercase() {
+        assert_eq!(WebSearchEngine::Exa.as_str(), "exa");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exa_search_errors_when_api_key_unset() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("EXA_API_KEY");
+        crate::env::remove_var("EXA_API_KEY");
+
+        let tool = WebSearchTool::new();
+        let res = tool.search_exa("rust async best practices", 5).await;
+        assert!(res.is_err(), "must error when EXA_API_KEY missing");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("EXA_API_KEY"),
+            "error must mention EXA_API_KEY: {msg}"
+        );
+
+        if let Some(p) = prev {
+            crate::env::set_var("EXA_API_KEY", p);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn exa_search_errors_when_api_key_blank() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("EXA_API_KEY");
+        crate::env::set_var("EXA_API_KEY", "   ");
+
+        let tool = WebSearchTool::new();
+        let res = tool.search_exa("rust", 1).await;
+        assert!(res.is_err(), "blank key should fail validation");
+
+        if let Some(p) = prev {
+            crate::env::set_var("EXA_API_KEY", p);
+        } else {
+            crate::env::remove_var("EXA_API_KEY");
+        }
     }
 
     #[test]

@@ -404,6 +404,7 @@ impl Agent {
             message_id: self.session.id.clone(),
             tool_call_id: call_id,
             working_dir: self.working_dir().map(PathBuf::from),
+            sandbox_root: crate::sandbox::current_sandbox_root(),
             stdin_request_tx: self.stdin_request_tx.clone(),
             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
             execution_mode: ToolExecutionMode::Direct,
@@ -506,6 +507,26 @@ impl Agent {
         let reset_ms = reset_start.elapsed().as_millis();
 
         let model_start = Instant::now();
+
+        // Issue #69: detect when the restored session was using a different
+        // provider than the one currently active. The MultiProvider doesn't
+        // yet expose a set_active_provider — when it lands, this check
+        // should switch and re-run set_model. For now, log a clear warning
+        // so the symptom (turn fails with "model X is not available") has
+        // a breadcrumb in the logs.
+        if let Some(persisted_provider) = self.session.provider_key.clone() {
+            let current = crate::session::derive_session_provider_key(self.provider.name());
+            if let Some(current_key) = current.as_ref()
+                && current_key != &persisted_provider
+            {
+                logging::warn(&format!(
+                    "Restoring session that used provider '{}' but current jcode is configured for '{}'. \
+                     Re-run with `jcode --provider {} --resume {}` to use the original provider.",
+                    persisted_provider, current_key, persisted_provider, session_id,
+                ));
+            }
+        }
+
         if let Some(model) = self.session.model.clone() {
             let model_request =
                 crate::provider::MultiProvider::model_switch_request_for_session_route(
@@ -690,16 +711,42 @@ impl Agent {
 
             // Check for skill invocation
             if let Some(skill_name) = SkillRegistry::parse_invocation(input) {
-                if let Some(skill) = skills.get(skill_name) {
+                let mut skill = skills.get(skill_name).cloned();
+
+                // Issue #57 / upstream #59: a `skill_manage reload_all` running
+                // inside the same session updates the registry, but a CLI
+                // input handler that captured `skills` at the top of the loop
+                // sees the old snapshot. On a slash miss, refresh from the
+                // active session's working directory before reporting Unknown
+                // skill — same lazy-reload pattern as the TUI input path
+                // (`src/tui/app/input.rs`).
+                if skill.is_none() {
+                    let working_dir = self
+                        .session
+                        .working_dir
+                        .as_deref()
+                        .map(std::path::Path::new);
+                    if let Ok(reloaded) = SkillRegistry::load_for_working_dir(working_dir) {
+                        skill = reloaded.get(skill_name).cloned();
+                        // Update the shared registry so subsequent invocations
+                        // and the listing below also see the fresh snapshot.
+                        if let Ok(mut shared) = self.registry.skills().try_write() {
+                            *shared = reloaded;
+                        }
+                    }
+                }
+
+                if let Some(skill) = skill {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
                     self.active_skill = Some(skill_name.to_string());
                     continue;
                 } else {
                     println!("Unknown skill: /{}", skill_name);
+                    let fresh = self.current_skills_snapshot();
                     println!(
                         "Available: {}",
-                        skills
+                        fresh
                             .list()
                             .iter()
                             .map(|s| format!("/{}", s.name))

@@ -75,8 +75,42 @@ pub fn jcode_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
+    // Issue #123: opt-in XDG Base Directory Specification support.
+    //
+    // When `JCODE_USE_XDG=1` is set in the environment (truthy), resolve the
+    // jcode home to `$XDG_DATA_HOME/jcode` (or `$HOME/.local/share/jcode` if
+    // XDG_DATA_HOME is unset). This keeps the default unchanged for existing
+    // users who already have `~/.jcode/`, while letting XDG-strict
+    // distributions and dotfile managers move jcode out of `$HOME` root.
+    //
+    // Non-truthy / unset → keep the legacy `~/.jcode` location for full
+    // backwards compatibility.
+    if jcode_use_xdg_enabled() {
+        let xdg_data = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))
+            .ok_or_else(|| anyhow::anyhow!("No XDG_DATA_HOME and no $HOME"))?;
+        return Ok(xdg_data.join("jcode"));
+    }
+
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
     Ok(home.join(".jcode"))
+}
+
+/// Whether the user has opted into XDG Base Directory Specification paths
+/// via `JCODE_USE_XDG=1` (or any truthy value). See `jcode_dir` for details.
+fn jcode_use_xdg_enabled() -> bool {
+    matches!(
+        std::env::var("JCODE_USE_XDG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 pub fn logs_dir() -> Result<PathBuf> {
@@ -378,4 +412,114 @@ pub fn append_json_line_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> R
     file.write_all(b"\n")?;
     file.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Local mutex — these tests mutate process env vars and would race with
+    /// each other if run in parallel.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn save(keys: &[&'static str]) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        keys.iter().map(|k| (*k, std::env::var_os(k))).collect()
+    }
+
+    fn restore(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (k, v) in saved {
+            unsafe {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jcode_dir_legacy_default_when_xdg_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = save(&["JCODE_HOME", "JCODE_USE_XDG"]);
+        unsafe {
+            std::env::remove_var("JCODE_HOME");
+            std::env::remove_var("JCODE_USE_XDG");
+        }
+        let dir = jcode_dir().expect("legacy path");
+        assert!(
+            dir.ends_with(".jcode"),
+            "expected ~/.jcode legacy path, got {}",
+            dir.display()
+        );
+        restore(saved);
+    }
+
+    #[test]
+    fn jcode_dir_uses_xdg_data_home_when_opt_in() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = save(&["JCODE_HOME", "JCODE_USE_XDG", "XDG_DATA_HOME"]);
+        unsafe {
+            std::env::remove_var("JCODE_HOME");
+            std::env::set_var("JCODE_USE_XDG", "1");
+            std::env::set_var("XDG_DATA_HOME", "/tmp/test-xdg-data");
+        }
+        let dir = jcode_dir().expect("xdg path");
+        assert_eq!(dir, PathBuf::from("/tmp/test-xdg-data/jcode"));
+        restore(saved);
+    }
+
+    #[test]
+    fn jcode_dir_xdg_falls_back_to_local_share() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = save(&["JCODE_HOME", "JCODE_USE_XDG", "XDG_DATA_HOME"]);
+        unsafe {
+            std::env::remove_var("JCODE_HOME");
+            std::env::set_var("JCODE_USE_XDG", "true");
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        let dir = jcode_dir().expect("xdg fallback");
+        // Should end with `.local/share/jcode` regardless of platform's
+        // home dir.
+        let suffix: PathBuf = [".local", "share", "jcode"].iter().collect();
+        assert!(
+            dir.ends_with(&suffix),
+            "expected ~/.local/share/jcode, got {}",
+            dir.display()
+        );
+        restore(saved);
+    }
+
+    #[test]
+    fn jcode_dir_jcode_home_overrides_everything() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = save(&["JCODE_HOME", "JCODE_USE_XDG", "XDG_DATA_HOME"]);
+        unsafe {
+            std::env::set_var("JCODE_HOME", "/tmp/forced-home");
+            std::env::set_var("JCODE_USE_XDG", "1");
+            std::env::set_var("XDG_DATA_HOME", "/tmp/should-be-ignored");
+        }
+        let dir = jcode_dir().expect("jcode_home");
+        assert_eq!(dir, PathBuf::from("/tmp/forced-home"));
+        restore(saved);
+    }
+
+    #[test]
+    fn jcode_use_xdg_enabled_recognizes_truthy_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = save(&["JCODE_USE_XDG"]);
+        for truthy in ["1", "true", "TRUE", "yes", "On"] {
+            unsafe {
+                std::env::set_var("JCODE_USE_XDG", truthy);
+            }
+            assert!(jcode_use_xdg_enabled(), "{truthy:?} should be truthy");
+        }
+        for falsy in ["0", "false", "no", "off", "", "  "] {
+            unsafe {
+                std::env::set_var("JCODE_USE_XDG", falsy);
+            }
+            assert!(!jcode_use_xdg_enabled(), "{falsy:?} should be falsy");
+        }
+        restore(saved);
+    }
 }

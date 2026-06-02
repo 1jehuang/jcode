@@ -1474,3 +1474,96 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
         }
     );
 }
+
+#[test]
+fn jcode_session_name_env_titles_top_level_session() {
+    // Issue #99: `jcode --name "my-session"` is wired through the
+    // JCODE_SESSION_NAME env var so a freshly-created top-level session picks
+    // it up as Session::title. Subagents (parent_id=Some) must not inherit it
+    // so spawn children stay random-named for clarity.
+    let _lock = crate::storage::lock_test_env();
+    let _name = EnvVarGuard::set("JCODE_SESSION_NAME", "my custom title");
+
+    let top = Session::create(None, None);
+    assert_eq!(top.title.as_deref(), Some("my custom title"));
+
+    let spawned = Session::create(Some("parent_x".to_string()), None);
+    assert!(
+        spawned.title.is_none(),
+        "child sessions must not inherit JCODE_SESSION_NAME, got {:?}",
+        spawned.title
+    );
+
+    // Explicit title still wins over the env.
+    let explicit = Session::create(None, Some("explicit".to_string()));
+    assert_eq!(explicit.title.as_deref(), Some("explicit"));
+}
+
+// ---- Issue #2: session fork ----
+
+#[test]
+fn fork_creates_new_id_with_parent_pointing_back() {
+    let original = Session::create(None, Some("orig".to_string()));
+    let forked = original.fork(None);
+
+    assert_ne!(forked.id, original.id, "fork must have a fresh id");
+    assert_eq!(
+        forked.parent_id.as_deref(),
+        Some(original.id.as_str()),
+        "fork's parent_id must point at the original"
+    );
+    assert_eq!(forked.status, SessionStatus::Active);
+}
+
+#[test]
+fn fork_copies_messages_and_title_by_default() {
+    let mut original = Session::create(None, Some("orig title".to_string()));
+    original.append_stored_message(StoredMessage {
+        id: "msg_1".to_string(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    let forked = original.fork(None);
+
+    assert_eq!(forked.messages.len(), 1);
+    assert_eq!(forked.title.as_deref(), Some("orig title"));
+}
+
+#[test]
+fn fork_with_explicit_title_overrides_inherited() {
+    let original = Session::create(None, Some("orig".to_string()));
+    let forked = original.fork(Some("branched-version".to_string()));
+    assert_eq!(forked.title.as_deref(), Some("branched-version"));
+}
+
+#[test]
+fn fork_does_not_mutate_original() {
+    let original = Session::create(None, Some("orig".to_string()));
+    let original_id = original.id.clone();
+    let original_messages = original.messages.len();
+
+    let _forked = original.fork(None);
+
+    // We didn't pass `&mut`; this confirms by re-reading.
+    assert_eq!(original.id, original_id);
+    assert_eq!(original.messages.len(), original_messages);
+}
+
+#[test]
+fn fork_resets_provider_session_id_to_force_fresh_thread() {
+    let mut original = Session::create(None, Some("orig".to_string()));
+    original.provider_session_id = Some("prev-thread-abc".to_string());
+
+    let forked = original.fork(None);
+    assert_eq!(
+        forked.provider_session_id, None,
+        "fork must start a fresh provider thread to avoid sharing context"
+    );
+}

@@ -3,6 +3,7 @@ pub mod antigravity;
 pub mod azure;
 pub mod claude;
 pub mod codex;
+pub mod codex_config;
 mod commands;
 pub mod copilot;
 pub mod cursor;
@@ -171,6 +172,29 @@ fn copilot_auth_state_from_credentials() -> (AuthState, bool) {
     } else {
         (AuthState::Available, true)
     }
+}
+
+/// Issue #163: check whether `key` is listed in
+/// `provider.disabled_providers` config. Case-insensitive,
+/// whitespace-trimmed. Recognized aliases:
+///   "copilot" matches "github copilot" and vice versa.
+///
+/// Used by auth status, login picker, and provider catalog to hide
+/// providers an operator has explicitly turned off (e.g. enterprise
+/// policy, billing constraints).
+pub fn provider_key_disabled(key: &str) -> bool {
+    crate::config::config()
+        .provider
+        .disabled_providers
+        .iter()
+        .any(|raw| {
+            let value = raw.trim();
+            value.eq_ignore_ascii_case(key)
+                || (key.eq_ignore_ascii_case("copilot")
+                    && value.eq_ignore_ascii_case("github copilot"))
+                || (key.eq_ignore_ascii_case("github copilot")
+                    && value.eq_ignore_ascii_case("copilot"))
+        })
 }
 
 impl AuthStatus {

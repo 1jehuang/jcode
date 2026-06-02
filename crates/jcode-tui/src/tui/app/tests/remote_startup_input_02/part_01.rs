@@ -1075,3 +1075,336 @@ fn test_handle_input_shell_completed_renders_markdown_blocks() {
         Some("Shell command completed".to_string())
     );
 }
+
+#[test]
+fn test_submit_input_records_input_history() {
+    let mut app = create_test_app();
+
+    // Submit first input
+    app.input = "first command".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    assert!(app.input_history.contains(&"first command".to_string()));
+    assert_eq!(app.input_history.len(), 1);
+
+    // Submit second input
+    app.input = "second command".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    assert_eq!(app.input_history.len(), 2);
+    assert_eq!(app.input_history[0], "first command");
+    assert_eq!(app.input_history[1], "second command");
+}
+
+#[test]
+fn test_submit_input_deduplicates_consecutive_entries() {
+    let mut app = create_test_app();
+
+    app.input = "same command".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    app.input = "same command".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    assert_eq!(app.input_history.len(), 1);
+}
+
+#[test]
+fn test_submit_input_does_not_record_empty() {
+    let mut app = create_test_app();
+
+    app.input = "   ".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    assert!(app.input_history.is_empty());
+}
+
+#[test]
+fn test_input_history_up_recalls_last_input() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+
+    assert!(app.input.is_empty());
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "second");
+    assert_eq!(app.input_history_index, Some(1));
+
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "first");
+    assert_eq!(app.input_history_index, Some(0));
+
+    // At the top, pressing up again should stay at index 0
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "first");
+    assert_eq!(app.input_history_index, Some(0));
+}
+
+#[test]
+fn test_input_history_down_navigates_forward() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history_index = Some(0);
+    app.input = "first".to_string();
+
+    assert!(app.input_history_down());
+    assert_eq!(app.input, "second");
+    assert_eq!(app.input_history_index, Some(1));
+
+    // Past the end clears input and exits browse mode
+    assert!(app.input_history_down());
+    assert!(app.input.is_empty());
+    assert!(app.input_history_index.is_none());
+}
+
+#[test]
+fn test_input_history_down_does_nothing_when_not_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    assert!(!app.input_history_down());
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_text_input_resets_history_browse() {
+    let mut app = create_test_app();
+
+    app.input_history.push("old".to_string());
+    app.input_history_index = Some(0);
+    app.input = "old".to_string();
+    app.cursor_pos = 3;
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .unwrap();
+
+    assert!(app.input_history_index.is_none());
+}
+
+#[test]
+fn test_backspace_resets_history_browse() {
+    let mut app = create_test_app();
+
+    app.input_history.push("test".to_string());
+    app.input_history_index = Some(0);
+    app.input = "test".to_string();
+    app.cursor_pos = 4;
+
+    app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
+        .unwrap();
+
+    assert!(app.input_history_index.is_none());
+}
+
+#[test]
+fn test_history_command_lists_entries() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history");
+
+    let last = app.display_messages().last().expect("history message");
+    assert!(last.content.contains("**Input history:**"));
+    assert!(last.content.contains("first"));
+    assert!(last.content.contains("second"));
+}
+
+#[test]
+fn test_history_command_empty() {
+    let mut app = create_test_app();
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history");
+
+    let last = app.display_messages().last().expect("empty message");
+    assert!(last.content.contains("No input history yet"));
+}
+
+#[test]
+fn test_history_input_n_loads_entry() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history input 1");
+
+    assert_eq!(app.input(), "first");
+    assert!(app.input_history_index.is_none());
+}
+
+#[test]
+fn test_history_input_n_rejects_invalid_index() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history input 5");
+
+    let last = app.display_messages().last().expect("error message");
+    assert!(last.content.contains("Invalid index"));
+}
+
+#[test]
+fn test_input_history_up_empty_history() {
+    let mut app = create_test_app();
+
+    assert!(!app.input_history_up());
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_input_history_up_continues_while_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history.push("third".to_string());
+
+    // Start browsing with empty input
+    app.input.clear();
+    app.cursor_pos = 0;
+
+    // First Up: loads "third" (most recent), index = Some(2)
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "third");
+    assert_eq!(app.input_history_index, Some(2));
+
+    // Second Up: loads "second", index = Some(1)
+    // This should work even though input is now non-empty (we're browsing).
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "second");
+    assert_eq!(app.input_history_index, Some(1));
+
+    // Third Up: loads "first", index = Some(0)
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "first");
+    assert_eq!(app.input_history_index, Some(0));
+
+    // Fourth Up: already at oldest, stays at "first"
+    assert!(app.input_history_up());
+    assert_eq!(app.input, "first");
+    assert_eq!(app.input_history_index, Some(0));
+}
+
+#[test]
+fn test_input_history_down_returns_false_when_not_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input = "typed text".to_string();
+    app.input_history_index = None;
+
+    // Down should not engage history when not browsing
+    assert!(!app.input_history_down());
+    assert_eq!(app.input, "typed text");
+}
+
+#[test]
+fn test_history_clear_removes_all_entries() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history.push("third".to_string());
+
+    app.clear_input_history();
+    assert!(app.input_history.is_empty());
+}
+
+#[test]
+fn test_history_search_finds_matches() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello world".to_string());
+    app.input_history.push("goodbye world".to_string());
+    app.input_history.push("hello there".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history search hello");
+
+    let last = app.display_messages().last().expect("search results");
+    assert!(last.content.contains("hello world"));
+    assert!(last.content.contains("hello there"));
+    assert!(!last.content.contains("goodbye"));
+    assert!(last.content.contains("2 match"));
+}
+
+#[test]
+fn test_history_search_no_results() {
+    let mut app = create_test_app();
+
+    app.input_history.push("hello world".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history search xyz");
+
+    let last = app.display_messages().last().expect("no match message");
+    assert!(last.content.contains("No history entries match"));
+}
+
+#[test]
+fn test_history_delete_removes_entry() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history.push("third".to_string());
+
+    use crate::tui::app::commands::handle_session_command;
+    handle_session_command(&mut app, "/history delete 2");
+
+    assert_eq!(app.input_history.len(), 2);
+    assert_eq!(app.input_history[0], "first");
+    assert_eq!(app.input_history[1], "third");
+}
+
+#[test]
+fn test_history_non_consecutive_dedup() {
+    let mut app = create_test_app();
+
+    app.push_input_history("hello".to_string());
+    app.push_input_history("world".to_string());
+    app.push_input_history("hello".to_string());
+
+    // "hello" should move to the end, not duplicate
+    assert_eq!(app.input_history.len(), 2);
+    assert_eq!(app.input_history[0], "world");
+    assert_eq!(app.input_history[1], "hello");
+}
+
+#[test]
+fn test_input_history_browse_status_none_when_not_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("test".to_string());
+    app.input_history_index = None;
+
+    assert!(crate::tui::TuiState::input_history_browse_status(&app).is_none());
+}
+
+#[test]
+fn test_input_history_browse_status_some_when_browsing() {
+    let mut app = create_test_app();
+
+    app.input_history.push("first".to_string());
+    app.input_history.push("second".to_string());
+    app.input_history_index = Some(1);
+
+    let (current, total) = crate::tui::TuiState::input_history_browse_status(&app).unwrap();
+    assert_eq!(current, 2); // 1-based
+    assert_eq!(total, 2);
+}

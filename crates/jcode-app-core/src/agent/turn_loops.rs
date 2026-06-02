@@ -291,7 +291,19 @@ impl Agent {
                                 print_tool_summary(&tool);
                             }
 
-                            tool_calls.push(tool);
+                            // Issue #164: dedup by tool_use_id. Streaming
+                            // can yield ToolUseEnd twice on reconnect / partial
+                            // replay; without dedup both execute, visible as
+                            // duplicate tool calls in the transcript and
+                            // confusing the next turn's input.
+                            let tool_id = tool.id.clone();
+                            let tool_name = tool.name.clone();
+                            if !super::tools::push_dedup_by_id(&mut tool_calls, tool) {
+                                logging::warn(&format!(
+                                    "Dropping duplicate tool_use_id={} name={} (already accumulated this turn)",
+                                    tool_id, tool_name
+                                ));
+                            }
                             current_tool_input.clear();
                         }
                     }
@@ -487,6 +499,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
+                            sandbox_root: crate::sandbox::current_sandbox_root(),
                             stdin_request_tx: self.stdin_request_tx.clone(),
                             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                             execution_mode: ToolExecutionMode::AgentTurn,
@@ -881,6 +894,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
+                    sandbox_root: crate::sandbox::current_sandbox_root(),
                     stdin_request_tx: self.stdin_request_tx.clone(),
                     graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                     execution_mode: ToolExecutionMode::AgentTurn,

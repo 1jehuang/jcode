@@ -169,6 +169,7 @@ async fn test_batch_resolves_oauth_names() {
         message_id: "test".to_string(),
         tool_call_id: "test".to_string(),
         working_dir: Some(temp_dir),
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
@@ -197,6 +198,7 @@ async fn registry_execute_enforces_session_tool_policy_after_alias_resolution() 
         message_id: "test".to_string(),
         tool_call_id: "test".to_string(),
         working_dir: Some(temp_dir.clone()),
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
@@ -461,6 +463,56 @@ async fn test_request_permission_is_ambient_only() {
         defs_after.iter().any(|d| d.name == "request_permission"),
         "request_permission should be available after ambient tool registration"
     );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_no_builtin_tools_env_disables_registry() {
+    // Issue #23: JCODE_NO_BUILTIN_TOOLS=1 must produce a Registry with no
+    // built-in tools loaded. Extension/MCP tools (added separately) are
+    // not part of the base registry, so this asserts emptiness of the base.
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_NO_BUILTIN_TOOLS");
+    crate::env::set_var("JCODE_NO_BUILTIN_TOOLS", "1");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs = registry.definitions(None).await;
+
+    assert!(
+        defs.is_empty(),
+        "JCODE_NO_BUILTIN_TOOLS=1 must produce empty registry, got {} tools: {:?}",
+        defs.len(),
+        defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+
+    if let Some(v) = prev {
+        crate::env::set_var("JCODE_NO_BUILTIN_TOOLS", v);
+    } else {
+        crate::env::remove_var("JCODE_NO_BUILTIN_TOOLS");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_default_registry_has_builtin_tools() {
+    // Negative control for the test above.
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_NO_BUILTIN_TOOLS");
+    crate::env::remove_var("JCODE_NO_BUILTIN_TOOLS");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs = registry.definitions(None).await;
+
+    assert!(
+        !defs.is_empty(),
+        "default registry must have at least one built-in tool"
+    );
+
+    if let Some(v) = prev {
+        crate::env::set_var("JCODE_NO_BUILTIN_TOOLS", v);
+    }
 }
 
 #[test]

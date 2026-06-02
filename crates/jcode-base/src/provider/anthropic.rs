@@ -44,6 +44,40 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
+/// Issue #83: Anthropic-compatible third-party endpoint override.
+///
+/// Returns the base URL (no `/v1/messages` suffix) when the user has
+/// set either `ANTHROPIC_BASE_URL` or `JCODE_ANTHROPIC_BASE_URL`.
+/// Empty values are treated as unset.
+///
+/// Used only for direct API-key auth — OAuth flows are still pinned
+/// to api.anthropic.com to prevent token leakage to a proxy.
+pub(crate) fn anthropic_base_url_override() -> Option<String> {
+    for key in ["JCODE_ANTHROPIC_BASE_URL", "ANTHROPIC_BASE_URL"] {
+        if let Ok(v) = std::env::var(key) {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+/// Issue #83 follow-up: report whether a direct API key is configured
+/// via the environment, independent of any OAuth credentials on disk.
+///
+/// Used by provider startup / failover to decide whether to instantiate
+/// the Anthropic provider runtime when only an API key (e.g. for a
+/// third-party Anthropic-compatible endpoint via `ANTHROPIC_BASE_URL`)
+/// is available. Empty values are treated as unset.
+pub fn anthropic_api_key_env_configured() -> bool {
+    matches!(
+        std::env::var("ANTHROPIC_API_KEY"),
+        Ok(v) if !v.trim().is_empty()
+    )
+}
+
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
 pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
 
@@ -665,10 +699,9 @@ impl AnthropicProvider {
         // Max/Pro users expect.
         if matches!(mode, AnthropicCredentialMode::Auto)
             && auth::claude::load_credentials().is_err()
+            && let Ok(key) = load_anthropic_api_key()
         {
-            if let Ok(key) = load_anthropic_api_key() {
-                return Ok((key, false));
-            }
+            return Ok((key, false));
         }
 
         self.get_oauth_access_token().await
@@ -1768,8 +1801,22 @@ async fn stream_response(
         .await;
 
     let connect_start = std::time::Instant::now();
-    // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    // Build request with appropriate auth headers.
+    //
+    // Issue #83: support Anthropic-compatible third-party endpoints
+    // (Bedrock proxies, self-hosted gateways, etc.) by allowing
+    // ANTHROPIC_BASE_URL or JCODE_ANTHROPIC_BASE_URL to override the
+    // default api.anthropic.com host. The override is applied only
+    // for direct API-key auth — OAuth flows still hit Anthropic
+    // (would otherwise leak Anthropic-issued tokens).
+    let url = if is_oauth {
+        API_URL_OAUTH.to_string()
+    } else if let Some(base) = anthropic_base_url_override() {
+        format!("{}/v1/messages", base.trim_end_matches('/'))
+    } else {
+        API_URL.to_string()
+    };
+    let url = url.as_str();
 
     let mut req = client
         .post(url)
@@ -1850,15 +1897,18 @@ async fn stream_response(
     let mut cache_read_input_tokens: Option<u64> = None;
     let mut cache_creation_input_tokens: Option<u64> = None;
 
-    const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    let sse_chunk_timeout = crate::provider::sse_timeout::chunk_timeout(180);
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+        let chunk = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
             Ok(Some(chunk_result)) => chunk_result.context("Error reading stream chunk")?,
             Ok(None) => break, // stream ended normally
             Err(_) => {
-                crate::logging::warn("Anthropic SSE stream timed out (no data for 180s)");
-                anyhow::bail!("Stream read timeout: no data received for 180 seconds");
+                let secs = sse_chunk_timeout.as_secs();
+                crate::logging::warn(&format!(
+                    "Anthropic SSE stream timed out (no data for {secs}s)"
+                ));
+                anyhow::bail!("Stream read timeout: no data received for {secs} seconds");
             }
         };
         let chunk_str = String::from_utf8_lossy(&chunk);
@@ -1985,6 +2035,7 @@ struct SseEvent {
 }
 
 /// Process an SSE event and return StreamEvents if applicable
+#[allow(clippy::too_many_arguments)]
 fn process_sse_event(
     event: &SseEvent,
     current_tool_use: &mut Option<ToolUseAccumulator>,
@@ -2472,6 +2523,7 @@ struct ContentBlockDeltaEvent {
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 enum ApiDelta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },

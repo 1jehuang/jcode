@@ -158,7 +158,7 @@ impl App {
 
         if let Some(summary_chars) = event.summary_chars.filter(|chars| *chars > 0) {
             details.push(format!(
-                "summary {} chars",
+                "artifact {} chars",
                 Self::format_compaction_number(summary_chars as u64)
             ));
         }

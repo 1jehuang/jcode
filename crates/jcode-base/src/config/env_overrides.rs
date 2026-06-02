@@ -502,6 +502,15 @@ impl Config {
             }
         }
 
+        // Terminal (issue #260 follow-up): JCODE_SHELL overrides
+        // the bash tool's default shell selection.
+        if let Ok(v) = std::env::var("JCODE_SHELL") {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                self.terminal.shell = Some(trimmed);
+            }
+        }
+
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);

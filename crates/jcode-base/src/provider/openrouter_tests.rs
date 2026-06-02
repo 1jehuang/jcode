@@ -891,6 +891,7 @@ async fn collect_openrouter_live_smoke_stream(
 
 #[tokio::test]
 #[ignore = "live smoke: requires OPENROUTER_API_KEY or configured OpenRouter credentials"]
+#[allow(clippy::await_holding_lock)]
 async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let Some(token) = OpenRouterProvider::get_api_key() else {

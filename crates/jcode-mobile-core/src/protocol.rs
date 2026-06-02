@@ -123,8 +123,19 @@ pub struct MobileGatewayConfig {
 }
 
 impl MobileGatewayConfig {
-    pub fn new(host: impl Into<String>, port: u16, use_tls: bool) -> anyhow::Result<Self> {
-        let host = normalize_gateway_host(&host.into())?;
+    pub fn new(host: impl Into<String>, port: u16, mut use_tls: bool) -> anyhow::Result<Self> {
+        // If the caller passes a fully-qualified URL with a TLS-bearing scheme
+        // (https:// or wss://), respect that explicitly even when the boolean
+        // flag is `false`. Mobile clients, copy-pasted gateway URLs, and
+        // automated provisioners frequently surface the scheme in the host
+        // string itself; silently dropping to plain http would downgrade the
+        // connection. See issue #77 / upstream PR #83.
+        let host_str = host.into();
+        let trimmed = host_str.trim();
+        if trimmed.starts_with("https://") || trimmed.starts_with("wss://") {
+            use_tls = true;
+        }
+        let host = normalize_gateway_host(trimmed)?;
         Ok(Self {
             host,
             port,
@@ -636,6 +647,26 @@ mod tests {
             endpoints.websocket_url,
             "wss://devbox.tailnet.ts.net:7643/ws"
         );
+    }
+
+    #[test]
+    fn gateway_config_auto_enables_tls_for_secure_schemes() {
+        // Regression for issue #77 / upstream PR #83: a host string carrying
+        // an explicit TLS-bearing scheme must not be silently downgraded
+        // when the legacy bool flag is `false`.
+        let config = MobileGatewayConfig::new("https://secure.example.com", 7643, false)
+            .expect("https host should parse");
+        assert!(config.use_tls, "TLS should be enabled for https:// scheme");
+        assert_eq!(config.host, "secure.example.com");
+
+        let config = MobileGatewayConfig::new("wss://secure.example.com", 7643, false)
+            .expect("wss host should parse");
+        assert!(config.use_tls, "TLS should be enabled for wss:// scheme");
+
+        // Non-TLS schemes still respect the explicit flag.
+        let config = MobileGatewayConfig::new("http://plain.example.com", 7643, false)
+            .expect("http host should parse");
+        assert!(!config.use_tls, "http:// alone must not auto-enable TLS");
     }
 
     #[test]

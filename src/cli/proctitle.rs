@@ -52,6 +52,13 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::AuthTest { .. }) => "jcode auth-test".to_string(),
         Some(Command::Restart { .. }) => "jcode restart".to_string(),
         Some(Command::SetupLauncher) => "jcode setup-launcher".to_string(),
+        // New commands added by PR #336 – give them a generic title.
+        Some(Command::Logout { .. }) => "jcode logout".to_string(),
+        Some(Command::Prompts(_)) => "jcode prompts".to_string(),
+        Some(Command::Skills(_)) => "jcode skills".to_string(),
+        Some(Command::Mcp(_)) => "jcode mcp".to_string(),
+        Some(Command::Doctor { .. }) => "jcode doctor".to_string(),
+        Some(Command::Export { .. }) => "jcode export".to_string(),
         None => {
             if let Some(resume) = args.resume.as_deref().filter(|resume| !resume.is_empty()) {
                 let prefix = if crate::cli::selfdev::client_selfdev_requested() {

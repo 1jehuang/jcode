@@ -690,6 +690,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
             message_id: message_id.clone(),
             tool_call_id: tool_call_for_task.id.clone(),
             working_dir: working_dir.as_deref().map(PathBuf::from),
+            sandbox_root: crate::sandbox::current_sandbox_root(),
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
@@ -890,7 +891,7 @@ fn apply_diff_mode(app: &mut App, mode: crate::config::DiffDisplayMode) {
     if !app.diff_pane_visible() {
         app.diff_pane_focus = false;
     }
-    app.set_status_notice(&format!("Diffs: {}", app.diff_mode.label()));
+    app.set_status_notice(format!("Diffs: {}", app.diff_mode.label()));
 }
 
 pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
@@ -1754,6 +1755,385 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/export" || trimmed.starts_with("/export ") {
+        // Issue #10 follow-up: /export from inside a TUI session.
+        //
+        // Usage:
+        //   /export                 → markdown, default <slug>-<timestamp>.md
+        //   /export out.md          → explicit path
+        //   /export --json out.json → JSON
+        //   /export --redact out.md → mask common secrets before write
+        let rest = trimmed.strip_prefix("/export").unwrap_or_default().trim();
+        let mut format = crate::export::ExportFormat::Markdown;
+        let mut redact = false;
+        let mut output: Option<std::path::PathBuf> = None;
+        for tok in rest.split_whitespace() {
+            match tok {
+                "--json" => format = crate::export::ExportFormat::Json,
+                "--md" | "--markdown" => format = crate::export::ExportFormat::Markdown,
+                "--html" => format = crate::export::ExportFormat::Html,
+                "--redact" => redact = true,
+                _ if tok.starts_with("--") => {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Unknown /export flag: `{tok}`. Supported: `--json`, `--markdown`, `--html`, `--redact`."
+                    )));
+                    return true;
+                }
+                path => {
+                    output = Some(std::path::PathBuf::from(path));
+                }
+            }
+        }
+        // Persist the session before exporting so the file reflects the
+        // latest in-memory state.
+        if let Err(e) = app.session.save() {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to persist session before export: {e}"
+            )));
+            return true;
+        }
+        let session_id = app.session.id.clone();
+        match crate::export::export_to_path(&session_id, output, format, redact) {
+            Ok(path) => {
+                let label = match format {
+                    crate::export::ExportFormat::Markdown => "Markdown",
+                    crate::export::ExportFormat::Json => "JSON",
+                    crate::export::ExportFormat::Html => "HTML",
+                };
+                let suffix = if redact { " (redacted)" } else { "" };
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Exported {label}{suffix} session to {}",
+                    path.display()
+                )));
+                app.set_status_notice("Session exported");
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage::error(format!("Export failed: {e}")));
+                app.set_status_notice("Export failed");
+            }
+        }
+        return true;
+    }
+
+    if trimmed == "/plan" || trimmed.starts_with("/plan ") {
+        // Issue #85: Plan Mode toggle (read-only).
+        //
+        //   /plan       → toggle on; subsequent turn becomes plan-only
+        //   /plan off   → explicitly disable
+        //   /plan on    → explicitly enable
+        //
+        // While enabled, plan_mode() returns true and the agent gates
+        // out write-class tools (full filtering wires up in a follow-up
+        // PR; this PR adds the toggle + a hint to the model).
+        let rest = trimmed.strip_prefix("/plan").unwrap_or_default().trim();
+        let want_on = match rest {
+            "" => !app.plan_mode,
+            "on" | "enable" | "1" | "true" => true,
+            "off" | "disable" | "0" | "false" => false,
+            _ => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Unknown /plan flag: `{rest}`. Supported: (no arg), `on`, `off`."
+                )));
+                return true;
+            }
+        };
+        app.plan_mode = want_on;
+        let label = if want_on {
+            "🧠 Plan Mode ON — agent will draft a plan instead of editing/running. Re-run `/plan` to disable."
+        } else {
+            "Plan Mode OFF — write tools restored."
+        };
+        app.push_display_message(DisplayMessage::system(label.to_string()));
+        return true;
+    }
+
+    if trimmed == "/permission-mode" || trimmed.starts_with("/permission-mode ") {
+        // Shift+Tab cycles modes. This slash command allows explicit mode selection.
+        //
+        //   /permission-mode           → show current mode
+        //   /permission-mode <mode>    → set mode (default|acceptEdits|plan|auto|dontAsk|bypassPermissions)
+        let rest = trimmed
+            .strip_prefix("/permission-mode")
+            .unwrap_or_default()
+            .trim();
+        if rest.is_empty() {
+            let label = app.permission_mode_label();
+            app.push_display_message(DisplayMessage::system(format!(
+                "🔒 Permission mode: {}",
+                label
+            )));
+            return true;
+        }
+        let parsed = dcg_core::Mode::parse(rest);
+        if let Some(mode) = parsed {
+            app.set_permission_mode(mode);
+            let label = app.permission_mode_label();
+            app.push_display_message(DisplayMessage::system(format!(
+                "🔒 Permission mode set to: {}",
+                label
+            )));
+        } else {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Unknown permission mode: '{}'. Valid: default, acceptEdits, plan, auto, dontAsk, bypassPermissions",
+                rest
+            )));
+        }
+        return true;
+    }
+
+    if trimmed == "/fork" || trimmed.starts_with("/fork ") {
+        // Issue #2: fork the current session into a new branch.
+        //
+        //   /fork              → fork with same title
+        //   /fork <title...>   → fork with custom title
+        //
+        // The fork is saved as a new session. The original session
+        // continues unchanged. To switch into the fork, use
+        // /resume <id>.
+        let rest = trimmed.strip_prefix("/fork").unwrap_or_default().trim();
+        let title = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
+        let mut fork = app.session.fork(title);
+        match fork.save() {
+            Ok(_) => {
+                let label = format!(
+                    "🌿 Forked into new session `{}`. Original `{}` is unchanged. Run `/resume {}` to switch.",
+                    fork.id, app.session.id, fork.id
+                );
+                app.push_display_message(DisplayMessage::system(label));
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Fork failed to save: {e}"
+                )));
+            }
+        }
+        return true;
+    }
+
+    if trimmed == "/settings" || trimmed.starts_with("/settings ") {
+        // Issue #7: display the active config in the chat for quick
+        // inspection. This is the read-only viewer; interactive
+        // editing is a larger overlay design — for now users edit
+        // ~/.jcode/config.toml directly and this command shows what
+        // jcode is using.
+        let cfg = crate::config::config();
+        let output = format!(
+            "## jcode settings (from ~/.jcode/config.toml + env)\n\n\
+             provider:\n\
+             • default_provider: {}\n\
+             • default_model:    {}\n\
+             • openai_reasoning_effort: {}\n\
+             • anthropic_reasoning_effort: {}\n\n\
+             features:\n\
+             • memory:    {}\n\
+             • swarm:     {}\n\
+             • message_timestamps: {}\n\n\
+             tools:\n\
+             • profile:        {}\n\
+             • enabled count:  {}\n\
+             • disabled count: {}\n\n\
+             flags (env):\n\
+             • JCODE_OFFLINE:        {}\n\
+             • JCODE_NO_TELEMETRY:   {}\n\
+             • JCODE_SAFE_EVAL:      {}\n\
+             • JCODE_SANDBOX_ROOT:   {}\n\
+             • JCODE_EXTENSION_POLICY: {}\n\
+             • JCODE_NO_BUILTIN_TOOLS: {}\n\n\
+             Edit `~/.jcode/config.toml` to change persistent settings.",
+            cfg.provider.default_provider.as_deref().unwrap_or("(auto)"),
+            cfg.provider.default_model.as_deref().unwrap_or("(default)"),
+            cfg.provider
+                .openai_reasoning_effort
+                .as_deref()
+                .unwrap_or("(default)"),
+            cfg.provider
+                .anthropic_reasoning_effort
+                .as_deref()
+                .unwrap_or("(default)"),
+            cfg.features.memory,
+            cfg.features.swarm,
+            cfg.features.message_timestamps,
+            cfg.tools.profile,
+            cfg.tools.enabled.len(),
+            cfg.tools.disabled.len(),
+            std::env::var("JCODE_OFFLINE").unwrap_or_else(|_| "(unset)".to_string()),
+            std::env::var("JCODE_NO_TELEMETRY").unwrap_or_else(|_| "(unset)".to_string()),
+            std::env::var("JCODE_SAFE_EVAL").unwrap_or_else(|_| "(unset)".to_string()),
+            std::env::var("JCODE_SANDBOX_ROOT").unwrap_or_else(|_| "(unset)".to_string()),
+            std::env::var("JCODE_EXTENSION_POLICY").unwrap_or_else(|_| "(unset)".to_string()),
+            std::env::var("JCODE_NO_BUILTIN_TOOLS").unwrap_or_else(|_| "(unset)".to_string()),
+        );
+        app.push_display_message(DisplayMessage::system(output));
+        return true;
+    }
+
+    if trimmed == "/doctor" || trimmed.starts_with("/doctor ") {
+        // Issue #155 etc.: surface jcode doctor inline so users
+        // don't need to drop to a shell. Keeps the same JSON format
+        // hidden in the slash UI; for full machine-readable output
+        // the user still runs \`jcode doctor --format json\` from
+        // their terminal.
+        let report = crate::doctor::collect_report();
+        let summary = format!(
+            "jcode doctor:
+  version       : {}
+  build_profile : {}
+  flags.offline : {}
+  flags.safe_eval: {}
+  providers     : {} configured
+  health        : {} issue(s)",
+            report.build.version,
+            if report.build.release_build {
+                "release"
+            } else {
+                "debug"
+            },
+            report.flags.offline,
+            report.flags.safe_eval,
+            report.providers.len(),
+            report.health.len(),
+        );
+        app.push_display_message(DisplayMessage::system(summary));
+        if !report.health.is_empty() {
+            for issue in &report.health {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "  [{}] {}",
+                    issue.area, issue.detail
+                )));
+            }
+        }
+        app.push_display_message(DisplayMessage::system(
+            "For full report run `jcode doctor` (or `jcode doctor --format json`) in your shell."
+                .to_string(),
+        ));
+        return true;
+    }
+
+    if trimmed == "/share" || trimmed.starts_with("/share ") {
+        // Issue #25: upload the session as a private GitHub gist via the
+        // installed `gh` CLI, copy the URL to clipboard, print it in chat.
+        //
+        // Usage:
+        //   /share              → private gist, redacted, copied to clipboard
+        //   /share --public     → public gist (still redacted)
+        //   /share --no-redact  → keep raw secrets (off by default)
+        let rest = trimmed.strip_prefix("/share").unwrap_or_default().trim();
+        let mut public = false;
+        let mut redact = true; // default: redact for safety
+        for tok in rest.split_whitespace() {
+            match tok {
+                "--public" => public = true,
+                "--private" => public = false,
+                "--no-redact" => redact = false,
+                "--redact" => redact = true,
+                _ => {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Unknown /share flag: `{tok}`. Supported: `--public`, `--private`, `--redact`, `--no-redact`."
+                    )));
+                    return true;
+                }
+            }
+        }
+
+        // Pre-flight: gh CLI must be installed.
+        let gh_check = std::process::Command::new("gh")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !gh_check.map(|s| s.success()).unwrap_or(false) {
+            app.push_display_message(DisplayMessage::error(
+                "/share requires the GitHub CLI. Install from https://cli.github.com/ then run `gh auth login`.".to_string(),
+            ));
+            return true;
+        }
+
+        if let Err(e) = app.session.save() {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to persist session: {e}"
+            )));
+            return true;
+        }
+        let title = app
+            .session
+            .display_title()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| app.session.display_name().to_string());
+        let body = crate::export::render_markdown(&app.session);
+        let body = if redact {
+            crate::export::redact_secrets(&body)
+        } else {
+            body
+        };
+        let tmp_path = std::env::temp_dir().join(format!(
+            "jcode-share-{}.md",
+            app.session.id.replace('/', "_")
+        ));
+        if let Err(e) = std::fs::write(&tmp_path, body.as_bytes()) {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to write temp file {}: {e}",
+                tmp_path.display()
+            )));
+            return true;
+        }
+
+        let mut gh = std::process::Command::new("gh");
+        gh.arg("gist").arg("create").arg(&tmp_path);
+        if public {
+            gh.arg("--public");
+        }
+        gh.arg("--desc").arg(format!("jcode session: {title}"));
+
+        match gh.output() {
+            Ok(out) if out.status.success() => {
+                let _ = std::fs::remove_file(&tmp_path);
+                let url = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .rfind(|l| l.starts_with("https://"))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if url.is_empty() {
+                    app.push_display_message(DisplayMessage::system(
+                        "Shared via `gh gist create` — no URL printed by gh. Run `gh gist list` to find it.".to_string(),
+                    ));
+                } else {
+                    let copied = super::helpers::copy_to_clipboard(&url);
+                    let visibility = if public { "public" } else { "private" };
+                    let redact_note = if redact { " (redacted)" } else { "" };
+                    let clip_note = if copied {
+                        " — copied to clipboard"
+                    } else {
+                        ""
+                    };
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Shared session as {visibility} gist{redact_note}{clip_note}:\n\n{url}"
+                    )));
+                    app.set_status_notice(format!("Shared → {url}"));
+                }
+            }
+            Ok(out) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                app.push_display_message(DisplayMessage::error(format!(
+                    "gh gist create failed:\n{stderr}\n\nIf you haven't authenticated yet: `gh auth login`."
+                )));
+                app.set_status_notice("Share failed");
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to invoke gh: {e}"
+                )));
+                app.set_status_notice("Share failed");
+            }
+        }
+        return true;
+    }
     if trimmed == "/memory status" {
         let default_enabled = crate::config::config().features.memory;
         app.push_display_message(DisplayMessage::system(format!(
@@ -1807,6 +2187,14 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             "Usage: /memory [on|off|status]".to_string(),
         ));
         return true;
+    }
+
+    // DCP commands (dynamic context pruning)
+    #[cfg(feature = "dcp")]
+    {
+        if handle_dcp_command(app, trimmed) {
+            return true;
+        }
     }
 
     if handle_test_command(app, trimmed) {
@@ -1897,6 +2285,131 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             restored,
             if restored == 1 { "" } else { "s" }
         )));
+        return true;
+    }
+
+    if trimmed == "/history input" || trimmed == "/history" {
+        if app.input_history.is_empty() {
+            app.push_display_message(DisplayMessage::system("No input history yet.".to_string()));
+            return true;
+        }
+        let mut listing = String::from("**Input history:**\n\n");
+        for (i, entry) in app.input_history.iter().enumerate() {
+            let preview = crate::util::truncate_str(entry, 80);
+            listing.push_str(&format!("  `{}` {}\n", i + 1, preview));
+        }
+        listing.push_str("\nUse `/history input N` to load entry N into the input box.");
+        listing.push_str("\nUse `/history search <term>` to search.");
+        listing.push_str("\nUse `/history delete N` to remove entry N.");
+        listing.push_str("\nUse `/history clear` to remove all entries.");
+        app.push_display_message(DisplayMessage::system(listing));
+        return true;
+    }
+
+    if trimmed == "/history clear" {
+        let count = app.input_history.len();
+        app.clear_input_history();
+        app.set_status_notice(format!("🗑 Cleared {} input history entries", count));
+        return true;
+    }
+
+    if let Some(term) = trimmed.strip_prefix("/history search ") {
+        let term = term.trim();
+        if term.is_empty() {
+            app.push_display_message(DisplayMessage::system(
+                "Usage: `/history search <term>`".to_string(),
+            ));
+            return true;
+        }
+        let term_lower = term.to_lowercase();
+        let matches: Vec<(usize, &str)> = app
+            .input_history
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.to_lowercase().contains(&term_lower))
+            .map(|(i, e)| (i + 1, e.as_str()))
+            .collect();
+        if matches.is_empty() {
+            app.push_display_message(DisplayMessage::system(format!(
+                "No history entries match \"{}\".",
+                term
+            )));
+        } else {
+            let mut listing = format!("**History matches for \"{}\":**\n\n", term);
+            for (i, entry) in &matches {
+                let preview = crate::util::truncate_str(entry, 80);
+                listing.push_str(&format!("  `{}` {}\n", i, preview));
+            }
+            listing.push_str(&format!(
+                "\n{} match{} found.",
+                matches.len(),
+                if matches.len() == 1 { "" } else { "es" }
+            ));
+            app.push_display_message(DisplayMessage::system(listing));
+        }
+        return true;
+    }
+
+    if let Some(num_str) = trimmed.strip_prefix("/history delete ") {
+        let num_str = num_str.trim();
+        if app.input_history.is_empty() {
+            app.push_display_message(DisplayMessage::system(
+                "No input history to delete.".to_string(),
+            ));
+            return true;
+        }
+        match num_str.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= app.input_history.len() => {
+                let entry = app.input_history[n - 1].clone();
+                let preview = crate::util::truncate_str(&entry, 40).to_string();
+                app.delete_input_history_entry(n - 1);
+                app.set_status_notice(format!("🗑 Deleted history #{}: {}", n, preview));
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Invalid index. Use `/history delete N` where N is 1..{}.",
+                    app.input_history.len()
+                )));
+            }
+        }
+        return true;
+    }
+
+    if let Some(num_str) = trimmed.strip_prefix("/history input ") {
+        let num_str = num_str.trim();
+        match num_str.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= app.input_history.len() => {
+                let entry = app.input_history[n - 1].clone();
+                if !app.input.is_empty() {
+                    app.remember_input_undo_state();
+                }
+                app.input = entry;
+                app.cursor_pos = app.input.len();
+                app.reset_tab_completion();
+                app.reset_input_history_browse();
+                app.sync_model_picker_preview_from_input();
+                app.set_status_notice(format!("📋 Loaded input #{}", n));
+            }
+            _ => {
+                if app.input_history.is_empty() {
+                    app.push_display_message(DisplayMessage::system(
+                        "No input history yet.".to_string(),
+                    ));
+                } else {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Invalid index. Use `/history input N` where N is 1..{}.",
+                        app.input_history.len()
+                    )));
+                }
+            }
+        }
+        return true;
+    }
+
+    if trimmed.starts_with("/history ") {
+        app.push_display_message(DisplayMessage::system(
+            "Unknown /history subcommand. Use: input N, search <term>, delete N, clear".to_string(),
+        ));
         return true;
     }
 
@@ -2960,6 +3473,127 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
 
 pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
     super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
+}
+
+/// Handle DCP slash commands: /dcp [context|stats|sweep|manual on|off]
+#[cfg(feature = "dcp")]
+#[allow(clippy::collapsible_if)]
+pub(super) fn handle_dcp_command(app: &mut App, trimmed: &str) -> bool {
+    // Helper to get DCP plugin from app
+    let get_dcp = || app.registry.dcp();
+
+    if trimmed == "/dcp" {
+        // Show DCP status
+        if let Some(dcp_arc) = get_dcp() {
+            if let Ok(dcp) = dcp_arc.lock() {
+                let stats = dcp.stats();
+                let enabled = dcp.is_enabled();
+                app.push_display_message(DisplayMessage::system(format!(
+                    "**DCP Status:**\n\
+                     • Enabled: {}\n\
+                     • Total prune tokens: {}\n\
+                     • Compression runs: {}\n\
+                     • Blocks committed: {}\n\
+                     \nUsage: `/dcp [context|stats|sweep|manual on|off]`",
+                    if enabled { "yes" } else { "no" },
+                    stats.total_prune_tokens,
+                    stats.compress_runs,
+                    stats.compress_blocks_committed,
+                )));
+                return true;
+            }
+        }
+        app.push_display_message(DisplayMessage::system(
+            "DCP not available in this session.".to_string(),
+        ));
+        return true;
+    }
+
+    if trimmed == "/dcp context" {
+        if let Some(dcp_arc) = get_dcp() {
+            if let Ok(dcp) = dcp_arc.lock() {
+                let stats = dcp.stats();
+                app.push_display_message(DisplayMessage::system(format!(
+                    "**DCP Context:**\n\
+                     • Dedup pruned: {}\n\
+                     • Purge-errors pruned: {}\n\
+                     • Stale-file-reads pruned: {}\n\
+                     • Cache bust events: {}",
+                    stats.dedup_pruned,
+                    stats.purge_errors_pruned,
+                    stats.stale_file_reads_pruned,
+                    stats.cache_bust_events,
+                )));
+                return true;
+            }
+        }
+        app.push_display_message(DisplayMessage::system("DCP not available.".to_string()));
+        return true;
+    }
+
+    if trimmed == "/dcp stats" {
+        if let Some(dcp_arc) = get_dcp() {
+            if let Ok(dcp) = dcp_arc.lock() {
+                let stats = dcp.stats();
+                app.push_display_message(DisplayMessage::system(format!(
+                    "**DCP Statistics:**\n\
+                     • Total prune tokens: {}k\n\
+                     • Compression runs: {}\n\
+                     • Blocks committed: {}\n\
+                     • Compressions useful: {}\n\
+                     • Compressions oversized: {}",
+                    stats.total_prune_tokens / 1000,
+                    stats.compress_runs,
+                    stats.compress_blocks_committed,
+                    stats.compress_useful,
+                    stats.compress_oversized,
+                )));
+                return true;
+            }
+        }
+        app.push_display_message(DisplayMessage::system("DCP not available.".to_string()));
+        return true;
+    }
+
+    if trimmed == "/dcp sweep" {
+        // Note: set_force_apply is pub(crate) in dcp-core and not accessible here.
+        // The sweep functionality requires using the DCP compress tool directly.
+        app.push_display_message(DisplayMessage::system(
+            "Sweep is triggered automatically when context fills up, or use the dcp_compress tool."
+                .to_string(),
+        ));
+        return true;
+    }
+
+    if trimmed == "/dcp manual on" {
+        if let Some(dcp_arc) = get_dcp() {
+            if let Ok(mut dcp) = dcp_arc.lock() {
+                dcp.pruner_mut().set_manual_mode(true);
+                app.push_display_message(DisplayMessage::system(
+                    "DCP manual mode: ON (pruning requires explicit tool call)".to_string(),
+                ));
+                return true;
+            }
+        }
+        app.push_display_message(DisplayMessage::system("DCP not available.".to_string()));
+        return true;
+    }
+
+    if trimmed == "/dcp manual off" {
+        if let Some(dcp_arc) = get_dcp() {
+            if let Ok(mut dcp) = dcp_arc.lock() {
+                dcp.pruner_mut().set_manual_mode(false);
+                app.push_display_message(DisplayMessage::system(
+                    "DCP manual mode: OFF (pruning happens automatically)".to_string(),
+                ));
+                return true;
+            }
+        }
+        app.push_display_message(DisplayMessage::system("DCP not available.".to_string()));
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]

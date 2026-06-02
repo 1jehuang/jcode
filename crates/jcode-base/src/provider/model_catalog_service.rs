@@ -123,10 +123,10 @@ impl ModelCatalogService {
     ) -> Option<RuntimeModelUnavailability> {
         let mut unavailable = self.runtime_unavailable_models.write().ok()?;
         let models = unavailable.get_mut(scope)?;
-        if let Some(entry) = models.get(model) {
-            if entry.recorded_at.elapsed() <= self.runtime_unavailable_ttl {
-                return Some(entry.clone());
-            }
+        if let Some(entry) = models.get(model)
+            && entry.recorded_at.elapsed() <= self.runtime_unavailable_ttl
+        {
+            return Some(entry.clone());
         }
         models.remove(model);
         if models.is_empty() {
@@ -136,12 +136,12 @@ impl ModelCatalogService {
     }
 
     pub(crate) fn clear_runtime_model_unavailable(&self, scope: &str, model: &str) {
-        if let Ok(mut unavailable) = self.runtime_unavailable_models.write() {
-            if let Some(models) = unavailable.get_mut(scope) {
-                models.remove(model);
-                if models.is_empty() {
-                    unavailable.remove(scope);
-                }
+        if let Ok(mut unavailable) = self.runtime_unavailable_models.write()
+            && let Some(models) = unavailable.get_mut(scope)
+        {
+            models.remove(model);
+            if models.is_empty() {
+                unavailable.remove(scope);
             }
         }
     }

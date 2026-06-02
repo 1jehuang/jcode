@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Dry run: build all artifacts + SHA256SUMS but skip publishing
+          a GitHub release and skip the Homebrew formula bump. Use this
+          to validate the release pipeline before cutting a real tag.
+        type: boolean
+        default: true
 
 concurrency:
   group: release-${{ github.ref }}
@@ -37,6 +46,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: create-release
     timeout-minutes: 60
+    env:
+      # See ci.yml: avoid `if: ${{ secrets.X != '' }}` (Actions validator
+      # rejects `secrets` context in step-level `if:` expressions).
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +79,7 @@ jobs:
           fetch-depth: 0
 
       - name: Configure SSH for cargo git dependencies
+        if: env.DEPLOY_KEY != ''
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.DEPLOY_KEY }}
@@ -307,15 +321,28 @@ jobs:
       # Per-platform assets were already attached by their own build jobs as
       # they finished; here we only add the cross-cutting checksums file.
       - name: Upload checksums to release
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" SHA256SUMS --clobber
 
+      - name: Upload SHA256SUMS as workflow artifact (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS-dry-run
+          path: SHA256SUMS
+
+      - name: Dry run summary
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        run: |
+          echo "::notice title=Dry run::Release publish + Homebrew bump skipped. Built artifacts + SHA256SUMS uploaded as workflow artifacts so you can inspect them."
+
       - name: Update Homebrew formula
         env:
           HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
-        if: env.HOMEBREW_DEPLOY_KEY != ''
+        if: ${{ env.HOMEBREW_DEPLOY_KEY != '' && (github.event_name != 'workflow_dispatch' || inputs.dry_run != true) }}
         run: |
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NUM="${VERSION#v}"

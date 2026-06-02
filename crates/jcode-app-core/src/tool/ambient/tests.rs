@@ -271,6 +271,7 @@ async fn test_request_permission_rejects_non_ambient_session() {
         message_id: "msg_1".to_string(),
         tool_call_id: "call_1".to_string(),
         working_dir: None,
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
@@ -428,6 +429,7 @@ async fn test_schedule_tool_defaults_to_resuming_originating_session() {
         message_id: "msg_1".to_string(),
         tool_call_id: "call_1".to_string(),
         working_dir: None,
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
@@ -485,6 +487,7 @@ async fn test_schedule_tool_requires_time() {
         message_id: "msg_1".to_string(),
         tool_call_id: "call_1".to_string(),
         working_dir: None,
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: crate::tool::ToolExecutionMode::Direct,
@@ -495,4 +498,80 @@ async fn test_schedule_tool_requires_time() {
         .await
         .expect_err("should require wake_in_minutes or wake_at");
     assert!(err.to_string().contains("wake_in_minutes"));
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #133 / upstream PR #173:
+// Claude tool calls sometimes serialize numeric parameters as strings
+// (e.g. {"compactions": "0"}). Both number and string forms must deserialize.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_end_cycle_input_accepts_stringified_u32_fields() {
+    let input = json!({
+        "summary": "Compaction skipped",
+        "memories_modified": "3",
+        "compactions": "0",
+        "next_schedule": {
+            "wake_in_minutes": "20",
+            "context": "Recheck stale facts",
+            "priority": "normal"
+        }
+    });
+
+    let parsed: EndCycleInput = serde_json::from_value(input).unwrap();
+    assert_eq!(parsed.memories_modified, 3);
+    assert_eq!(parsed.compactions, 0);
+    let ns = parsed.next_schedule.unwrap();
+    assert_eq!(ns.wake_in_minutes, Some(20));
+}
+
+#[test]
+fn test_end_cycle_input_still_accepts_native_u32_fields() {
+    // Make sure the new deserializer didn't break the existing JSON-number form.
+    let input = json!({
+        "summary": "All good",
+        "memories_modified": 7,
+        "compactions": 2,
+        "next_schedule": {
+            "wake_in_minutes": 15
+        }
+    });
+    let parsed: EndCycleInput = serde_json::from_value(input).unwrap();
+    assert_eq!(parsed.memories_modified, 7);
+    assert_eq!(parsed.compactions, 2);
+    assert_eq!(parsed.next_schedule.unwrap().wake_in_minutes, Some(15));
+}
+
+#[test]
+fn test_schedule_input_accepts_stringified_wake_in_minutes() {
+    let input = json!({
+        "wake_in_minutes": "45",
+        "context": "Verify CI"
+    });
+    let parsed: ScheduleInput = serde_json::from_value(input).unwrap();
+    assert_eq!(parsed.wake_in_minutes, Some(45));
+    assert_eq!(parsed.context, "Verify CI");
+}
+
+#[test]
+fn test_schedule_tool_input_accepts_stringified_wake_in_minutes() {
+    let input = json!({
+        "task": "Check on tests",
+        "wake_in_minutes": "60"
+    });
+    let parsed: ScheduleToolInput = serde_json::from_value(input).unwrap();
+    assert_eq!(parsed.wake_in_minutes, Some(60));
+}
+
+#[test]
+fn test_end_cycle_input_rejects_non_numeric_string() {
+    // Defensive: a non-numeric string must still be rejected, not silently
+    // treated as 0.
+    let input = json!({
+        "summary": "Bad input",
+        "memories_modified": "not-a-number",
+        "compactions": 0
+    });
+    assert!(serde_json::from_value::<EndCycleInput>(input).is_err());
 }

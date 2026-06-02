@@ -301,15 +301,35 @@ fn extract_api_key(source: ExternalAuthSource, entry: &Value) -> Option<String> 
     let object = entry.as_object()?;
     match source {
         ExternalAuthSource::OpenCode => {
-            if object.get("type")?.as_str()? != "api" {
+            // Issue #171: OpenCode + OpenCode Go shipped multiple auth.json
+            // schema variants over time. Be tolerant:
+            //
+            //   {"type": "api", "key":     "..."}    classic
+            //   {"type": "api", "api_key": "..."}    OpenCode Go newer format
+            //   {"type": "key", "key":     "..."}    some self-hosted forks
+            //   {                "key":     "..."}    type field absent — assume API key
+            //   {                "token":   "..."}    OpenCode Go alt naming
+            //
+            // OAuth-typed entries (type=="oauth") are handled separately via
+            // extract_oauth_tokens; reject them here so the caller doesn't
+            // mistake an OAuth blob for an API key.
+            let token_type = object.get("type").and_then(Value::as_str);
+            if let Some(t) = token_type
+                && t != "api"
+                && t != "key"
+            {
                 return None;
             }
-            object
-                .get("key")?
-                .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
+
+            for field in ["key", "api_key", "apiKey", "token"] {
+                if let Some(value) = object.get(field).and_then(Value::as_str) {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_owned());
+                    }
+                }
+            }
+            None
         }
         ExternalAuthSource::Pi => {
             if object.get("type")?.as_str()? != "api_key" {
@@ -394,6 +414,8 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "MOONSHOT_API_KEY" => &["moonshotai", "moonshot"],
         "PERPLEXITY_API_KEY" => &["perplexity"],
         "BAILIAN_CODING_PLAN_API_KEY" => &["alibaba-coding-plan", "bailian"],
+        "GITLAB_TOKEN" => &["gitlab-duo", "gitlab"],
+        "GOOGLE_CLOUD_ACCESS_TOKEN" | "VERTEX_API_KEY" => &["vertex-ai", "vertex"],
         _ => &[],
     }
 }

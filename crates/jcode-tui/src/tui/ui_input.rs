@@ -1436,6 +1436,14 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
         ));
     }
 
+    if let Some((current, total)) = app.input_history_browse_status() {
+        push_sep(&mut spans);
+        spans.push(Span::styled(
+            format!("📋 history {}/{}", current, total),
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+
     spans
 }
 

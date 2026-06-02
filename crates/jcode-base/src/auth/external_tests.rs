@@ -192,3 +192,119 @@ fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+// ---- Issue #171: OpenCode Go schema variants ----
+
+#[test]
+fn opencode_api_key_accepts_api_key_field() {
+    // OpenCode Go newer format uses "api_key" instead of "key".
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "opencode-go": { "type": "api", "api_key": "ocgo_secret" }
+        }),
+    );
+
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    assert_eq!(
+        load_api_key_for_env("OPENCODE_GO_API_KEY").as_deref(),
+        Some("ocgo_secret")
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn opencode_api_key_accepts_token_field() {
+    // Some forks use "token" instead of "key".
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "opencode": { "type": "api", "token": "tok_value" }
+        }),
+    );
+
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    assert_eq!(
+        load_api_key_for_env("OPENCODE_API_KEY").as_deref(),
+        Some("tok_value")
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn opencode_api_key_accepts_missing_type_field() {
+    // type field absent — accept if a recognized key field is present.
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "opencode": { "key": "no_type_field_secret" }
+        }),
+    );
+
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    assert_eq!(
+        load_api_key_for_env("OPENCODE_API_KEY").as_deref(),
+        Some("no_type_field_secret")
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn opencode_api_key_rejects_oauth_typed_entry() {
+    // type=="oauth" must not be misinterpreted as an API key — those go
+    // through the OAuth path.
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({
+            "opencode": { "type": "oauth", "access": "...", "key": "should_be_ignored" }
+        }),
+    );
+
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    assert!(load_api_key_for_env("OPENCODE_API_KEY").is_none());
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

@@ -188,6 +188,7 @@ async fn test_selfdev_session_and_registry() {
         message_id: "test".to_string(),
         tool_call_id: "test".to_string(),
         working_dir: None,
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: tool::ToolExecutionMode::Direct,

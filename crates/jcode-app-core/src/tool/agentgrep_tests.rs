@@ -8,6 +8,7 @@ fn test_ctx(root: &Path) -> ToolContext {
         message_id: "test".to_string(),
         tool_call_id: "test".to_string(),
         working_dir: Some(root.to_path_buf()),
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: super::super::ToolExecutionMode::Direct,

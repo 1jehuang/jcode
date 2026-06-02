@@ -1,17 +1,24 @@
+#[cfg(test)]
 use anyhow::{Context, ensure};
-use serde::Deserialize;
 
+#[cfg(test)]
 use crate::auth::lifecycle::{
     AuthActivationRequest, AuthActivationResult, AuthCatalogInvariantReport, activate_auth_change,
-    provider_model_to_select_after_auth, validate_catalog_invariants,
+    validate_catalog_invariants,
 };
+
+#[cfg(test)]
 use crate::auth::test_sandbox::AuthTestSandbox;
+#[cfg(test)]
 use crate::protocol::{
     AuthChanged, AuthCredentialSource, AuthMethod, CatalogNamespace, RuntimeProviderKey,
 };
+#[cfg(test)]
 use crate::provider::ModelRoute;
+#[cfg(test)]
 use crate::provider_catalog::OpenAiCompatibleProfile;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthLifecycleAuthPath {
     TuiPasteApiKey,
@@ -21,6 +28,7 @@ pub(crate) enum AuthLifecycleAuthPath {
     ProcessEnvPreseeded,
 }
 
+#[cfg(test)]
 impl AuthLifecycleAuthPath {
     fn auth_method(self) -> AuthMethod {
         match self {
@@ -47,6 +55,7 @@ impl AuthLifecycleAuthPath {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct AuthLifecycleSpec {
     pub provider_id: &'static str,
@@ -59,6 +68,7 @@ pub(crate) struct AuthLifecycleSpec {
     pub current_runtime_provider_name: &'static str,
 }
 
+#[cfg(test)]
 impl AuthLifecycleSpec {
     pub(crate) fn cerebras_fixture(auth_path: AuthLifecycleAuthPath) -> Self {
         let mut spec =
@@ -94,6 +104,7 @@ impl AuthLifecycleSpec {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PickerSnapshot {
     pub selected_model: Option<String>,
@@ -104,6 +115,7 @@ pub(crate) struct PickerSnapshot {
     pub switch_route_api_method: Option<String>,
 }
 
+#[cfg(test)]
 impl PickerSnapshot {
     fn build(
         spec: &AuthLifecycleSpec,
@@ -149,6 +161,7 @@ impl PickerSnapshot {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct AuthLifecycleResult {
     pub activation: AuthActivationResult,
@@ -159,6 +172,7 @@ pub(crate) struct AuthLifecycleResult {
     pub credential_location: Option<String>,
 }
 
+#[cfg(test)]
 impl AuthLifecycleResult {
     pub(crate) fn assert_success(&self, spec: &AuthLifecycleSpec) {
         let transcript = self.transcript_text();
@@ -363,10 +377,12 @@ impl AuthLifecycleResult {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct AuthLifecycleDriver {
     sandbox: AuthTestSandbox,
 }
 
+#[cfg(test)]
 impl AuthLifecycleDriver {
     pub(crate) fn new() -> anyhow::Result<Self> {
         Ok(Self {
@@ -513,6 +529,7 @@ impl AuthLifecycleDriver {
     }
 }
 
+#[cfg(test)]
 fn route_matches_spec(route: &ModelRoute, spec: &AuthLifecycleSpec) -> bool {
     route
         .api_method

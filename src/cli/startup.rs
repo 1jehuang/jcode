@@ -24,7 +24,7 @@ pub async fn run() -> Result<()> {
     // Wire config-reload reactions without making config depend on auth/bus:
     // when the config cache reloads, invalidate the auth-status cache and
     // broadcast a models-updated event.
-    crate::config::on_config_reloaded(|| crate::auth::AuthStatus::invalidate_cache());
+    crate::config::on_config_reloaded(crate::auth::AuthStatus::invalidate_cache);
     crate::config::on_config_reloaded(|| crate::bus::Bus::global().publish_models_updated());
 
     // Invert the legacy provider_catalog -> auth dependency: provider_catalog
@@ -99,7 +99,7 @@ pub async fn run() -> Result<()> {
 }
 
 fn parse_and_prepare_args() -> Result<Args> {
-    let args = Args::parse();
+    let mut args = Args::parse();
     startup_profile::mark("args_parse");
 
     output::set_quiet_enabled(args.quiet);
@@ -111,6 +111,151 @@ fn parse_and_prepare_args() -> Result<Args> {
 
     if args.trace {
         crate::env::set_var("JCODE_TRACE", "1");
+    }
+
+    // Translate --offline to the in-process JCODE_OFFLINE flag so deep code
+    // paths can read it without threading an extra argument. See issue #24.
+    // Honor a pre-existing env value too (the env var is the documented way
+    // to enable offline mode for wrapper scripts).
+    if args.offline || std::env::var("JCODE_OFFLINE").is_ok() {
+        crate::env::set_var("JCODE_OFFLINE", "1");
+        if !args.quiet {
+            output::stderr_info(
+                "Offline mode: startup network operations disabled (JCODE_OFFLINE=1).",
+            );
+        }
+    }
+
+    // --safe-eval: layered first-run sandbox. Sets an isolated JCODE_HOME and
+    // turns off network/ambient/telemetry/selfdev so users can poke at jcode
+    // without touching their main credentials/sessions/memory. Issue #60.
+    if args.safe_eval || std::env::var("JCODE_SAFE_EVAL").is_ok() {
+        crate::env::set_var("JCODE_SAFE_EVAL", "1");
+        if std::env::var_os("JCODE_HOME").is_none()
+            && let Some(home) = dirs::home_dir()
+        {
+            let isolated = home.join(".jcode-safe-eval");
+            crate::env::set_var("JCODE_HOME", &isolated);
+        }
+        crate::env::set_var("JCODE_OFFLINE", "1");
+        crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+        crate::env::set_var("JCODE_AMBIENT_DISABLED", "1");
+        crate::env::set_var("JCODE_NO_SELFDEV", "1");
+        // Issue #62: project-local MCP configs in safe-eval mode require
+        // explicit trust via `jcode mcp trust <path>`.
+        crate::env::set_var("JCODE_REQUIRE_MCP_TRUST", "1");
+        if !args.quiet {
+            output::stderr_info(
+                "Safe-eval profile: isolated JCODE_HOME, telemetry off, offline, ambient/selfdev gated.",
+            );
+            if let Some(home) = std::env::var_os("JCODE_HOME") {
+                output::stderr_info(format!("  JCODE_HOME = {}", home.to_string_lossy()));
+            }
+        }
+    }
+
+    // --system-prompt / --append-system-prompt: translate to env vars so the
+    // build_system_prompt helpers (which run on demand from many code paths)
+    // can pick them up without threading args through every layer. Issue #22.
+    if let Some(ref text) = args.system_prompt {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", text);
+    }
+    if let Some(ref text) = args.append_system_prompt {
+        crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", text);
+    }
+
+    // --models <patterns>: translate to JCODE_SCOPED_MODELS env so cycle_model
+    // and the `/scoped-models` slash command can see it. Issue #26.
+    if !args.scoped_models.is_empty() {
+        let joined = args
+            .scoped_models
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        if !joined.is_empty() {
+            crate::env::set_var("JCODE_SCOPED_MODELS", &joined);
+        }
+    }
+
+    // --name <title>: translate to env so the next freshly-created top-level
+    // session picks it up as `Session::title`. Issue #99.
+    if let Some(ref text) = args.session_name {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            crate::env::set_var("JCODE_SESSION_NAME", trimmed);
+        }
+    }
+
+    // --no-context-files: translate to JCODE_NO_CONTEXT_FILES so the prompt
+    // loading helpers can skip AGENTS.md without threading args.
+    if args.no_context_files {
+        crate::env::set_var("JCODE_NO_CONTEXT_FILES", "1");
+    }
+
+    // --no-builtin-tools: translate to JCODE_NO_BUILTIN_TOOLS so the tool
+    // registry can skip the built-in entries without threading args.
+    if args.no_builtin_tools {
+        crate::env::set_var("JCODE_NO_BUILTIN_TOOLS", "1");
+    }
+
+    // Issue #14: --extension-policy → JCODE_EXTENSION_POLICY.
+    // Other subsystems (MCP loader, future extension runtime) read
+    // this env var via crate::extension_policy::current().
+    if let Some(ref policy) = args.extension_policy {
+        crate::env::set_var("JCODE_EXTENSION_POLICY", policy);
+    }
+
+    // Issue #110: --sandbox shortcut for hardened defaults.
+    // Lighter than --safe-eval; doesn't reroute JCODE_HOME or
+    // disable network — just locks down extension loading to
+    // explicitly trusted entries.
+    if args.sandbox {
+        crate::env::set_var("JCODE_REQUIRE_MCP_TRUST", "1");
+        // Only set if user hasn't explicitly chosen a different
+        // policy via --extension-policy; their choice wins.
+        if std::env::var_os("JCODE_EXTENSION_POLICY").is_none() {
+            crate::env::set_var("JCODE_EXTENSION_POLICY", "trusted");
+        }
+    }
+
+    // Issue #110: --sandbox-root <DIR> → JCODE_SANDBOX_ROOT.
+    // Canonicalize the path so downstream tool-context comparisons
+    // are stable (matters when user passes a relative directory).
+    if let Some(ref dir) = args.sandbox_root {
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        crate::env::set_var("JCODE_SANDBOX_ROOT", &canonical);
+    }
+
+    // --permission-mode → dcg_bridge global mode. When unspecified we leave
+    // the default (`Mode::Default`, set by the bridge's LazyLock) untouched
+    // so behavior matches the legacy AUTO_ALLOWED-based classify.
+    //
+    // `--dangerously-skip-permissions` is the Claude Code compatibility alias
+    // for `--permission-mode bypass-permissions`. Explicit `--permission-mode`
+    // wins when both are set.
+    if let Some(mode) = args.permission_mode {
+        crate::dcg_bridge::set_mode(mode.into_dcg_mode());
+    } else if args.dangerously_skip_permissions {
+        crate::dcg_bridge::set_mode(dcg_core::Mode::BypassPermissions);
+    } else if let Ok(env_mode) = std::env::var("JCODE_PERMISSION_MODE")
+        && let Some(mode) = dcg_core::Mode::parse(env_mode.trim())
+    {
+        crate::dcg_bridge::set_mode(mode);
+    }
+
+    // JCODE_MODEL fallback: when --model is not passed on the CLI,
+    // read JCODE_MODEL from the env so users can `export JCODE_MODEL=...`
+    // in their shell profile and have it apply to every jcode invocation.
+    // CLI flag still wins when both are set.
+    if args.model.is_none()
+        && let Ok(env_model) = std::env::var("JCODE_MODEL")
+    {
+        let trimmed = env_model.trim();
+        if !trimmed.is_empty() {
+            args.model = Some(trimmed.to_string());
+        }
     }
 
     if let Some(ref socket) = args.socket {
@@ -198,6 +343,9 @@ fn spawn_background_update_check(args: &Args) {
 }
 
 fn should_spawn_background_update_check(args: &Args) -> bool {
+    if std::env::var("JCODE_OFFLINE").is_ok() {
+        return false;
+    }
     !args.quiet
         && !args.no_update
         && !matches!(
@@ -258,5 +406,70 @@ mod tests {
         assert!(matches!(args.command, Some(Command::Update)));
         assert!(!should_spawn_background_update_check(&args));
         assert!(should_auto_install_update(&args));
+    }
+
+    // ---- JCODE_MODEL fallback ----
+
+    fn apply_model_env_fallback(args: &mut Args) {
+        if args.model.is_none()
+            && let Ok(env_model) = std::env::var("JCODE_MODEL")
+        {
+            let trimmed = env_model.trim();
+            if !trimmed.is_empty() {
+                args.model = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn jcode_model_env_used_when_cli_flag_absent() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_MODEL");
+        crate::env::set_var("JCODE_MODEL", "claude-haiku-4");
+
+        let mut args = parse_args(&["jcode"]);
+        assert!(args.model.is_none());
+        apply_model_env_fallback(&mut args);
+        assert_eq!(args.model.as_deref(), Some("claude-haiku-4"));
+
+        if let Some(p) = prev {
+            crate::env::set_var("JCODE_MODEL", p);
+        } else {
+            crate::env::remove_var("JCODE_MODEL");
+        }
+    }
+
+    #[test]
+    fn cli_flag_wins_over_jcode_model_env() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_MODEL");
+        crate::env::set_var("JCODE_MODEL", "from-env");
+
+        let mut args = parse_args(&["jcode", "--model", "from-cli"]);
+        apply_model_env_fallback(&mut args);
+        assert_eq!(args.model.as_deref(), Some("from-cli"));
+
+        if let Some(p) = prev {
+            crate::env::set_var("JCODE_MODEL", p);
+        } else {
+            crate::env::remove_var("JCODE_MODEL");
+        }
+    }
+
+    #[test]
+    fn empty_jcode_model_env_treated_as_unset() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_MODEL");
+        crate::env::set_var("JCODE_MODEL", "   ");
+
+        let mut args = parse_args(&["jcode"]);
+        apply_model_env_fallback(&mut args);
+        assert!(args.model.is_none(), "blank env should not override");
+
+        if let Some(p) = prev {
+            crate::env::set_var("JCODE_MODEL", p);
+        } else {
+            crate::env::remove_var("JCODE_MODEL");
+        }
     }
 }

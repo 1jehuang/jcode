@@ -296,7 +296,7 @@ impl App {
     ///   - `TelemetryConsent`: Left/h -> No, Right/l -> Yes, toggle with
     ///     Up/Down/k/j/Tab; y/n commit directly, Enter/Space commit the
     ///     highlighted default.
-    /// Returns true if the key was consumed.
+    ///     Returns true if the key was consumed.
     pub(super) fn handle_onboarding_continue_prompt_key(&mut self, code: KeyCode) -> bool {
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {

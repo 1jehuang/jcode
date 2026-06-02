@@ -1,0 +1,8 @@
+{
+  "tool": "read",
+  "args": { "path": "no-such-file.txt" },
+  "setup_files": {},
+  "expect": {
+    "expected_error_contains": "read failed"
+  }
+}

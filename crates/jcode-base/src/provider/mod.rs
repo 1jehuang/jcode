@@ -23,6 +23,7 @@ mod registry;
 mod route_builders;
 mod routing;
 mod selection;
+pub(crate) mod sse_timeout;
 mod startup;
 mod state;
 
@@ -739,6 +740,7 @@ impl MultiProvider {
             }
         } else if self.anthropic_provider().is_none()
             && (crate::auth::claude::load_credentials().is_ok()
+                || anthropic::anthropic_api_key_env_configured()
                 || crate::provider_catalog::load_api_key_from_env_or_config(
                     "ANTHROPIC_API_KEY",
                     "anthropic.env",

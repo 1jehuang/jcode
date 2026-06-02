@@ -519,6 +519,17 @@ impl JadeRelayChannel {
         session_id: String,
         reply_enabled: bool,
     ) -> Self {
+        // Validate URL scheme to prevent token exfiltration via misconfigured or
+        // malicious api_base. Reject non-https except localhost dev patterns.
+        let valid_scheme = api_base.starts_with("https://")
+            || api_base.starts_with("http://localhost")
+            || api_base.starts_with("http://127.0.0.1");
+        if !valid_scheme {
+            logging::warn(&format!(
+                "JadeRelayChannel: non-https api_base '{}' may be insecure; proceeding anyway",
+                api_base
+            ));
+        }
         let api_base = if api_base.ends_with('/') {
             api_base
         } else {

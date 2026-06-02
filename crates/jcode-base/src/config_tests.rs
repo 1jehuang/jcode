@@ -578,3 +578,60 @@ impl Config {
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
     }
 }
+
+#[test]
+fn is_provider_disabled_returns_false_when_env_unset() {
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_DISABLED_PROVIDERS");
+    crate::env::remove_var("JCODE_DISABLED_PROVIDERS");
+
+    assert!(!crate::config::is_provider_disabled("anthropic"));
+    assert!(!crate::config::is_provider_disabled("openai"));
+
+    if let Some(v) = prev {
+        crate::env::set_var("JCODE_DISABLED_PROVIDERS", v);
+    }
+}
+
+#[test]
+fn is_provider_disabled_matches_csv_and_whitespace() {
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_DISABLED_PROVIDERS");
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", "anthropic, openai\tgemini");
+
+    assert!(crate::config::is_provider_disabled("anthropic"));
+    assert!(crate::config::is_provider_disabled("openai"));
+    assert!(crate::config::is_provider_disabled("gemini"));
+    assert!(!crate::config::is_provider_disabled("zai"));
+
+    // Case-insensitive both ways.
+    assert!(crate::config::is_provider_disabled("Anthropic"));
+    assert!(crate::config::is_provider_disabled("OPENAI"));
+
+    if let Some(v) = prev {
+        crate::env::set_var("JCODE_DISABLED_PROVIDERS", v);
+    } else {
+        crate::env::remove_var("JCODE_DISABLED_PROVIDERS");
+    }
+}
+
+#[test]
+fn is_provider_disabled_handles_empty_and_whitespace_lists() {
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_DISABLED_PROVIDERS");
+
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", "");
+    assert!(!crate::config::is_provider_disabled("anthropic"));
+
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", "   ,,  ,");
+    assert!(!crate::config::is_provider_disabled("openai"));
+
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", "");
+    assert!(!crate::config::is_provider_disabled(""));
+
+    if let Some(v) = prev {
+        crate::env::set_var("JCODE_DISABLED_PROVIDERS", v);
+    } else {
+        crate::env::remove_var("JCODE_DISABLED_PROVIDERS");
+    }
+}

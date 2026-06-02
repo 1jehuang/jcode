@@ -1,0 +1,13 @@
+{
+  "tool": "glob_count",
+  "args": { "pattern": "main*" },
+  "setup_files": {
+    "main.rs": "",
+    "main_test.rs": "",
+    "lib.rs": "",
+    "Cargo.toml": ""
+  },
+  "expect": {
+    "output_contains": ["count: 2"]
+  }
+}

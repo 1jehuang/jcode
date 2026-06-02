@@ -151,8 +151,31 @@ impl App {
     }
 
     pub(super) fn cycle_model(&mut self, direction: i8) {
-        let models = self.provider.available_models_for_switching();
+        let provider_models = self.provider.available_models_for_switching();
+        if provider_models.is_empty() {
+            self.push_display_message(DisplayMessage::error(
+                "Model switching is not available for this provider.",
+            ));
+            self.set_status_notice("Model switching not available");
+            return;
+        }
+
+        // Apply scoped-models allowlist (issue #26). If the user has
+        // configured a list, restrict cycling to entries matching it,
+        // preserving the allowlist's order so flips are deterministic.
+        let allowlist = crate::scoped_models::resolve_allowlist();
+        let models = crate::scoped_models::filter_by_allowlist(&provider_models, &allowlist);
         if models.is_empty() {
+            // The allowlist filtered everything out — surface a helpful error
+            // instead of silently falling back to the unscoped list.
+            if !allowlist.is_empty() {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Scoped models {:?} matched no available model. Edit `provider.scoped_models` or pass `--models <patterns>`.",
+                    allowlist
+                )));
+                self.set_status_notice("No scoped models match");
+                return;
+            }
             self.push_display_message(DisplayMessage::error(
                 "Model switching is not available for this provider.",
             ));

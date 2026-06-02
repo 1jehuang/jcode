@@ -595,6 +595,25 @@ impl BedrockProvider {
             .map(str::to_string)
     }
 
+    /// Extract the AIP id from an Application Inference Profile ARN (#143).
+    ///
+    /// Example: `arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abcd1234`
+    /// returns `Some("abcd1234")`.
+    ///
+    /// Returns `None` for normal inference-profile ARNs and for foundation
+    /// model ARNs.
+    fn application_inference_profile_id_from_arn(arn: &str) -> Option<String> {
+        let trimmed = arn.trim();
+        if !trimmed.contains("application-inference-profile/") {
+            return None;
+        }
+        trimmed
+            .rsplit_once("application-inference-profile/")
+            .map(|(_, profile)| profile.trim())
+            .filter(|profile| !profile.is_empty())
+            .map(str::to_string)
+    }
+
     fn foundation_model_id_from_profile_id(profile_id: &str) -> Option<String> {
         let id = profile_id.trim();
         let id = Self::inference_profile_id_from_arn(id).unwrap_or_else(|| id.to_string());
@@ -727,6 +746,28 @@ impl BedrockProvider {
     }
 
     fn model_info(model: &str) -> BedrockModelInfo {
+        // Issue #143: Application Inference Profile ARNs (
+        // arn:aws:bedrock:...:application-inference-profile/<aip-id>) carry no
+        // model-name hint, so Self::normalize_model_id strips them down to a
+        // user-chosen ID that doesn't match any known-model pattern below.
+        // That makes capability detection (tools, vision, context window) fall
+        // through to a defensive "no tools, no vision" default which is wrong
+        // for AIPs that route to e.g. Claude Sonnet 4.
+        //
+        // Honor JCODE_BEDROCK_AIP_MODEL_HINT (e.g. "claude-sonnet-4") so
+        // operators can tell jcode which underlying model the AIP routes to,
+        // and re-run capability detection against that hint instead of the
+        // raw AIP id. This keeps existing non-AIP behavior unchanged.
+        if Self::application_inference_profile_id_from_arn(model).is_some()
+            && let Ok(hint) = std::env::var("JCODE_BEDROCK_AIP_MODEL_HINT")
+            && !hint.trim().is_empty()
+        {
+            return Self::model_info_inner(hint.trim());
+        }
+        Self::model_info_inner(model)
+    }
+
+    fn model_info_inner(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
         if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
             BedrockModelInfo {
@@ -1751,5 +1792,67 @@ mod tests {
             .await
             .expect("live Bedrock completion");
         assert!(output.to_ascii_lowercase().contains("bedrock ok"));
+    }
+
+    // ---- Application Inference Profile (#143) ----
+
+    #[test]
+    fn application_inference_profile_id_from_arn_extracts_aip_suffix() {
+        let arn =
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abcd1234efgh";
+        assert_eq!(
+            BedrockProvider::application_inference_profile_id_from_arn(arn),
+            Some("abcd1234efgh".to_string())
+        );
+    }
+
+    #[test]
+    fn application_inference_profile_id_from_arn_rejects_unrelated_arns() {
+        let foundation = "arn:aws:bedrock::us-east-1:foundation-model/anthropic.claude-3-5-sonnet";
+        assert!(BedrockProvider::application_inference_profile_id_from_arn(foundation).is_none());
+        let inference_profile =
+            "arn:aws:bedrock::us-east-1:inference-profile/us.anthropic.claude-sonnet-4";
+        assert!(
+            BedrockProvider::application_inference_profile_id_from_arn(inference_profile).is_none()
+        );
+        assert!(BedrockProvider::application_inference_profile_id_from_arn("not-an-arn").is_none());
+        assert!(BedrockProvider::application_inference_profile_id_from_arn("").is_none());
+    }
+
+    #[test]
+    fn model_info_uses_aip_hint_when_arn_is_application_inference_profile() {
+        // Snapshot env, ensure the hint is set, and verify capability lookup
+        // routes through the hint instead of the AIP-id default.
+        let aip_arn = "arn:aws:bedrock:us-east-1:123:application-inference-profile/budget-prod-1";
+
+        // Save & clear env first so default-case behavior is reproducible.
+        let prev = std::env::var_os("JCODE_BEDROCK_AIP_MODEL_HINT");
+        unsafe {
+            std::env::remove_var("JCODE_BEDROCK_AIP_MODEL_HINT");
+        }
+        let no_hint = BedrockProvider::model_info(aip_arn);
+        assert!(
+            !no_hint.supports_tools,
+            "without hint, AIP normalizes to a non-Claude id and defaults to no-tools"
+        );
+
+        unsafe {
+            std::env::set_var("JCODE_BEDROCK_AIP_MODEL_HINT", "claude-sonnet-4");
+        }
+        let with_hint = BedrockProvider::model_info(aip_arn);
+        assert!(
+            with_hint.supports_tools,
+            "claude-sonnet-4 hint should enable tool-call capability"
+        );
+        assert!(with_hint.supports_vision);
+        assert_eq!(with_hint.context_tokens, 200_000);
+
+        // Restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("JCODE_BEDROCK_AIP_MODEL_HINT", v),
+                None => std::env::remove_var("JCODE_BEDROCK_AIP_MODEL_HINT"),
+            }
+        }
     }
 }
