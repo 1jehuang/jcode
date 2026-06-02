@@ -11,7 +11,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::broadcast;
+
+const DEFAULT_SUBAGENT_TIMEOUT_SECS: u64 = 300;
 
 pub struct SubagentTool {
     provider: Arc<dyn Provider>,
@@ -55,6 +58,8 @@ struct SubagentInput {
     session_id: Option<String>,
     #[serde(default)]
     output_mode: SubagentOutputMode,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
     #[serde(rename = "command", default)]
     _command: Option<String>,
 }
@@ -114,6 +119,12 @@ impl Tool for SubagentTool {
                     "type": "string",
                     "enum": ["answer", "compact", "full_transcript"],
                     "description": "Return mode. 'answer' returns the final answer only, 'compact' adds a user-visible transcript, and 'full_transcript' adds raw persisted messages. Defaults to 'answer'."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": DEFAULT_SUBAGENT_TIMEOUT_SECS,
+                    "description": "Maximum seconds to wait for the subagent before returning a timeout error. Defaults to 300."
                 },
                 "command": {
                     "type": "string",
@@ -201,8 +212,8 @@ impl Tool for SubagentTool {
         });
 
         logging::info(&format!(
-            "Subagent starting: {} (type: {})",
-            params.description, params.subagent_type
+            "Subagent starting: {} (type: {}) session_id={} model={}",
+            params.description, params.subagent_type, session.id, resolved_model
         ));
 
         // Run subagent on an isolated provider fork so model/session changes do not
@@ -215,18 +226,39 @@ impl Tool for SubagentTool {
         );
 
         let start = std::time::Instant::now();
-        let final_text = agent.run_once_capture(&params.prompt).await.map_err(|err| {
-            logging::warn(&format!(
-                "[tool:subagent] subagent failed description={} type={} session_id={} model={} error={}",
-                params.description,
-                params.subagent_type,
-                agent.session_id(),
-                resolved_model,
-                err
-            ));
-            err
-        })?;
         let sub_session_id = agent.session_id().to_string();
+        let timeout_secs = params
+            .timeout_secs
+            .unwrap_or(DEFAULT_SUBAGENT_TIMEOUT_SECS)
+            .max(1);
+        let final_text = match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            agent.run_once_capture(&params.prompt),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|err| {
+                logging::warn(&format!(
+                    "[tool:subagent] subagent failed description={} type={} session_id={} model={} error={}",
+                    params.description,
+                    params.subagent_type,
+                    sub_session_id,
+                    resolved_model,
+                    err
+                ));
+                err
+            })?,
+            Err(_) => {
+                listener.abort();
+                let message =
+                    subagent_timeout_error(&params.description, &sub_session_id, timeout_secs);
+                logging::warn(&format!(
+                    "[tool:subagent] {} type={} model={}",
+                    message, params.subagent_type, resolved_model
+                ));
+                return Err(anyhow::anyhow!(message));
+            }
+        };
         let history = if params.output_mode == SubagentOutputMode::Compact {
             Some(agent.get_history())
         } else {
@@ -285,6 +317,13 @@ fn subagent_display_title(params: &SubagentInput, model: &str) -> String {
     format!(
         "{} ({} · {})",
         params.description, params.subagent_type, model
+    )
+}
+
+fn subagent_timeout_error(description: &str, sub_session_id: &str, timeout_secs: u64) -> String {
+    format!(
+        "Subagent timed out after {timeout_secs}s before returning a final answer: {description}. \
+Child session `{sub_session_id}` was created and saved, so inspect or resume that session instead of waiting on this direct subagent call. For long-running work, prefer durable `swarm spawn`/`swarm await_members`."
     )
 }
 
@@ -369,7 +408,7 @@ fn format_compact_subagent_history(messages: &[HistoryMessage]) -> String {
 mod tests {
     use super::{
         SubagentInput, SubagentOutputMode, format_compact_subagent_history, format_subagent_output,
-        subagent_display_title,
+        subagent_display_title, subagent_timeout_error,
     };
     use crate::protocol::HistoryMessage;
 
@@ -382,6 +421,7 @@ mod tests {
             model: None,
             session_id: None,
             output_mode: SubagentOutputMode::Answer,
+            timeout_secs: None,
             _command: None,
         };
 
@@ -389,6 +429,17 @@ mod tests {
             subagent_display_title(&params, "gpt-5.4"),
             "Verify subagent model (general · gpt-5.4)"
         );
+    }
+
+    #[test]
+    fn subagent_timeout_error_includes_recovery_details() {
+        let message = subagent_timeout_error("Review the plan", "session_child", 300);
+
+        assert!(message.contains("timed out after 300s"));
+        assert!(message.contains("Review the plan"));
+        assert!(message.contains("session_child"));
+        assert!(message.contains("resume that session"));
+        assert!(message.contains("swarm spawn"));
     }
 
     #[test]
