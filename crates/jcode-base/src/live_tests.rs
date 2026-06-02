@@ -255,7 +255,7 @@ const ISSUE_DRIVEN_LIVE_PROVIDER_TARGETS: &[IssueDrivenLiveProviderTarget] = &[
     IssueDrivenLiveProviderTarget {
         provider_id: "minimax",
         provider_label: "MiniMax",
-        model: Some("MiniMax-M2.7"),
+        model: Some("MiniMax-M3"),
         reason: "MiniMax endpoint/key-region selection and live balance/readiness",
         issue_refs: &["#110", "#131", "#189"],
     },

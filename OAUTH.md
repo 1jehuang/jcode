@@ -267,7 +267,7 @@ Two notable presets are:
 - Stored env file: `~/.config/jcode/minimax.env`
 - API key env var: `OPENAI_API_KEY`
 - Base URL: `https://api.minimax.io/v1`
-- Default model hint: `MiniMax-M2.7`
+- Default model hint: `MiniMax-M3`
 - Docs: <https://platform.minimax.io/docs/guides/text-generation>
 
 These are first-class jcode provider presets, not just manual custom endpoint examples.
