@@ -68,15 +68,16 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
     let current_exe = std::env::current_exe().ok();
 
     let candidate_canonical = canonicalize_or(candidate.0.clone());
+    let candidate_comparison = reload_comparison_path(candidate_canonical.clone());
     let current_canonical = current_exe.as_ref().map(|p| canonicalize_or(p.clone()));
 
     let mtime = |path: &Path| std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     let current_mtime = current_exe.as_ref().map(|p| p.as_path()).and_then(mtime);
-    let candidate_mtime = mtime(candidate_canonical.as_path());
+    let candidate_mtime = mtime(candidate_comparison.as_path());
 
     match guarded_reload_target(
         candidate,
-        candidate_canonical.as_path(),
+        candidate_comparison.as_path(),
         current_exe.as_deref(),
         current_canonical.as_deref(),
         current_mtime,
@@ -145,6 +146,21 @@ fn guarded_reload_target(
 
 fn canonicalize_or(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn reload_comparison_path(path: PathBuf) -> PathBuf {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "jcode")
+        && let Some(dir) = path.parent()
+    {
+        let sibling_bin = dir.join("jcode-linux-x86_64.bin");
+        if sibling_bin.exists() {
+            return canonicalize_or(sibling_bin);
+        }
+    }
+    path
 }
 
 pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
@@ -228,7 +244,8 @@ fn newer_binary_available(
 
     candidates.into_iter().any(|(candidate, candidate_mtime)| {
         // Reloading into ourselves is never an "update".
-        if current_canonical == Some(candidate.as_path()) {
+        let candidate_comparison = reload_comparison_path(candidate.clone());
+        if current_canonical == Some(candidate_comparison.as_path()) {
             return false;
         }
 
@@ -281,7 +298,8 @@ pub(crate) fn server_has_newer_binary() -> bool {
     }
 
     let candidates_with_mtimes = candidates.into_iter().map(|candidate| {
-        let candidate_mtime = std::fs::metadata(&candidate)
+        let candidate_comparison = reload_comparison_path(candidate.clone());
+        let candidate_mtime = std::fs::metadata(&candidate_comparison)
             .ok()
             .and_then(|m| m.modified().ok());
         (candidate, candidate_mtime)
@@ -324,7 +342,7 @@ pub(crate) fn startup_headless_recovery_test_delay() -> Option<std::time::Durati
 
 #[cfg(test)]
 mod newer_binary_tests {
-    use super::newer_binary_available;
+    use super::{newer_binary_available, reload_comparison_path};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -413,6 +431,21 @@ mod newer_binary_tests {
             Some(std::path::Path::new("/x/builds/versions/dev/jcode")),
             candidates,
         ));
+    }
+
+    #[test]
+    fn installed_wrapper_compares_as_sibling_binary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wrapper = temp.path().join("jcode");
+        let bin = temp.path().join("jcode-linux-x86_64.bin");
+        std::fs::write(
+            &wrapper,
+            "#!/usr/bin/env sh\nexec ./jcode-linux-x86_64.bin \"$@\"\n",
+        )
+        .expect("write wrapper");
+        std::fs::write(&bin, b"bin").expect("write bin");
+
+        assert_eq!(reload_comparison_path(wrapper), bin);
     }
 
     #[test]
