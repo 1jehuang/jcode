@@ -245,6 +245,10 @@ impl Agent {
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
             let mut reasoning_content = String::new();
+            // Emit the 💭 prefix only once per thinking burst; subsequent deltas are streamed
+            // raw so providers that fragment reasoning into many small chunks don't render
+            // "💭 chunk 💭 chunk 💭 chunk…" interleaved with the actual answer.
+            let mut thinking_prefix_emitted = false;
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             let mut openai_native_compaction: Option<(String, usize)> = None;
@@ -351,6 +355,7 @@ impl Agent {
 
                 match event {
                     StreamEvent::ThinkingStart => {
+                        thinking_prefix_emitted = false;
                         // Reasoning tokens are counted in provider output usage even when
                         // `display.show_thinking` hides the text. Let remote clients start
                         // their TPS timer without forcing hidden reasoning into the transcript.
@@ -358,7 +363,19 @@ impl Agent {
                             phase: crate::message::ConnectionPhase::Streaming.to_string(),
                         });
                     }
-                    StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingEnd => {
+                        // If this burst surfaced a 💭 prefix into the transcript, emit a blank
+                        // line before the model's regular answer so they don't visually fuse.
+                        // Providers that emit ThinkingDone separately will append `\nThought
+                        // for…\n` and supply their own separator there instead.
+                        if thinking_prefix_emitted && crate::config::config().display.show_thinking
+                        {
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: "\n\n".to_string(),
+                            });
+                        }
+                        thinking_prefix_emitted = false;
+                    }
                     StreamEvent::ThinkingSignatureDelta(signature) => {
                         if store_reasoning_content {
                             reasoning_signature.push_str(&signature);
@@ -367,17 +384,20 @@ impl Agent {
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Only send thinking content if enabled in config
                         if crate::config::config().display.show_thinking {
-                            let _ = event_tx.send(ServerEvent::TextDelta {
-                                text: format!("💭 {}\n", thinking_text),
-                            });
+                            let payload = super::streaming::format_thinking_delta_payload(
+                                &thinking_text,
+                                &mut thinking_prefix_emitted,
+                            );
+                            let _ = event_tx.send(ServerEvent::TextDelta { text: payload });
                         }
                         if store_reasoning_content {
                             reasoning_content.push_str(&thinking_text);
                         }
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
+                        thinking_prefix_emitted = false;
                         let _ = event_tx.send(ServerEvent::TextDelta {
-                            text: format!("Thought for {:.1}s\n", duration_secs),
+                            text: format!("\nThought for {:.1}s\n", duration_secs),
                         });
                     }
                     StreamEvent::TextDelta(text) => {

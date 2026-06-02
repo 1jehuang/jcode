@@ -12,6 +12,7 @@ mod burst_spawn;
 mod provider_behavior;
 mod safety;
 mod session_flow;
+mod streaming_thinking;
 mod transport;
 #[cfg(windows)]
 mod windows_lifecycle;
