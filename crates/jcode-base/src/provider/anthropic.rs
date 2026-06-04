@@ -38,11 +38,14 @@ pub fn is_cache_ttl_1h() -> bool {
     CACHE_TTL_1H.load(Ordering::Relaxed)
 }
 
-/// Anthropic Messages API endpoint
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+/// Default Anthropic Messages API base.
+const DEFAULT_API_BASE: &str = "https://api.anthropic.com/v1";
 
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
+
+const ANTHROPIC_BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
+const ANTHROPIC_AUTH_TOKEN_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
 
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
 pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
@@ -84,6 +87,65 @@ pub(crate) fn apply_oauth_attribution_headers(
         .header("X-Stainless-Runtime-Version", "v24.3.0")
         .header("X-Stainless-Timeout", "600")
         .header("anthropic-dangerous-direct-browser-access", "true")
+}
+
+fn load_anthropic_api_base_override() -> Option<String> {
+    let raw = crate::provider_catalog::load_env_value_from_env_or_config(
+        ANTHROPIC_BASE_URL_ENV,
+        "anthropic.env",
+    )?;
+    match crate::provider_catalog::normalize_api_base(&raw) {
+        Some(base) => Some(base),
+        None => {
+            crate::logging::warn(&format!(
+                "Ignoring invalid {ANTHROPIC_BASE_URL_ENV}='{}'; use https://... or an allowed private http:// host",
+                raw
+            ));
+            None
+        }
+    }
+}
+
+fn anthropic_messages_url_from_base(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/messages") {
+        base.to_string()
+    } else {
+        format!("{base}/messages")
+    }
+}
+
+fn anthropic_messages_url(auth_kind: AnthropicAuthKind) -> String {
+    if auth_kind.is_oauth() {
+        return API_URL_OAUTH.to_string();
+    }
+
+    let base = load_anthropic_api_base_override().unwrap_or_else(|| DEFAULT_API_BASE.to_string());
+    anthropic_messages_url_from_base(&base)
+}
+
+fn direct_anthropic_model_catalog_auth(
+    token: &str,
+    auth_kind: AnthropicAuthKind,
+) -> Result<crate::provider::AnthropicModelCatalogAuth<'_>> {
+    match auth_kind {
+        AnthropicAuthKind::ApiKey => Ok(crate::provider::AnthropicModelCatalogAuth::ApiKey(token)),
+        AnthropicAuthKind::AuthToken => {
+            Ok(crate::provider::AnthropicModelCatalogAuth::Bearer(token))
+        }
+        AnthropicAuthKind::OAuth => {
+            anyhow::bail!("OAuth Anthropic catalog requests must use the OAuth catalog endpoint")
+        }
+    }
+}
+
+async fn fetch_direct_anthropic_model_catalog(
+    token: &str,
+    auth_kind: AnthropicAuthKind,
+) -> Result<crate::provider::AnthropicModelCatalog> {
+    let base = load_anthropic_api_base_override().unwrap_or_else(|| DEFAULT_API_BASE.to_string());
+    let auth = direct_anthropic_model_catalog_auth(token, auth_kind)?;
+    crate::provider::fetch_anthropic_model_catalog_with_base(&base, auth).await
 }
 
 #[derive(Debug, Clone, Default)]
@@ -428,13 +490,51 @@ impl AnthropicCredentialMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnthropicAuthKind {
+    OAuth,
+    ApiKey,
+    AuthToken,
+}
+
+impl AnthropicAuthKind {
+    fn is_oauth(self) -> bool {
+        matches!(self, Self::OAuth)
+    }
+}
+
 pub(crate) fn load_anthropic_api_key() -> Result<String> {
     crate::provider_catalog::load_api_key_from_env_or_config("ANTHROPIC_API_KEY", "anthropic.env")
         .context("No Anthropic API key found")
 }
 
+fn load_anthropic_auth_token() -> Option<String> {
+    crate::provider_catalog::load_env_value_from_env_or_config(
+        ANTHROPIC_AUTH_TOKEN_ENV,
+        "anthropic.env",
+    )
+}
+
+fn load_anthropic_direct_auth() -> Result<(String, AnthropicAuthKind)> {
+    if load_anthropic_api_base_override().is_some()
+        && let Some(token) = load_anthropic_auth_token()
+    {
+        return Ok((token, AnthropicAuthKind::AuthToken));
+    }
+
+    if let Ok(key) = load_anthropic_api_key() {
+        return Ok((key, AnthropicAuthKind::ApiKey));
+    }
+
+    if let Some(token) = load_anthropic_auth_token() {
+        return Ok((token, AnthropicAuthKind::AuthToken));
+    }
+
+    anyhow::bail!("No Anthropic API key found; set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN")
+}
+
 pub(crate) fn has_anthropic_api_key() -> bool {
-    load_anthropic_api_key().is_ok()
+    load_anthropic_direct_auth().is_ok()
 }
 
 /// Direct Anthropic API provider
@@ -464,7 +564,8 @@ impl AnthropicProvider {
     /// resolution path the runtime uses. Returns the bearer token and an
     /// `is_oauth` flag so callers can pick the matching catalog endpoint.
     pub async fn resolve_access_token_for_doctor(&self) -> Result<(String, bool)> {
-        self.get_access_token().await
+        let (token, auth_kind) = self.get_access_token().await?;
+        Ok((token, auth_kind.is_oauth()))
     }
 
     /// Pin the credential mode (OAuth vs API key) for a provider-doctor run.
@@ -493,14 +594,14 @@ impl AnthropicProvider {
     /// live `GET /v1/models` endpoint works and that the model under test is in
     /// the live catalog.
     pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
-        let (token, is_oauth) = self.get_access_token().await?;
+        let (token, auth_kind) = self.get_access_token().await?;
         if token.trim().is_empty() {
             anyhow::bail!("resolved an empty Anthropic access token");
         }
-        let catalog = if is_oauth {
+        let catalog = if auth_kind.is_oauth() {
             crate::provider::fetch_anthropic_model_catalog_oauth(&token).await?
         } else {
-            crate::provider::fetch_anthropic_model_catalog(&token).await?
+            fetch_direct_anthropic_model_catalog(&token, auth_kind).await?
         };
         // Persist so the rest of the process benefits from the warm catalog,
         // exactly like the runtime's own prefetch.
@@ -725,14 +826,13 @@ impl AnthropicProvider {
     /// Get the access token from credentials
     /// Supports both OAuth tokens and direct API keys
     /// Automatically refreshes OAuth tokens when expired
-    async fn get_access_token(&self) -> Result<(String, bool)> {
+    async fn get_access_token(&self) -> Result<(String, AnthropicAuthKind)> {
         let mode = *self.credential_mode.read().await;
 
         // Explicit API-key mode: use the direct API key and surface an error if
         // one is not configured (never silently fall back to OAuth).
         if matches!(mode, AnthropicCredentialMode::ApiKey) {
-            let key = load_anthropic_api_key()?;
-            return Ok((key, false)); // false = not OAuth
+            return load_anthropic_direct_auth();
         }
 
         // Auto mode prefers OAuth (Claude subscription) when credentials are
@@ -742,15 +842,15 @@ impl AnthropicProvider {
         if matches!(mode, AnthropicCredentialMode::Auto)
             && auth::claude::load_credentials().is_err()
         {
-            if let Ok(key) = load_anthropic_api_key() {
-                return Ok((key, false));
+            if let Ok(auth) = load_anthropic_direct_auth() {
+                return Ok(auth);
             }
         }
 
         self.get_oauth_access_token().await
     }
 
-    async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
+    async fn get_oauth_access_token(&self) -> Result<(String, AnthropicAuthKind)> {
         // Check cached credentials
         {
             let cached = self.credentials.read().await;
@@ -758,7 +858,7 @@ impl AnthropicProvider {
                 let now = chrono::Utc::now().timestamp_millis();
                 // Return cached token if not expired (with 5 min buffer)
                 if creds.expires_at > now + 300_000 {
-                    return Ok((creds.access_token.clone(), true));
+                    return Ok((creds.access_token.clone(), AnthropicAuthKind::OAuth));
                 }
             }
         }
@@ -801,7 +901,7 @@ impl AnthropicProvider {
                         expires_at: refreshed.expires_at,
                     });
 
-                    return Ok((refreshed.access_token, true));
+                    return Ok((refreshed.access_token, AnthropicAuthKind::OAuth));
                 }
                 Err(e) => {
                     crate::logging::error(&format!("OAuth token refresh failed: {}", e));
@@ -818,14 +918,14 @@ impl AnthropicProvider {
             expires_at: fresh_creds.expires_at,
         });
 
-        Ok((fresh_creds.access_token, true))
+        Ok((fresh_creds.access_token, AnthropicAuthKind::OAuth))
     }
 
     pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
         match mode {
             AnthropicCredentialMode::Auto => {}
             AnthropicCredentialMode::ApiKey => {
-                load_anthropic_api_key()?;
+                load_anthropic_direct_auth()?;
             }
             AnthropicCredentialMode::OAuth => {
                 auth::claude::load_credentials().context("Failed to load Claude credentials")?;
@@ -866,7 +966,8 @@ impl AnthropicProvider {
 
     #[cfg(test)]
     pub(crate) async fn test_access_token_and_oauth_mode(&self) -> Result<(String, bool)> {
-        self.get_access_token().await
+        let (token, auth_kind) = self.get_access_token().await?;
+        Ok((token, auth_kind.is_oauth()))
     }
 
     /// Convert our Message type to Anthropic API format
@@ -1068,7 +1169,9 @@ impl AnthropicProvider {
                         signature: signature.clone(),
                     });
                 }
-                ContentBlock::ToolUse { id, name, input, .. } => {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     result.push(ApiContentBlock::ToolUse {
                         id: crate::message::sanitize_tool_id(id),
                         name: if is_oauth {
@@ -1272,7 +1375,8 @@ impl Provider for AnthropicProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let (token, is_oauth) = self.get_access_token().await?;
+        let (token, auth_kind) = self.get_access_token().await?;
+        let is_oauth = auth_kind.is_oauth();
         if is_oauth {
             ensure_oauth_preflight(
                 &self.client,
@@ -1347,7 +1451,7 @@ impl Provider for AnthropicProvider {
             run_stream_with_retries(
                 client,
                 token,
-                is_oauth,
+                auth_kind,
                 request,
                 tx,
                 credentials,
@@ -1488,12 +1592,12 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let (token, is_oauth) = self.get_access_token().await?;
+        let (token, auth_kind) = self.get_access_token().await?;
         if token.trim().is_empty() {
             return Ok(());
         }
 
-        let catalog = if is_oauth {
+        let catalog = if auth_kind.is_oauth() {
             match crate::provider::fetch_anthropic_model_catalog_oauth(&token).await {
                 Ok(catalog) => catalog,
                 Err(err) => {
@@ -1505,7 +1609,18 @@ impl Provider for AnthropicProvider {
                 }
             }
         } else {
-            crate::provider::fetch_anthropic_model_catalog(&token).await?
+            let custom_base = load_anthropic_api_base_override().is_some();
+            match fetch_direct_anthropic_model_catalog(&token, auth_kind).await {
+                Ok(catalog) => catalog,
+                Err(err) if custom_base => {
+                    crate::logging::warn(&format!(
+                        "Anthropic custom-base model catalog refresh failed; keeping fallback list: {}",
+                        err
+                    ));
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            }
         };
         crate::provider::persist_anthropic_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
@@ -1565,7 +1680,8 @@ impl Provider for AnthropicProvider {
         system_dynamic: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let (token, is_oauth) = self.get_access_token().await?;
+        let (token, auth_kind) = self.get_access_token().await?;
+        let is_oauth = auth_kind.is_oauth();
         if is_oauth {
             ensure_oauth_preflight(
                 &self.client,
@@ -1639,7 +1755,7 @@ impl Provider for AnthropicProvider {
             run_stream_with_retries(
                 client,
                 token,
-                is_oauth,
+                auth_kind,
                 request,
                 tx,
                 credentials,
@@ -1660,7 +1776,7 @@ impl Provider for AnthropicProvider {
 async fn run_stream_with_retries(
     client: Client,
     initial_token: String,
-    is_oauth: bool,
+    auth_kind: AnthropicAuthKind,
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
@@ -1668,6 +1784,7 @@ async fn run_stream_with_retries(
     oauth_session_id: String,
 ) {
     let mut token = initial_token;
+    let is_oauth = auth_kind.is_oauth();
     let mut last_error = None;
     let mut attempted_forced_refresh = false;
 
@@ -1694,7 +1811,7 @@ async fn run_stream_with_retries(
         match stream_response(
             client.clone(),
             token.clone(),
-            is_oauth,
+            auth_kind,
             request.clone(),
             tx.clone(),
             &model_name,
@@ -1818,17 +1935,61 @@ async fn force_refresh_oauth_token(
     Ok(refreshed.access_token)
 }
 
+fn direct_api_beta_header(model_name: &str, thinking_enabled: bool) -> String {
+    let beta_header = if is_1m_model(model_name) {
+        "prompt-caching-2024-07-31,context-1m-2025-08-07"
+    } else {
+        "prompt-caching-2024-07-31"
+    };
+    anthropic_beta_header_with_thinking(beta_header, thinking_enabled)
+}
+
+fn apply_anthropic_auth_headers(
+    req: reqwest::RequestBuilder,
+    token: &str,
+    auth_kind: AnthropicAuthKind,
+    model_name: &str,
+    thinking_enabled: bool,
+    oauth_session_id: &str,
+) -> reqwest::RequestBuilder {
+    match auth_kind {
+        AnthropicAuthKind::OAuth => {
+            let beta_header = anthropic_beta_header_with_thinking(
+                oauth_beta_headers(model_name),
+                thinking_enabled,
+            );
+            apply_oauth_attribution_headers(
+                req.header("Authorization", format!("Bearer {}", token))
+                    .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                    .header("anthropic-beta", beta_header),
+                oauth_session_id,
+            )
+        }
+        AnthropicAuthKind::ApiKey => req.header("x-api-key", token).header(
+            "anthropic-beta",
+            direct_api_beta_header(model_name, thinking_enabled),
+        ),
+        AnthropicAuthKind::AuthToken => req
+            .header("Authorization", format!("Bearer {}", token))
+            .header(
+                "anthropic-beta",
+                direct_api_beta_header(model_name, thinking_enabled),
+            ),
+    }
+}
+
 /// Stream the response from Anthropic API
 async fn stream_response(
     client: Client,
     token: String,
-    is_oauth: bool,
+    auth_kind: AnthropicAuthKind,
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
     oauth_session_id: &str,
 ) -> Result<()> {
     use crate::message::ConnectionPhase;
+    let is_oauth = auth_kind.is_oauth();
     if std::env::var("JCODE_ANTHROPIC_DEBUG")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -1845,10 +2006,10 @@ async fn stream_response(
 
     let connect_start = std::time::Instant::now();
     // Build request with appropriate auth headers
-    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+    let url = anthropic_messages_url(auth_kind);
 
     let mut req = client
-        .post(url)
+        .post(&url)
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
         .header(
@@ -1860,36 +2021,14 @@ async fn stream_response(
             },
         );
 
-    if is_oauth {
-        // OAuth tokens require:
-        // 1. Bearer auth (NOT x-api-key)
-        // 2. User-Agent matching Claude CLI
-        // 3. Multiple beta headers
-        // 4. ?beta=true query param (in URL above)
-        let beta_header = anthropic_beta_header_with_thinking(
-            oauth_beta_headers(model_name),
-            request.thinking.is_some(),
-        );
-        req = apply_oauth_attribution_headers(
-            req.header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
-                .header("anthropic-beta", beta_header),
-            oauth_session_id,
-        );
-    } else {
-        // Direct API keys use x-api-key
-        // Include prompt-caching beta header
-        let beta_header = if is_1m_model(model_name) {
-            "prompt-caching-2024-07-31,context-1m-2025-08-07"
-        } else {
-            "prompt-caching-2024-07-31"
-        };
-        let beta_header =
-            anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
-        req = req
-            .header("x-api-key", &token)
-            .header("anthropic-beta", beta_header);
-    }
+    req = apply_anthropic_auth_headers(
+        req,
+        &token,
+        auth_kind,
+        model_name,
+        request.thinking.is_some(),
+        oauth_session_id,
+    );
 
     let response = req
         .json(&request)

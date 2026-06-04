@@ -133,6 +133,7 @@ fn tracked_env_vars() -> Vec<String> {
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "AZURE_OPENAI_ENDPOINT",
         "AZURE_OPENAI_MODEL",
         "AZURE_OPENAI_API_KEY",

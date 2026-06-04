@@ -92,6 +92,7 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
         "HOME",
         crate::subscription_catalog::JCODE_API_KEY_ENV,
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "JCODE_OPENROUTER_API_BASE",

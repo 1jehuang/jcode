@@ -12,6 +12,12 @@ pub struct AnthropicModelCatalog {
     pub context_limits: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum AnthropicModelCatalogAuth<'a> {
+    ApiKey(&'a str),
+    Bearer(&'a str),
+}
+
 pub(crate) fn parse_anthropic_model_catalog(data: &serde_json::Value) -> AnthropicModelCatalog {
     let models = data
         .get("data")
@@ -119,13 +125,44 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
     Ok(parse_openai_model_catalog(&data))
 }
 
+const DEFAULT_ANTHROPIC_API_BASE: &str = "https://api.anthropic.com/v1";
+
+pub(crate) fn anthropic_model_catalog_url_from_base(api_base: &str) -> String {
+    let base = api_base.trim_end_matches('/');
+    if base.ends_with("/models") {
+        base.to_string()
+    } else if let Some(api_base) = base.strip_suffix("/messages") {
+        format!("{api_base}/models")
+    } else {
+        format!("{base}/models")
+    }
+}
+
 pub async fn fetch_anthropic_model_catalog(api_key: &str) -> Result<AnthropicModelCatalog> {
+    fetch_anthropic_model_catalog_with_base(
+        DEFAULT_ANTHROPIC_API_BASE,
+        AnthropicModelCatalogAuth::ApiKey(api_key),
+    )
+    .await
+}
+
+pub async fn fetch_anthropic_model_catalog_with_base(
+    api_base: &str,
+    auth: AnthropicModelCatalogAuth<'_>,
+) -> Result<AnthropicModelCatalog> {
+    let url = anthropic_model_catalog_url_from_base(api_base);
     fetch_anthropic_model_catalog_with_request(|client, after_id| {
         let mut req = client
-            .get("https://api.anthropic.com/v1/models")
-            .header("x-api-key", api_key)
+            .get(&url)
             .header("anthropic-version", "2023-06-01")
             .query(&[("limit", "1000")]);
+
+        req = match auth {
+            AnthropicModelCatalogAuth::ApiKey(api_key) => req.header("x-api-key", api_key),
+            AnthropicModelCatalogAuth::Bearer(token) => {
+                req.header("Authorization", format!("Bearer {}", token))
+            }
+        };
 
         if let Some(after) = after_id {
             req = req.query(&[("after_id", after)]);
@@ -213,6 +250,35 @@ where
         available_models,
         context_limits: limits,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_model_catalog_url_appends_models_to_base_url() {
+        assert_eq!(
+            anthropic_model_catalog_url_from_base("http://127.0.0.1:15721/anthropic/v1/"),
+            "http://127.0.0.1:15721/anthropic/v1/models"
+        );
+    }
+
+    #[test]
+    fn anthropic_model_catalog_url_keeps_explicit_models_endpoint() {
+        assert_eq!(
+            anthropic_model_catalog_url_from_base("https://example.test/v1/models"),
+            "https://example.test/v1/models"
+        );
+    }
+
+    #[test]
+    fn anthropic_model_catalog_url_replaces_explicit_messages_endpoint() {
+        assert_eq!(
+            anthropic_model_catalog_url_from_base("https://example.test/v1/messages"),
+            "https://example.test/v1/models"
+        );
+    }
 }
 
 /// Fetch model availability from the OpenAI platform API using an API key.

@@ -77,10 +77,12 @@ pub fn resolve_dual_credential_auth(
     let (has_oauth, has_api_key, forced) = match provider {
         ActiveProvider::Claude => {
             let has_oauth = auth.anthropic.has_oauth;
-            // `has_api_key` already folds in the ANTHROPIC_API_KEY env var via the
-            // auth probe, but re-check defensively so an env-only key set after the
+            // `has_api_key` already folds in Anthropic direct auth env vars via the
+            // auth probe, but re-check defensively so env-only auth set after the
             // cached snapshot still reports honestly.
-            let has_api_key = auth.anthropic.has_api_key || std::env::var("ANTHROPIC_API_KEY").is_ok();
+            let has_api_key = auth.anthropic.has_api_key
+                || std::env::var("ANTHROPIC_API_KEY").is_ok()
+                || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
             let forced = match runtime.as_deref() {
                 Some("claude-api" | "anthropic-api") => Some(ActiveCredential::ApiKey),
                 Some("claude" | "anthropic") => Some(ActiveCredential::OAuth),
@@ -123,6 +125,29 @@ mod tests {
     use super::*;
     use crate::auth::ProviderAuth;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            crate::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                crate::env::set_var(self.key, previous);
+            } else {
+                crate::env::remove_var(self.key);
+            }
+        }
+    }
+
     fn anthropic(has_oauth: bool, has_api_key: bool) -> AuthStatus {
         AuthStatus {
             anthropic: ProviderAuth {
@@ -154,7 +179,8 @@ mod tests {
     fn anthropic_explicit_selection_wins_over_auto() {
         let auth = anthropic(true, true);
         let resolved =
-            resolve_dual_credential_auth(ActiveProvider::Claude, &auth, Some("claude-api")).unwrap();
+            resolve_dual_credential_auth(ActiveProvider::Claude, &auth, Some("claude-api"))
+                .unwrap();
         assert_eq!(resolved.active, ActiveCredential::ApiKey);
         assert!(resolved.explicit);
         let resolved =
@@ -172,6 +198,8 @@ mod tests {
 
     #[test]
     fn anthropic_none_when_unconfigured() {
+        let _api_key = EnvVarGuard::remove("ANTHROPIC_API_KEY");
+        let _auth_token = EnvVarGuard::remove("ANTHROPIC_AUTH_TOKEN");
         let auth = anthropic(false, false);
         assert!(resolve_dual_credential_auth(ActiveProvider::Claude, &auth, None).is_none());
     }

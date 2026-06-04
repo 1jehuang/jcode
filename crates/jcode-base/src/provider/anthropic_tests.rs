@@ -6,6 +6,18 @@ struct EnvVarGuard {
 }
 
 impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, previous }
+    }
+
     fn set_if_missing(key: &'static str, value: &str) -> Option<Self> {
         if std::env::var_os(key).is_some() {
             return None;
@@ -75,6 +87,105 @@ async fn test_available_models() {
     assert!(models.contains(&"claude-sonnet-4-6"));
     assert!(models.contains(&"claude-sonnet-4-6[1m]"));
     assert!(models.contains(&"claude-haiku-4-5"));
+}
+
+#[test]
+fn anthropic_messages_url_defaults_to_official_api_base() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_string_lossy().as_ref());
+    let _base = EnvVarGuard::remove("ANTHROPIC_BASE_URL");
+
+    assert_eq!(
+        anthropic_messages_url(AnthropicAuthKind::ApiKey),
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert_eq!(
+        anthropic_messages_url(AnthropicAuthKind::OAuth),
+        "https://api.anthropic.com/v1/messages?beta=true"
+    );
+}
+
+#[test]
+fn anthropic_messages_url_uses_configured_base_url() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_string_lossy().as_ref());
+    let _base = EnvVarGuard::set(
+        "ANTHROPIC_BASE_URL",
+        "http://127.0.0.1:15721/claude-desktop/v1/",
+    );
+
+    assert_eq!(
+        anthropic_messages_url(AnthropicAuthKind::ApiKey),
+        "http://127.0.0.1:15721/claude-desktop/v1/messages"
+    );
+}
+
+#[test]
+fn direct_auth_prefers_auth_token_for_configured_base_url() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_string_lossy().as_ref());
+    let _base = EnvVarGuard::set(
+        "ANTHROPIC_BASE_URL",
+        "http://127.0.0.1:15721/claude-desktop/v1",
+    );
+    let _api_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+    let _auth_token = EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", "gateway-token");
+
+    let (token, auth_kind) = load_anthropic_direct_auth().expect("direct auth");
+
+    assert_eq!(token, "gateway-token");
+    assert_eq!(auth_kind, AnthropicAuthKind::AuthToken);
+}
+
+#[test]
+fn direct_api_key_requests_keep_x_api_key_auth() {
+    let request = reqwest::Client::new().post("http://127.0.0.1:1/v1/messages");
+    let request = apply_anthropic_auth_headers(
+        request,
+        "sk-ant-test",
+        AnthropicAuthKind::ApiKey,
+        "claude-sonnet-4-6",
+        false,
+        "session",
+    )
+    .build()
+    .expect("request");
+
+    assert_eq!(
+        request
+            .headers()
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok()),
+        Some("sk-ant-test")
+    );
+    assert!(request.headers().get("authorization").is_none());
+}
+
+#[test]
+fn auth_token_requests_use_bearer_auth() {
+    let request = reqwest::Client::new().post("http://127.0.0.1:1/v1/messages");
+    let request = apply_anthropic_auth_headers(
+        request,
+        "gateway-token",
+        AnthropicAuthKind::AuthToken,
+        "claude-sonnet-4-6",
+        false,
+        "session",
+    )
+    .build()
+    .expect("request");
+
+    assert_eq!(
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer gateway-token")
+    );
+    assert!(request.headers().get("x-api-key").is_none());
 }
 
 #[test]
@@ -474,11 +585,15 @@ async fn test_dangling_tool_use_repair() {
                 ContentBlock::ToolUse {
                     id: "tool_123".to_string(),
                     name: "bash".to_string(),
-                    input: serde_json::json!({"command": "ls"}), thought_signature: None, },
+                    input: serde_json::json!({"command": "ls"}),
+                    thought_signature: None,
+                },
                 ContentBlock::ToolUse {
                     id: "tool_456".to_string(),
                     name: "read".to_string(),
-                    input: serde_json::json!({"file_path": "/tmp/test"}), thought_signature: None, },
+                    input: serde_json::json!({"file_path": "/tmp/test"}),
+                    thought_signature: None,
+                },
             ],
             timestamp: None,
             tool_duration_ms: None,
@@ -542,7 +657,9 @@ async fn test_no_repair_when_tool_results_present() {
             content: vec![ContentBlock::ToolUse {
                 id: "tool_123".to_string(),
                 name: "bash".to_string(),
-                input: serde_json::json!({"command": "ls"}), thought_signature: None, }],
+                input: serde_json::json!({"command": "ls"}),
+                thought_signature: None,
+            }],
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -616,15 +733,21 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
                 ContentBlock::ToolUse {
                     id: "tool_a".to_string(),
                     name: "read".to_string(),
-                    input: serde_json::json!({"file_path": "a.png"}), thought_signature: None, },
+                    input: serde_json::json!({"file_path": "a.png"}),
+                    thought_signature: None,
+                },
                 ContentBlock::ToolUse {
                     id: "tool_b".to_string(),
                     name: "read".to_string(),
-                    input: serde_json::json!({"file_path": "b.png"}), thought_signature: None, },
+                    input: serde_json::json!({"file_path": "b.png"}),
+                    thought_signature: None,
+                },
                 ContentBlock::ToolUse {
                     id: "tool_c".to_string(),
                     name: "read".to_string(),
-                    input: serde_json::json!({"file_path": "c.png"}), thought_signature: None, },
+                    input: serde_json::json!({"file_path": "c.png"}),
+                    thought_signature: None,
+                },
             ],
             timestamp: None,
             tool_duration_ms: None,
@@ -1157,7 +1280,9 @@ async fn test_sanitize_tool_ids_with_dots() {
             content: vec![ContentBlock::ToolUse {
                 id: "chatcmpl-BF2xX.tool_call.0".to_string(),
                 name: "bash".to_string(),
-                input: serde_json::json!({"command": "ls"}), thought_signature: None, }],
+                input: serde_json::json!({"command": "ls"}),
+                thought_signature: None,
+            }],
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1210,7 +1335,9 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
             content: vec![ContentBlock::ToolUse {
                 id: "call.with.dots".to_string(),
                 name: "bash".to_string(),
-                input: serde_json::json!({"command": "crash"}), thought_signature: None, }],
+                input: serde_json::json!({"command": "crash"}),
+                thought_signature: None,
+            }],
             timestamp: None,
             tool_duration_ms: None,
         },

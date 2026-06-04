@@ -232,13 +232,13 @@ pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Resu
 use self::dispatch::CompletionMode;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
-    OpenAIModelCatalog, begin_anthropic_model_catalog_refresh, begin_openai_model_catalog_refresh,
-    cached_anthropic_model_ids, cached_openai_model_ids,
+    AnthropicModelCatalogAuth, OpenAIModelCatalog, begin_anthropic_model_catalog_refresh,
+    begin_openai_model_catalog_refresh, cached_anthropic_model_ids, cached_openai_model_ids,
     clear_all_model_unavailability_for_account, clear_all_provider_unavailability_for_account,
     clear_model_unavailable_for_account, clear_provider_unavailable_for_account,
     context_limit_for_model, context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
-    fetch_anthropic_model_catalog_oauth, fetch_openai_api_key_model_catalog,
-    fetch_openai_context_limits, fetch_openai_model_catalog,
+    fetch_anthropic_model_catalog_oauth, fetch_anthropic_model_catalog_with_base,
+    fetch_openai_api_key_model_catalog, fetch_openai_context_limits, fetch_openai_model_catalog,
     finish_anthropic_model_catalog_refresh_for_scope, finish_openai_model_catalog_refresh,
     format_account_model_availability_detail, get_best_available_openai_model,
     is_model_available_for_account, known_anthropic_model_ids, known_openai_model_ids,

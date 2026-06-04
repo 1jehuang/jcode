@@ -452,11 +452,11 @@ impl AuthStatus {
             _ => match provider.auth_state_key {
                 LoginProviderAuthStateKey::Anthropic => {
                     let detail = if self.anthropic.has_oauth && self.anthropic.has_api_key {
-                        "OAuth + API key"
+                        "OAuth + direct auth"
                     } else if self.anthropic.has_oauth {
                         "OAuth"
                     } else if self.anthropic.has_api_key {
-                        "API key"
+                        "direct auth"
                     } else {
                         "not configured"
                     };
@@ -914,6 +914,7 @@ fn assessment_for_key(
             let (source, detail) = summarize_sources(vec![
                 anthropic_oauth_source(status),
                 env_source("ANTHROPIC_API_KEY"),
+                env_source("ANTHROPIC_AUTH_TOKEN"),
             ]);
             (
                 source,
