@@ -247,8 +247,15 @@ pub(super) fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Copy text to clipboard, trying wl-copy first (Wayland), then arboard as fallback.
+/// Copy text to clipboard.
+///
+/// In browser-backed terminals such as cmux, the process clipboard APIs can
+/// succeed while only updating the remote host clipboard. Emit OSC 52 as well
+/// so the terminal frontend can synchronize the user's local clipboard when it
+/// supports clipboard escape sequences.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
+    let osc52_success = copy_to_terminal_clipboard_osc52(text);
+
     if let Ok(mut child) = std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -260,12 +267,58 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
             && stdin.write_all(text.as_bytes()).is_ok()
         {
             drop(child.stdin.take());
-            return child.wait().map(|s| s.success()).unwrap_or(false);
+            return child.wait().map(|s| s.success()).unwrap_or(false) || osc52_success;
         }
     }
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text.to_string()))
         .is_ok()
+        || osc52_success
+}
+
+fn copy_to_terminal_clipboard_osc52(text: &str) -> bool {
+    use std::io::Write;
+
+    let sequence = osc52_clipboard_sequence(text);
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(sequence.as_bytes()).is_ok() && stdout.flush().is_ok()
+}
+
+fn osc52_clipboard_sequence(text: &str) -> String {
+    osc52_clipboard_sequence_for_tmux(text, std::env::var_os("TMUX").is_some())
+}
+
+fn osc52_clipboard_sequence_for_tmux(text: &str, in_tmux: bool) -> String {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let osc = format!("\x1b]52;c;{encoded}\x07");
+    if in_tmux {
+        format!("\x1bPtmux;\x1b{osc}\x1b\\")
+    } else {
+        osc
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::osc52_clipboard_sequence_for_tmux;
+
+    #[test]
+    fn osc52_clipboard_sequence_encodes_text() {
+        assert_eq!(
+            osc52_clipboard_sequence_for_tmux("hello", false),
+            "\x1b]52;c;aGVsbG8=\x07"
+        );
+    }
+
+    #[test]
+    fn osc52_clipboard_sequence_wraps_for_tmux() {
+        assert_eq!(
+            osc52_clipboard_sequence_for_tmux("hello", true),
+            "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\"
+        );
+    }
 }
 
 pub(super) fn effort_display_label(effort: &str) -> &str {
