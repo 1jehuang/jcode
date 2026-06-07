@@ -60,6 +60,12 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 
+const PLAIN_FONT_STYLE_ENV: &str = "JCODE_TUI_PLAIN_FONT_STYLE";
+const FONT_VARIANT_MODIFIERS: Modifier = Modifier::BOLD
+    .union(Modifier::DIM)
+    .union(Modifier::ITALIC)
+    .union(Modifier::REVERSED);
+
 #[path = "ui_animations.rs"]
 mod animations;
 #[path = "ui_box.rs"]
@@ -1964,6 +1970,40 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         Ok(()) => {}
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
+    strip_font_variant_modifiers_if_requested(frame);
+}
+
+fn plain_font_style_requested() -> bool {
+    std::env::var_os(PLAIN_FONT_STYLE_ENV)
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            let value = value.trim();
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+fn strip_font_variant_modifiers_if_requested(frame: &mut Frame) {
+    if !plain_font_style_requested() {
+        return;
+    }
+
+    let area = frame.area().intersection(*frame.buffer_mut().area());
+    strip_font_variant_modifiers(frame.buffer_mut(), area);
+}
+
+fn strip_font_variant_modifiers(buf: &mut ratatui::buffer::Buffer, area: Rect) {
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let cell = &mut buf[(x, y)];
+            if cell.modifier.intersects(FONT_VARIANT_MODIFIERS) {
+                cell.modifier.remove(FONT_VARIANT_MODIFIERS);
+            }
+        }
+    }
 }
 
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
@@ -2795,6 +2835,36 @@ pub(crate) fn render_native_scrollbar(
     }
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+#[cfg(test)]
+mod font_style_tests {
+    use super::*;
+
+    #[test]
+    fn strip_font_variant_modifiers_preserves_ascii_symbols() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 32, 1));
+        let text = "browser continue Done Built";
+        for (x, ch) in text.chars().enumerate() {
+            let cell = &mut buffer[(x as u16, 0)];
+            cell.set_symbol(ch.encode_utf8(&mut [0; 4]));
+            cell.modifier
+                .insert(Modifier::BOLD | Modifier::DIM | Modifier::ITALIC | Modifier::REVERSED);
+        }
+
+        strip_font_variant_modifiers(&mut buffer, Rect::new(0, 0, 32, 1));
+
+        let rendered: String = (0..text.len() as u16)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect();
+        assert_eq!(rendered, text);
+        for x in 0..text.len() as u16 {
+            assert!(
+                !buffer[(x, 0)].modifier.intersects(FONT_VARIANT_MODIFIERS),
+                "cell {x} should not keep font-variant modifiers"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
