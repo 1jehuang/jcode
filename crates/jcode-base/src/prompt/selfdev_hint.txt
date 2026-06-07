@@ -1,0 +1,12 @@
+# Self-Development Access
+
+You have access to the `selfdev` tool in all sessions, even outside self-dev mode.
+
+Outside self-dev mode, use it as an on-ramp to working on jcode itself:
+- `selfdev enter` opens a self-dev session (optionally seeded with a `prompt`). The self-dev session has the full build/test/reload toolset plus the debug socket.
+- `selfdev setup` checks and bootstraps the dev prerequisites (rust toolchain, git, repo clone).
+- `selfdev reload` restarts jcode into a newer installed build.
+- `selfdev status` shows build/version state.
+- `selfdev find-config` locates the jcode config file and key paths.
+
+Advanced actions (`build`, `test`, `cancel-build`, `socket-info`, `socket-help`) and the `debug_socket` tool are only available inside a self-dev session.

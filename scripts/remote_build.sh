@@ -55,6 +55,14 @@ SUBCOMMAND="build"
 SUBCOMMAND_SET=0
 POSITIONAL=()
 
+remote_connect_timeout() {
+    local value="${JCODE_REMOTE_CONNECT_TIMEOUT:-5}"
+    if [[ ! "$value" =~ ^[0-9]+$ || "$value" -lt 1 ]]; then
+        value=5
+    fi
+    printf '%s\n' "$value"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -r|--release)
@@ -120,6 +128,21 @@ for bin in "$SSH_BIN" "$RSYNC_BIN"; do
         exit 2
     fi
 done
+
+SSH_CONNECT_TIMEOUT="$(remote_connect_timeout)"
+SSH_SERVER_ALIVE_INTERVAL="${JCODE_REMOTE_SERVER_ALIVE_INTERVAL:-10}"
+SSH_SERVER_ALIVE_COUNT_MAX="${JCODE_REMOTE_SERVER_ALIVE_COUNT_MAX:-1}"
+SSH_OPTS=(
+    -o BatchMode=yes
+    -o ConnectTimeout="$SSH_CONNECT_TIMEOUT"
+    -o ServerAliveInterval="$SSH_SERVER_ALIVE_INTERVAL"
+    -o ServerAliveCountMax="$SSH_SERVER_ALIVE_COUNT_MAX"
+)
+RSYNC_SSH_COMMAND="${JCODE_REMOTE_RSYNC_SSH:-$SSH_BIN -o BatchMode=yes -o ConnectTimeout=$SSH_CONNECT_TIMEOUT -o ServerAliveInterval=$SSH_SERVER_ALIVE_INTERVAL -o ServerAliveCountMax=$SSH_SERVER_ALIVE_COUNT_MAX}"
+
+remote_ssh() {
+    "$SSH_BIN" "${SSH_OPTS[@]}" "$REMOTE" "$@"
+}
 
 CARGO_CMD=(cargo "$SUBCOMMAND")
 if [[ "$RELEASE" -eq 1 ]]; then
@@ -194,12 +217,23 @@ echo "Local:   $LOCAL_DIR"
 echo "Remote:  $REMOTE_DIR"
 echo "Command: ${CARGO_CMD[*]}"
 echo "Mode:    $build_mode"
+echo "SSH timeout: ${SSH_CONNECT_TIMEOUT}s"
+
+echo ""
+echo "[0/3] Checking remote SSH..."
+if ! preflight_output="$(remote_ssh "printf 'jcode-remote-ok\\n'" 2>&1)"; then
+    echo "error: remote host '$REMOTE' is not reachable within ${SSH_CONNECT_TIMEOUT}s" >&2
+    echo "$preflight_output" >&2
+    echo "hint: set JCODE_REMOTE_CARGO=0 to force local cargo, or fix JCODE_REMOTE_HOST/JCODE_REMOTE_CONNECT_TIMEOUT." >&2
+    exit 75
+fi
 
 if [[ "$SYNC_SOURCE" -eq 1 ]]; then
     echo ""
     echo "[1/3] Syncing source files..."
-    "$SSH_BIN" "$REMOTE" "$(printf 'mkdir -p %q' "$REMOTE_DIR")"
+    remote_ssh "$(printf 'mkdir -p %q' "$REMOTE_DIR")"
     "$RSYNC_BIN" -avz --delete \
+        -e "$RSYNC_SSH_COMMAND" \
         --exclude 'target/' \
         --exclude '.git/' \
         --exclude '*.log' \
@@ -223,7 +257,7 @@ if [[ "$SYNC_SOURCE" -eq 1 ]]; then
         printf 'git_dirty=%s\n' "$local_git_dirty"
         printf 'changelog_raw<<JCODE_CHANGELOG_EOF\n%s\nJCODE_CHANGELOG_EOF\n' "$local_changelog_raw"
     } > "$metadata_file"
-    "$RSYNC_BIN" -avz "$metadata_file" "$REMOTE:$REMOTE_DIR/.jcode-build-meta"
+    "$RSYNC_BIN" -avz -e "$RSYNC_SSH_COMMAND" "$metadata_file" "$REMOTE:$REMOTE_DIR/.jcode-build-meta"
 else
     echo ""
     echo "[1/3] Skipping source sync (--no-sync)"
@@ -234,15 +268,15 @@ printf -v REMOTE_INNER_CMD 'cd %q && env JCODE_BUILD_METADATA_FILE=.jcode-build-
 printf -v REMOTE_RUN_CMD 'sh -lc %q' "$REMOTE_INNER_CMD"
 echo ""
 echo "[2/3] Running on remote..."
-"$SSH_BIN" "$REMOTE" "$REMOTE_RUN_CMD 2>&1"
+remote_ssh "$REMOTE_RUN_CMD 2>&1"
 
 echo ""
 if [[ "$sync_back" -eq 1 ]]; then
     printf -v REMOTE_TEST_CMD 'test -f %q' "$REMOTE_DIR/$BINARY_PATH"
-    if "$SSH_BIN" "$REMOTE" "$REMOTE_TEST_CMD"; then
+    if remote_ssh "$REMOTE_TEST_CMD"; then
         echo "[3/3] Syncing built artifact back..."
         mkdir -p "$(dirname "$LOCAL_DIR/$BINARY_PATH")"
-        "$RSYNC_BIN" -avz "$REMOTE:$REMOTE_DIR/$BINARY_PATH" "$LOCAL_DIR/$BINARY_PATH"
+        "$RSYNC_BIN" -avz -e "$RSYNC_SSH_COMMAND" "$REMOTE:$REMOTE_DIR/$BINARY_PATH" "$LOCAL_DIR/$BINARY_PATH"
         echo ""
         echo "=== Remote cargo complete ==="
         ls -la "$LOCAL_DIR/$BINARY_PATH"

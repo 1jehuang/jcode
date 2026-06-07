@@ -131,6 +131,18 @@ async fn probe_openai_auth(report: &mut AuthTestProviderReport) {
 }
 
 async fn probe_gemini_auth(report: &mut AuthTestProviderReport) {
+    // Prefer the official Gemini Developer API key when configured: it is a
+    // static credential (no refresh handshake) pointed at
+    // generativelanguage.googleapis.com, so we only assert that it loads.
+    if crate::auth::gemini::has_api_key() {
+        let detail = match crate::auth::gemini::api_key() {
+            Some(_) => "Loaded Gemini Developer API key (generativelanguage.googleapis.com).",
+            None => "Gemini Developer API key reported present but failed to load.",
+        };
+        report.push_step("credential_probe", true, detail);
+        return;
+    }
+
     if push_result_step(
         report,
         "credential_probe",

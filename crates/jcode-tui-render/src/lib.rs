@@ -1,5 +1,6 @@
 pub mod chrome;
 pub mod layout;
+pub mod memory_tiles;
 
 use ratatui::prelude::{Line, Span, Style};
 

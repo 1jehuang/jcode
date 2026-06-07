@@ -87,11 +87,10 @@ fn kitty_scaled_image_for_zoom(source: &DynamicImage, zoom_percent: u8) -> Dynam
 }
 
 fn div_ceil_u32_local(value: u32, divisor: u32) -> u32 {
-    if divisor == 0 {
-        value
-    } else {
-        value.saturating_add(divisor - 1) / divisor
-    }
+    value
+        .saturating_add(divisor.saturating_sub(1))
+        .checked_div(divisor)
+        .unwrap_or(value)
 }
 
 fn kitty_full_rect_for_image(img: &DynamicImage, font_size: (u16, u16)) -> (u16, u16) {

@@ -41,122 +41,162 @@ pub fn wrap_line(
         .map(|(_, prefix_width)| *prefix_width)
         .unwrap_or(0);
 
+    // Tokenize the entire line into whitespace-delimited words (with their
+    // trailing spaces) so that words are kept intact even when they span
+    // multiple styled spans. Breaking only happens at whitespace, and words
+    // wider than the available width are split character-by-character.
+    let tokens = tokenize_wrap_words(&line.spans);
+
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
     let mut current_width = 0usize;
     let mut current_has_content = false;
     let mut pending_repeated_prefix = false;
 
-    for span in line.spans {
-        let style = span.style;
-        let text = span.content.as_ref();
+    let flush_line = |result: &mut Vec<Line<'static>>,
+                      current_spans: &mut Vec<Span<'static>>,
+                      current_width: &mut usize,
+                      current_has_content: &mut bool,
+                      pending_repeated_prefix: &mut bool| {
+        let mut new_line = Line::from(std::mem::take(current_spans));
+        if let Some(align) = alignment {
+            new_line = new_line.alignment(align);
+        }
+        result.push(new_line);
+        *current_width = 0;
+        *current_has_content = false;
+        *pending_repeated_prefix = repeated_prefix.is_some();
+    };
 
-        let mut remaining = text;
-        while !remaining.is_empty() {
-            let (chunk, rest) = if let Some(space_idx) = remaining.find(' ') {
-                let (word, after_space) = remaining.split_at(space_idx);
-                if after_space.len() > 1 {
-                    let mut buf = String::with_capacity(word.len() + 1);
-                    buf.push_str(word);
-                    buf.push(' ');
-                    (buf, &after_space[1..])
-                } else {
-                    let mut buf = String::with_capacity(word.len() + 1);
-                    buf.push_str(word);
-                    buf.push(' ');
-                    (buf, "")
-                }
-            } else {
-                (remaining.to_string(), "")
-            };
-            remaining = rest;
+    for token in tokens {
+        let token_width = token.word_width + token.space_width;
 
-            let chunk_width = chunk.width();
+        // If the whole token (word + trailing spaces) does not fit on the
+        // current line and the line already has content, wrap first so the
+        // word starts on a fresh line (keeping it intact when possible).
+        if current_width + token_width > width && current_has_content {
+            flush_line(
+                &mut result,
+                &mut current_spans,
+                &mut current_width,
+                &mut current_has_content,
+                &mut pending_repeated_prefix,
+            );
+        }
 
-            if current_width + chunk_width > width && current_has_content {
-                let mut new_line = Line::from(std::mem::take(&mut current_spans));
-                if let Some(align) = alignment {
-                    new_line = new_line.alignment(align);
-                }
-                result.push(new_line);
-                current_width = 0;
-                current_has_content = false;
-                pending_repeated_prefix = repeated_prefix.is_some();
-            }
+        if token.word_width > width {
+            // Word is too wide to ever fit on one line: split by characters.
+            let mut part = String::new();
+            let mut part_width = 0usize;
+            let mut part_style: Option<Style> = None;
 
-            if chunk_width > width {
-                let mut part = String::new();
-                let mut part_width = 0usize;
-
-                for c in chunk.chars() {
-                    seed_repeated_prefix(
-                        &mut current_spans,
-                        &mut current_width,
-                        &mut pending_repeated_prefix,
-                    );
-                    let char_width = c.width().unwrap_or(0);
-
-                    if current_width + part_width + char_width > width
-                        && (current_width + part_width) > 0
-                    {
-                        if !part.is_empty() {
-                            current_spans.push(Span::styled(std::mem::take(&mut part), style));
-                            let width_before = current_width;
-                            current_width += part_width;
-                            if width_before + part_width > initial_prefix_width {
-                                current_has_content = true;
-                            }
-                            part_width = 0;
-                        }
-
-                        if current_has_content {
-                            let mut new_line = Line::from(std::mem::take(&mut current_spans));
-                            if let Some(align) = alignment {
-                                new_line = new_line.alignment(align);
-                            }
-                            result.push(new_line);
-                            current_width = 0;
-                            current_has_content = false;
-                            pending_repeated_prefix = repeated_prefix.is_some();
-                        }
-
-                        seed_repeated_prefix(
-                            &mut current_spans,
-                            &mut current_width,
-                            &mut pending_repeated_prefix,
-                        );
-                    }
-
-                    part.push(c);
-                    part_width += char_width;
-                }
-
+            let flush_part = |current_spans: &mut Vec<Span<'static>>,
+                              current_width: &mut usize,
+                              current_has_content: &mut bool,
+                              part: &mut String,
+                              part_width: &mut usize,
+                              part_style: &mut Option<Style>| {
                 if !part.is_empty() {
-                    seed_repeated_prefix(
-                        &mut current_spans,
-                        &mut current_width,
-                        &mut pending_repeated_prefix,
-                    );
-                    current_spans.push(Span::styled(part, style));
-                    let width_before = current_width;
-                    current_width += part_width;
-                    if width_before + part_width > initial_prefix_width {
-                        current_has_content = true;
+                    let style = part_style.unwrap_or_default();
+                    current_spans.push(Span::styled(std::mem::take(part), style));
+                    let width_before = *current_width;
+                    *current_width += *part_width;
+                    if width_before + *part_width > initial_prefix_width {
+                        *current_has_content = true;
                     }
+                    *part_width = 0;
+                    *part_style = None;
                 }
-            } else {
+            };
+
+            for (c, style) in token.word_chars() {
                 seed_repeated_prefix(
                     &mut current_spans,
                     &mut current_width,
                     &mut pending_repeated_prefix,
                 );
-                current_spans.push(Span::styled(chunk, style));
-                let width_before = current_width;
-                current_width += chunk_width;
-                if width_before + chunk_width > initial_prefix_width {
-                    current_has_content = true;
+                let char_width = c.width().unwrap_or(0);
+
+                if current_width + part_width + char_width > width
+                    && (current_width + part_width) > 0
+                {
+                    flush_part(
+                        &mut current_spans,
+                        &mut current_width,
+                        &mut current_has_content,
+                        &mut part,
+                        &mut part_width,
+                        &mut part_style,
+                    );
+                    if current_has_content {
+                        flush_line(
+                            &mut result,
+                            &mut current_spans,
+                            &mut current_width,
+                            &mut current_has_content,
+                            &mut pending_repeated_prefix,
+                        );
+                    }
+                    seed_repeated_prefix(
+                        &mut current_spans,
+                        &mut current_width,
+                        &mut pending_repeated_prefix,
+                    );
                 }
+
+                if part_style != Some(style) {
+                    flush_part(
+                        &mut current_spans,
+                        &mut current_width,
+                        &mut current_has_content,
+                        &mut part,
+                        &mut part_width,
+                        &mut part_style,
+                    );
+                    part_style = Some(style);
+                }
+                part.push(c);
+                part_width += char_width;
             }
+
+            flush_part(
+                &mut current_spans,
+                &mut current_width,
+                &mut current_has_content,
+                &mut part,
+                &mut part_width,
+                &mut part_style,
+            );
+
+            // Append trailing spaces (these may be trimmed at line end later).
+            append_token_spaces(
+                &token,
+                &mut current_spans,
+                &mut current_width,
+                &mut current_has_content,
+                initial_prefix_width,
+            );
+        } else {
+            seed_repeated_prefix(
+                &mut current_spans,
+                &mut current_width,
+                &mut pending_repeated_prefix,
+            );
+            for piece in &token.word {
+                current_spans.push(Span::styled(piece.text.clone(), piece.style));
+            }
+            let width_before = current_width;
+            current_width += token.word_width;
+            if width_before + token.word_width > initial_prefix_width {
+                current_has_content = true;
+            }
+            append_token_spaces(
+                &token,
+                &mut current_spans,
+                &mut current_width,
+                &mut current_has_content,
+                initial_prefix_width,
+            );
         }
     }
 
@@ -191,6 +231,97 @@ struct WrapToken {
     spaces: Vec<StyledPiece>,
     word_width: usize,
     space_width: usize,
+}
+
+impl WrapToken {
+    /// Iterate over the word's characters paired with their style, preserving
+    /// per-piece styling so split words keep their original colors.
+    fn word_chars(&self) -> impl Iterator<Item = (char, Style)> + '_ {
+        self.word
+            .iter()
+            .flat_map(|piece| piece.text.chars().map(move |c| (c, piece.style)))
+    }
+}
+
+/// Tokenize line spans into whitespace-delimited words with their trailing
+/// whitespace, preserving per-character styles. Unlike `tokenize_balanced_wrap`
+/// this never bails out: it handles leading whitespace, runs of whitespace, and
+/// tabs by treating any whitespace as a (non-breaking-within) trailing run on
+/// the preceding word. A leading whitespace run becomes a token with an empty
+/// word so indentation is preserved.
+fn tokenize_wrap_words(spans: &[Span<'static>]) -> Vec<WrapToken> {
+    let mut tokens: Vec<WrapToken> = Vec::new();
+    let mut word: Vec<StyledPiece> = Vec::new();
+    let mut spaces: Vec<StyledPiece> = Vec::new();
+    let mut word_width = 0usize;
+    let mut space_width = 0usize;
+    let mut in_spaces = false;
+    let mut have_token = false;
+
+    for span in spans {
+        let style = span.style;
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch.is_whitespace() {
+                in_spaces = true;
+                have_token = true;
+                push_piece_char(&mut spaces, ch, style);
+                space_width += ch_width;
+            } else {
+                if in_spaces {
+                    // A new word begins after whitespace: close the previous token.
+                    tokens.push(WrapToken {
+                        word: std::mem::take(&mut word),
+                        spaces: std::mem::take(&mut spaces),
+                        word_width,
+                        space_width,
+                    });
+                    word_width = 0;
+                    space_width = 0;
+                    in_spaces = false;
+                }
+                have_token = true;
+                push_piece_char(&mut word, ch, style);
+                word_width += ch_width;
+            }
+        }
+    }
+
+    if have_token {
+        tokens.push(WrapToken {
+            word,
+            spaces,
+            word_width,
+            space_width,
+        });
+    }
+
+    tokens
+}
+
+/// Append a token's trailing whitespace to the current line, accounting for
+/// width and content tracking. Whitespace never counts as "content" so it can
+/// be trimmed cleanly at line ends by downstream rendering.
+fn append_token_spaces(
+    token: &WrapToken,
+    current_spans: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    current_has_content: &mut bool,
+    initial_prefix_width: usize,
+) {
+    if token.spaces.is_empty() {
+        return;
+    }
+    for piece in &token.spaces {
+        current_spans.push(Span::styled(piece.text.clone(), piece.style));
+    }
+    let width_before = *current_width;
+    *current_width += token.space_width;
+    // Spaces only mark content when they extend a line that already had a word
+    // beyond the prefix (mirrors the previous chunk-based behaviour).
+    if *current_has_content && width_before + token.space_width > initial_prefix_width {
+        *current_has_content = true;
+    }
 }
 
 fn wrap_line_balanced(line: &Line<'static>, width: usize) -> Option<Vec<Line<'static>>> {

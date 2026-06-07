@@ -1,0 +1,14 @@
+[package]
+name = "jcode-terminal-image"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Terminal image display (Kitty/iTerm2/Sixel) and image metadata formatting helpers for jcode"
+
+[lib]
+name = "jcode_terminal_image"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+crossterm = "0.29"

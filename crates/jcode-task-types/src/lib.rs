@@ -194,12 +194,23 @@ fn default_pending_status() -> String {
     "pending".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TodoItem {
     pub content: String,
     pub status: String,
     pub priority: String,
     pub id: String,
+    /// Optional group label. Todos that share a group are displayed together
+    /// under a single header. Use one group per coherent goal; when work is
+    /// steered into a new area, start a new group instead of renaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Forward-looking confidence, from 0-100, that this todo can be completed correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
+    /// Confidence, from 0-100, recorded when the todo is marked completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_confidence: Option<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

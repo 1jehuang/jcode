@@ -1,0 +1,111 @@
+name: Require Linked Issue
+
+# Ensure every pull request is linked to a REAL GitHub issue in this repo.
+# A PR passes when it links an issue via any of:
+#   * GitHub's "Development" sidebar (closing issue reference), or
+#   * a closing keyword in the body/title (e.g. "Closes #123"), or
+#   * a plain mention (#123 / owner/repo#123) or full issue URL.
+# Any referenced number is verified against the API: it must resolve to an
+# existing issue (not a pull request) in this repository.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: require-issue-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  require-issue:
+    name: Require Linked Issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check for a linked, existing issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('No pull_request payload; skipping.');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const text = `${pr.title || ''}\n\n${pr.body || ''}`;
+
+            // Collect candidate issue numbers that belong to THIS repo.
+            const candidates = new Set();
+
+            // Full issue URLs: https://github.com/owner/repo/issues/123
+            const urlRe = /https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/gi;
+            for (const m of text.matchAll(urlRe)) {
+              if (m[1].toLowerCase() === owner.toLowerCase() &&
+                  m[2].toLowerCase() === repo.toLowerCase()) {
+                candidates.add(Number(m[3]));
+              }
+            }
+
+            // owner/repo#123 or bare #123 (bare assumed to be this repo).
+            const refRe = /(?:([\w.-]+)\/([\w.-]+))?#(\d+)/g;
+            for (const m of text.matchAll(refRe)) {
+              const refOwner = m[1];
+              const refRepo = m[2];
+              const num = Number(m[3]);
+              if (!refOwner && !refRepo) {
+                candidates.add(num); // bare #123 -> this repo
+              } else if (refOwner?.toLowerCase() === owner.toLowerCase() &&
+                         refRepo?.toLowerCase() === repo.toLowerCase()) {
+                candidates.add(num);
+              }
+            }
+
+            // Issues linked via the Development sidebar (closing references).
+            try {
+              const query = `query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$number) {
+                    closingIssuesReferences(first: 10) { nodes { number } }
+                  }
+                }
+              }`;
+              const result = await github.graphql(query, { owner, repo, number: pr.number });
+              const nodes = result?.repository?.pullRequest?.closingIssuesReferences?.nodes || [];
+              for (const n of nodes) candidates.add(Number(n.number));
+            } catch (err) {
+              core.warning(`Could not query closing issue references: ${err}`);
+            }
+
+            // Verify at least one candidate is a real issue (not a PR, not this PR).
+            let linkedIssue = null;
+            for (const num of candidates) {
+              if (num === pr.number) continue;
+              try {
+                const { data } = await github.rest.issues.get({ owner, repo, issue_number: num });
+                if (!data.pull_request) { // issues have no pull_request field
+                  linkedIssue = num;
+                  break;
+                }
+              } catch (err) {
+                // 404 -> number doesn't exist; ignore and keep checking.
+              }
+            }
+
+            if (!linkedIssue) {
+              core.setFailed(
+                'This PR must be linked to an existing GitHub issue in this repository. ' +
+                  'Add a closing keyword (e.g. "Closes #123") to the PR description, link an ' +
+                  'issue via the Development sidebar, or reference an existing issue number ' +
+                  '(e.g. "#123"). If no issue exists yet, please open one first.'
+              );
+              return;
+            }
+
+            core.info(`Linked to existing issue #${linkedIssue}. ✅`);

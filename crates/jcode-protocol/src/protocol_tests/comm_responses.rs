@@ -158,6 +158,7 @@ fn test_comm_members_roundtrip_includes_status() -> Result<()> {
             latest_completion_report: Some("Done.".to_string()),
             live_attachments: Some(0),
             status_age_secs: Some(12),
+            ..Default::default()
         }],
     };
 

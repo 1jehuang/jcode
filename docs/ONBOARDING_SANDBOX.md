@@ -17,6 +17,39 @@ scripts/onboarding_sandbox.sh fresh
 
 That gives you a clean jcode launch with isolated state.
 
+## Test with your REAL logins (import them in the sandbox)
+
+A clean sandbox is fully isolated, so the onboarding "import existing logins"
+step has nothing to import. To exercise the import + "continue where you left
+off" steps against your actual accounts, seed copies of your real credential and
+transcript files into the sandbox:
+
+```bash
+# Copy real external logins (Codex/Claude/Gemini/Copilot/Cursor/OpenCode/pi)
+scripts/onboarding_sandbox.sh seed-real-logins
+
+# Also copy your real Codex/Claude transcripts so the "continue a session"
+# step has real history to resume:
+scripts/onboarding_sandbox.sh seed-real-logins --with-transcripts
+
+# Or do it all in one shot: reset, seed, and launch jcode
+scripts/onboarding_sandbox.sh fresh-real --with-transcripts
+```
+
+How it works: when `JCODE_HOME` is set, jcode resolves every external credential
+and transcript lookup to `$JCODE_HOME/external/<same-relative-path-as-$HOME>`.
+`seed-real-logins` copies your real files there, so detection and import behave
+exactly as they would on a first-run machine that already has those tools
+installed. The copies are real tokens, so the sandbox stays local-only; your
+original `$HOME` files are never moved, rewritten, or deleted.
+
+Once seeded, just launch the sandbox and walk onboarding; it will detect and
+offer to import each real login:
+
+```bash
+scripts/onboarding_sandbox.sh jcode
+```
+
 ## Common commands
 
 ```bash

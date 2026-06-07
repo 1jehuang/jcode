@@ -536,6 +536,18 @@ Copy-Item -Path $DestBin -Destination (Join-Path $StableDir "jcode.exe") -Force
 Set-Content -Path (Join-Path $BuildsDir "stable-version") -Value $VersionNum
 Copy-Item -Path (Join-Path $StableDir "jcode.exe") -Destination $LauncherPath -Force
 
+# Gracefully reload any running background server onto the freshly installed
+# binary (issue #291). `server reload` only reloads a genuinely-older daemon,
+# hands its live sessions to the new process, and is a no-op when nothing is
+# running, so it is safe to call unconditionally. Best-effort: never fail the
+# install over it.
+if ($env:JCODE_SKIP_SERVER_RELOAD -ne "1") {
+    try {
+        & $LauncherPath server reload 2>$null | Out-Null
+    } catch {
+    }
+}
+
 Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")

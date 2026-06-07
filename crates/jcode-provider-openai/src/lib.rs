@@ -1,4 +1,6 @@
 pub mod request;
+pub mod stream;
+pub mod websocket_health;
 
 pub use request::{
     OPENAI_ENCRYPTED_CONTENT_PROVIDER_MAX_CHARS, OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS,

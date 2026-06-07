@@ -1,3 +1,6 @@
+pub mod request;
+pub mod stream;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -319,12 +322,7 @@ pub fn current_unix_secs() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-fn configured_cache_namespace() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+fn sanitize_cache_namespace(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -336,13 +334,33 @@ fn configured_cache_namespace() -> String {
     }
 }
 
-fn cache_path() -> PathBuf {
-    let namespace = configured_cache_namespace();
+fn configured_cache_namespace() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+
+    sanitize_cache_namespace(&raw)
+}
+
+fn cache_path_for_namespace(namespace: &str) -> PathBuf {
+    let namespace = sanitize_cache_namespace(namespace);
+    if let Ok(path) = std::env::var("JCODE_HOME") {
+        return PathBuf::from(path)
+            .join("cache")
+            .join(format!("{}_models.json", namespace));
+    }
+
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".jcode")
         .join("cache")
         .join(format!("{}_models.json", namespace))
+}
+
+fn cache_path() -> PathBuf {
+    cache_path_for_namespace(&configured_cache_namespace())
 }
 
 fn disk_cache_modified_at(path: &PathBuf) -> Option<SystemTime> {
@@ -359,8 +377,7 @@ fn fresh_disk_cache(cache: Option<DiskCache>) -> Option<DiskCache> {
     }
 }
 
-pub fn load_disk_cache_entry() -> Option<DiskCache> {
-    let path = cache_path();
+fn load_disk_cache_entry_from_path(path: PathBuf) -> Option<DiskCache> {
     let modified_at = disk_cache_modified_at(&path);
 
     if let Ok(memo) = DISK_CACHE_MEMO.lock()
@@ -385,6 +402,14 @@ pub fn load_disk_cache_entry() -> Option<DiskCache> {
     }
 
     fresh_disk_cache(loaded)
+}
+
+pub fn load_disk_cache_entry() -> Option<DiskCache> {
+    load_disk_cache_entry_from_path(cache_path())
+}
+
+pub fn load_disk_cache_entry_for_namespace(namespace: &str) -> Option<DiskCache> {
+    load_disk_cache_entry_from_path(cache_path_for_namespace(namespace))
 }
 
 pub fn load_disk_cache() -> Option<Vec<ModelInfo>> {
@@ -451,8 +476,24 @@ pub fn all_model_timestamps() -> Vec<(String, u64)> {
     load_disk_cache_entry()
         .into_iter()
         .flat_map(|cache| cache.models)
-        .filter_map(|m| m.created.map(|t| (m.id, t)))
+        .filter_map(|m| normalize_model_created_timestamp(m.created).map(|t| (m.id, t)))
         .collect()
+}
+
+fn normalize_model_created_timestamp(created: Option<u64>) -> Option<u64> {
+    let ts = created?;
+    // Model providers occasionally return malformed `created` values. Avoid
+    // rendering obviously bogus dates such as "Apr 1993" in the model picker.
+    const FIRST_PLAUSIBLE_MODEL_RELEASE_SECS: u64 = 1_577_836_800; // 2020-01-01
+    const ONE_YEAR_SECS: u64 = 365 * 24 * 60 * 60;
+    let now_plus_slack = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_add(ONE_YEAR_SECS))
+        .unwrap_or(u64::MAX);
+
+    (FIRST_PLAUSIBLE_MODEL_RELEASE_SECS..=now_plus_slack)
+        .contains(&ts)
+        .then_some(ts)
 }
 
 pub fn save_disk_cache(models: &[ModelInfo]) {
@@ -460,7 +501,26 @@ pub fn save_disk_cache(models: &[ModelInfo]) {
 }
 
 pub fn save_disk_cache_with_source(models: &[ModelInfo], source_api_base: Option<&str>) {
-    let path = cache_path();
+    save_disk_cache_with_source_to_path(cache_path(), models, source_api_base);
+}
+
+pub fn save_disk_cache_with_source_for_namespace(
+    namespace: &str,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+) {
+    save_disk_cache_with_source_to_path(
+        cache_path_for_namespace(namespace),
+        models,
+        source_api_base,
+    );
+}
+
+fn save_disk_cache_with_source_to_path(
+    path: PathBuf,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -858,5 +918,15 @@ mod tests {
         assert!(detail.contains("14tps"));
         assert!(detail.contains("cache"));
         assert!(detail.contains("fp8"));
+    }
+
+    #[test]
+    fn normalize_model_created_timestamp_rejects_implausible_dates() {
+        assert_eq!(normalize_model_created_timestamp(Some(734_658_000)), None);
+        assert_eq!(normalize_model_created_timestamp(Some(1_577_836_799)), None);
+        assert_eq!(
+            normalize_model_created_timestamp(Some(1_735_689_600)),
+            Some(1_735_689_600)
+        );
     }
 }

@@ -176,6 +176,25 @@ struct AuthTestProviderReport {
     success: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct AuthTestContextModelReport {
+    model: String,
+    catalog_context_window: usize,
+    resolved_context_window: usize,
+    ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthTestContextAuditReport {
+    provider: String,
+    display_name: String,
+    checked_models: usize,
+    skipped_models_without_context: usize,
+    mismatches: Vec<AuthTestContextModelReport>,
+    success: bool,
+    detail: String,
+}
+
 impl AuthTestProviderReport {
     fn new(target: AuthTestTarget) -> Self {
         Self {
@@ -260,7 +279,9 @@ impl AuthTestSmokeKind {
     fn success_detail(self) -> &'static str {
         match self {
             Self::Provider => "Provider returned AUTH_TEST_OK.",
-            Self::Tool => "Tool-enabled provider request returned AUTH_TEST_OK.",
+            Self::Tool => {
+                "Tool-enabled provider request returned AUTH_TEST_OK after one validated real Jcode bash tool call, successful registry execution, and tool-result followup."
+            }
         }
     }
 

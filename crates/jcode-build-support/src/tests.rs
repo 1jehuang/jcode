@@ -354,3 +354,502 @@ fn shared_server_candidate_prefers_approved_channel_over_current() {
         assert_eq!(selected, approved);
     });
 }
+
+#[test]
+fn normal_shared_server_candidate_repairs_stale_shared_channel_to_stable() {
+    with_temp_jcode_home(|| {
+        let stale_version = "0.14.2";
+        let installed_version = "0.17.0";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), stale_version)
+            .expect("install stale shared version");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), installed_version)
+            .expect("install installed version");
+        update_shared_server_symlink(stale_version).expect("update shared server");
+        update_stable_symlink(installed_version).expect("update stable");
+        update_current_symlink(installed_version).expect("update current");
+
+        let candidate =
+            shared_server_update_candidate(false).expect("expected stable shared-server candidate");
+        assert_eq!(candidate.1, "stable");
+        let selected = std::fs::canonicalize(candidate.0).expect("canonical selected");
+        let installed = std::fs::canonicalize(version_binary_path(installed_version).unwrap())
+            .expect("canonical installed");
+        assert_eq!(selected, installed);
+    });
+}
+
+#[test]
+fn normal_shared_server_candidate_allows_shared_channel_matching_stable() {
+    with_temp_jcode_home(|| {
+        let installed_version = "0.17.0";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), installed_version)
+            .expect("install installed version");
+        update_shared_server_symlink(installed_version).expect("update shared server");
+        update_stable_symlink(installed_version).expect("update stable");
+
+        let candidate = shared_server_update_candidate(false)
+            .expect("expected matching shared-server candidate");
+        assert_eq!(candidate.1, "shared-server");
+    });
+}
+
+#[test]
+fn normal_shared_server_candidate_ignores_shared_channel_with_missing_marker() {
+    with_temp_jcode_home(|| {
+        let shared_version = "0.14.2";
+        let installed_version = "0.17.0";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), shared_version)
+            .expect("install shared version");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), installed_version)
+            .expect("install installed version");
+        update_shared_server_symlink(shared_version).expect("update shared server");
+        std::fs::remove_file(shared_server_version_file().unwrap()).expect("remove marker");
+        update_stable_symlink(installed_version).expect("update stable");
+
+        let candidate = shared_server_update_candidate(false)
+            .expect("expected stable candidate when shared marker is missing");
+        assert_eq!(candidate.1, "stable");
+    });
+}
+
+#[test]
+fn normal_shared_server_candidate_ignores_shared_channel_with_corrupt_marker() {
+    with_temp_jcode_home(|| {
+        let shared_version = "0.14.2";
+        let installed_version = "0.17.0";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), shared_version)
+            .expect("install shared version");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), installed_version)
+            .expect("install installed version");
+        update_shared_server_symlink(shared_version).expect("update shared server");
+        std::fs::write(
+            shared_server_version_file().unwrap(),
+            "not-the-installed-version",
+        )
+        .expect("write corrupt marker");
+        update_stable_symlink(installed_version).expect("update stable");
+
+        let candidate = shared_server_update_candidate(false)
+            .expect("expected stable candidate when shared marker is corrupt");
+        assert_eq!(candidate.1, "stable");
+    });
+}
+
+#[test]
+fn version_match_detects_installed_channel_by_semver_or_git_hash() {
+    with_temp_jcode_home(|| {
+        std::fs::create_dir_all(builds_dir().unwrap()).expect("create builds dir");
+        std::fs::write(stable_version_file().unwrap(), "0.17.0").expect("write stable marker");
+        assert!(version_matches_installed_channel(
+            "v0.17.0 (abc1234)",
+            "different"
+        ));
+        assert!(!version_matches_installed_channel("v0.14.2", "different"));
+
+        std::fs::write(stable_version_file().unwrap(), "abc1234-dirty-build")
+            .expect("write git marker");
+        assert!(version_matches_installed_channel(
+            "v0.14.2-dev (abc1234)",
+            "abc1234"
+        ));
+    });
+}
+
+#[test]
+fn shared_server_tracks_stable_when_marker_missing() {
+    with_temp_jcode_home(|| {
+        std::fs::create_dir_all(builds_dir().unwrap()).expect("create builds dir");
+        // No shared-server marker at all: nothing deliberate to protect.
+        assert!(shared_server_tracks_stable().expect("tracks stable"));
+    });
+}
+
+#[test]
+fn shared_server_tracks_stable_when_equal_to_stable() {
+    with_temp_jcode_home(|| {
+        std::fs::create_dir_all(builds_dir().unwrap()).expect("create builds dir");
+        std::fs::write(stable_version_file().unwrap(), "0.17.0").expect("write stable");
+        std::fs::write(shared_server_version_file().unwrap(), "0.17.0").expect("write shared");
+        assert!(shared_server_tracks_stable().expect("tracks stable"));
+    });
+}
+
+#[test]
+fn shared_server_does_not_track_stable_when_pinned_to_selfdev() {
+    with_temp_jcode_home(|| {
+        std::fs::create_dir_all(builds_dir().unwrap()).expect("create builds dir");
+        std::fs::write(stable_version_file().unwrap(), "0.17.0").expect("write stable");
+        std::fs::write(
+            shared_server_version_file().unwrap(),
+            "56f43c3d-dirty-deadbeef",
+        )
+        .expect("write shared");
+        assert!(!shared_server_tracks_stable().expect("does not track stable"));
+    });
+}
+
+#[test]
+fn advance_shared_server_carries_forward_when_tracking_stable() {
+    with_temp_jcode_home(|| {
+        let old = "0.17.0";
+        let new = "0.18.0";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old)
+            .expect("install old");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), new)
+            .expect("install new");
+        update_stable_symlink(old).expect("stable old");
+        update_shared_server_symlink(old).expect("shared old");
+
+        let advanced = advance_shared_server_if_tracking_stable(new).expect("advance");
+        assert!(advanced);
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(new),
+            "shared-server should follow the update"
+        );
+    });
+}
+
+#[test]
+fn advance_shared_server_preserves_pinned_selfdev_build() {
+    with_temp_jcode_home(|| {
+        let stable_old = "0.17.0";
+        let selfdev = "56f43c3d-dirty-deadbeef";
+        let update = "0.18.0";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), stable_old)
+            .expect("install stable");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), selfdev)
+            .expect("install selfdev");
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), update)
+            .expect("install update");
+        update_stable_symlink(stable_old).expect("stable");
+        update_shared_server_symlink(selfdev).expect("shared selfdev");
+
+        let advanced = advance_shared_server_if_tracking_stable(update).expect("advance");
+        assert!(!advanced, "must not advance a deliberately-promoted build");
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev),
+            "self-dev shared-server build must be preserved across update"
+        );
+    });
+}
+
+/// Simulate the channel mutations performed by `/update`'s stable install path
+/// (`download_and_install_blocking_with_progress`), without doing any network
+/// I/O. This is the exact sequence: advance shared-server if tracking stable,
+/// then move stable/current/launcher to the freshly installed version.
+fn simulate_stable_update_channel_swap(new_version: &str) {
+    install_binary_at_version(std::env::current_exe().as_ref().unwrap(), new_version)
+        .expect("install update version");
+    // /update tries to carry the daemon's reload target forward, but only when
+    // shared-server is tracking stable.
+    advance_shared_server_if_tracking_stable(new_version).expect("advance shared-server");
+    update_stable_symlink(new_version).expect("update stable");
+    update_current_symlink(new_version).expect("update current");
+    update_launcher_symlink_to_current().expect("update launcher");
+}
+
+/// Resolve the binary the long-lived daemon would actually reload into for a
+/// *normal* (non-self-dev) session. This mirrors `reload_exec_target` /
+/// `server_update_candidate` in the server, which both go through
+/// `shared_server_update_candidate(false)`.
+fn daemon_reload_target_version() -> Option<String> {
+    let (candidate, _label) = shared_server_update_candidate(false)?;
+    let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+    // versions/<version>/jcode -> <version>
+    canonical
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Reproduces the user-reported "/update gives the new client but a stale
+/// server" bug.
+///
+/// Repro setup matches a real self-dev machine state observed in the field:
+/// the `shared-server` channel is pinned to a self-dev build that differs from
+/// `stable`. When the user runs `/update`, the client channels advance to the
+/// new release, but `advance_shared_server_if_tracking_stable` refuses to move
+/// the pinned shared-server channel, so the daemon's reload target stays on the
+/// old self-dev binary forever.
+///
+/// EXPECTED (post-fix): after `/update`, the daemon's reload target resolves to
+/// the freshly installed release version, so a reconnecting client can upgrade
+/// the server too.
+#[test]
+fn update_leaves_daemon_reload_target_stale_when_shared_server_pinned_to_selfdev() {
+    with_temp_jcode_home(|| {
+        // Field state: client + server both on an old self-dev build.
+        let old_selfdev = "3f160da1-dirty-e756d52efca9";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old_selfdev)
+            .expect("install old selfdev");
+        // `stable` lags behind (a previously released version).
+        let old_stable = "0.14.3";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old_stable)
+            .expect("install old stable");
+        update_stable_symlink(old_stable).expect("stable");
+        update_current_symlink(old_selfdev).expect("current selfdev");
+        update_shared_server_symlink(old_selfdev).expect("shared-server selfdev");
+
+        // User runs `/update`: a newer release ships and the client installs it.
+        let new_release = "0.15.0";
+        simulate_stable_update_channel_swap(new_release);
+
+        // Client side is upgraded: current + stable now point at the release.
+        assert_eq!(
+            read_current_version().unwrap().as_deref(),
+            Some(new_release),
+            "client `current` channel should advance on /update"
+        );
+        assert_eq!(
+            read_stable_version().unwrap().as_deref(),
+            Some(new_release),
+            "client `stable` channel should advance on /update"
+        );
+
+        // Server side: what would the daemon reload into? This is the bug.
+        let target = daemon_reload_target_version();
+        assert_eq!(
+            target.as_deref(),
+            Some(new_release),
+            "BUG: after /update the daemon's reload target is still stale \
+             (shared-server pinned to {old_selfdev}); the user gets a new client \
+             but the long-lived server never upgrades. shared-server-version={:?}",
+            read_shared_server_version().unwrap()
+        );
+    });
+}
+
+/// Control case: when `shared-server` is tracking `stable` (the normal,
+/// non-self-dev install), `/update` correctly advances the daemon's reload
+/// target. This guards against a fix that over-corrects and breaks the healthy
+/// path.
+#[test]
+fn update_advances_daemon_reload_target_when_shared_server_tracks_stable() {
+    with_temp_jcode_home(|| {
+        let old_release = "0.14.3";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old_release)
+            .expect("install old release");
+        update_stable_symlink(old_release).expect("stable");
+        update_current_symlink(old_release).expect("current");
+        update_shared_server_symlink(old_release).expect("shared-server tracks stable");
+
+        let new_release = "0.15.0";
+        simulate_stable_update_channel_swap(new_release);
+
+        assert_eq!(
+            daemon_reload_target_version().as_deref(),
+            Some(new_release),
+            "daemon reload target should advance with /update when tracking stable"
+        );
+    });
+}
+
+fn candidate_version(candidate: Option<(PathBuf, &'static str)>) -> Option<String> {
+    let (candidate, _label) = candidate?;
+    let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+    canonical
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Documents the channel-level precondition behind the "/update -> new client,
+/// stale server" bug for a self-dev / canary daemon.
+///
+/// The daemon decides "is a server update available?" via `server_has_newer_binary`,
+/// which scans BOTH candidate flavors (`shared_server_update_candidate(false)`
+/// AND `(true)`). After `/update`, the `false` flavor self-heals to the freshly
+/// installed release, so the daemon reports `server_has_update = true`.
+///
+/// The single-flavor reload target, however, diverges: a self-dev/canary session
+/// resolves `shared_server_update_candidate(true)`, which returns the *pinned*
+/// old shared-server binary == the running daemon. So if the daemon naively
+/// reloaded into only its own flavor it would exec back into the same old binary,
+/// never upgrade, and loop on the still-true update signal.
+///
+/// The fix lives in `server::util::reload_exec_target`, which now selects the
+/// *newest* candidate across both flavors so the reload target matches the
+/// advertised update. This test pins the channel-level divergence that motivates
+/// that fix.
+#[test]
+fn selfdev_reload_target_diverges_from_update_probe_when_shared_server_pinned() {
+    with_temp_jcode_home(|| {
+        let old_selfdev = "3f160da1-dirty-e756d52efca9";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old_selfdev)
+            .expect("install old selfdev");
+        let old_stable = "0.14.3";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old_stable)
+            .expect("install old stable");
+        update_stable_symlink(old_stable).expect("stable");
+        update_current_symlink(old_selfdev).expect("current selfdev");
+        update_shared_server_symlink(old_selfdev).expect("shared-server pinned selfdev");
+
+        let new_release = "0.15.0";
+        simulate_stable_update_channel_swap(new_release);
+
+        // The "is there a server update?" probe (false flavor) self-heals and
+        // sees the new release, so the daemon advertises an update.
+        let update_probe = candidate_version(shared_server_update_candidate(false));
+        assert_eq!(
+            update_probe.as_deref(),
+            Some(new_release),
+            "server_has_newer_binary's normal-candidate probe should see the new release \
+             (this is what makes the daemon advertise server_has_update = true)"
+        );
+
+        // A self-dev/canary session's OWN flavor stays pinned to the OLD binary.
+        // This single-flavor divergence is what `reload_exec_target` must
+        // reconcile by taking the newest candidate across both flavors.
+        let selfdev_reload_target = candidate_version(shared_server_update_candidate(true));
+        assert_eq!(
+            selfdev_reload_target.as_deref(),
+            Some(old_selfdev),
+            "self-dev single-flavor reload target stays pinned to the old binary"
+        );
+
+        assert_ne!(
+            selfdev_reload_target, update_probe,
+            "the single-flavor self-dev reload target diverges from the advertised update; \
+             reload_exec_target reconciles this by preferring the newest candidate across flavors"
+        );
+    });
+}
+
+/// Write a distinct, real binary into `versions/<version>/jcode` with an
+/// explicit mtime so channel-repair mtime comparisons are deterministic
+/// (install_binary_at_version hard-links and would share an mtime).
+fn write_versioned_binary(version: &str, mtime: std::time::SystemTime) -> PathBuf {
+    let dir = builds_dir().unwrap().join("versions").join(version);
+    std::fs::create_dir_all(&dir).expect("create version dir");
+    let path = dir.join(binary_name());
+    std::fs::write(&path, format!("bin {version}")).expect("write binary");
+    std::fs::File::open(&path)
+        .expect("open binary")
+        .set_modified(mtime)
+        .expect("set mtime");
+    path
+}
+
+#[test]
+fn repair_repoints_stale_shared_server_to_newer_stable() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let old = "0.14.6";
+        let new = "0.22.0";
+        // shared-server pinned to the OLD build; stable advanced to the NEW
+        // release (the "current client, no-op /update, stale server" state).
+        write_versioned_binary(old, base);
+        write_versioned_binary(new, base + Duration::from_secs(60));
+        update_shared_server_symlink(old).expect("pin shared-server old");
+        update_stable_symlink(new).expect("stable new");
+
+        let outcome = repair_stale_shared_server_channel().expect("repair");
+        assert_eq!(
+            outcome,
+            SharedServerRepair::Repaired {
+                previous: Some(old.to_string()),
+                repaired_to: new.to_string(),
+            },
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(new),
+            "shared-server should be dragged forward to stable"
+        );
+    });
+}
+
+#[test]
+fn repair_is_noop_when_shared_server_already_matches_stable() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let v = "0.22.0";
+        write_versioned_binary(v, base);
+        update_shared_server_symlink(v).expect("shared");
+        update_stable_symlink(v).expect("stable");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+        );
+        assert_eq!(read_shared_server_version().unwrap().as_deref(), Some(v));
+    });
+}
+
+#[test]
+fn repair_preserves_fresher_selfdev_pin() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let stable_old = "0.14.3";
+        let selfdev_new = "56f43c3d-dirty-deadbeef";
+        // Deliberately-promoted self-dev build that is NEWER than stable must be
+        // preserved (the whole point of pinning shared-server).
+        write_versioned_binary(stable_old, base);
+        write_versioned_binary(selfdev_new, base + Duration::from_secs(120));
+        update_stable_symlink(stable_old).expect("stable");
+        update_shared_server_symlink(selfdev_new).expect("pin newer self-dev");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "must not downgrade a fresher self-dev pin to an older stable"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev_new),
+        );
+    });
+}
+
+#[test]
+fn repair_preserves_older_selfdev_pin() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let selfdev_old = "56f43c3d-dirty-deadbeef";
+        let stable_new = "0.22.0";
+        write_versioned_binary(selfdev_old, base);
+        write_versioned_binary(stable_new, base + Duration::from_secs(120));
+        update_shared_server_symlink(selfdev_old).expect("pin older self-dev");
+        update_stable_symlink(stable_new).expect("stable new");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "repair must not overwrite a deliberately-pinned self-dev build"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev_old),
+        );
+    });
+}
+
+#[test]
+fn repair_never_downgrades_when_stable_is_older() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let shared_new = "0.22.0";
+        let stable_old = "0.14.3";
+        write_versioned_binary(stable_old, base);
+        write_versioned_binary(shared_new, base + Duration::from_secs(90));
+        update_shared_server_symlink(shared_new).expect("shared new");
+        update_stable_symlink(stable_old).expect("stable old");
+
+        assert_eq!(
+            repair_stale_shared_server_channel().expect("repair"),
+            SharedServerRepair::AlreadyCurrent,
+            "repair must never move shared-server backward to an older stable"
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(shared_new),
+        );
+    });
+}

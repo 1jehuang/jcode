@@ -91,7 +91,7 @@ pub fn classify_telemetry_tool_category(name: &str) -> TelemetryToolCategory {
         "swarm" | "communicate" => TelemetryToolCategory::Swarm,
         "gmail" => TelemetryToolCategory::Email,
         "side_panel" => TelemetryToolCategory::SidePanel,
-        "goal" => TelemetryToolCategory::Goal,
+        "initiative" => TelemetryToolCategory::Goal,
         "mcp" => TelemetryToolCategory::Mcp,
         other if other.starts_with("mcp__") => TelemetryToolCategory::Mcp,
         _ => TelemetryToolCategory::Other,

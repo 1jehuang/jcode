@@ -32,13 +32,13 @@ impl CompactionMode {
     }
 }
 
-/// Session picker Enter action: "new-terminal" (default) or "current-terminal".
+/// Session picker Enter action: "current-terminal" (default) or "new-terminal".
 /// Ctrl+Enter performs the alternate action.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionPickerResumeAction {
-    #[default]
     NewTerminal,
+    #[default]
     CurrentTerminal,
 }
 
@@ -156,6 +156,47 @@ impl MarkdownSpacingMode {
         match self {
             Self::Compact => "Compact",
             Self::Document => "Document",
+        }
+    }
+}
+
+/// How to display the model's reasoning/thinking content in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningDisplayMode {
+    /// Never display reasoning content.
+    #[default]
+    Off,
+    /// Keep every reasoning trace in the transcript (classic behavior).
+    Full,
+    /// Show only the *current* reasoning live; collapse it once the model
+    /// commits an assistant message or tool call, then show the next one.
+    Current,
+}
+
+impl ReasoningDisplayMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Full => "Full",
+            Self::Current => "Current",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Current,
+            Self::Current => Self::Full,
+            Self::Full => Self::Off,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "off" | "none" | "false" | "0" | "no" => Some(Self::Off),
+            "full" | "all" | "true" | "1" | "yes" | "on" => Some(Self::Full),
+            "current" | "live" | "ephemeral" | "collapse" => Some(Self::Current),
+            _ => None,
         }
     }
 }
@@ -356,6 +397,11 @@ pub struct AuthConfig {
 #[serde(default)]
 pub struct AgentsConfig {
     /// Optional default model override for spawned swarm/subagent sessions.
+    ///
+    /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
+    /// agents inherit the spawning coordinator's model. Set to a concrete model
+    /// string only when you deliberately want every swarm worker pinned to a
+    /// specific model regardless of which model spawned them.
     pub swarm_model: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
@@ -385,6 +431,15 @@ impl SwarmSpawnMode {
             "headless" => Some(Self::Headless),
             "auto" => Some(Self::Auto),
             _ => None,
+        }
+    }
+
+    /// Canonical lowercase string for this mode (matches the config/env values).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Headless => "headless",
+            Self::Auto => "auto",
         }
     }
 }
@@ -437,9 +492,9 @@ pub struct KeybindingsConfig {
     pub scroll_prompt_down: String,
     /// Scroll bookmark toggle key (default: "ctrl+g")
     pub scroll_bookmark: String,
-    /// Scroll up fallback key (default: "cmd+k")
+    /// Scroll up fallback key (default: unset; Cmd+K moves up by prompt on macOS)
     pub scroll_up_fallback: String,
-    /// Scroll down fallback key (default: "cmd+j")
+    /// Scroll down fallback key (default: unset; Cmd+J moves down by prompt on macOS)
     pub scroll_down_fallback: String,
     /// Workspace navigation left key (default: "alt+h")
     pub workspace_left: String,
@@ -449,7 +504,19 @@ pub struct KeybindingsConfig {
     pub workspace_up: String,
     /// Workspace navigation right key (default: "alt+l")
     pub workspace_right: String,
-    /// Session picker Enter action: "new-terminal" (default) or "current-terminal".
+    /// Toggle the side panel (default: "alt+m")
+    pub side_panel_toggle: String,
+    /// Toggle copy/selection mode (default: "alt+y")
+    pub copy_selection_toggle: String,
+    /// Toggle the diagram pane position (default: "alt+t")
+    pub diagram_pane_toggle: String,
+    /// Toggle typing scroll lock (default: "alt+s")
+    pub typing_scroll_lock_toggle: String,
+    /// Cycle inline diff display mode (default: "alt+g")
+    pub diff_mode_cycle: String,
+    /// Toggle the info widget (default: "alt+i")
+    pub info_widget_toggle: String,
+    /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
     /// Ctrl+Enter performs the alternate action.
     pub session_picker_enter: SessionPickerResumeAction,
 }
@@ -469,13 +536,19 @@ impl Default for KeybindingsConfig {
             scroll_prompt_up: "ctrl+[".to_string(),
             scroll_prompt_down: "ctrl+]".to_string(),
             scroll_bookmark: "ctrl+g".to_string(),
-            scroll_up_fallback: "cmd+k".to_string(),
-            scroll_down_fallback: "cmd+j".to_string(),
+            scroll_up_fallback: String::new(),
+            scroll_down_fallback: String::new(),
             workspace_left: "alt+h".to_string(),
             workspace_down: "alt+j".to_string(),
             workspace_up: "alt+k".to_string(),
             workspace_right: "alt+l".to_string(),
-            session_picker_enter: SessionPickerResumeAction::NewTerminal,
+            side_panel_toggle: "alt+m".to_string(),
+            copy_selection_toggle: "alt+y".to_string(),
+            diagram_pane_toggle: "alt+t".to_string(),
+            typing_scroll_lock_toggle: "alt+s".to_string(),
+            diff_mode_cycle: "alt+g".to_string(),
+            info_widget_toggle: "alt+i".to_string(),
+            session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
 }
@@ -519,8 +592,12 @@ pub struct DisplayConfig {
     pub debug_socket: bool,
     /// Center all content (default: false)
     pub centered: bool,
-    /// Show thinking/reasoning content by default (default: false)
+    /// Show thinking/reasoning content by default (default: true)
     pub show_thinking: bool,
+    /// How to display reasoning/thinking content (off/full/current).
+    /// When unset, falls back to `show_thinking` (true => full, false => off).
+    #[serde(default)]
+    reasoning_display: Option<ReasoningDisplayMode>,
     /// How to display mermaid diagrams (none/margin/pinned, default: none).
     /// Mermaid rendering is temporarily disabled for users unless JCODE_ENABLE_MERMAID=1.
     pub diagram_mode: DiagramDisplayMode,
@@ -544,6 +621,8 @@ pub struct DisplayConfig {
     pub redraw_fps: u32,
     /// Show a truncated preview of the previous prompt at the top when it scrolls out of view (default: true)
     pub prompt_preview: bool,
+    /// Override the Alt/Option label shown in copy badges. Empty = auto (⌥ on macOS, Alt elsewhere).
+    pub copy_badge_alt_label: String,
     /// Native terminal scrollbar configuration for scrollable panes
     pub native_scrollbars: NativeScrollbarConfig,
 }
@@ -559,7 +638,8 @@ impl Default for DisplayConfig {
             mouse_capture: true,
             debug_socket: false,
             centered: false,
-            show_thinking: false,
+            show_thinking: true,
+            reasoning_display: Some(ReasoningDisplayMode::Current),
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
             idle_animation: true,
@@ -570,6 +650,7 @@ impl Default for DisplayConfig {
             animation_fps: 60,
             redraw_fps: 60,
             prompt_preview: true,
+            copy_badge_alt_label: String::new(),
             native_scrollbars: NativeScrollbarConfig::default(),
         }
     }
@@ -585,6 +666,30 @@ impl DisplayConfig {
             };
         }
     }
+
+    /// Resolve the effective reasoning display mode. Prefers the explicit
+    /// `reasoning_display` field, falling back to the legacy `show_thinking`
+    /// boolean (true => Full, false => Off) when unset.
+    pub fn reasoning_display(&self) -> ReasoningDisplayMode {
+        self.reasoning_display.unwrap_or(if self.show_thinking {
+            ReasoningDisplayMode::Full
+        } else {
+            ReasoningDisplayMode::Off
+        })
+    }
+
+    /// Set the reasoning display mode and keep `show_thinking` in sync so the
+    /// provider request path (which still keys off `show_thinking`) requests
+    /// reasoning whenever any display mode is active.
+    pub fn set_reasoning_display(&mut self, mode: ReasoningDisplayMode) {
+        self.reasoning_display = Some(mode);
+        self.show_thinking = !matches!(mode, ReasoningDisplayMode::Off);
+    }
+
+    /// Whether reasoning content should be generated/requested at all.
+    pub fn reasoning_enabled(&self) -> bool {
+        !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
+    }
 }
 
 /// Runtime feature toggles
@@ -597,6 +702,9 @@ pub struct FeatureConfig {
     pub swarm: bool,
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
+    /// Persist auto-recalled memory injections into normal session history instead of sending
+    /// them as request-only ephemeral suffix messages (default: false)
+    pub persist_memory_injections: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
 }
@@ -607,6 +715,7 @@ impl Default for FeatureConfig {
             memory: true,
             swarm: true,
             message_timestamps: true,
+            persist_memory_injections: false,
             update_channel: UpdateChannel::default(),
         }
     }
@@ -621,6 +730,10 @@ pub enum WebSearchEngine {
     Duckduckgo,
     /// Bing search. Uses the Bing API when configured, otherwise Bing HTML search.
     Bing,
+    /// SearXNG metasearch instance (JSON API). Requires `searxng_url` (or the
+    /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
+    /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
+    Searxng,
 }
 
 impl WebSearchEngine {
@@ -628,6 +741,7 @@ impl WebSearchEngine {
         match self {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
+            Self::Searxng => "searxng",
         }
     }
 
@@ -635,6 +749,7 @@ impl WebSearchEngine {
         match value.trim().to_ascii_lowercase().as_str() {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
+            "searxng" | "searx" => Some(Self::Searxng),
             _ => None,
         }
     }
@@ -654,6 +769,12 @@ pub struct WebSearchConfig {
     pub bing_api_key_env: String,
     /// Bing market, e.g. "en-US" or "zh-CN".
     pub bing_market: String,
+    /// Base URL of a SearXNG instance (e.g. "https://searx.example.org"), used
+    /// by the `searxng` engine. When empty, the `searxng_url_env` variable is
+    /// consulted instead.
+    pub searxng_url: Option<String>,
+    /// Environment variable containing the SearXNG base URL.
+    pub searxng_url_env: String,
 }
 
 impl Default for WebSearchConfig {
@@ -664,6 +785,8 @@ impl Default for WebSearchConfig {
             bing_api_key: None,
             bing_api_key_env: "JCODE_BING_API_KEY".to_string(),
             bing_market: "en-US".to_string(),
+            searxng_url: None,
+            searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
         }
     }
 }
@@ -671,12 +794,14 @@ impl Default for WebSearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Default model to use (e.g. "claude-opus-4-6", "copilot:claude-opus-4.6")
+    /// Default model to use (e.g. "claude-opus-4-8", "copilot:claude-opus-4.6")
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,
     /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
     pub openai_reasoning_effort: Option<String>,
+    /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
+    pub anthropic_reasoning_effort: Option<String>,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|flex)
@@ -685,6 +810,8 @@ pub struct ProviderConfig {
     pub openai_native_compaction_mode: String,
     /// Token threshold at which OpenAI auto native compaction should trigger.
     pub openai_native_compaction_threshold_tokens: usize,
+    /// Preserve provider-native reasoning/thinking items for future-turn context when supported.
+    pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
     pub cross_provider_failover: CrossProviderFailoverMode,
     /// Whether jcode should automatically try another account on the same provider
@@ -693,6 +820,11 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Max seconds to wait for streaming data before timing out a request with
+    /// no data received. Raise this for slow reasoning models (e.g. DeepSeek)
+    /// that think silently for minutes before emitting tokens. Default: 180.
+    /// Overridable per-launch via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
+    pub stream_idle_timeout_secs: u64,
 }
 
 impl Default for ProviderConfig {
@@ -701,13 +833,16 @@ impl Default for ProviderConfig {
             default_model: None,
             default_provider: None,
             openai_reasoning_effort: Some("low".to_string()),
+            anthropic_reasoning_effort: None,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
             openai_native_compaction_mode: "auto".to_string(),
             openai_native_compaction_threshold_tokens: 200_000,
+            preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,
+            stream_idle_timeout_secs: 180,
         }
     }
 }
@@ -804,6 +939,24 @@ pub struct SafetyConfig {
     pub discord_bot_user_id: Option<String>,
     /// Enable Discord reply → agent directive feature (default: false)
     pub discord_reply_enabled: bool,
+    /// Enable the Jade cloud relay channel (remote control via cloud mailbox, default: false)
+    pub jade_relay_enabled: bool,
+    /// Jade relay API base URL (e.g. https://...lambda-url.us-east-1.on.aws/)
+    pub jade_relay_api_base: Option<String>,
+    /// Jade relay bearer token (prefer JCODE_JADE_RELAY_TOKEN env var)
+    pub jade_relay_token: Option<String>,
+    /// Jade relay token id header (x-jade-token-id), used for fast token lookup
+    pub jade_relay_token_id: Option<String>,
+    /// Jade relay user id (channel scope; defaults to the token's user when omitted)
+    pub jade_relay_user_id: Option<String>,
+    /// Jade relay session id to bind this laptop's listener to (the channel = user_id/session_id)
+    pub jade_relay_session_id: Option<String>,
+    /// Enable Jade relay prompt → agent directive feature (default: false)
+    pub jade_relay_reply_enabled: bool,
+    /// Enable Jade relay device launch commands that open headed local sessions (default: false)
+    pub jade_relay_launch_enabled: bool,
+    /// Default working directory for remotely launched headed sessions
+    pub jade_relay_launch_working_dir: Option<String>,
 }
 
 impl Default for SafetyConfig {
@@ -830,6 +983,15 @@ impl Default for SafetyConfig {
             discord_channel_id: None,
             discord_bot_user_id: None,
             discord_reply_enabled: false,
+            jade_relay_enabled: false,
+            jade_relay_api_base: None,
+            jade_relay_token: None,
+            jade_relay_token_id: None,
+            jade_relay_user_id: None,
+            jade_relay_session_id: None,
+            jade_relay_reply_enabled: false,
+            jade_relay_launch_enabled: false,
+            jade_relay_launch_working_dir: None,
         }
     }
 }
@@ -852,6 +1014,27 @@ impl Default for GatewayConfig {
             enabled: false,
             port: 7643,
             bind_addr: "0.0.0.0".to_string(),
+        }
+    }
+}
+
+/// Power-management configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PowerConfig {
+    /// Prevent the machine from going to sleep (idle/lid suspend) while any
+    /// jcode session is actively streaming/processing. The display is still
+    /// allowed to sleep; only system suspend is inhibited. Default: true.
+    ///
+    /// Honored by the shared `jcode serve` daemon. The `JCODE_DISABLE_POWER_INHIBIT`
+    /// environment variable forces this off regardless of the config value.
+    pub prevent_sleep_while_streaming: bool,
+}
+
+impl Default for PowerConfig {
+    fn default() -> Self {
+        Self {
+            prevent_sleep_while_streaming: true,
         }
     }
 }

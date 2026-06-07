@@ -5,6 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anyhow = "1"
+crossterm = "0.29"
+ratatui = "0.30"
+serde_json = "1"
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]

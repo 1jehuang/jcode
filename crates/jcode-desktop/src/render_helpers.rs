@@ -187,6 +187,7 @@ pub(crate) fn normalize_bitmap_text(text: &str) -> String {
     normalized.trim().to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_bitmap_text(
     vertices: &mut Vec<Vertex>,
     text: &str,
@@ -505,14 +506,27 @@ pub(crate) fn push_status_preview(
     vertices: &mut Vec<Vertex>,
     workspace: &Workspace,
     active_workspace: i32,
-    visible_layout: VisibleColumnLayout,
+    render_layout: WorkspaceRenderLayout,
+    surface_frames: Option<&WorkspaceSurfaceTransitionFrames>,
+    exiting_surfaces: &HashMap<u64, workspace::Surface>,
+    focus_pulse: f32,
     status_rect: Rect,
     size: PhysicalSize<u32>,
 ) {
+    let visible_layout = render_layout.visible;
     let first_lane = active_workspace - STATUS_PREVIEW_LANE_RADIUS;
     let last_lane = active_workspace + STATUS_PREVIEW_LANE_RADIUS;
     let lanes: Vec<StatusPreviewLane> = (first_lane..=last_lane)
-        .map(|lane| status_preview_lane(workspace, lane, active_workspace, visible_layout))
+        .map(|lane| {
+            status_preview_lane_with_exiting(
+                workspace,
+                surface_frames,
+                exiting_surfaces,
+                lane,
+                active_workspace,
+                visible_layout,
+            )
+        })
         .filter(|lane| !lane.is_empty || lane.is_active)
         .collect();
 
@@ -579,57 +593,212 @@ pub(crate) fn push_status_preview(
             continue;
         }
 
+        let tick_stride = status_preview_tick_stride(&lane);
         for surface in workspace
             .surfaces
             .iter()
             .filter(|surface| surface.lane == lane.lane)
         {
-            let column_offset = (surface.column - lane.min_column) as f32;
-            let surface_x = cursor_x + column_offset * (panel_width + panel_gap);
             let focused = workspace.is_focused(surface.id);
-            let color = status_preview_surface_color(surface.color_index, focused, lane.is_active);
-            let tick_width = if focused {
-                panel_width
-            } else {
-                panel_width * 0.56
-            };
-            let tick_x = surface_x + (panel_width - tick_width) / 2.0;
-            push_rounded_rect(
+            if !focused
+                && !status_preview_column_in_viewport(surface.column, visible_layout)
+                && !status_preview_should_draw_column(surface.column, &lane, tick_stride)
+            {
+                continue;
+            }
+            let frame = surface_frames.and_then(|frames| frames.frame_for_surface(surface.id));
+            push_status_preview_surface_tick(
                 vertices,
-                Rect {
-                    x: tick_x,
-                    y: strip_y,
-                    width: tick_width.max(2.0),
-                    height: strip_height,
-                },
-                2.0,
-                color,
+                surface,
+                frame,
+                render_layout,
                 size,
+                &lane,
+                cursor_x,
+                panel_width,
+                panel_gap,
+                strip_y,
+                strip_height,
+                focused,
+                focus_pulse,
+                lane.is_active,
             );
         }
 
+        if let Some(surface_frames) = surface_frames {
+            for frame in surface_frames.exiting_frames() {
+                let Some(surface) = exiting_surfaces
+                    .get(&frame.id)
+                    .filter(|surface| surface.lane == lane.lane)
+                else {
+                    continue;
+                };
+                push_status_preview_surface_tick(
+                    vertices,
+                    surface,
+                    Some(frame),
+                    render_layout,
+                    size,
+                    &lane,
+                    cursor_x,
+                    panel_width,
+                    panel_gap,
+                    strip_y,
+                    strip_height,
+                    false,
+                    0.0,
+                    lane.is_active,
+                );
+            }
+        }
+
         if lane.is_active {
-            let viewport_x = cursor_x
-                + (visible_layout.first_visible_column - lane.min_column) as f32
-                    * (panel_width + panel_gap);
+            let viewport_pitch = panel_width + panel_gap;
+            let visual_first_column = status_preview_visual_first_column(render_layout);
+            let viewport_start =
+                cursor_x + (visual_first_column - lane.min_column as f32) * viewport_pitch;
             let viewport_width = visible_layout.visible_columns as f32 * panel_width
                 + visible_layout.visible_columns.saturating_sub(1) as f32 * panel_gap;
-            push_stroked_rect(
-                vertices,
-                Rect {
-                    x: viewport_x - 1.5,
-                    y: strip_y - 2.0,
-                    width: (viewport_width + 3.0).min(cursor_x + lane_width - viewport_x + 1.5),
-                    height: strip_height + 4.0,
-                },
-                1.0,
-                STATUS_PREVIEW_VIEWPORT_COLOR,
-                size,
-            );
+            let viewport_end = viewport_start + viewport_width;
+            let clipped_start = viewport_start.max(cursor_x);
+            let clipped_end = viewport_end.min(cursor_x + lane_width);
+            if clipped_end > clipped_start {
+                push_stroked_rect(
+                    vertices,
+                    Rect {
+                        x: clipped_start - 1.5,
+                        y: strip_y - 2.0,
+                        width: clipped_end - clipped_start + 3.0,
+                        height: strip_height + 4.0,
+                    },
+                    1.0,
+                    STATUS_PREVIEW_VIEWPORT_COLOR,
+                    size,
+                );
+            }
         }
 
         cursor_x += lane_width + group_gap;
     }
+}
+
+fn status_preview_tick_stride(lane: &StatusPreviewLane) -> i32 {
+    let columns = lane.column_count();
+    ((columns + STATUS_PREVIEW_MAX_TICKS_PER_LANE - 1) / STATUS_PREVIEW_MAX_TICKS_PER_LANE).max(1)
+}
+
+fn status_preview_column_in_viewport(column: i32, visible_layout: VisibleColumnLayout) -> bool {
+    let first = visible_layout.first_visible_column;
+    let last = first + visible_layout.visible_columns.saturating_sub(1) as i32;
+    (first..=last).contains(&column)
+}
+
+fn status_preview_should_draw_column(column: i32, lane: &StatusPreviewLane, stride: i32) -> bool {
+    column
+        .saturating_sub(lane.min_column)
+        .rem_euclid(stride.max(1))
+        == 0
+}
+
+fn push_status_preview_surface_tick(
+    vertices: &mut Vec<Vertex>,
+    surface: &workspace::Surface,
+    frame: Option<SurfaceVisualFrame>,
+    render_layout: WorkspaceRenderLayout,
+    size: PhysicalSize<u32>,
+    lane: &StatusPreviewLane,
+    cursor_x: f32,
+    panel_width: f32,
+    panel_gap: f32,
+    strip_y: f32,
+    strip_height: f32,
+    focused: bool,
+    focus_pulse: f32,
+    active_lane: bool,
+) {
+    let opacity = frame.map(|frame| frame.opacity).unwrap_or(1.0);
+    if opacity <= 0.001 {
+        return;
+    }
+
+    let visual_column = frame
+        .and_then(|frame| status_preview_visual_column_for_frame(frame, render_layout))
+        .unwrap_or(surface.column as f32);
+    let column_offset = visual_column - lane.min_column as f32;
+    let surface_x = cursor_x + column_offset * (panel_width + panel_gap);
+    let mut color = status_preview_surface_color(surface.color_index, focused, active_lane);
+    color[3] *= opacity.clamp(0.0, 1.0);
+    let focus_pulse = if focused {
+        focus_pulse.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let base_tick_width = if focused {
+        panel_width
+    } else {
+        panel_width * 0.56
+    };
+    let tick_width = base_tick_width + panel_width * 0.22 * focus_pulse;
+    let tick_height = strip_height + 4.0 * focus_pulse;
+    let tick_x = surface_x + (panel_width - tick_width) / 2.0;
+    let tick_y = strip_y - (tick_height - strip_height) / 2.0;
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x: tick_x,
+            y: tick_y,
+            width: tick_width.max(2.0),
+            height: tick_height,
+        },
+        2.0,
+        color,
+        size,
+    );
+}
+
+fn status_preview_visual_first_column(render_layout: WorkspaceRenderLayout) -> f32 {
+    let column_pitch = render_layout.column_width + GAP;
+    if column_pitch <= 0.001 {
+        return render_layout.visible.first_visible_column as f32;
+    }
+    render_layout.scroll_offset / column_pitch
+}
+
+fn status_preview_visual_column_for_frame(
+    frame: SurfaceVisualFrame,
+    render_layout: WorkspaceRenderLayout,
+) -> Option<f32> {
+    let column_pitch = render_layout.column_width + GAP;
+    if column_pitch <= 0.001 {
+        return None;
+    }
+    let rect = rect_from_animated_rect(frame.visual_rect());
+    Some((rect.x + render_layout.scroll_offset - OUTER_PADDING) / column_pitch)
+}
+
+fn status_preview_lane_with_exiting(
+    workspace: &Workspace,
+    surface_frames: Option<&WorkspaceSurfaceTransitionFrames>,
+    exiting_surfaces: &HashMap<u64, workspace::Surface>,
+    lane: i32,
+    active_workspace: i32,
+    visible_layout: VisibleColumnLayout,
+) -> StatusPreviewLane {
+    let mut preview = status_preview_lane(workspace, lane, active_workspace, visible_layout);
+    let Some(surface_frames) = surface_frames else {
+        return preview;
+    };
+
+    for frame in surface_frames.exiting_frames() {
+        if let Some(surface) = exiting_surfaces
+            .get(&frame.id)
+            .filter(|surface| surface.lane == lane)
+        {
+            preview.include_column(surface.column);
+        }
+    }
+
+    preview
 }
 
 pub(crate) fn status_preview_surface_color(
@@ -669,6 +838,17 @@ impl StatusPreviewLane {
     fn scaled_width(&self, panel_width: f32, panel_gap: f32) -> f32 {
         let column_count = self.column_count() as f32;
         column_count * panel_width + (column_count - 1.0).max(0.0) * panel_gap
+    }
+
+    fn include_column(&mut self, column: i32) {
+        if self.is_empty && !self.is_active {
+            self.min_column = column;
+            self.max_column = column;
+        } else {
+            self.min_column = self.min_column.min(column);
+            self.max_column = self.max_column.max(column);
+        }
+        self.is_empty = false;
     }
 }
 
@@ -1000,6 +1180,68 @@ pub(crate) fn push_rounded_rect(
             center,
             points[index],
             points[next_index],
+            color,
+            size,
+        );
+    }
+}
+
+pub(crate) fn push_rounded_rect_border(
+    vertices: &mut Vec<Vertex>,
+    rect: Rect,
+    radius: f32,
+    stroke_width: f32,
+    color: [f32; 4],
+    size: PhysicalSize<u32>,
+) {
+    let stroke_width = stroke_width
+        .max(0.0)
+        .min(rect.width / 2.0)
+        .min(rect.height / 2.0);
+    if stroke_width <= 0.0 || color[3] <= 0.0 {
+        return;
+    }
+
+    let outer_radius = radius.max(0.0).min(rect.width / 2.0).min(rect.height / 2.0);
+    if outer_radius <= 0.5 {
+        push_stroked_rect(vertices, rect, stroke_width, color, size);
+        return;
+    }
+
+    let inner = Rect {
+        x: rect.x + stroke_width,
+        y: rect.y + stroke_width,
+        width: (rect.width - stroke_width * 2.0).max(0.0),
+        height: (rect.height - stroke_width * 2.0).max(0.0),
+    };
+    if inner.width <= 0.0 || inner.height <= 0.0 {
+        push_rounded_rect(vertices, rect, outer_radius, color, size);
+        return;
+    }
+
+    let inner_radius = (outer_radius - stroke_width)
+        .max(0.0)
+        .min(inner.width / 2.0)
+        .min(inner.height / 2.0);
+    let outer_points = rounded_rect_points(rect, outer_radius);
+    let inner_points = rounded_rect_points(inner, inner_radius);
+    debug_assert_eq!(outer_points.len(), inner_points.len());
+
+    for index in 0..outer_points.len() {
+        let next = (index + 1) % outer_points.len();
+        push_pixel_triangle(
+            vertices,
+            outer_points[index],
+            outer_points[next],
+            inner_points[next],
+            color,
+            size,
+        );
+        push_pixel_triangle(
+            vertices,
+            outer_points[index],
+            inner_points[next],
+            inner_points[index],
             color,
             size,
         );

@@ -3,6 +3,44 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Identifies a session to resume, across the agent backends jcode can import
+/// from. This is pure data (only ids/paths) with no UI dependency; it lives in
+/// `jcode-session-types` so the foundation/import layer can match on it without
+/// depending on any `jcode-tui-*` crate. The session-picker UI re-exports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResumeTarget {
+    JcodeSession {
+        session_id: String,
+    },
+    ClaudeCodeSession {
+        session_id: String,
+        session_path: String,
+    },
+    CodexSession {
+        session_id: String,
+        session_path: String,
+    },
+    PiSession {
+        session_path: String,
+    },
+    OpenCodeSession {
+        session_id: String,
+        session_path: String,
+    },
+}
+
+impl ResumeTarget {
+    pub fn stable_id(&self) -> &str {
+        match self {
+            Self::JcodeSession { session_id } => session_id,
+            Self::ClaudeCodeSession { session_id, .. } => session_id,
+            Self::CodexSession { session_id, .. } => session_id,
+            Self::PiSession { session_path } => session_path,
+            Self::OpenCodeSession { session_id, .. } => session_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
     pub role: String,
@@ -13,9 +51,18 @@ pub struct RenderedMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderedCompactedHistoryInfo {
+    /// Number of compacted historical messages that can render visibly in the UI.
+    /// Hidden internal reminders are excluded from this count.
     pub total_messages: usize,
+    /// Number of renderable compacted historical messages included in this payload.
     pub visible_messages: usize,
+    /// Number of older renderable compacted historical messages still hidden.
     pub remaining_messages: usize,
+    /// Number of user prompts (turns) that are hidden before the first rendered
+    /// message. Used to keep prompt numbering correct when older history is
+    /// truncated (e.g. the first visible prompt is really the 5th, not the 1st).
+    #[serde(default)]
+    pub hidden_user_prompts: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

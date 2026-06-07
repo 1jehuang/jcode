@@ -181,6 +181,7 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
                 id: "tool-1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"cmd": "echo hi"}),
+                thought_signature: None,
             },
         ],
     );

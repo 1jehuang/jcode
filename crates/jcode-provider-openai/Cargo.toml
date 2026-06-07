@@ -5,6 +5,15 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anyhow = "1"
+base64 = "0.22"
+bytes = "1"
+futures = "0.3"
+jcode-core = { path = "../jcode-core" }
+jcode-logging = { path = "../jcode-logging" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["sync"] }

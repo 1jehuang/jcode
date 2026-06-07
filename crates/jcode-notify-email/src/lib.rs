@@ -63,7 +63,6 @@ pub async fn send_email(request: SendEmailRequest<'_>) -> Result<()> {
 }
 
 pub fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> Result<Vec<ReplyAction>> {
-    let _tls = native_tls::TlsConnector::builder().build()?;
     let client = imap::ClientBuilder::new(host, port).connect()?;
     let mut session = client
         .login(user, pass)

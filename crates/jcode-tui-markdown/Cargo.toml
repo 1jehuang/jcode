@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+jcode-render-core = { path = "../jcode-render-core" }
 jcode-tui-mermaid = { path = "../jcode-tui-mermaid", optional = true }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 pulldown-cmark = "0.12"

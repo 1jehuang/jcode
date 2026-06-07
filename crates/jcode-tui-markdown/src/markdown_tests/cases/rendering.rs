@@ -49,12 +49,21 @@ fn test_table_render_basic() {
 }
 
 #[test]
-fn test_table_width_truncation() {
+fn test_table_width_wraps_without_truncation() {
     let md = "| Column | Value |\n| - | - |\n| very_long_cell_value | 1234567890 |";
     let lines = render_markdown_with_width(md, Some(20));
     let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
 
-    assert!(rendered.iter().any(|l| l.contains('…')));
+    assert!(!rendered.iter().any(|l| l.contains('…')), "{rendered:?}");
+    assert!(
+        rendered.iter().any(|l| l.contains("very_long")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|l| l.contains("_cell_val")),
+        "{rendered:?}"
+    );
+    assert!(rendered.iter().any(|l| l.contains("ue")), "{rendered:?}");
     let max_len = rendered
         .iter()
         .map(|l| l.chars().count())
@@ -64,7 +73,7 @@ fn test_table_width_truncation() {
 }
 
 #[test]
-fn test_table_width_truncation_with_three_columns_stays_within_limit() {
+fn test_table_width_wrapping_with_three_columns_stays_within_limit() {
     let md =
         "| # | Principle | Story Ready |\n| - | - | - |\n| 1 | Customer Obsession | unchecked |";
     let lines = render_markdown_with_width(md, Some(24));
@@ -83,6 +92,22 @@ fn test_table_width_truncation_with_three_columns_stays_within_limit() {
         max_width,
         rendered
     );
+}
+
+#[test]
+fn test_table_width_wrap_keeps_apostrophe_words_intact_when_possible() {
+    let md = "| Movie | Notes |\n| - | - |\n| Test | Anderson's thriller shouldn't truncate |";
+    let lines = render_markdown_with_width(md, Some(32));
+    let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+    assert!(!rendered.iter().any(|l| l.contains('…')), "{rendered:?}");
+    assert!(
+        rendered.iter().any(|l| l.contains("Anderson’s")),
+        "expected apostrophe word to remain intact when it fits: {rendered:?}"
+    );
+
+    let max_width = rendered.iter().map(|line| line.width()).max().unwrap_or(0);
+    assert!(max_width <= 32, "{max_width}: {rendered:?}");
 }
 
 #[test]
@@ -130,8 +155,14 @@ fn test_mermaid_block_detection() {
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
         .collect();
 
-    assert!(text.contains("mermaid"), "Expected code block header: {text}");
-    assert!(text.contains("flowchart LR"), "Expected raw Mermaid source: {text}");
+    assert!(
+        text.contains("mermaid"),
+        "Expected code block header: {text}"
+    );
+    assert!(
+        text.contains("flowchart LR"),
+        "Expected raw Mermaid source: {text}"
+    );
 }
 
 #[test]
@@ -522,4 +553,261 @@ fn test_centered_mode_keeps_lists_left_aligned() {
             .iter()
             .all(|line| line[first_pad..].starts_with("• "))
     );
+}
+
+#[test]
+fn test_reasoning_line_stays_dim_italic_across_apostrophes() {
+    // Smart-punctuation splits a reasoning line into several text events at
+    // apostrophes. The whole line (every span) must remain dim + italic, since
+    // only the first event carries the REASONING_SENTINEL.
+    assert_reasoning_line_fully_dim_italic("so it's composite and don't stop.");
+}
+
+/// Render a single reasoning line through the real `reasoning_line_markup`
+/// helper + markdown renderer and assert the invariant the user cares about:
+/// every visible span is dim + italic, the sentinel never leaks into visible
+/// text, and the original (escaped) characters all survive. This is the
+/// programmatic check that replaces eyeballing the TUI: any input that breaks
+/// the dim/italic styling fails here.
+fn assert_reasoning_line_fully_dim_italic(line: &str) {
+    let sentinel = crate::REASONING_SENTINEL;
+    let md = crate::reasoning_line_markup(line);
+    let lines = render_markdown(&md);
+    let dim = md_dim_color();
+
+    let mut visible = String::new();
+    for rendered in &lines {
+        for span in &rendered.spans {
+            assert!(
+                !span.content.contains(sentinel),
+                "sentinel leaked into visible text for {line:?}: {:?}",
+                span.content
+            );
+            if span.content.trim().is_empty() {
+                continue;
+            }
+            assert_eq!(
+                span.style.fg,
+                Some(dim),
+                "reasoning span not dim for {line:?}: {:?}",
+                span.content
+            );
+            assert!(
+                span.style.add_modifier.contains(Modifier::ITALIC),
+                "reasoning span not italic for {line:?}: {:?}",
+                span.content
+            );
+            visible.push_str(&span.content);
+        }
+    }
+
+    // Styling must not have eaten any characters. Smart-punctuation may pretty
+    // up the text (straight quotes/dashes become typographic ones), so compare
+    // after normalizing those equivalences; the point is that no content is lost
+    // and nothing reverts to non-reasoning styling. Leading/trailing whitespace
+    // is not visually meaningful (the renderer may collapse it), so compare the
+    // trimmed bodies.
+    assert_eq!(
+        normalize_smart_punctuation(visible.trim()),
+        normalize_smart_punctuation(line.trim()),
+        "reasoning text content lost during render for {line:?}"
+    );
+}
+
+/// Fold the typographic characters pulldown-cmark's smart-punctuation produces
+/// back to their ASCII equivalents so styling tests can compare text content
+/// without caring about quote/dash prettification.
+fn normalize_smart_punctuation(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            '\u{2013}' | '\u{2014}' => '-',
+            other => other,
+        })
+        .collect::<String>()
+        .replace('\u{2026}', "...")
+}
+
+#[test]
+fn test_reasoning_line_survives_embedded_markdown() {
+    // Adversarial corpus: each of these contains markdown the renderer would
+    // normally act on (emphasis, code, links, headings, lists, math, html).
+    // After wrapping with reasoning_line_markup they must all render as a single
+    // dim+italic run with no characters lost.
+    let cases = [
+        "plain reasoning with no markup",
+        "it's a contraction with an apostrophe",
+        "emphasis *star* and _under_ score",
+        "double **bold** and __strong__ markers",
+        "inline `code span` should stay literal",
+        "a [link](https://example.com) reference",
+        "an ![image](pic.png) embed",
+        "trailing single asterisk like 5 * 3 = 15",
+        "ratio a/b and pipe a | b in a table-ish line",
+        "tilde ~~strike~~ and lone ~ tilde",
+        "angle <tag> and ampersand a & b",
+        "leading # not a heading and - not a list",
+        "math $x^2$ and $$y$$ dollar spans",
+        "backslash path C:\\\\Users\\\\name",
+        "unbalanced *open emphasis that never closes",
+        "unbalanced `open code that never closes",
+        "mixed it's **bold** with `code` and a [link](x)",
+        "🤔 unicode and emoji with it's apostrophe",
+        // Whitespace edges: CommonMark emphasis flanking rules reject a closing
+        // `*` preceded by whitespace (or an opening `*` followed by whitespace),
+        // so lines that start/end with whitespace must still stay dim+italic.
+        "trailing spaces break the closing star   ",
+        "   leading spaces before the text",
+        "  surrounded by spaces on both sides  ",
+        "trailing tab breaks it\t",
+        "ends right at an asterisk *",
+        "* starts at an asterisk",
+        "   ",
+        "\t",
+        "ends with escaped backslash and space \\ ",
+    ];
+    for case in cases {
+        assert_reasoning_line_fully_dim_italic(case);
+    }
+}
+
+#[test]
+fn test_multiline_reasoning_renders_one_visual_line_per_thought() {
+    // Regression: consecutive reasoning lines must NOT collapse into one run-on
+    // paragraph. Each `reasoning_line_markup` line ends in a CommonMark hard
+    // break so the model's line structure is preserved (one visual row per
+    // thought) instead of softbreaks rendering as spaces.
+    let thoughts = [
+        "First I will analyze the problem.",
+        "Then I will consider the options.",
+        "Finally I will decide.",
+    ];
+    let mut md = String::new();
+    for thought in thoughts {
+        md.push_str(&crate::reasoning_line_markup(thought));
+    }
+    let lines = render_markdown(&md);
+
+    // One rendered line per thought (ignoring any trailing blank lines).
+    let non_blank: Vec<String> = lines
+        .iter()
+        .map(line_to_string)
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    assert_eq!(
+        non_blank.len(),
+        thoughts.len(),
+        "each reasoning thought should be its own line, got: {non_blank:?}"
+    );
+    for (rendered, expected) in non_blank.iter().zip(thoughts) {
+        assert_eq!(
+            rendered.trim(),
+            expected,
+            "reasoning line content mismatch: {non_blank:?}"
+        );
+    }
+
+    // And every visible span must still be dim + italic.
+    let dim = md_dim_color();
+    for line in &lines {
+        for span in &line.spans {
+            if span.content.trim().is_empty() {
+                continue;
+            }
+            assert_eq!(
+                span.style.fg,
+                Some(dim),
+                "reasoning span not dim: {:?}",
+                span.content
+            );
+            assert!(
+                span.style.add_modifier.contains(Modifier::ITALIC),
+                "reasoning span not italic: {:?}",
+                span.content
+            );
+        }
+    }
+}
+
+#[test]
+fn test_reasoning_emphasis_does_not_leak_into_following_text() {
+    // After the reasoning emphasis closes, normal paragraph text must not be
+    // styled as reasoning (dim/italic).
+    let md = format!(
+        "{}\n{}",
+        crate::reasoning_line_markup("it's **thinking** with `code`."),
+        "Normal answer text."
+    );
+    let lines = render_markdown(&md);
+
+    let dim = md_dim_color();
+    let answer_line = lines
+        .iter()
+        .find(|l| line_to_string(l).contains("Normal answer text."))
+        .expect("answer line present");
+    for span in &answer_line.spans {
+        if span.content.trim().is_empty() {
+            continue;
+        }
+        assert_ne!(
+            span.style.fg,
+            Some(dim),
+            "answer span must not be dim: {:?}",
+            span.content
+        );
+        assert!(
+            !span.style.add_modifier.contains(Modifier::ITALIC),
+            "answer span must not be italic: {:?}",
+            span.content
+        );
+    }
+}
+
+#[test]
+fn test_reasoning_summary_line_markup_folds_to_single_dim_italic_trace() {
+    let sentinel = crate::REASONING_SENTINEL;
+
+    // Pluralized count for multi-line blocks.
+    let many = crate::reasoning_summary_line_markup(3);
+    assert!(
+        many.contains(&format!("*{0}▸ thought (3 lines){0}*", sentinel)),
+        "expected pluralized summary markup, got: {many:?}"
+    );
+
+    // Single/zero-line blocks omit the count.
+    let one = crate::reasoning_summary_line_markup(1);
+    assert!(
+        one.contains(&format!("*{0}▸ thought{0}*", sentinel)) && !one.contains("lines"),
+        "expected bare summary markup, got: {one:?}"
+    );
+    let none = crate::reasoning_summary_line_markup(0);
+    assert!(none.contains(&format!("*{0}▸ thought{0}*", sentinel)), "{none:?}");
+
+    // The summary line renders dim + italic with no sentinel leaking into text.
+    let lines = render_markdown(&many);
+    let dim = md_dim_color();
+    let mut saw_marker = false;
+    for rendered in &lines {
+        for span in &rendered.spans {
+            assert!(
+                !span.content.contains(sentinel),
+                "sentinel leaked into visible summary: {:?}",
+                span.content
+            );
+            if span.content.trim().is_empty() {
+                continue;
+            }
+            if span.content.contains('▸') {
+                saw_marker = true;
+            }
+            assert_eq!(span.style.fg, Some(dim), "summary span not dim: {:?}", span.content);
+            assert!(
+                span.style.add_modifier.contains(Modifier::ITALIC),
+                "summary span not italic: {:?}",
+                span.content
+            );
+        }
+    }
+    assert!(saw_marker, "summary marker '▸' must be visible: {lines:?}");
 }

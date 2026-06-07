@@ -454,3 +454,38 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert_eq!(spawn_mode.as_deref(), Some("headless"));
     Ok(())
 }
+
+#[test]
+fn test_reload_force_defaults_true_for_legacy_clients() -> Result<()> {
+    // Old clients (and the desktop Swift enum, which has no reload case) send a
+    // reload request with no `force` field. It must default to true so their
+    // behavior stays unconditional, matching the pre-#291 protocol.
+    let json = r#"{"type":"reload","id":7}"#;
+    let decoded = parse_request_json(json)?;
+    let Request::Reload { id, force } = decoded else {
+        return Err(anyhow!("expected Reload"));
+    };
+    assert_eq!(id, 7);
+    assert!(force, "missing force must default to true");
+    Ok(())
+}
+
+#[test]
+fn test_reload_force_roundtrip() -> Result<()> {
+    for force in [false, true] {
+        let req = Request::Reload { id: 9, force };
+        let json = serde_json::to_string(&req)?;
+        assert!(json.contains("\"type\":\"reload\""));
+        let decoded = parse_request_json(&json)?;
+        let Request::Reload {
+            id,
+            force: decoded_force,
+        } = decoded
+        else {
+            return Err(anyhow!("expected Reload"));
+        };
+        assert_eq!(id, 9);
+        assert_eq!(decoded_force, force);
+    }
+    Ok(())
+}

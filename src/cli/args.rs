@@ -28,7 +28,7 @@ pub(crate) enum ProviderAuthArg {
 
 #[derive(Parser, Debug)]
 #[command(name = "jcode")]
-#[command(version = env!("JCODE_VERSION"))]
+#[command(version = jcode_build_meta::VERSION)]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
     /// Provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect)
@@ -84,6 +84,22 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) provider_profile: Option<String>,
 
+    /// Tool profile to expose to the model: full, minimal/lite, or none.
+    #[arg(long, global = true)]
+    pub(crate) tool_profile: Option<String>,
+
+    /// Comma-separated explicit allow-list of tools to expose, e.g. bash,read,write,apply_patch. Use '*' or 'all' to expose all tools, including default-disabled tools.
+    #[arg(long, global = true)]
+    pub(crate) tools: Option<String>,
+
+    /// Comma-separated list of tools to hide after applying the selected profile.
+    #[arg(long, global = true)]
+    pub(crate) disabled_tools: Option<String>,
+
+    /// Hide all built-in tools unless --tools or [tools].enabled opts tools back in.
+    #[arg(long, global = true)]
+    pub(crate) disable_base_tools: bool,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -105,6 +121,15 @@ pub(crate) enum Command {
         temp_idle_timeout_secs: Option<u64>,
     },
 
+    /// Run as an Agent Client Protocol (ACP) adapter backed by the Jcode daemon
+    Acp,
+
+    /// Manage the background server daemon (e.g. `jcode server stop`).
+    Server {
+        #[command(subcommand)]
+        action: ServerCommand,
+    },
+
     /// Connect to a running server
     Connect,
 
@@ -124,6 +149,10 @@ pub(crate) enum Command {
 
     /// Login to a provider via OAuth, API key, or local credentials
     Login {
+        /// Provider to log in to. Equivalent to --provider for this command, e.g. `jcode login google`.
+        #[arg(value_enum)]
+        provider: Option<ProviderChoice>,
+
         /// Account label for multi-account support (stored labels are auto-numbered)
         #[arg(long, short = 'a')]
         account: Option<String>,
@@ -245,6 +274,10 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Ambient(AmbientCommand),
 
+    /// Optional Jcode Cloud/Jade integration commands
+    #[command(subcommand)]
+    Cloud(CloudCommand),
+
     /// Generate a pairing code for iOS/web client
     Pair {
         /// List paired devices instead of generating a code
@@ -280,7 +313,7 @@ pub(crate) enum Command {
         r#type: bool,
     },
 
-    /// Set up a global hotkey (Alt+;) to launch jcode
+    /// Set up the platform global hotkey to launch jcode
     SetupHotkey {
         /// Internal: run as the macOS hotkey listener process.
         #[arg(long, hide = true)]
@@ -351,6 +384,44 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Model(ModelCommand),
 
+    /// Show live verification coverage. With no provider/model, prints the full coverage summary.
+    #[command(name = "provider-test-coverage", alias = "model-status")]
+    ProviderTestCoverage {
+        /// Provider to look up. Omit provider and model to print the full coverage summary.
+        #[arg(value_name = "PROVIDER")]
+        provider_query: Option<String>,
+
+        /// Model to look up. Defaults to the global --model value only when PROVIDER is supplied.
+        #[arg(value_name = "MODEL")]
+        model_query: Option<String>,
+
+        /// Read coverage from this JSON file instead of the default live-test coverage ledger
+        #[arg(long)]
+        coverage_file: Option<String>,
+
+        /// Maximum provider/model pairs to list in the full summary (0 = show all)
+        #[arg(long, default_value_t = 0)]
+        coverage_limit: usize,
+    },
+
+    /// Diagnose why a provider/model or the model picker is broken by walking the
+    /// strict end-to-end checkpoints (catalog, picker, model-switch, chat, streaming, tools).
+    #[command(name = "provider-doctor", alias = "provider-strict-e2e")]
+    ProviderDoctor {
+        /// OpenAI-compatible provider id to diagnose (e.g. cerebras, fpt, nvidia-nim)
+        #[arg(id = "doctor_provider", value_name = "PROVIDER")]
+        provider: String,
+
+        /// How much to exercise: offline (no key/no spend), catalog (key, ~no spend),
+        /// or full (key, spends balance: chat + streaming + tools).
+        #[arg(long, value_name = "TIER", default_value = "catalog")]
+        tier: String,
+
+        /// Emit the report as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Test authentication end-to-end: login (optional), credential probe, refresh, and provider smoke
     AuthTest {
         /// Run the provider login flow before validation (interactive/browser-based)
@@ -380,6 +451,22 @@ pub(crate) enum Command {
         /// Write the full auth-test report JSON to a file
         #[arg(long)]
         output: Option<String>,
+
+        /// Show strict live provider/model E2E coverage instead of running auth tests
+        #[arg(long, conflicts_with_all = ["login", "all_configured", "no_smoke", "no_tool_smoke", "prompt"])]
+        coverage: bool,
+
+        /// Fetch live model catalogs and verify context-window resolution for each model with metadata
+        #[arg(long, conflicts_with_all = ["login", "no_smoke", "no_tool_smoke", "prompt", "coverage"])]
+        context_audit: bool,
+
+        /// Read coverage from this JSON file instead of the default live-test coverage ledger
+        #[arg(long, requires = "coverage")]
+        coverage_file: Option<String>,
+
+        /// Maximum uncovered provider/model gaps to show in the text coverage report
+        #[arg(long, requires = "coverage", default_value_t = 50)]
+        coverage_limit: usize,
     },
 
     /// Save or restore the current set of open jcode windows across a system reboot
@@ -387,6 +474,263 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: RestartCommand,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ServerCommand {
+    /// Gracefully reload the running background server onto the newest binary.
+    ///
+    /// This is the preferred way to pick up an upgrade: the daemon hands its
+    /// live sessions off to a freshly exec'd server (the same path `/reload`
+    /// uses), so headless/swarm work is preserved instead of being killed. If
+    /// no server is running, this is a no-op. Use `server stop --force` only
+    /// when you need to hard-retire a wedged daemon.
+    Reload {
+        /// Reload even if the running server is already on the newest binary.
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop the running background server and clear its socket.
+    ///
+    /// Prefer `server reload` after an upgrade; it preserves live sessions.
+    /// `stop` terminates the daemon (SIGTERM, escalating to SIGKILL), which
+    /// drops any in-flight headless/swarm sessions, so it requires `--force`
+    /// as a deliberate acknowledgement.
+    Stop {
+        /// Confirm that terminating the daemon (and dropping live sessions) is intended.
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CloudCommand {
+    /// Upload, list, verify, and view cloud-synced sessions
+    Sessions {
+        #[command(subcommand)]
+        action: CloudSessionsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum CloudSessionsCommand {
+    /// Configure Jade API defaults for cloud sessions on this machine
+    Configure {
+        /// Jade Session API base URL
+        #[arg(long)]
+        api_base: Option<String>,
+
+        /// Jade Session API bearer token. Prefer --api-token-env to avoid shell history.
+        #[arg(long, conflicts_with = "api_token_env")]
+        api_token: Option<String>,
+
+        /// Read the Jade Session API bearer token from this environment variable
+        #[arg(long, conflicts_with = "api_token")]
+        api_token_env: Option<String>,
+
+        /// Optional Jade token id, e.g. dev-admin
+        #[arg(long)]
+        api_token_id: Option<String>,
+
+        /// Default Jade user id for commands that do not pass --user-id
+        #[arg(long)]
+        user_id: Option<String>,
+
+        /// Default private Jade session helper path
+        #[arg(long)]
+        helper: Option<String>,
+
+        /// Remove the saved cloud sessions config
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// Show saved Jade API defaults for cloud sessions without printing secrets
+    Status {
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Upload a specific local session JSON file to Jade cloud storage
+    Upload {
+        /// Path to a local Jcode session JSON file
+        session_file: String,
+
+        /// Upload without Jade's redaction pass
+        #[arg(long)]
+        raw: bool,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+
+    /// Upload the newest local Jcode session to Jade cloud storage
+    UploadLatest {
+        /// Directory containing local Jcode session JSON files
+        #[arg(long, default_value = "~/.jcode/sessions")]
+        sessions_dir: String,
+
+        /// Upload without Jade's redaction pass
+        #[arg(long)]
+        raw: bool,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+
+    /// Sync new or changed local sessions to Jade cloud storage (idempotent; safe to schedule)
+    Sync {
+        /// Directory containing local Jcode session JSON files (default: ~/.jcode/sessions)
+        #[arg(long)]
+        sessions_dir: Option<String>,
+
+        /// Only consider sessions modified within this many days (ignored with --all)
+        #[arg(long)]
+        since_days: Option<u64>,
+
+        /// Sync all matching sessions regardless of age
+        #[arg(long)]
+        all: bool,
+
+        /// Maximum number of sessions to upload in this run
+        #[arg(long, default_value_t = 50)]
+        max: usize,
+
+        /// Skip this run if the last sync ran fewer than this many minutes ago (for cron/timers)
+        #[arg(long)]
+        min_interval_mins: Option<u64>,
+
+        /// Upload without Jade's redaction pass
+        #[arg(long)]
+        raw: bool,
+
+        /// Show what would be uploaded without uploading or recording state
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Re-upload sessions even if local sync state says they are unchanged
+        #[arg(long)]
+        force: bool,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+
+    /// List cloud-uploaded sessions from the Jade index
+    List {
+        /// Maximum number of sessions to show
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+
+    /// Verify that cloud metadata and the S3 session blob both exist
+    Verify {
+        /// Session ID to verify
+        session_id: String,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+
+    /// Render a local HTML dashboard of cloud-uploaded sessions from the Jade index
+    Dashboard {
+        /// Maximum number of sessions to include
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+
+        /// Write the dashboard HTML to this path (default: a temp file)
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Open the generated dashboard in the default browser
+        #[arg(long)]
+        open: bool,
+
+        /// Also download each session and link rows to a local per-session viewer
+        #[arg(long)]
+        with_view: bool,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+
+    /// Download and view a cloud-uploaded session
+    View {
+        /// Session ID to view
+        session_id: String,
+
+        /// Output format
+        #[arg(long, default_value = "summary")]
+        format: CloudSessionViewFormat,
+
+        /// Write HTML output to this path when --format html is used
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Open the generated HTML file when --format html is used
+        #[arg(long)]
+        open: bool,
+
+        #[command(flatten)]
+        jade: JadeCloudOptions,
+    },
+}
+
+#[derive(Parser, Debug, Clone)]
+pub(crate) struct JadeCloudOptions {
+    /// Jade user id to pass to the dev helper
+    #[arg(long, default_value = "dev")]
+    pub(crate) user_id: String,
+
+    /// AWS CLI profile used by the private dev Jade helper. If omitted, the helper decides.
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+
+    /// AWS region used by the private dev Jade helper. If omitted, the helper decides.
+    #[arg(long)]
+    pub(crate) region: Option<String>,
+
+    /// Path to the private Jade session helper. Defaults to $JCODE_JADE_SESSIONS_HELPER or ~/jade/scripts/jade_sessions.py.
+    #[arg(long)]
+    pub(crate) helper: Option<String>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub(crate) enum CloudSessionViewFormat {
+    Summary,
+    Json,
+    Html,
+}
+
+impl CloudSessionViewFormat {
+    pub(crate) fn as_arg(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Json => "json",
+            Self::Html => "html",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]

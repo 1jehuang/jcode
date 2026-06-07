@@ -275,6 +275,38 @@ fn test_generated_image_event_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_side_pane_images_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::SidePaneImages {
+        session_id: "session_active".to_string(),
+        images: vec![jcode_session_types::RenderedImage {
+            media_type: "image/png".to_string(),
+            data: "base64-data".to_string(),
+            label: Some("openclaw.png".to_string()),
+            source: jcode_session_types::RenderedImageSource::ToolResult {
+                tool_name: "read".to_string(),
+            },
+        }],
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"side_pane_images\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::SidePaneImages { session_id, images } = decoded else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(session_id, "session_active");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].media_type, "image/png");
+    assert_eq!(images[0].label.as_deref(), Some("openclaw.png"));
+    assert_eq!(
+        images[0].source,
+        jcode_session_types::RenderedImageSource::ToolResult {
+            tool_name: "read".to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn test_interrupted_event_roundtrip() -> Result<()> {
     let event = ServerEvent::Interrupted;
     let json = encode_event(&event);
@@ -341,7 +373,15 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         available_model_routes: Vec::new(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
-        total_tokens: None,
+        total_tokens: Some((123, 45)),
+        token_usage_totals: Some(TokenUsageTotals {
+            messages_with_token_usage: 2,
+            input_tokens: 123,
+            output_tokens: 45,
+            cache_reported_input_tokens: 100,
+            cache_read_input_tokens: 80,
+            cache_creation_input_tokens: 10,
+        }),
         all_sessions: Vec::new(),
         client_count: None,
         is_canary: None,
@@ -354,6 +394,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         connection_type: Some("websocket".to_string()),
         status_detail: None,
         upstream_provider: None,
+        resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
@@ -382,6 +423,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         messages,
         provider_name,
         provider_model,
+        total_tokens,
+        token_usage_totals,
         ..
     } = decoded
     else {
@@ -390,6 +433,11 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     assert_eq!(id, 101);
     assert_eq!(provider_name.as_deref(), Some("openai"));
     assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(total_tokens, Some((123, 45)));
+    assert_eq!(
+        token_usage_totals.map(|totals| totals.cache_read_input_tokens),
+        Some(80)
+    );
     assert_eq!(messages.len(), 1);
     assert_eq!(side_panel.focused_page_id.as_deref(), Some("page-1"));
     assert_eq!(side_panel.pages.len(), 1);
@@ -413,6 +461,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         compacted_total: 128,
         compacted_visible: 64,
         compacted_remaining: 64,
+        compacted_hidden_prompts: 3,
     };
     let json = encode_event(&event);
     assert!(json.contains("\"type\":\"compacted_history\""));

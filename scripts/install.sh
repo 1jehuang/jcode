@@ -3,12 +3,17 @@ set -euo pipefail
 
 REPO="1jehuang/jcode"
 IS_WINDOWS=false
+IS_TERMUX=false
 
 info() { printf '\033[1;34m%s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+
+if [ -n "${TERMUX_VERSION:-}" ] || [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ] || [ -d "/data/data/com.termux/files/usr" ]; then
+  IS_TERMUX=true
+fi
 
 case "$OS" in
   Linux)
@@ -123,6 +128,28 @@ fi
 
 chmod +x "$dest_version_dir/$bin_name" 2>/dev/null || true
 
+if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
+  termux_glibc_dir="/data/data/com.termux/files/usr/glibc/lib"
+  termux_glibc_linker=""
+  case "$ARCH" in
+    aarch64|arm64) termux_glibc_linker="$termux_glibc_dir/ld-linux-aarch64.so.1" ;;
+    x86_64) termux_glibc_linker="$termux_glibc_dir/ld-linux-x86-64.so.2" ;;
+  esac
+  if [ "$OS" = "Linux" ] && [ -n "$termux_glibc_linker" ]; then
+    if [ -x "$termux_glibc_linker" ]; then
+      if command -v patchelf >/dev/null 2>&1; then
+        patchelf --set-interpreter "$termux_glibc_linker" "$dest_version_dir/$bin_name" \
+          || err "Failed to patch jcode ELF interpreter for Termux glibc"
+        info "Patched Termux glibc ELF interpreter: $termux_glibc_linker"
+      else
+        info "Termux detected: install patchelf with 'pkg install patchelf' and rerun this installer if jcode fails to start."
+      fi
+    else
+      info "Termux detected: install glibc with 'pkg install glibc' if jcode fails due to a missing dynamic linker."
+    fi
+  fi
+fi
+
 if [ "$IS_WINDOWS" = true ]; then
   cp -f "$dest_version_dir/$bin_name" "$stable_dir/$bin_name"
   printf '%s\n' "$version" > "$builds_dir/stable-version"
@@ -130,7 +157,17 @@ if [ "$IS_WINDOWS" = true ]; then
 else
   ln -sfn "$dest_version_dir/$bin_name" "$stable_dir/$bin_name"
   printf '%s\n' "$version" > "$builds_dir/stable-version"
-  ln -sfn "$stable_dir/$bin_name" "$launcher_path"
+  if [ "$IS_TERMUX" = true ]; then
+    rm -f "$launcher_path"
+    cat > "$launcher_path" <<EOF
+#!/usr/bin/env bash
+unset LD_PRELOAD
+exec "$stable_dir/$bin_name" "\$@"
+EOF
+    chmod +x "$launcher_path"
+  else
+    ln -sfn "$stable_dir/$bin_name" "$launcher_path"
+  fi
 fi
 
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -142,6 +179,23 @@ if [ "$(uname -s)" = "Darwin" ]; then
     mac_hotkey_ready=true
   else
     mac_hotkey_ready=false
+  fi
+fi
+
+# Retire any background server still running the old binary so the freshly
+# installed version is picked up without the user having to kill a daemon by
+# hand (issue #291). We use the graceful `server reload` path, which hands live
+# headless/swarm sessions to a newly-exec'd server instead of dropping them, and
+# only reloads when the running server is genuinely older than what we just
+# installed (so a newer/dev daemon is never downgraded). This is best-effort:
+# it must never fail the install, and it is skipped when no server is running.
+if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
+  reload_bin="$launcher_path"
+  [ -x "$reload_bin" ] || reload_bin="$stable_dir/$bin_name"
+  if [ -x "$reload_bin" ]; then
+    if "$reload_bin" server reload </dev/null >/dev/null 2>&1; then
+      info "Reloaded the running jcode server onto $VERSION (if one was active)."
+    fi
   fi
 fi
 
@@ -205,9 +259,9 @@ else
 
   if [ "$(uname -s)" = "Darwin" ]; then
     if [ "${mac_hotkey_ready:-false}" = true ]; then
-      info "Global hotkey ready: Alt+; opens jcode in your preferred terminal"
+      info "Global hotkey ready: Cmd+; launches a new jcode from anywhere, system-wide"
     else
-      info "Tip: run 'jcode setup-hotkey' to enable Alt+; launch on macOS"
+      info "Tip: run 'jcode setup-hotkey' so Cmd+; launches jcode system-wide on macOS"
     fi
   fi
 

@@ -1,0 +1,18 @@
+[package]
+name = "jcode-render-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Backend-neutral document/render model shared by the TUI and desktop
+# front-ends. This crate owns markdown parsing, the semantic block/span
+# model, and width-parameterized wrapping. It has NO dependency on ratatui
+# or any GPU/glyph layer; front-ends provide thin adapters that turn the
+# neutral model into their own draw primitives.
+
+[dependencies]
+pulldown-cmark = "0.12"
+serde = { version = "1", features = ["derive"] }
+unicode-width = "0.2"
+
+[dev-dependencies]

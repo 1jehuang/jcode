@@ -184,8 +184,7 @@ fn build_synthetic_session(turns: usize, tool_input_kib: usize, tool_output_kib:
                     input: serde_json::json!({
                         "command": make_blob(&format!("printf 'turn {idx}' && # "), tool_input_bytes),
                         "description": format!("Synthetic tool call {idx}"),
-                    }),
-                },
+                    }), thought_signature: None, },
             ],
         );
         session.add_message(

@@ -24,40 +24,11 @@ impl SessionSource {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ResumeTarget {
-    JcodeSession {
-        session_id: String,
-    },
-    ClaudeCodeSession {
-        session_id: String,
-        session_path: String,
-    },
-    CodexSession {
-        session_id: String,
-        session_path: String,
-    },
-    PiSession {
-        session_path: String,
-    },
-    OpenCodeSession {
-        session_id: String,
-        session_path: String,
-    },
-}
-
-impl ResumeTarget {
-    pub fn stable_id(&self) -> &str {
-        match self {
-            Self::JcodeSession { session_id } => session_id,
-            Self::ClaudeCodeSession { session_id, .. } => session_id,
-            Self::CodexSession { session_id, .. } => session_id,
-            Self::PiSession { session_path } => session_path,
-            Self::OpenCodeSession { session_id, .. } => session_id,
-        }
-    }
-}
+// `ResumeTarget` is pure data and now lives in `jcode-session-types` so the
+// foundation/import layer can use it without depending on this UI crate. It is
+// re-exported here so existing `jcode_tui_session_picker::ResumeTarget` paths
+// keep working.
+pub use jcode_session_types::ResumeTarget;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -69,6 +40,10 @@ pub enum SessionFilterMode {
     Codex,
     Pi,
     OpenCode,
+    /// External CLI transcripts (Codex and/or Claude Code) shown together.
+    /// Used by the first-run onboarding "continue where you left off" picker so
+    /// it surfaces every external CLI the user is logged into, not just one.
+    ExternalClis,
 }
 
 impl SessionFilterMode {
@@ -81,6 +56,9 @@ impl SessionFilterMode {
             Self::Codex => Self::Pi,
             Self::Pi => Self::OpenCode,
             Self::OpenCode => Self::All,
+            // ExternalClis is an onboarding-only composite filter, not part of
+            // the user-facing cycle; treat it as a no-op anchor.
+            Self::ExternalClis => Self::All,
         }
     }
 
@@ -93,6 +71,7 @@ impl SessionFilterMode {
             Self::Codex => Self::ClaudeCode,
             Self::Pi => Self::Codex,
             Self::OpenCode => Self::Pi,
+            Self::ExternalClis => Self::All,
         }
     }
 
@@ -105,12 +84,14 @@ impl SessionFilterMode {
             Self::Codex => Some("🧠 Codex"),
             Self::Pi => Some("π Pi"),
             Self::OpenCode => Some("◌ OpenCode"),
+            Self::ExternalClis => Some("🧠 Codex + 🧵 Claude Code"),
         }
     }
 }
 
 /// Session info for display in the interactive session picker.
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SessionInfo {
     pub id: String,
     pub parent_id: Option<String>,
@@ -133,6 +114,8 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     pub needs_catchup: bool,
     pub estimated_tokens: usize,
+    /// First visible user prompt in the session, shown in compact list rows.
+    pub first_user_prompt: Option<String>,
     pub messages_preview: Vec<PreviewMessage>,
     /// Lowercased searchable text used by picker filtering.
     pub search_index: String,
@@ -150,6 +133,7 @@ pub struct SessionInfo {
 
 /// A group of sessions under a server.
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ServerGroup {
     pub name: String,
     pub icon: String,
@@ -160,6 +144,7 @@ pub struct ServerGroup {
 }
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PreviewMessage {
     pub role: String,
     pub content: String,

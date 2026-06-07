@@ -116,6 +116,23 @@ gh release create "$VERSION" \
     --title "$TITLE" \
     --generate-notes
 
+# Close issues marked fixed-but-not-yet-released.
+PENDING_LABEL="triage: fixed-pending-release"
+echo "▸ Closing issues labeled '$PENDING_LABEL'..."
+PENDING_ISSUES="$(gh issue list --label "$PENDING_LABEL" --state open --json number --jq '.[].number' 2>/dev/null || true)"
+if [[ -n "$PENDING_ISSUES" ]]; then
+    while read -r issue; do
+        [[ -z "$issue" ]] && continue
+        gh issue close "$issue" \
+            --comment "Released in [$VERSION](https://github.com/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/releases/tag/$VERSION). Run \`jcode update\` to get it." \
+            --reason completed >/dev/null 2>&1 \
+            && echo "  ✅ Closed #$issue"
+        gh issue edit "$issue" --remove-label "$PENDING_LABEL" >/dev/null 2>&1 || true
+    done <<< "$PENDING_ISSUES"
+else
+    echo "  (none)"
+fi
+
 TOTAL_TIME=$(( $(date +%s) - OVERALL_START ))
 echo ""
 echo "=== Released $VERSION in ${TOTAL_TIME}s ==="

@@ -92,16 +92,16 @@ pub fn build_preview_mesh(scene: &VisualScene) -> PreviewMesh {
                     let fill = parse_color(&rect.fill).unwrap_or([1.0, 0.0, 1.0, 1.0]);
                     let bounds = to_rect(rect.bounds);
                     push_rounded_rect(&mut vertices, bounds, rect.corner_radius as f32, fill, size);
-                    if let Some(stroke) = &rect.stroke {
-                        if let Some(stroke_color) = parse_color(stroke) {
-                            push_stroked_rect(
-                                &mut vertices,
-                                bounds,
-                                rect.stroke_width.max(1) as f32,
-                                stroke_color,
-                                size,
-                            );
-                        }
+                    if let Some(stroke) = &rect.stroke
+                        && let Some(stroke_color) = parse_color(stroke)
+                    {
+                        push_stroked_rect(
+                            &mut vertices,
+                            bounds,
+                            rect.stroke_width.max(1) as f32,
+                            stroke_color,
+                            size,
+                        );
                     }
                 }
                 VisualPrimitive::Text(text) => {
@@ -110,8 +110,7 @@ pub fn build_preview_mesh(scene: &VisualScene) -> PreviewMesh {
                     push_bitmap_text(
                         &mut vertices,
                         &normalize_preview_text(&text.text),
-                        text.x as f32,
-                        y,
+                        [text.x as f32, y],
                         TEXT_PIXEL,
                         fill,
                         size,
@@ -616,13 +615,13 @@ fn normalize_preview_text(text: &str) -> String {
 fn push_bitmap_text(
     vertices: &mut Vec<PreviewVertex>,
     text: &str,
-    x: f32,
-    y: f32,
+    origin: [f32; 2],
     pixel: f32,
     color: [f32; 4],
     size: PhysicalSize<u32>,
     max_width: f32,
 ) {
+    let [x, y] = origin;
     let advance = bitmap_char_advance(pixel);
     let mut cursor_x = x;
     for ch in text.chars() {

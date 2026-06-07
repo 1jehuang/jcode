@@ -1,0 +1,328 @@
+use super::{
+    build_resume_command, clear_ambient_info_cache_for_tests, extract_bracketed_system_message,
+    format_countdown_until, gather_ambient_info, inferred_reasoning_efforts,
+    partition_queued_messages, pretty_model_display_name, resume_invocation_args,
+};
+use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
+use crate::terminal_launch::{detected_resume_terminal, shell_command};
+use crate::tui::session_picker::ResumeTarget;
+use chrono::{Duration as ChronoDuration, Utc};
+
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_value(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            crate::env::set_var(self.key, prev);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
+#[test]
+fn extract_bracketed_system_message_strips_wrapper() {
+    let parsed = extract_bracketed_system_message(
+        "[SYSTEM: Your session was interrupted. Continue immediately.]",
+    );
+    assert_eq!(
+        parsed.as_deref(),
+        Some("Your session was interrupted. Continue immediately.")
+    );
+}
+
+#[test]
+fn partition_queued_messages_moves_system_messages_into_reminders() {
+    let (user_messages, reminder, display_system_messages) = partition_queued_messages(
+        vec![
+            "[SYSTEM: Continue where you left off.]".to_string(),
+            "normal user input".to_string(),
+        ],
+        vec!["hidden reminder".to_string()],
+    );
+
+    assert_eq!(user_messages, vec!["normal user input"]);
+    assert_eq!(
+        display_system_messages,
+        vec!["Continue where you left off."]
+    );
+    assert_eq!(
+        reminder.as_deref(),
+        Some("hidden reminder\n\nContinue where you left off.")
+    );
+}
+
+#[test]
+fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
+    assert_eq!(
+        inferred_reasoning_efforts(Some("anthropic"), Some("claude-sonnet-4-6")),
+        vec!["none", "low", "medium", "high"]
+    );
+    assert_eq!(
+        inferred_reasoning_efforts(Some("anthropic"), Some("claude-opus-4-7")),
+        vec!["none", "low", "medium", "high", "xhigh"]
+    );
+    assert_eq!(
+        inferred_reasoning_efforts(Some("openrouter"), Some("anthropic/claude-sonnet-4.6")),
+        vec!["none", "low", "medium", "high", "xhigh"]
+    );
+    assert_eq!(
+        inferred_reasoning_efforts(Some("openrouter"), Some("deepseek/deepseek-r1")),
+        vec!["none", "low", "medium", "high", "xhigh"],
+        "OpenRouter uses unified reasoning where max is only an alias, not a cycle level"
+    );
+    assert_eq!(
+        inferred_reasoning_efforts(Some("deepseek"), Some("deepseek-v4-pro")),
+        vec!["none", "low", "medium", "high", "max"],
+        "DeepSeek direct keeps max as a real provider level"
+    );
+    assert!(inferred_reasoning_efforts(Some("ollama"), Some("llama3")).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn detected_resume_terminal_recognizes_handterm_term_program() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
+    assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_command_quotes_single_quotes_for_handterm_exec() {
+    let command = shell_command(&[
+        "/tmp/jcode binary".to_string(),
+        "--resume".to_string(),
+        "session'quote".to_string(),
+    ]);
+    assert_eq!(
+        command,
+        "'/tmp/jcode binary' '--resume' 'session'\"'\"'quote'"
+    );
+}
+
+#[test]
+fn resume_invocation_args_includes_socket_when_present() {
+    let args = resume_invocation_args("ses_123", Some("/tmp/jcode-test.sock"));
+    assert_eq!(
+        args,
+        vec![
+            "--fresh-spawn".to_string(),
+            "--resume".to_string(),
+            "ses_123".to_string(),
+            "--socket".to_string(),
+            "/tmp/jcode-test.sock".to_string()
+        ]
+    );
+}
+
+#[test]
+fn resume_invocation_args_omits_blank_socket() {
+    let args = resume_invocation_args("ses_123", Some("   "));
+    assert_eq!(
+        args,
+        vec![
+            "--fresh-spawn".to_string(),
+            "--resume".to_string(),
+            "ses_123".to_string()
+        ]
+    );
+}
+
+#[test]
+fn build_resume_command_uses_imported_jcode_session_for_claude_code() {
+    let (program, args, title) = build_resume_command(
+        &ResumeTarget::ClaudeCodeSession {
+            session_id: "claude-session-123".to_string(),
+            session_path: "/tmp/claude-session-123.jsonl".to_string(),
+        },
+        None,
+    );
+
+    assert_eq!(
+        program.file_name().and_then(|name| name.to_str()),
+        Some("jcode")
+    );
+    assert_eq!(
+        args,
+        vec![
+            "--fresh-spawn".to_string(),
+            "--resume".to_string(),
+            crate::import::imported_claude_code_session_id("claude-session-123")
+        ]
+    );
+    assert!(title.contains("Claude Code"));
+    assert!(title.contains("claude-s"));
+}
+
+#[test]
+fn build_resume_command_uses_imported_jcode_session_for_codex() {
+    let (program, args, title) = build_resume_command(
+        &ResumeTarget::CodexSession {
+            session_id: "codex-session-123".to_string(),
+            session_path: "/tmp/codex-session-123.jsonl".to_string(),
+        },
+        None,
+    );
+
+    assert_eq!(
+        program.file_name().and_then(|name| name.to_str()),
+        Some("jcode")
+    );
+    assert_eq!(
+        args,
+        vec![
+            "--fresh-spawn".to_string(),
+            "--resume".to_string(),
+            crate::import::imported_codex_session_id("codex-session-123")
+        ]
+    );
+    assert!(title.contains("Codex"));
+}
+
+#[test]
+fn format_countdown_until_handles_subminute_and_minutes() {
+    let soon = Utc::now() + ChronoDuration::seconds(25);
+    let medium = Utc::now() + ChronoDuration::minutes(2) + ChronoDuration::seconds(15);
+
+    let soon_text = format_countdown_until(soon);
+    let medium_text = format_countdown_until(medium);
+
+    assert!(soon_text.starts_with("in "));
+    assert!(soon_text.ends_with('s'));
+    assert!(medium_text.starts_with("in 2m"));
+}
+
+#[test]
+fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("ambient manager");
+    let first_due = Utc::now() + ChronoDuration::minutes(5);
+    let second_due = Utc::now() + ChronoDuration::minutes(10);
+
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: None,
+            wake_at: Some(first_due),
+            context: "ambient context".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "ambient".to_string(),
+            working_dir: None,
+            task_description: Some("ambient work".to_string()),
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule ambient item");
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: None,
+            wake_at: Some(first_due),
+            context: "first context".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "session_1".to_string(),
+            },
+            created_by_session: "session_1".to_string(),
+            working_dir: None,
+            task_description: Some("first reminder".to_string()),
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule first reminder");
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: None,
+            wake_at: Some(second_due),
+            context: "second context".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "session_1".to_string(),
+            },
+            created_by_session: "session_1".to_string(),
+            working_dir: None,
+            task_description: Some("second reminder".to_string()),
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule second reminder");
+
+    clear_ambient_info_cache_for_tests();
+    let info = (0..20)
+        .find_map(|_| {
+            let info = gather_ambient_info(false);
+            if info.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            info
+        })
+        .expect("ambient info");
+    assert!(info.show_widget);
+    assert_eq!(info.queue_count, 3);
+    assert_eq!(info.reminder_count, 2);
+    assert_eq!(
+        info.next_reminder_preview.as_deref(),
+        Some("first reminder")
+    );
+    assert!(
+        info.next_reminder_wake
+            .as_deref()
+            .is_some_and(|text| text.starts_with("in 4m") || text.starts_with("in 5m"))
+    );
+}
+
+#[test]
+fn pretty_model_display_name_formats_common_models() {
+    assert_eq!(pretty_model_display_name("gpt-5.5"), "GPT-5.5");
+    assert_eq!(pretty_model_display_name("gpt-5.1-codex"), "GPT-5.1-codex");
+    assert_eq!(
+        pretty_model_display_name("claude-opus-4-8"),
+        "Claude Opus 4.8"
+    );
+    assert_eq!(
+        pretty_model_display_name("claude-sonnet-4-5"),
+        "Claude Sonnet 4.5"
+    );
+    assert_eq!(
+        pretty_model_display_name("claude-opus-4-8[1m]"),
+        "Claude Opus 4.8 (1M)"
+    );
+    assert_eq!(
+        pretty_model_display_name("gemini-2.5-pro"),
+        "Gemini 2.5 Pro"
+    );
+}
+
+#[test]
+fn pretty_model_display_name_handles_empty_and_unknown() {
+    assert_eq!(pretty_model_display_name(""), "your default model");
+    assert_eq!(pretty_model_display_name("   "), "your default model");
+    // Unknown shapes fall back to a title-cased dashed rendering.
+    assert_eq!(
+        pretty_model_display_name("some-new-model"),
+        "Some New Model"
+    );
+}

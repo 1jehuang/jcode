@@ -2,6 +2,7 @@
   "name": "jcode-telemetry",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "npx wrangler dev",
     "deploy": "npx wrangler deploy",
@@ -14,7 +15,12 @@
     "migrate:dashboard-indexes": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0007_dashboard_indexes.sql",
     "migrate:agent-time": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0008_agent_time_and_churn.sql",
     "migrate:feedback-text": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0009_feedback_text.sql",
-    "health": "npx wrangler d1 execute jcode-telemetry --remote --file=health.sql"
+    "migrate:daily-active": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0010_daily_active_users.sql",
+    "migrate:daily-active-backfill": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0011_backfill_daily_active_recent.sql",
+    "migrate:daily-active-ci": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0012_daily_active_ci_flag.sql",
+    "health": "npx wrangler d1 execute jcode-telemetry --remote --file=health.sql",
+    "dau": "npx wrangler d1 execute jcode-telemetry --remote --file=dau.sql",
+    "users": "npx wrangler d1 execute jcode-telemetry --remote --file=users.sql"
   },
   "devDependencies": {
     "wrangler": "^4"

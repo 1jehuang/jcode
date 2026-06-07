@@ -215,3 +215,40 @@ fn test_prose_before_line_oriented_tool_transcript_gets_blank_line() {
         "expected separator line to be blank: {rendered:?}"
     );
 }
+
+#[test]
+fn wrap_keeps_word_intact_across_span_boundary() {
+    // Regression: a word split across multiple styled spans (e.g. smart-quote
+    // tokenization turning "there's" into "there" + "’" + "s") must not be
+    // broken mid-word at the span boundary when wrapping left-aligned text.
+    use ratatui::style::{Color, Style};
+    let spans = vec![
+        Span::styled("or if there".to_string(), Style::default()),
+        Span::styled("\u{2019}".to_string(), Style::default().fg(Color::Red)),
+        Span::styled("s something about the".to_string(), Style::default()),
+    ];
+    let line = Line::from(spans); // left aligned (default)
+    let wrapped = wrap_line(line, 13);
+    let rendered: Vec<String> = wrapped.iter().map(line_to_string).collect();
+
+    // "there’s" must appear intact on a single rendered line.
+    assert!(
+        rendered.iter().any(|l| l.contains("there\u{2019}s")),
+        "expected word to stay intact, got {rendered:?}"
+    );
+    // No line may end with the apostrophe while the next starts with the rest.
+    for (i, l) in rendered.iter().enumerate() {
+        if l.trim_end().ends_with('\u{2019}')
+            && let Some(next) = rendered.get(i + 1)
+        {
+            assert!(
+                !next.trim_start().starts_with('s'),
+                "word 'there\u{2019}s' was split across lines: {rendered:?}"
+            );
+        }
+    }
+    // Each rendered line must respect the width budget.
+    for l in &rendered {
+        assert!(l.width() <= 13, "line exceeds width: {l:?} in {rendered:?}");
+    }
+}

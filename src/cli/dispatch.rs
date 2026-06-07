@@ -1,12 +1,14 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use anyhow::Result;
+use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
 
 use super::args::{
-    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand, ProviderCommand,
-    RestartCommand, SessionCommand, TranscriptModeArg,
+    AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
+    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
+    TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -14,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    commands, debug, hot_exec, login, output, provider_init, selfdev, terminal, tui_launch,
+    acp, commands, debug, hot_exec, login, output, provider_init, selfdev, terminal, tui_launch,
 };
 use provider_init::ProviderChoice;
 
@@ -31,6 +33,26 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
         args.provider = ProviderChoice::OpenaiCompatible;
+    }
+
+    if let Some(tool_profile) = args.tool_profile.as_deref() {
+        crate::env::set_var("JCODE_TOOL_PROFILE", tool_profile);
+    }
+    if let Some(tools) = args.tools.as_deref() {
+        crate::env::set_var("JCODE_TOOLS", tools);
+    }
+    if let Some(disabled_tools) = args.disabled_tools.as_deref() {
+        crate::env::set_var("JCODE_DISABLED_TOOLS", disabled_tools);
+    }
+    if args.disable_base_tools {
+        crate::env::set_var("JCODE_DISABLE_BASE_TOOLS", "1");
+    }
+    if args.tool_profile.is_some()
+        || args.tools.is_some()
+        || args.disabled_tools.is_some()
+        || args.disable_base_tools
+    {
+        crate::config::invalidate_config_cache();
     }
 
     match args.command {
@@ -59,9 +81,26 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             ));
             server.run().await?;
         }
+        Some(Command::Acp) => {
+            acp::run_acp_command(
+                args.provider,
+                args.model.clone(),
+                args.provider_profile.clone(),
+                args.tool_profile.is_some(),
+            )
+            .await?;
+        }
         Some(Command::Connect) => {
             tui_launch::run_client().await?;
         }
+        Some(Command::Server { action }) => match action {
+            ServerCommand::Reload { force, json } => {
+                commands::run_server_reload_command(force, json).await?;
+            }
+            ServerCommand::Stop { force, json } => {
+                commands::run_server_stop_command(force, json).await?;
+            }
+        },
         Some(Command::Run {
             message,
             json,
@@ -78,6 +117,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             .await?;
         }
         Some(Command::Login {
+            provider: login_provider,
             account,
             no_browser,
             print_auth_url,
@@ -92,7 +132,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             api_key_env,
         }) => {
             login::run_login(
-                &args.provider,
+                &login_provider.unwrap_or(args.provider),
                 account.as_deref(),
                 login::LoginOptions {
                     no_browser,
@@ -217,6 +257,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }
+        Some(Command::Cloud(subcmd)) => {
+            commands::run_cloud_command(map_cloud_subcommand(subcmd))?;
+        }
         Some(Command::Pair { list, revoke }) => {
             commands::run_pair_command(list, revoke)?;
         }
@@ -286,6 +329,52 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     .await?;
             }
         },
+        Some(Command::ProviderTestCoverage {
+            provider_query,
+            model_query,
+            coverage_file,
+            coverage_limit,
+        }) => {
+            let coverage_path = coverage_file.as_deref().map(std::path::Path::new);
+            let colorize = std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none()
+                && std::env::var_os("JCODE_NO_COLOR").is_none();
+            if let Some(provider) = provider_query {
+                let model = model_query
+                    .or_else(|| args.model.clone())
+                    .unwrap_or_else(|| "*".to_string());
+                let report = crate::live_tests::format_provider_test_coverage_report(
+                    &provider,
+                    &model,
+                    coverage_path,
+                );
+                print_provider_test_coverage_report(&report, colorize);
+            } else {
+                let (coverage, path) = crate::live_tests::load_coverage(coverage_path)?;
+                let summary = crate::live_tests::strict_live_provider_model_coverage_summary(
+                    &coverage,
+                    path.display().to_string(),
+                );
+                let report = crate::live_tests::format_strict_live_provider_model_coverage_summary(
+                    &summary,
+                    coverage_limit,
+                );
+                print_provider_test_coverage_report(&report, colorize);
+            }
+        }
+        Some(Command::ProviderDoctor {
+            provider,
+            tier,
+            json,
+        }) => {
+            crate::cli::provider_doctor::run_provider_doctor_command(
+                &provider,
+                args.model.as_deref(),
+                &tier,
+                json,
+            )
+            .await?;
+        }
         Some(Command::AuthTest {
             login,
             all_configured,
@@ -294,19 +383,40 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             prompt,
             json,
             output,
+            coverage,
+            context_audit,
+            coverage_file,
+            coverage_limit,
         }) => {
-            commands::run_auth_test_command(
-                &args.provider,
-                args.model.as_deref(),
-                login,
-                all_configured,
-                no_smoke,
-                no_tool_smoke,
-                prompt.as_deref(),
-                json,
-                output.as_deref(),
-            )
-            .await?;
+            if coverage {
+                commands::run_auth_test_coverage_command(
+                    json,
+                    output.as_deref(),
+                    coverage_file.as_deref(),
+                    coverage_limit,
+                )?;
+            } else if context_audit {
+                commands::run_auth_test_context_audit_command(
+                    &args.provider,
+                    all_configured,
+                    json,
+                    output.as_deref(),
+                )
+                .await?;
+            } else {
+                commands::run_auth_test_command(
+                    &args.provider,
+                    args.model.as_deref(),
+                    login,
+                    all_configured,
+                    no_smoke,
+                    no_tool_smoke,
+                    prompt.as_deref(),
+                    json,
+                    output.as_deref(),
+                )
+                .await?;
+            }
         }
         Some(Command::Restart { action }) => match action {
             RestartCommand::Save { auto_restore } => {
@@ -341,21 +451,69 @@ fn resolve_resume_arg(args: &mut Args) -> Result<()> {
             return tui_launch::list_sessions();
         }
 
-        match resolve_resume_id(resume_id) {
+        let resume_id = resume_id.clone();
+        match resolve_resume_id(&resume_id) {
             Ok(full_id) => {
                 args.resume = Some(full_id);
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
-                if !output::quiet_enabled() {
-                    eprintln!("\nUse `jcode --resume` to list available sessions.");
+                match resume_resolution_failure_action(&resume_id, |key| std::env::var_os(key)) {
+                    // During a reload/update/restart handoff the client re-execs
+                    // itself with `--resume <id>` and `JCODE_RESUMING=1`. In the
+                    // client/server architecture the shared server is the authority
+                    // for session lifecycle, so an id that is not in the local store
+                    // can still be valid server-side. Hard-exiting here dumped the
+                    // user back to a shell with "No session found matching ...",
+                    // making jcode unusable after an auto-update (issue #328).
+                    // Instead, keep the raw id and let the remote connection resolve
+                    // it; if the server cannot find it either, the TUI surfaces a
+                    // recoverable message and falls back to a fresh session rather
+                    // than killing the process.
+                    ResumeResolutionFailureAction::DeferToServer => {
+                        crate::logging::warn(&format!(
+                            "Resume id '{}' not found locally during reload handoff ({}); deferring resolution to the server instead of exiting",
+                            resume_id, e
+                        ));
+                        // Leave args.resume as the raw id for the server to resolve.
+                    }
+                    ResumeResolutionFailureAction::Exit => {
+                        eprintln!("Error: {}", e);
+                        if !output::quiet_enabled() {
+                            eprintln!("\nUse `jcode --resume` to list available sessions.");
+                        }
+                        std::process::exit(1);
+                    }
                 }
-                std::process::exit(1);
             }
         }
     }
 
     Ok(())
+}
+
+/// What to do when a `--resume <id>` cannot be resolved from the local session
+/// store. Extracted as a pure function so the reload-handoff recovery path can
+/// be unit-tested without invoking `std::process::exit` (issue #328).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeResolutionFailureAction {
+    /// Keep the raw id and let the shared server resolve it (reload handoff).
+    DeferToServer,
+    /// No live handoff in progress; the id is genuinely bad, so exit.
+    Exit,
+}
+
+fn resume_resolution_failure_action<F, V>(
+    _resume_id: &str,
+    var_os: F,
+) -> ResumeResolutionFailureAction
+where
+    F: Fn(&str) -> Option<V>,
+{
+    if var_os("JCODE_RESUMING").is_some() {
+        ResumeResolutionFailureAction::DeferToServer
+    } else {
+        ResumeResolutionFailureAction::Exit
+    }
 }
 
 fn resolve_resume_id(resume_id: &str) -> Result<String> {
@@ -401,6 +559,140 @@ fn map_ambient_subcommand(subcmd: AmbientCommand) -> commands::AmbientSubcommand
     }
 }
 
+fn map_cloud_subcommand(subcmd: CloudCommand) -> commands::CloudSubcommand {
+    match subcmd {
+        CloudCommand::Sessions { action } => {
+            commands::CloudSubcommand::Sessions(map_cloud_sessions_subcommand(action))
+        }
+    }
+}
+
+fn map_cloud_sessions_subcommand(
+    action: CloudSessionsCommand,
+) -> commands::CloudSessionsSubcommand {
+    match action {
+        CloudSessionsCommand::Configure {
+            api_base,
+            api_token,
+            api_token_env,
+            api_token_id,
+            user_id,
+            helper,
+            clear,
+        } => commands::CloudSessionsSubcommand::Configure {
+            api_base,
+            api_token,
+            api_token_env,
+            api_token_id,
+            user_id,
+            helper,
+            clear,
+        },
+        CloudSessionsCommand::Status { json } => commands::CloudSessionsSubcommand::Status { json },
+        CloudSessionsCommand::Upload {
+            session_file,
+            raw,
+            jade,
+        } => commands::CloudSessionsSubcommand::Upload {
+            session_file,
+            raw,
+            user_id: jade.user_id,
+            profile: jade.profile,
+            region: jade.region,
+            helper: jade.helper,
+        },
+        CloudSessionsCommand::UploadLatest {
+            sessions_dir,
+            raw,
+            jade,
+        } => commands::CloudSessionsSubcommand::UploadLatest {
+            sessions_dir,
+            raw,
+            user_id: jade.user_id,
+            profile: jade.profile,
+            region: jade.region,
+            helper: jade.helper,
+        },
+        CloudSessionsCommand::Sync {
+            sessions_dir,
+            since_days,
+            all,
+            max,
+            min_interval_mins,
+            raw,
+            dry_run,
+            force,
+            json,
+            jade,
+        } => commands::CloudSessionsSubcommand::Sync {
+            sessions_dir,
+            since_days,
+            all,
+            max,
+            min_interval_mins,
+            raw,
+            dry_run,
+            force,
+            json,
+            user_id: jade.user_id,
+            profile: jade.profile,
+            region: jade.region,
+            helper: jade.helper,
+        },
+        CloudSessionsCommand::List { limit, json, jade } => {
+            commands::CloudSessionsSubcommand::List {
+                limit,
+                json,
+                user_id: jade.user_id,
+                profile: jade.profile,
+                region: jade.region,
+                helper: jade.helper,
+            }
+        }
+        CloudSessionsCommand::Verify { session_id, jade } => {
+            commands::CloudSessionsSubcommand::Verify {
+                session_id,
+                user_id: jade.user_id,
+                profile: jade.profile,
+                region: jade.region,
+                helper: jade.helper,
+            }
+        }
+        CloudSessionsCommand::Dashboard {
+            limit,
+            output,
+            open,
+            with_view,
+            jade,
+        } => commands::CloudSessionsSubcommand::Dashboard {
+            limit,
+            output,
+            open,
+            with_view,
+            user_id: jade.user_id,
+            profile: jade.profile,
+            region: jade.region,
+            helper: jade.helper,
+        },
+        CloudSessionsCommand::View {
+            session_id,
+            format,
+            output,
+            open,
+            jade,
+        } => commands::CloudSessionsSubcommand::View {
+            session_id,
+            format: format.as_arg().to_string(),
+            output,
+            open,
+            user_id: jade.user_id,
+            profile: jade.profile,
+            region: jade.region,
+            helper: jade.helper,
+        },
+    }
+}
+
 fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMode {
     match mode {
         TranscriptModeArg::Insert => crate::protocol::TranscriptMode::Insert,
@@ -416,8 +708,13 @@ async fn run_default_command(args: Args) -> Result<()> {
     let explicit_provider_or_model = args.provider != ProviderChoice::Auto
         || args.model.is_some()
         || args.provider_profile.is_some();
+    let explicit_tool_options = args.tool_profile.is_some()
+        || args.tools.is_some()
+        || args.disabled_tools.is_some()
+        || args.disable_base_tools;
     if args.resume.is_none()
         && !explicit_provider_or_model
+        && !explicit_tool_options
         && commands::maybe_run_pending_restart_restore_on_startup().await?
     {
         return Ok(());
@@ -447,7 +744,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         output::stderr_blank_line();
 
         crate::env::set_var(selfdev::CLIENT_SELFDEV_ENV, "1");
-        crate::process_title::set_initial_title(&args);
+        crate::cli::proctitle::set_initial_title(&args);
     }
 
     startup_profile::mark("client_mode_start");
@@ -484,7 +781,23 @@ async fn run_default_command(args: Args) -> Result<()> {
         ));
     }
 
+    if server_running && explicit_tool_options {
+        output::stderr_info(
+            "Server already running; tool flags only apply when starting a new server. Restart server or edit [tools] in config.toml to change the active toolset.",
+        );
+    }
+
     if !server_running {
+        // No live server and no in-flight reload/resume. If a dead socket was
+        // left behind by a crashed or upgraded daemon, reap it now so the spawn
+        // below binds cleanly instead of wedging the client in a connect-retry
+        // loop against a stale socket (issues #277/#291). This only removes a
+        // socket that has no live listener AND whose daemon lock is free, so it
+        // can never disturb a running server.
+        if server::reap_stale_socket_if_dead(&server::socket_path()).await {
+            output::stderr_info("Removed a stale jcode socket from a previous server.");
+        }
+
         maybe_prompt_server_bootstrap_login(&args.provider).await?;
         spawn_server(
             &args.provider,
@@ -507,6 +820,17 @@ async fn run_default_command(args: Args) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+fn print_provider_test_coverage_report(report: &str, colorize: bool) {
+    if colorize {
+        print!(
+            "{}",
+            crate::live_tests::colorize_provider_test_coverage_output(report)
+        );
+    } else {
+        print!("{}", report);
+    }
 }
 
 pub(crate) async fn server_is_running() -> bool {
@@ -672,26 +996,41 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     provider_choice: &ProviderChoice,
 ) -> Result<()> {
     startup_profile::mark("cred_check_start");
-    let mut cred_state = detect_bootstrap_credentials().await;
+    let cred_state = detect_bootstrap_credentials().await;
     startup_profile::mark("cred_check_done");
 
-    if !cred_state.has_any
-        && auth::AuthStatus::has_any_untrusted_external_auth()
-        && *provider_choice == ProviderChoice::Auto
-    {
-        let _ = provider_init::maybe_run_external_auth_auto_import_flow().await?;
-        cred_state = detect_bootstrap_credentials().await;
+    // Onboarding now happens entirely inside the TUI. We deliberately do *not*
+    // run the blocking CLI "Approve sources" import prompt or the
+    // "Choose a provider" selection menu here: a brand-new user launches
+    // straight into the TUI, which detects the missing credentials and walks
+    // them through login / external-auth import / model selection in the guided
+    // first-run flow. The server is happy to spawn unauthenticated and the TUI
+    // drives `/login` from there.
+    //
+    // The only thing left to honor at the CLI layer is an explicit headless
+    // bootstrap (e.g. CI / non-interactive provisioning), which opts in via the
+    // `JCODE_CLI_BOOTSTRAP_LOGIN` env var.
+    if cred_state.has_any || *provider_choice != ProviderChoice::Auto {
+        return Ok(());
+    }
+    if std::env::var_os("JCODE_CLI_BOOTSTRAP_LOGIN").is_none() {
+        return Ok(());
     }
 
-    if !cred_state.has_any && *provider_choice == ProviderChoice::Auto {
-        let provider = provider_init::prompt_login_provider_selection(
-            &provider_catalog::server_bootstrap_login_providers(),
-            "No credentials found. Let's log in!\n\nChoose a provider:",
-        )?;
-        login::run_login_provider(provider, None, login::LoginOptions::default()).await?;
-        provider_init::apply_login_provider_profile_env(provider);
-        output::stderr_blank_line();
+    if auth::AuthStatus::has_any_untrusted_external_auth() {
+        let _ = provider_init::maybe_run_external_auth_auto_import_flow().await?;
+        if detect_bootstrap_credentials().await.has_any {
+            return Ok(());
+        }
     }
+
+    let provider = provider_init::prompt_login_provider_selection(
+        &provider_catalog::server_bootstrap_login_providers(),
+        "No credentials found. Let's log in!\n\nChoose a provider:",
+    )?;
+    login::run_login_provider(provider, None, login::LoginOptions::default()).await?;
+    provider_init::apply_login_provider_profile_env(provider);
+    output::stderr_blank_line();
 
     Ok(())
 }
@@ -758,6 +1097,11 @@ pub(crate) async fn spawn_server(
         cmd.env("JCODE_DEBUG_CONTROL", "1");
     }
     cmd.arg("--provider").arg(provider_choice.as_arg_value());
+    // The interactive TUI owns first-run onboarding/login. Let the spawned
+    // server boot with a deferred (credential-less) provider when nothing is
+    // configured yet, instead of bailing; the TUI activates a provider via the
+    // in-TUI `/login` flow. See init_provider_with_options.
+    cmd.env("JCODE_DEFERRED_AUTH_BOOTSTRAP", "1");
     if let Some(provider_profile) = provider_profile {
         cmd.arg("--provider-profile").arg(provider_profile);
     }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::panic;
 
 use crate::{id, session, telemetry, tui};
@@ -8,6 +8,66 @@ pub struct TuiRuntimeState {
     mouse_capture: bool,
     keyboard_enhanced: bool,
     focus_change: bool,
+}
+
+/// RAII guard that guarantees the terminal is restored to a sane state when the
+/// TUI runtime ends, even if the run loop returns an error or unwinds via panic.
+///
+/// Without this guard, an error propagated by `?` (e.g. an I/O error from a
+/// `terminal.draw` call, or any other fallible step in the event loop) would
+/// skip the explicit `cleanup_tui_runtime` call and leave the terminal in raw
+/// mode / alternate screen. That manifests as a corrupted terminal after exit:
+/// typed input is invisible because echo and cooked mode were never restored
+/// (see issue #214).
+///
+/// The normal teardown path should call [`TuiRuntimeGuard::finish`] (or
+/// [`TuiRuntimeGuard::finish_for_run_result`]) which performs the restore and
+/// disarms the guard. If neither is called (error/panic path), `Drop` performs
+/// a best-effort full restore.
+pub struct TuiRuntimeGuard {
+    state: TuiRuntimeState,
+    armed: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Counts how many times the guard's `Drop` performed an emergency restore.
+    /// Used by tests to verify the error/panic safety net fires exactly once.
+    static GUARD_DROP_RESTORES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+impl TuiRuntimeGuard {
+    fn new(state: TuiRuntimeState) -> Self {
+        Self { state, armed: true }
+    }
+
+    /// Normal teardown for the simple case: restore the terminal and disarm.
+    pub fn finish(mut self, restore_terminal: bool) {
+        cleanup_tui_runtime(&self.state, restore_terminal);
+        self.armed = false;
+    }
+
+    /// Normal teardown for the interactive client: restore unless we are about
+    /// to exec a follow-up process (reload/rebuild/update), in which case the
+    /// next process inherits the terminal modes.
+    pub fn finish_for_run_result(mut self, run_result: &crate::tui::RunResult, extra_exec: bool) {
+        cleanup_tui_runtime_for_run_result(&self.state, run_result, extra_exec);
+        self.armed = false;
+    }
+}
+
+impl Drop for TuiRuntimeGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Reached only on an error/panic path that skipped explicit
+            // teardown. Always perform a full restore so the user's terminal is
+            // not left corrupted.
+            cleanup_tui_runtime(&self.state, true);
+            self.armed = false;
+            #[cfg(test)]
+            GUARD_DROP_RESTORES.with(|c| c.set(c.get() + 1));
+        }
+    }
 }
 
 pub fn set_current_session(session_id: &str) {
@@ -105,7 +165,7 @@ fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
     }
 }
 
-pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)> {
+pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeGuard)> {
     let terminal = init_tui_terminal()?;
     crate::tui::mermaid::install_jcode_mermaid_hooks();
     crate::tui::markdown::install_jcode_markdown_hooks();
@@ -130,15 +190,15 @@ pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)>
 
     Ok((
         terminal,
-        TuiRuntimeState {
+        TuiRuntimeGuard::new(TuiRuntimeState {
             mouse_capture,
             keyboard_enhanced,
             focus_change,
-        },
+        }),
     ))
 }
 
-pub fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
+fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
     if restore_terminal {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         if state.focus_change {
@@ -156,7 +216,7 @@ pub fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
     crate::tui::mermaid::clear_image_state();
 }
 
-pub fn cleanup_tui_runtime_for_run_result(
+fn cleanup_tui_runtime_for_run_result(
     state: &TuiRuntimeState,
     run_result: &crate::tui::RunResult,
     extra_exec: bool,
@@ -169,14 +229,20 @@ pub fn cleanup_tui_runtime_for_run_result(
 }
 
 pub fn print_session_resume_hint(session_id: &str) {
+    let _ = write_session_resume_hint(io::stderr().lock(), session_id);
+}
+
+fn write_session_resume_hint(mut writer: impl Write, session_id: &str) -> io::Result<()> {
     let session_name = id::extract_session_name(session_id).unwrap_or(session_id);
-    eprintln!();
-    eprintln!(
+    writeln!(writer)?;
+    writeln!(
+        writer,
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
         session_name
-    );
-    eprintln!("  jcode --resume {}", session_id);
-    eprintln!();
+    )?;
+    writeln!(writer, "  jcode --resume {}", session_id)?;
+    writeln!(writer)?;
+    Ok(())
 }
 
 fn init_tui_terminal_resume() -> Result<ratatui::DefaultTerminal> {
@@ -287,6 +353,44 @@ mod tests {
 
     static TEST_SESSION_LOCK: Mutex<()> = Mutex::new(());
 
+    fn test_guard() -> TuiRuntimeGuard {
+        // All terminal-mode flags disabled so teardown only performs the minimal
+        // (and TTY-safe) restore path during tests.
+        TuiRuntimeGuard::new(TuiRuntimeState {
+            mouse_capture: false,
+            keyboard_enhanced: false,
+            focus_change: false,
+        })
+    }
+
+    #[test]
+    fn guard_drop_restores_terminal_when_not_finished() {
+        // Simulates the error/panic path where explicit teardown is skipped:
+        // the guard must restore the terminal exactly once on drop (issue #214).
+        GUARD_DROP_RESTORES.with(|c| c.set(0));
+        {
+            let _guard = test_guard();
+        }
+        let restores = GUARD_DROP_RESTORES.with(|c| c.get());
+        assert_eq!(
+            restores, 1,
+            "dropping an un-finished guard must restore the terminal once"
+        );
+    }
+
+    #[test]
+    fn guard_finish_disarms_drop_restore() {
+        // The happy path calls finish(); the drop safety net must NOT fire again.
+        GUARD_DROP_RESTORES.with(|c| c.set(0));
+        let guard = test_guard();
+        guard.finish(true);
+        let restores = GUARD_DROP_RESTORES.with(|c| c.get());
+        assert_eq!(
+            restores, 0,
+            "finish() should disarm the guard so drop does not double-restore"
+        );
+    }
+
     #[test]
     fn test_session_recovery_tracking() {
         let _guard = TEST_SESSION_LOCK.lock().unwrap();
@@ -303,11 +407,34 @@ mod tests {
         set_current_session(test_session);
 
         if let Some(session_id) = get_current_session() {
+            let mut output = Vec::new();
+            write_session_resume_hint(&mut output, &session_id).unwrap();
+            let output = String::from_utf8(output).unwrap();
             let expected_cmd = format!("jcode --resume {}", session_id);
-            assert!(expected_cmd.starts_with("jcode --resume "));
+            assert!(output.contains(&expected_cmd));
+            assert!(output.contains("to resume"));
             assert!(!session_id.is_empty());
         } else {
             panic!("Session ID should be set");
         }
+    }
+
+    #[test]
+    fn session_resume_hint_writer_reports_closed_stderr_without_panicking() {
+        struct ClosedWriter;
+
+        impl Write for ClosedWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "stderr closed"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = write_session_resume_hint(ClosedWriter, "session_closed_pipe")
+            .expect_err("closed stderr should be reported as an I/O error");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }

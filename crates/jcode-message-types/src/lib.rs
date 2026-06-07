@@ -8,6 +8,10 @@ pub struct ToolCall {
     pub input: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
+    /// Gemini 3 thought signature attached to this tool call, replayed on
+    /// later turns so the Cloud Code backend accepts the function call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Tool definition advertised to model providers.
@@ -117,10 +121,42 @@ pub enum ContentBlock {
     Reasoning {
         text: String,
     },
+    /// History-only reasoning trace. Captured purely so the model's thinking is
+    /// preserved in the transcript for later recall/debugging. Unlike
+    /// `Reasoning`/`AnthropicThinking`/`OpenAIReasoning`, this block is never
+    /// replayed back to any provider, so it carries no token cost on later turns
+    /// and cannot trigger provider-side "unsigned thinking" rejections.
+    ReasoningTrace {
+        text: String,
+    },
+    /// Anthropic signed thinking content. Anthropic requires the signature when
+    /// replaying thinking blocks in future request context.
+    AnthropicThinking {
+        thinking: String,
+        signature: String,
+    },
+    /// OpenAI Responses reasoning item. When `store=false`, OpenAI returns
+    /// encrypted reasoning content so clients can replay reasoning state in
+    /// future turns by sending the native reasoning item back in `input`.
+    OpenAIReasoning {
+        id: String,
+        summary: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Gemini 3 "thought signature" for this function call. The Antigravity
+        /// / Cloud Code backend requires the original signature to be replayed
+        /// on the matching `functionCall` part in subsequent turns, otherwise it
+        /// rejects the request ("Function call is missing a thought_signature").
+        /// Empty/None for providers that do not use thought signatures.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -458,6 +494,18 @@ impl ToolCall {
         Self::normalize_input_to_object(input.clone())
     }
 
+    pub fn parse_streamed_input_to_object(input: &str) -> serde_json::Value {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => Self::normalize_input_to_object(value),
+            Err(_) => serde_json::Value::Null,
+        }
+    }
+
     pub fn validation_error(&self) -> Option<String> {
         if self.name.trim().is_empty() {
             return Some("Invalid tool call: tool name must not be empty.".to_string());
@@ -554,6 +602,10 @@ pub enum StreamEvent {
     ToolInputDelta(String),
     /// Tool use complete
     ToolUseEnd,
+    /// Gemini 3 thought signature for the most recent tool call. Emitted right
+    /// after the matching `ToolUseStart`/`ToolUseEnd` so the agent loop can
+    /// persist it on the `ToolUse` block and replay it on later turns.
+    ToolUseSignature(String),
     /// Tool result from provider (provider already executed the tool)
     ToolResult {
         tool_use_id: String,
@@ -572,6 +624,15 @@ pub enum StreamEvent {
     ThinkingStart,
     /// Extended thinking delta (reasoning content)
     ThinkingDelta(String),
+    /// Provider signature for the current thinking block.
+    ThinkingSignatureDelta(String),
+    /// Native OpenAI Responses reasoning item for future-turn replay.
+    OpenAIReasoning {
+        id: String,
+        summary: Vec<String>,
+        encrypted_content: Option<String>,
+        status: Option<String>,
+    },
     /// Extended thinking ended
     ThinkingEnd,
     /// Extended thinking completed with duration

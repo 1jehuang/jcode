@@ -1,5 +1,6 @@
 use super::{
     SelfDevBuildCommand, SelfDevBuildTarget, canary_binary_path, current_binary_path,
+    read_current_version, read_shared_server_version, read_stable_version,
     shared_server_binary_path, stable_binary_path,
 };
 use anyhow::Result;
@@ -11,6 +12,13 @@ use std::time::SystemTime;
 
 /// Get the jcode repository directory
 pub fn get_repo_dir() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("JCODE_REPO_DIR") {
+        let path = PathBuf::from(path);
+        if is_jcode_repo(&path) {
+            return Some(path);
+        }
+    }
+
     // First try: compile-time directory
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir);
@@ -371,10 +379,15 @@ pub fn client_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'s
 /// shared server should only run binaries that were explicitly promoted onto the
 /// shared-server channel (or stable as fallback), so local dirty self-dev builds
 /// stop taking out every client by accident.
-pub fn shared_server_update_candidate(
-    _is_selfdev_session: bool,
-) -> Option<(PathBuf, &'static str)> {
-    if let Some(shared_server) = existing_binary(shared_server_binary_path(), "shared-server") {
+pub fn shared_server_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'static str)> {
+    let shared_server = existing_binary(shared_server_binary_path(), "shared-server");
+    if is_selfdev_session {
+        if let Some(shared_server) = shared_server {
+            return Some(shared_server);
+        }
+    } else if let Some(shared_server) = shared_server
+        && shared_server_channel_is_current_enough()
+    {
         return Some(shared_server);
     }
 
@@ -383,6 +396,71 @@ pub fn shared_server_update_candidate(
     }
 
     std::env::current_exe().ok().map(|exe| (exe, "current"))
+}
+
+fn shared_server_channel_is_current_enough() -> bool {
+    let shared = read_shared_server_version().ok().flatten();
+    let Some(shared) = shared
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    let stable = read_stable_version().ok().flatten();
+    if stable
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|stable| stable == shared)
+    {
+        return true;
+    }
+
+    let current = read_current_version().ok().flatten();
+    current
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|current| current == shared)
+}
+
+fn normalize_version_marker(value: &str) -> String {
+    let value = value.trim();
+    let value = value.strip_prefix('v').unwrap_or(value);
+    value
+        .split([' ', '(', ')'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+pub fn version_matches_installed_channel(version: &str, git_hash: &str) -> bool {
+    let version = normalize_version_marker(version);
+    let git_hash = git_hash.trim();
+    let mut saw_marker = false;
+    for marker in [read_stable_version(), read_current_version()] {
+        let Some(marker) = marker.ok().flatten() else {
+            continue;
+        };
+        let marker_trimmed = marker.trim();
+        if marker_trimmed.is_empty() {
+            continue;
+        }
+        saw_marker = true;
+        if normalize_version_marker(marker_trimmed) == version {
+            return true;
+        }
+        if !git_hash.is_empty()
+            && git_hash != "unknown"
+            && (marker_trimmed == git_hash || marker_trimmed.starts_with(git_hash))
+        {
+            return true;
+        }
+    }
+    !saw_marker
 }
 
 /// Resolve the best binary to use for `/reload`.

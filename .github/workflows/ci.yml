@@ -157,25 +157,27 @@ jobs:
           if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
             export RUSTC_WRAPPER=sccache
           fi
-          cargo build --release --target ${{ matrix.target }}
+          export RUSTC="$(rustup which rustc)"
+          CARGO_BIN="$(rustup which cargo)"
+          "$CARGO_BIN" build --release --target ${{ matrix.target }}
 
       - name: Compile library and binary tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            cargo test --target ${{ matrix.target }} --lib --bins --no-run
+            "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
 
       - name: Run provider matrix tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            cargo test --target ${{ matrix.target }} --test provider_matrix
+            "$(rustup which cargo)" test --target ${{ matrix.target }} --test provider_matrix
 
       - name: Run e2e tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            cargo test --target ${{ matrix.target }} --test e2e
+            "$(rustup which cargo)" test --target ${{ matrix.target }} --test e2e
 
       - name: Check PowerShell script syntax (Windows)
         if: runner.os == 'Windows'

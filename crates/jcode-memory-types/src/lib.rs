@@ -273,12 +273,18 @@ fn default_active() -> bool {
     true
 }
 
+fn new_memory_id() -> String {
+    let ts = Utc::now().timestamp_millis();
+    let rand: u64 = rand::random();
+    format!("mem_{ts}_{rand}")
+}
+
 impl MemoryEntry {
     pub fn new(category: MemoryCategory, content: impl Into<String>) -> Self {
         let now = Utc::now();
         let content = content.into();
         Self {
-            id: jcode_core::id::new_id("mem"),
+            id: new_memory_id(),
             category,
             search_text: normalize_memory_search_text(&content, &[]),
             content,

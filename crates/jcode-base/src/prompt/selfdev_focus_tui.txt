@@ -1,0 +1,3 @@
+## Product Focus
+
+This self-dev session was launched from the TUI/root jcode context. By default, assume the user is asking about the TUI/CLI agent unless they explicitly mention the desktop app. Prefer TUI targets and commands (`selfdev build target=tui`, package `jcode`, binary `jcode`) for builds, reloads, tests, and code navigation. Do not switch to desktop files, desktop builds, or desktop UI debugging just because the repository contains a desktop crate.

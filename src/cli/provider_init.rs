@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use crate::auth;
@@ -7,26 +7,26 @@ use crate::provider;
 use crate::provider::Provider;
 use crate::provider_catalog::{
     LoginProviderDescriptor, LoginProviderTarget, OpenAiCompatibleProfile,
-    apply_openai_compatible_profile_env, is_safe_env_file_name, is_safe_env_key_name,
-    resolve_login_selection, resolve_openai_compatible_profile,
+    apply_openai_compatible_profile_env, force_apply_openai_compatible_profile_env,
+    is_safe_env_file_name, is_safe_env_key_name, resolve_login_selection,
+    resolve_openai_compatible_profile,
 };
 use crate::tool;
 
 use super::login::run_login_provider;
 use super::output;
 
-mod external_auth;
-use external_auth::*;
-pub(crate) use external_auth::{
-    ExternalAuthReviewCandidate, format_external_auth_review_candidates_markdown,
-    maybe_run_external_auth_auto_import_flow, parse_external_auth_review_selection,
-    pending_external_auth_review_candidates, run_external_auth_auto_import_candidates,
+pub(crate) use crate::external_auth::maybe_run_external_auth_auto_import_flow;
+use crate::external_auth::{
+    can_prompt_for_external_auth, external_auth_blocked_message, prompt_to_trust_external_auth,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderChoice {
     Jcode,
     Claude,
+    #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
+    AnthropicApi,
     #[deprecated(
         note = "Claude Code CLI subprocess transport is deprecated; use ProviderChoice::Claude for native Anthropic OAuth/API transport"
     )]
@@ -92,6 +92,8 @@ pub enum ProviderChoice {
     Xai,
     #[value(alias = "nvidia", alias = "nim")]
     NvidiaNim,
+    #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
+    XiaomiMimo,
     #[value(alias = "lm-studio")]
     Lmstudio,
     Ollama,
@@ -121,6 +123,7 @@ impl ProviderChoice {
         match self {
             Self::Jcode => "jcode",
             Self::Claude => "claude",
+            Self::AnthropicApi => "anthropic-api",
             Self::ClaudeSubprocess => "claude-subprocess",
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
@@ -152,6 +155,7 @@ impl ProviderChoice {
             Self::Minimax => "minimax",
             Self::Xai => "xai",
             Self::NvidiaNim => "nvidia-nim",
+            Self::XiaomiMimo => "xiaomi-mimo",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
             Self::Chutes => "chutes",
@@ -177,6 +181,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Claude,
         crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::AnthropicApi,
+        crate::provider_catalog::ANTHROPIC_API_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::ClaudeSubprocess,
@@ -301,6 +309,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::NvidiaNim,
         crate::provider_catalog::NVIDIA_NIM_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::XiaomiMimo,
+        crate::provider_catalog::XIAOMI_MIMO_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Lmstudio,
@@ -559,6 +571,36 @@ impl AutoProviderAvailability {
     }
 }
 
+fn maybe_enable_config_default_provider_for_auto() -> Result<bool> {
+    let cfg = crate::config::config();
+    let Some(default_provider) = cfg
+        .provider
+        .default_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+
+    if let Some(profile) =
+        crate::provider_catalog::resolve_openai_compatible_profile_selection(default_provider)
+    {
+        apply_openai_compatible_profile_env(Some(profile));
+        return Ok(provider::openrouter::OpenRouterProvider::has_credentials());
+    }
+
+    if cfg.providers.contains_key(default_provider) {
+        crate::provider_catalog::apply_named_provider_profile_env_from_config(
+            default_provider,
+            cfg,
+        )?;
+        return Ok(provider::openrouter::OpenRouterProvider::has_credentials());
+    }
+
+    Ok(false)
+}
+
 async fn detect_auto_provider_flags() -> AutoProviderAvailability {
     let auth_status = auth::AuthStatus::check_fast();
     AutoProviderAvailability {
@@ -603,6 +645,9 @@ fn provider_login_hint_for_api_key_env(env_key: &str) -> String {
 }
 
 fn ensure_external_api_key_auth_allowed_for_explicit_choice(env_key: &str) -> Result<()> {
+    if direct_api_key_configured_for_env(env_key) {
+        return Ok(());
+    }
     let Some(source) = auth::external::preferred_unconsented_api_key_source_for_env(env_key) else {
         return Ok(());
     };
@@ -626,6 +671,47 @@ fn ensure_external_api_key_auth_allowed_for_explicit_choice(env_key: &str) -> Re
         provider_name,
         login_hint
     )
+}
+
+fn direct_api_key_configured_for_env(env_key: &str) -> bool {
+    let env_key = env_key.trim();
+    if env_key.is_empty() {
+        return false;
+    }
+    if std::env::var(env_key)
+        .ok()
+        .map(|key| !key.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    crate::provider_catalog::openai_compatible_profiles()
+        .iter()
+        .filter_map(|profile| {
+            let resolved = resolve_openai_compatible_profile(*profile);
+            (resolved.api_key_env == env_key).then_some(resolved.env_file)
+        })
+        .any(|env_file| direct_env_file_contains_key(env_key, &env_file))
+}
+
+fn direct_env_file_contains_key(env_key: &str, env_file: &str) -> bool {
+    if !crate::provider_catalog::is_safe_env_file_name(env_file) {
+        return false;
+    }
+    let Some(config_dir) = crate::storage::app_config_dir().ok() else {
+        return false;
+    };
+    let path = config_dir.join(env_file);
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let prefix = format!("{}=", env_key);
+    content.lines().any(|line| {
+        line.strip_prefix(&prefix)
+            .map(|key| !key.trim().trim_matches('"').trim_matches('\'').is_empty())
+            .unwrap_or(false)
+    })
 }
 
 fn maybe_enable_external_api_key_auth_for_auto(has_other_provider: bool) -> Result<bool> {
@@ -862,6 +948,12 @@ fn maybe_enable_claude_auth_for_auto(has_other_provider: bool) -> Result<bool> {
 }
 
 fn ensure_gemini_auth_allowed_for_explicit_choice() -> Result<()> {
+    // An official Gemini Developer API key (GEMINI_API_KEY) authenticates
+    // directly against generativelanguage.googleapis.com and needs no OAuth
+    // consent flow, so allow it without further prompting.
+    if auth::gemini::has_api_key() {
+        return Ok(());
+    }
     if auth::gemini::load_tokens().is_ok() {
         return Ok(());
     }
@@ -898,6 +990,10 @@ fn ensure_gemini_auth_allowed_for_explicit_choice() -> Result<()> {
 }
 
 fn maybe_enable_gemini_auth_for_auto(has_other_provider: bool) -> Result<bool> {
+    // A configured Gemini Developer API key is sufficient on its own.
+    if auth::gemini::has_api_key() {
+        return Ok(true);
+    }
     if auth::gemini::load_tokens().is_ok() {
         return Ok(true);
     }
@@ -1072,9 +1168,31 @@ fn disable_subscription_runtime_mode() {
     crate::subscription_catalog::clear_runtime_env();
 }
 
+fn disable_subscription_runtime_mode_preserving_active_provider_profile() {
+    if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some()
+        || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
+    {
+        crate::env::remove_var(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
+    } else {
+        disable_subscription_runtime_mode();
+    }
+}
+
 pub fn apply_login_provider_profile_env(provider: LoginProviderDescriptor) {
-    if let LoginProviderTarget::OpenAiCompatible(profile) = provider.target {
-        apply_openai_compatible_profile_env(Some(profile));
+    match provider.target {
+        LoginProviderTarget::OpenAiCompatible(profile) => {
+            force_apply_openai_compatible_profile_env(Some(profile));
+            // Bootstrap login still spawns the daemon with `--provider auto`. Mark the
+            // just-selected compatible provider as active so the child process does
+            // not clear these inherited runtime vars before credential detection.
+            crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+        }
+        LoginProviderTarget::AutoImport | LoginProviderTarget::Google => {}
+        _ => {
+            // A later non-compatible login selection must not inherit a stale
+            // compatible-provider profile from an earlier bootstrap/login path.
+            force_apply_openai_compatible_profile_env(None);
+        }
     }
 }
 
@@ -1100,7 +1218,7 @@ pub async fn login_and_bootstrap_provider(
             Arc::new(provider::MultiProvider::new())
         }
         LoginProviderTarget::Jcode => Arc::new(provider::jcode::JcodeProvider::new()),
-        LoginProviderTarget::Claude => {
+        LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => {
             disable_subscription_runtime_mode();
             Arc::new(provider::MultiProvider::new())
         }
@@ -1253,6 +1371,13 @@ async fn init_provider_with_options(
             lock_model_provider("claude");
             Arc::new(provider::MultiProvider::with_preference_fast(false))
         }
+        ProviderChoice::AnthropicApi => {
+            disable_subscription_runtime_mode();
+            ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")?;
+            init_notice("Using Anthropic API key provider (provider locked)");
+            lock_model_provider("claude");
+            Arc::new(provider::MultiProvider::with_preference_fast(false))
+        }
         ProviderChoice::ClaudeSubprocess => {
             disable_subscription_runtime_mode();
             ensure_claude_auth_allowed_for_explicit_choice()?;
@@ -1298,7 +1423,13 @@ async fn init_provider_with_options(
         ProviderChoice::Gemini => {
             disable_subscription_runtime_mode();
             ensure_gemini_auth_allowed_for_explicit_choice()?;
-            init_notice("Using Gemini provider (native Google Code Assist OAuth)");
+            if auth::gemini::has_api_key() {
+                init_notice(
+                    "Using Gemini provider (official Gemini Developer API key, generativelanguage.googleapis.com)",
+                );
+            } else {
+                init_notice("Using Gemini provider (native Google Code Assist OAuth)");
+            }
             unlock_model_provider();
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "gemini");
             Arc::new(provider::gemini::GeminiProvider::new())
@@ -1351,6 +1482,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Minimax
         | ProviderChoice::Xai
         | ProviderChoice::NvidiaNim
+        | ProviderChoice::XiaomiMimo
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
         | ProviderChoice::Chutes
@@ -1360,10 +1492,12 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             let profile = profile_for_choice(choice)
                 .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
-            if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
-                && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
-            {
-                apply_openai_compatible_profile_env(Some(profile));
+            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none() {
+                // An explicit `--provider <compatible>` selection should win over
+                // any stale active-profile marker inherited from a previous
+                // bootstrap/login flow. Named provider profiles still take
+                // precedence when explicitly configured.
+                force_apply_openai_compatible_profile_env(Some(profile));
             }
             let mut runtime_model_hint = None;
             let display_name = if let Ok(named) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
@@ -1386,9 +1520,7 @@ async fn init_provider_with_options(
                 display_name
             ));
             crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
-            if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some()
-                || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
-            {
+            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
                 let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")?;
                 let cfg = crate::config::config();
                 let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
@@ -1417,12 +1549,14 @@ async fn init_provider_with_options(
             init_notice(
                 "Note: Google/Gmail is not a model provider. Using auto-detect for model provider.",
             );
-            init_notice("Gmail tool is available if you've run `jcode login google`.");
+            init_notice(
+                "Gmail credentials can be configured with `jcode login google`; the gmail tool is disabled by default for privacy.",
+            );
             unlock_model_provider();
             Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Auto => {
-            disable_subscription_runtime_mode();
+            disable_subscription_runtime_mode_preserving_active_provider_profile();
             unlock_model_provider();
             let auto_detect_start = std::time::Instant::now();
             let mut availability = detect_auto_provider_flags().await;
@@ -1507,6 +1641,10 @@ async fn init_provider_with_options(
                         maybe_enable_cursor_auth_for_auto(has_other_provider && !has_cursor)?;
                 }
 
+                if !has_openrouter {
+                    has_openrouter = maybe_enable_config_default_provider_for_auto()?;
+                }
+
                 has_other_provider = has_openai
                     || has_claude
                     || has_copilot
@@ -1555,23 +1693,37 @@ async fn init_provider_with_options(
                 Arc::new(multi)
             } else {
                 let non_interactive = std::env::var("JCODE_NON_INTERACTIVE").is_ok();
-                if non_interactive {
+                // Deferred-auth bootstrap: the interactive TUI server is spawned
+                // headless (JCODE_NON_INTERACTIVE) but the user logs in *inside*
+                // the TUI on a fresh install. Rather than bail, boot an empty
+                // MultiProvider with no configured credentials yet. The TUI's
+                // `/login` flow then activates a provider via the normal
+                // auth-changed path (MultiProvider::on_auth_changed hot-inits the
+                // newly logged-in provider). Only the actual TUI server opts in
+                // via JCODE_DEFERRED_AUTH_BOOTSTRAP, so `jcode run` and other
+                // genuinely headless callers still fail loudly.
+                if std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_some() {
+                    crate::logging::info(
+                        "No credentials configured; booting deferred-auth MultiProvider for in-TUI onboarding login",
+                    );
+                    let multi = provider::MultiProvider::from_auth_status(availability.auth_status);
+                    crate::env::set_var("JCODE_ACTIVE_PROVIDER", multi.name().to_lowercase());
+                    Arc::new(multi)
+                } else if non_interactive {
                     anyhow::bail!(
                         "No credentials configured. Run 'jcode login' or set ANTHROPIC_API_KEY to authenticate."
                     );
-                }
-
-                if !allow_login_bootstrap {
+                } else if !allow_login_bootstrap {
                     anyhow::bail!(
                         "No credentials configured for provider auto-detection; automatic login/bootstrap is disabled during validation."
                     );
+                } else {
+                    let provider_desc = prompt_login_provider_selection(
+                        &crate::provider_catalog::auto_init_login_providers(),
+                        "No credentials found. Let's log in!\n\nChoose a provider:",
+                    )?;
+                    Box::pin(login_and_bootstrap_provider(provider_desc, None)).await?
                 }
-
-                let provider_desc = prompt_login_provider_selection(
-                    &crate::provider_catalog::auto_init_login_providers(),
-                    "No credentials found. Let's log in!\n\nChoose a provider:",
-                )?;
-                Box::pin(login_and_bootstrap_provider(provider_desc, None)).await?
             }
         }
     };

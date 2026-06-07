@@ -103,48 +103,58 @@ pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Ve
         }
     }
 
-    // Render each row
+    // Render each row. Cells that exceed their allocated column width are
+    // wrapped into multiple physical lines instead of being truncated, so table
+    // output remains bounded to the terminal width without hiding content.
     for (row_idx, row) in rows.iter().enumerate() {
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let wrapped_cells: Vec<Vec<String>> = row
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                let col_width = col_widths
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| UnicodeWidthStr::width(cell.as_str()));
+                wrap_table_cell(cell, col_width)
+            })
+            .collect();
+        let physical_rows = wrapped_cells
+            .iter()
+            .map(|cell_lines| cell_lines.len())
+            .max()
+            .unwrap_or(1);
 
-        for (i, cell) in row.iter().enumerate() {
-            let display_width = UnicodeWidthStr::width(cell.as_str());
-            let col_width = col_widths.get(i).copied().unwrap_or(display_width);
+        for physical_idx in 0..physical_rows {
+            let mut spans: Vec<Span<'static>> = Vec::new();
 
-            let display_text = if display_width > col_width {
-                let mut truncated = String::new();
-                let mut w = 0;
-                for ch in cell.chars() {
-                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if w + cw + 1 > col_width {
-                        break;
-                    }
-                    truncated.push(ch);
-                    w += cw;
+            for (i, cell_lines) in wrapped_cells.iter().enumerate() {
+                let display_text = cell_lines
+                    .get(physical_idx)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let col_width = col_widths
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| UnicodeWidthStr::width(display_text));
+                let text_width = UnicodeWidthStr::width(display_text);
+                let pad = col_width.saturating_sub(text_width);
+                let padded = format!("{}{}", display_text, " ".repeat(pad));
+
+                // Header row gets bold styling
+                let style = if row_idx == 0 {
+                    Style::default().fg(bold_color()).bold()
+                } else {
+                    Style::default().fg(text_color())
+                };
+
+                if i > 0 {
+                    spans.push(Span::styled(" │ ", Style::default().fg(table_color())));
                 }
-                truncated.push('…');
-                truncated
-            } else {
-                cell.clone()
-            };
-            let text_width = UnicodeWidthStr::width(display_text.as_str());
-            let pad = col_width.saturating_sub(text_width);
-            let padded = format!("{}{}", display_text, " ".repeat(pad));
-
-            // Header row gets bold styling
-            let style = if row_idx == 0 {
-                Style::default().fg(bold_color()).bold()
-            } else {
-                Style::default().fg(text_color())
-            };
-
-            if i > 0 {
-                spans.push(Span::styled(" │ ", Style::default().fg(table_color())));
+                spans.push(Span::styled(padded, style));
             }
-            spans.push(Span::styled(padded, style));
-        }
 
-        lines.push(Line::from(spans).left_aligned());
+            lines.push(Line::from(spans).left_aligned());
+        }
 
         // Add separator after header row
         if row_idx == 0 {
@@ -161,6 +171,75 @@ pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Ve
     }
 
     lines
+}
+
+fn wrap_table_cell(cell: &str, width: usize) -> Vec<String> {
+    if width == 0 || cell.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for word in cell.split(' ') {
+        let word_width = UnicodeWidthStr::width(word);
+        let space_width = usize::from(!current.is_empty());
+
+        if !current.is_empty() && current_width + space_width + word_width <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_width += space_width + word_width;
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+
+        if word_width <= width {
+            current.push_str(word);
+            current_width = word_width;
+        } else {
+            for chunk in wrap_long_table_word(word, width) {
+                if UnicodeWidthStr::width(chunk.as_str()) == width {
+                    lines.push(chunk);
+                } else {
+                    current = chunk;
+                    current_width = UnicodeWidthStr::width(current.as_str());
+                }
+            }
+        }
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+fn wrap_long_table_word(word: &str, width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for ch in word.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > width && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
 }
 
 /// Render a table with a specific max width constraint

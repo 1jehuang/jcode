@@ -32,6 +32,7 @@ pub struct EditToolRange {
     pub file_path: String,
     pub start_line: usize,
     pub end_line: usize,
+    pub expandable: bool,
 }
 
 #[derive(Clone)]
@@ -144,6 +145,7 @@ impl PreparedChatFrame {
                 file_path: range.file_path.clone(),
                 start_line: range.start_line + line_start,
                 end_line: range.end_line + line_start,
+                expandable: range.expandable,
             }));
             copy_targets.extend(prepared.copy_targets.iter().map(|target| CopyTarget {
                 kind: target.kind.clone(),
@@ -218,9 +220,13 @@ impl PreparedChatFrame {
         })
     }
 
-    pub fn wrapped_plain_line(&self, abs_line: usize) -> Option<String> {
+    pub fn wrapped_plain_line(&self, abs_line: usize) -> Option<&str> {
         let (section, local) = self.line_section(abs_line)?;
-        section.prepared.wrapped_plain_lines.get(local).cloned()
+        section
+            .prepared
+            .wrapped_plain_lines
+            .get(local)
+            .map(String::as_str)
     }
 
     pub fn wrapped_copy_offset(&self, abs_line: usize) -> Option<usize> {
@@ -228,14 +234,13 @@ impl PreparedChatFrame {
         section.prepared.wrapped_copy_offsets.get(local).copied()
     }
 
-    pub fn raw_plain_line(&self, raw_line: usize) -> Option<String> {
-        let (_, local) = self.raw_section(raw_line)?;
-        self.raw_section(raw_line)?
-            .0
+    pub fn raw_plain_line(&self, raw_line: usize) -> Option<&str> {
+        let (section, local) = self.raw_section(raw_line)?;
+        section
             .prepared
             .raw_plain_lines
             .get(local)
-            .cloned()
+            .map(String::as_str)
     }
 
     pub fn wrapped_line_map(&self, abs_line: usize) -> Option<WrappedLineMap> {

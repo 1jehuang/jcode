@@ -12,6 +12,17 @@ pub enum AuthState {
     NotConfigured,
 }
 
+impl AuthState {
+    /// Short, stable, log-friendly label for this credential state.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Expired => "expired",
+            Self::NotConfigured => "not_configured",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthCredentialSource {

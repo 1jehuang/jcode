@@ -6,6 +6,37 @@ use crate::test_support::*;
 // Run with: cargo test --test e2e binary_integration -- --ignored
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// Reload/handoff robustness coverage map (for future contributors)
+//
+// Unit-level (no credentials, run by default):
+//   - server::reload_state::tests + server::socket_tests: marker/handoff state
+//     machine (Ready/Waiting/Failed/Idle verdicts, dead-pid crash detection,
+//     stale/foreign/completed marker cleanup, Failed-marker preservation,
+//     corrupt-marker tolerance, bounded handoff-event wait).
+//   - server::reload::reload_tests: graceful shutdown signaling, timeout, and
+//     partial-checkpoint behavior; recovery-intent persistence for peers.
+//   - server::reload_recovery::tests: recovery-store path-traversal safety,
+//     persist/peek roundtrip, non-consuming directive peek, delivery
+//     idempotency + continuation mismatch.
+//   - server::util::reload_target_tests: no-downgrade exec-target guard.
+//
+// E2E (real spawned process, run with --ignored; need a release binary):
+//   - binary_integration_reload_handoff: server identity changes, marker clears.
+//   - binary_integration_selfdev_reload_reconnects_quickly: repeated reloads.
+//   - binary_integration_selfdev_client_reload_resumes_session.
+//   - binary_integration_selfdev_full_reload_resumes_session_quickly.
+//
+// Known E2E gaps worth adding when a release binary is available:
+//   - Concurrent/rapid `client.reload()` calls collapsing into one handoff
+//     without stranding the client or leaving a stuck marker.
+//   - A pre-existing *foreign* stale reload marker (different pid) in the
+//     runtime dir at boot being cleared rather than blocking startup.
+//   - Crash-during-boot of the replacement server (e.g. point the reload
+//     candidate at a binary that exits non-zero) resolving the waiting client
+//     to a Failed verdict instead of an indefinite hang.
+// ----------------------------------------------------------------------------
+
 /// Test that the jcode binary can run independent with Claude provider
 #[tokio::test]
 #[ignore] // Requires Claude credentials

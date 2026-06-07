@@ -5,5 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 ratatui = "0.30"
 unicode-width = "0.2"

@@ -153,6 +153,15 @@ fn spawn_models_server(
     body: impl Into<String>,
     delay: Duration,
 ) -> FakeModelsServer {
+    spawn_raw_models_server(max_requests, "200 OK", body, delay)
+}
+
+fn spawn_raw_models_server(
+    max_requests: usize,
+    status: impl Into<String>,
+    body: impl Into<String>,
+    delay: Duration,
+) -> FakeModelsServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
     listener
         .set_nonblocking(true)
@@ -162,6 +171,7 @@ fn spawn_models_server(
     let request_count = Arc::new(AtomicUsize::new(0));
     let request_count_thread = Arc::clone(&request_count);
     let body = body.into();
+    let status = status.into();
 
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -183,7 +193,8 @@ fn spawn_models_server(
                         std::thread::sleep(delay);
                     }
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
                         body.len(),
                         body
                     );
@@ -437,6 +448,55 @@ fn model_picker_cache_miss_schedules_single_background_refresh_and_updates_route
     Ok(())
 }
 
+#[test]
+fn live_model_catalog_failure_keeps_static_and_selected_model_picker_fallbacks() -> Result<()> {
+    let env = TestEnv::new()?;
+    let server = spawn_raw_models_server(
+        1,
+        "500 Internal Server Error",
+        r#"{"error":"catalog temporarily unavailable"}"#,
+        Duration::ZERO,
+    );
+    env.configure_openai_compatible_runtime(
+        &server.api_base,
+        "auth-flow-catalog-failure",
+        Some("sk-catalog-failure"),
+        false,
+    );
+    jcode::env::set_var("JCODE_OPENROUTER_MODEL", "selected-fallback-model");
+    jcode::env::set_var(
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "selected-fallback-model\nstatic-fallback-model",
+    );
+
+    let provider = OpenRouterProvider::new()?;
+    let before = provider.available_models_display();
+    assert!(
+        before
+            .iter()
+            .any(|model| model == "selected-fallback-model")
+    );
+    assert!(before.iter().any(|model| model == "static-fallback-model"));
+
+    let err = run_current_thread(provider.fetch_models()).expect_err("catalog fetch should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("500") && message.contains("catalog temporarily unavailable"),
+        "unexpected catalog failure: {message}"
+    );
+
+    let after = provider.available_models_display();
+    assert!(
+        after.iter().any(|model| model == "selected-fallback-model")
+            && after.iter().any(|model| model == "static-fallback-model"),
+        "failed live catalog should not remove picker fallbacks; before={before:?} after={after:?}"
+    );
+    let request = server.requests.recv_timeout(Duration::from_secs(2))?;
+    assert_models_request(&request);
+
+    Ok(())
+}
+
 fn buffer_to_text(buffer: &Buffer) -> String {
     let area = buffer.area;
     let mut out = String::new();
@@ -477,7 +537,7 @@ fn login_picker_renders_openai_compatible_setup_copy() -> Result<()> {
         "API key / CLI",
         "Detected setup",
         "http://localhost:11434/v1 configured; no API key required",
-        "custom hosted or local OpenAI-compatible endpoint",
+        "custom endpoint setup: base URL first, then API key",
         "Press Enter to begin login.",
     ] {
         assert!(

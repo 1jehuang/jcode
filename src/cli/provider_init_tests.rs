@@ -1,4 +1,10 @@
 use super::*;
+// These moved from cli::provider_init to crate::external_auth in the
+// tui->cli layering refactor (a9a82827); provider_init.rs only re-imports the
+// subset it uses, so `super::*` no longer re-exports them to this test module.
+use crate::external_auth::{
+    parse_external_auth_review_selection, pending_external_auth_review_candidates,
+};
 use crate::provider_catalog::{self, resolve_login_selection, resolve_openai_compatible_profile};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -19,6 +25,7 @@ fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Jcode.as_arg_value(), "jcode");
     assert_eq!(ProviderChoice::Claude.as_arg_value(), "claude");
+    assert_eq!(ProviderChoice::AnthropicApi.as_arg_value(), "anthropic-api");
     assert_eq!(
         ProviderChoice::ClaudeSubprocess.as_arg_value(),
         "claude-subprocess"
@@ -39,6 +46,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Fireworks.as_arg_value(), "fireworks");
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
+    assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
     assert_eq!(ProviderChoice::Chutes.as_arg_value(), "chutes");
@@ -67,24 +75,16 @@ fn test_server_bootstrap_login_selection_preserves_order() {
         Some("claude")
     );
     assert_eq!(
-        resolve_login_selection("3", &providers).map(|provider| provider.id),
-        Some("jcode")
+        resolve_login_selection("2", &providers).map(|provider| provider.id),
+        Some("anthropic-api")
     );
     assert_eq!(
         resolve_login_selection("4", &providers).map(|provider| provider.id),
+        Some("jcode")
+    );
+    assert_eq!(
+        resolve_login_selection("5", &providers).map(|provider| provider.id),
         Some("copilot")
-    );
-    assert_eq!(
-        resolve_login_selection("10", &providers).map(|provider| provider.id),
-        Some("chutes")
-    );
-    assert_eq!(
-        resolve_login_selection("11", &providers).map(|provider| provider.id),
-        Some("cerebras")
-    );
-    assert_eq!(
-        resolve_login_selection("12", &providers).map(|provider| provider.id),
-        Some("alibaba-coding-plan")
     );
 }
 
@@ -96,23 +96,27 @@ fn test_auto_init_login_selection_preserves_order() {
         Some("claude")
     );
     assert_eq!(
-        resolve_login_selection("10", &providers).map(|provider| provider.id),
-        Some("alibaba-coding-plan")
+        resolve_login_selection("2", &providers).map(|provider| provider.id),
+        Some("anthropic-api")
     );
     assert_eq!(
         resolve_login_selection("11", &providers).map(|provider| provider.id),
-        Some("cursor")
+        Some("alibaba-coding-plan")
     );
     assert_eq!(
         resolve_login_selection("12", &providers).map(|provider| provider.id),
-        Some("copilot")
+        Some("cursor")
     );
     assert_eq!(
         resolve_login_selection("13", &providers).map(|provider| provider.id),
-        Some("gemini")
+        Some("copilot")
     );
     assert_eq!(
         resolve_login_selection("14", &providers).map(|provider| provider.id),
+        Some("gemini")
+    );
+    assert_eq!(
+        resolve_login_selection("15", &providers).map(|provider| provider.id),
         Some("antigravity")
     );
 }
@@ -320,6 +324,10 @@ fn choice_for_login_provider_round_trips_core_targets() {
         Some(ProviderChoice::Openrouter)
     );
     assert_eq!(
+        choice_for_login_provider(provider_catalog::ANTHROPIC_API_LOGIN_PROVIDER),
+        Some(ProviderChoice::AnthropicApi)
+    );
+    assert_eq!(
         choice_for_login_provider(provider_catalog::AZURE_LOGIN_PROVIDER),
         Some(ProviderChoice::Azure)
     );
@@ -454,6 +462,89 @@ fn resolved_profile_default_model_uses_openai_compatible_override() {
     }
 }
 
+#[test]
+fn apply_login_provider_profile_env_locks_compatible_profile_for_auto_spawn() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    for (key, _) in &saved {
+        crate::env::remove_var(key);
+    }
+
+    apply_login_provider_profile_env(provider_catalog::OPENCODE_GO_LOGIN_PROVIDER);
+
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("https://opencode.ai/zen/go/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OPENCODE_GO_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+        Some("opencode-go.env")
+    );
+    assert_eq!(
+        std::env::var("JCODE_PROVIDER_PROFILE_ACTIVE")
+            .ok()
+            .as_deref(),
+        Some("1")
+    );
+
+    // Mirrors the daemon child process starting with `--provider auto`: with the
+    // active marker present, auto init must not erase the selected profile env.
+    provider_catalog::apply_openai_compatible_profile_env(None);
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OPENCODE_GO_API_KEY")
+    );
+
+    // A later explicit compatible-provider selection in the same process must
+    // still replace the active profile instead of being blocked by the marker.
+    apply_login_provider_profile_env(provider_catalog::OPENCODE_LOGIN_PROVIDER);
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OPENCODE_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_PROVIDER_PROFILE_ACTIVE")
+            .ok()
+            .as_deref(),
+        Some("1")
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::await_holding_lock,
@@ -471,6 +562,7 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_FORCE_PROVIDER",
@@ -529,6 +621,105 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
             crate::env::remove_var(&key);
         }
     }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
+)]
+async fn auto_provider_uses_config_default_named_no_auth_provider() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_HOME",
+        "JCODE_NON_INTERACTIVE",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ] {
+        crate::env::remove_var(key);
+    }
+    std::fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[provider]
+default_provider = "ollama-local"
+default_model = "llama3.1:8b"
+
+[providers.ollama-local]
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+auth = "none"
+default_model = "llama3.1:8b"
+requires_api_key = false
+
+[[providers.ollama-local.models]]
+id = "llama3.1:8b"
+"#,
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let provider = init_provider_for_validation(&ProviderChoice::Auto, None)
+        .await
+        .expect("auto provider should honor config default_provider named profile");
+
+    assert_eq!(provider.model(), "llama3.1:8b");
+    assert!(provider.model_routes().iter().any(|route| {
+        route.provider == "ollama-local" && route.model == "llama3.1:8b" && route.available
+    }));
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+    crate::config::invalidate_config_cache();
 }
 
 #[tokio::test]
@@ -661,11 +852,12 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
 
     let candidates = pending_external_auth_review_candidates().expect("candidates");
     assert!(candidates.iter().any(|candidate| {
-        candidate.source_name == "OpenCode auth.json"
-            && candidate.provider_summary.contains("OpenAI/Codex")
+        candidate.source_name() == "OpenCode auth.json"
+            && candidate.provider_summary().contains("OpenAI/Codex")
     }));
     assert!(candidates.iter().any(|candidate| {
-        candidate.source_name == "Codex auth.json" && candidate.provider_summary == "OpenAI/Codex"
+        candidate.source_name() == "Codex auth.json"
+            && candidate.provider_summary() == "OpenAI/Codex"
     }));
 
     if let Some(prev_home) = prev_home {

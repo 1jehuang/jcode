@@ -121,6 +121,35 @@ fn resolve_resume_id_imports_raw_codex_session_ids() {
     crate::env::remove_var("JCODE_HOME");
 }
 
+#[test]
+fn resume_failure_defers_to_server_during_reload_handoff() {
+    // Issue #328: when `--resume <id>` cannot be resolved locally but a reload/
+    // update/restart handoff is in progress (JCODE_RESUMING set), we must defer
+    // to the server instead of exiting with "No session found matching ...".
+    let with_resuming = |key: &str| {
+        if key == "JCODE_RESUMING" {
+            Some(std::ffi::OsString::from("1"))
+        } else {
+            None
+        }
+    };
+    assert_eq!(
+        resume_resolution_failure_action("ses_1780655839703_174710856", with_resuming),
+        ResumeResolutionFailureAction::DeferToServer,
+    );
+}
+
+#[test]
+fn resume_failure_exits_when_no_handoff_in_progress() {
+    // Without a reload handoff, an unresolved id is a genuine user error and
+    // should still surface the actionable "use --resume to list" message + exit.
+    let no_env = |_key: &str| Option::<std::ffi::OsString>::None;
+    assert_eq!(
+        resume_resolution_failure_action("totally-bogus-id", no_env),
+        ResumeResolutionFailureAction::Exit,
+    );
+}
+
 #[tokio::test]
 async fn wait_for_existing_reload_server_uses_reloading_server_instead_of_spawning() {
     let _guard = crate::storage::lock_test_env();

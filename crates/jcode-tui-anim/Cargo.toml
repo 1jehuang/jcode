@@ -1,0 +1,18 @@
+[package]
+name = "jcode-tui-anim"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Pure, dependency-free math kernels for the TUI idle animations (3D ray-marching
+# samplers, the 3x3 subpixel glyph chooser and HSV->RGB). Split out of
+# `jcode-tui` so it can be pinned to `opt-level = 3` via per-package profile
+# overrides in the workspace Cargo.toml, keeping the hot trig loops fully
+# optimized even in debug/selfdev builds while only recompiling when this code
+# changes.
+
+[lib]
+name = "jcode_tui_anim"
+path = "src/lib.rs"
+
+[dependencies]

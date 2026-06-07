@@ -10,6 +10,7 @@ mod ambient;
 mod binary_integration;
 mod burst_spawn;
 mod provider_behavior;
+mod reload_multiclient;
 mod safety;
 mod session_flow;
 mod transport;

@@ -1,0 +1,35 @@
+[package]
+name = "jcode-provider-bedrock"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "jcode_provider_bedrock"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+aws-config = "1.8.16"
+aws-credential-types = "1.2.14"
+aws-sdk-bedrock = "1.141.0"
+aws-sdk-bedrockruntime = "1.130.0"
+aws-sdk-sts = "1.103.0"
+aws-smithy-types = "1.4.7"
+aws-types = "1.3.15"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+jcode-core = { path = "../jcode-core" }
+jcode-logging = { path = "../jcode-logging" }
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-provider-env = { path = "../jcode-provider-env" }
+jcode-storage = { path = "../jcode-storage" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "process", "rt", "sync"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

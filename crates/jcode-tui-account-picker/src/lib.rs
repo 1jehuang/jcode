@@ -135,3 +135,6 @@ mod tests {
         assert!(!item_matches_filter(&item, "claude"));
     }
 }
+
+mod overlay;
+pub use overlay::{AccountPicker, OverlayAction};

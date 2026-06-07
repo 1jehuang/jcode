@@ -31,18 +31,58 @@ mkdir -p "$out_dir" \
 host_uid="$(id -u)"
 host_gid="$(id -g)"
 
+# Compute git build metadata on the HOST and hand it to the container via a
+# metadata file (read by jcode-build-meta/build.rs through
+# JCODE_BUILD_METADATA_FILE). The repo is bind-mounted into the container and
+# owned by the host UID while git inside the container runs as root, so any
+# in-container `git` call trips git's "dubious ownership" guard
+# (CVE-2022-24765) and fails. That previously zeroed out the embedded git hash,
+# date, AND changelog, shipping release binaries that report
+# "vX.Y.Z (unknown) (unknown)" with an empty /changelog overlay. Computing the
+# values here makes the embedded metadata independent of container-git. This
+# mirrors scripts/remote_build.sh.
+git_hash=""
+git_date=""
+git_tag=""
+git_dirty="0"
+changelog_raw=""
+if command -v git >/dev/null 2>&1 && git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+  git_hash="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)"
+  git_date="$(git -C "$repo_root" log -1 --format=%ci 2>/dev/null || true)"
+  git_tag="$(git -C "$repo_root" describe --tags --always 2>/dev/null || true)"
+  changelog_raw="$(git -C "$repo_root" log -700 --format='%h|%ct|%D|%s' 2>/dev/null || true)"
+  if [[ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]]; then
+    git_dirty="1"
+  fi
+else
+  echo "warning: git metadata unavailable on host; embedded changelog/version may be empty" >&2
+fi
+
+metadata_file="$(mktemp)"
+trap 'rm -f "$metadata_file"' EXIT
+{
+  printf 'git_hash=%s\n' "$git_hash"
+  printf 'git_date=%s\n' "$git_date"
+  printf 'git_tag=%s\n' "$git_tag"
+  printf 'git_dirty=%s\n' "$git_dirty"
+  printf 'changelog_raw<<JCODE_CHANGELOG_EOF\n%s\nJCODE_CHANGELOG_EOF\n' "$changelog_raw"
+} > "$metadata_file"
+
 echo "Building portable Linux release in Docker image: $image"
 echo "Output dir: $out_dir"
+echo "Embedding git metadata: hash=${git_hash:-<none>} tag=${git_tag:-<none>} dirty=$git_dirty changelog_lines=$(printf '%s' "$changelog_raw" | grep -c '' || true)"
 
 docker run --rm \
   -e CARGO_TERM_COLOR=always \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
+  -e JCODE_BUILD_METADATA_FILE=/jcode-build-meta \
   -e JCODE_COMPAT_PROFILE="$profile" \
   -e JCODE_COMPAT_TARGET="$target" \
   -e HOST_UID="$host_uid" \
   -e HOST_GID="$host_gid" \
   -v "$repo_root:/work" \
+  -v "$metadata_file:/jcode-build-meta:ro" \
   -v "$out_dir:/out" \
   -v "$cache_root/cargo-registry:/root/.cargo/registry" \
   -v "$cache_root/cargo-git:/root/.cargo/git" \
@@ -83,6 +123,13 @@ docker run --rm \
       curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
     fi
 	    source /root/.cargo/env
+
+	    # Belt-and-suspenders: the host-computed metadata file
+	    # (JCODE_BUILD_METADATA_FILE=/jcode-build-meta) is the primary source of
+	    # git hash/date/changelog, but mark the bind-mounted repo as a safe
+	    # directory so any in-container git fallback still works despite the
+	    # host-UID/root-git ownership mismatch (CVE-2022-24765 guard).
+	    git config --global --add safe.directory /work 2>/dev/null || true
 
 	    export CARGO_TARGET_DIR=/work/target/linux-compat
 	    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
@@ -126,10 +173,27 @@ WRAPPER
 	          fi
 	        done
 
-	    (cd /out && tar czf '"$artifact"'.tar.gz '"$artifact"' '"$artifact"'.bin libssl.so* libcrypto.so*)
+		    extra_libs=()
+		    for pattern in libssl.so\* libcrypto.so\*; do
+		      for lib in $pattern; do
+		        [[ -e "$lib" ]] && extra_libs+=("$lib")
+		      done
+		    done
 
-	    chown "$HOST_UID:$HOST_GID" "/out/'"$artifact"'" "/out/'"$artifact"'.bin" "/out/'"$artifact"'.tar.gz" /out/libssl.so* /out/libcrypto.so* 2>/dev/null || true
-	  '
+		    if (( ${#extra_libs[@]} > 0 )); then
+		      (cd /out && tar czf '"$artifact"'.tar.gz '"$artifact"' '"$artifact"'.bin "${extra_libs[@]}")
+		    else
+		      (cd /out && tar czf '"$artifact"'.tar.gz '"$artifact"' '"$artifact"'.bin)
+		    fi
+
+		    chown_inputs=("/out/'"$artifact"'" "/out/'"$artifact"'.bin" "/out/'"$artifact"'.tar.gz")
+		    if (( ${#extra_libs[@]} > 0 )); then
+		      for lib in "${extra_libs[@]}"; do
+		        chown_inputs+=("/out/$lib")
+		      done
+		    fi
+		    chown "$HOST_UID:$HOST_GID" "${chown_inputs[@]}" 2>/dev/null || true
+		  '
 
 echo "Built artifacts:"
 ls -lh "$out_dir/$artifact" "$out_dir/$artifact.tar.gz"

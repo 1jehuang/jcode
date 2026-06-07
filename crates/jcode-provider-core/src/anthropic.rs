@@ -4,6 +4,88 @@ pub const ANTHROPIC_OAUTH_BETA_HEADERS: &str = "claude-code-20250219,oauth-2025-
 /// Claude Code OAuth beta headers with Anthropic's explicit 1M context beta.
 pub const ANTHROPIC_OAUTH_BETA_HEADERS_1M: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,context-1m-2025-08-07";
 
+/// How a Claude model exposes its 1M-token long-context window.
+///
+/// These classifications were verified against the live Anthropic API on a
+/// Claude subscription (raw 250K-token requests): the catalog's
+/// `max_input_tokens` field is not a reliable signal because it over-advertises
+/// 1M for models that are still hard-capped at 200K (e.g. `claude-sonnet-4-5`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnthropicContextMode {
+    /// 1M input window available by default, no beta header or `[1m]` opt-in
+    /// needed (e.g. `claude-opus-4-8`, `claude-opus-4-7`).
+    Native1M,
+    /// 200K by default; 1M available as an opt-in via the `context-1m` beta
+    /// header (the `[1m]` suffix), which may require usage credits
+    /// (e.g. `claude-opus-4-6`, `claude-sonnet-4-6`).
+    OptIn1M,
+    /// 200K input window, with no 1M path (e.g. `claude-opus-4-5`,
+    /// `claude-sonnet-4-5`, `claude-haiku-4-5`).
+    Standard,
+}
+
+impl AnthropicContextMode {
+    /// The default context window (in tokens) for this mode, i.e. what a request
+    /// gets without opting in to the 1M beta.
+    pub fn default_context_window(self) -> usize {
+        match self {
+            AnthropicContextMode::Native1M => 1_000_000,
+            AnthropicContextMode::OptIn1M | AnthropicContextMode::Standard => 200_000,
+        }
+    }
+
+    /// The context window (in tokens) when the 1M long-context path is engaged
+    /// (the `[1m]` suffix). For `Standard` models there is no 1M path, so this is
+    /// the same as the default.
+    pub fn long_context_window(self) -> usize {
+        match self {
+            AnthropicContextMode::Native1M => 1_000_000,
+            // Anthropic's opt-in beta advertises a 1,048,576-token window.
+            AnthropicContextMode::OptIn1M => 1_048_576,
+            AnthropicContextMode::Standard => 200_000,
+        }
+    }
+
+    /// Whether this model has any 1M long-context path at all (native or opt-in).
+    pub fn has_1m_window(self) -> bool {
+        !matches!(self, AnthropicContextMode::Standard)
+    }
+
+    /// Whether jcode should surface a distinct `[1m]` picker alias for this model.
+    /// Only opt-in models benefit, native-1M models already use 1M by default so
+    /// a `[1m]` alias would be a redundant duplicate.
+    pub fn exposes_1m_alias(self) -> bool {
+        matches!(self, AnthropicContextMode::OptIn1M)
+    }
+}
+
+/// Classify how a Claude model exposes long context. Accepts both canonical
+/// (`claude-opus-4-8`) and dotted (`claude-opus-4.8`) forms, with or without a
+/// trailing `[1m]` suffix.
+pub fn anthropic_context_mode(model: &str) -> AnthropicContextMode {
+    let base = anthropic_strip_1m_suffix(model.trim()).to_ascii_lowercase();
+
+    // Native 1M (default, no opt-in): Opus 4.8 and 4.7.
+    if base.starts_with("claude-opus-4-8")
+        || base.starts_with("claude-opus-4.8")
+        || base.starts_with("claude-opus-4-7")
+        || base.starts_with("claude-opus-4.7")
+    {
+        return AnthropicContextMode::Native1M;
+    }
+
+    // Opt-in 1M via the context-1m beta: Opus 4.6 and Sonnet 4.6.
+    if base.starts_with("claude-opus-4-6")
+        || base.starts_with("claude-opus-4.6")
+        || base.starts_with("claude-sonnet-4-6")
+        || base.starts_with("claude-sonnet-4.6")
+    {
+        return AnthropicContextMode::OptIn1M;
+    }
+
+    AnthropicContextMode::Standard
+}
+
 /// Check if a model name explicitly requests 1M context via suffix
 /// (for example `claude-opus-4-6[1m]`).
 pub fn anthropic_is_1m_model(model: &str) -> bool {
@@ -56,7 +138,6 @@ pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
         "Agent" => "subagent",
         "ScheduleWakeup" => "schedule",
         "Skill" => "skill_manage",
-        // ToolSearch intentionally has no direct local analogue yet.
         _ => name,
     }
     .to_string()

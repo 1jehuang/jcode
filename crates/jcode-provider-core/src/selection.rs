@@ -119,11 +119,61 @@ pub fn provider_from_model_key(key: &str) -> Option<ActiveProvider> {
     }
 }
 
+/// Translate a persisted session/runtime provider key (the `RuntimeKey`
+/// stable-id or `ModelRouteApiMethod` vocabulary, e.g. `anthropic-api-key`,
+/// `claude-oauth`, `openai-api-key`) into the CLI `--provider` argument value
+/// (the `ProviderChoice` vocabulary, e.g. `anthropic-api`, `claude`,
+/// `openai-api`).
+///
+/// These two vocabularies overlap but are NOT identical: the runtime key
+/// distinguishes auth method (`anthropic-api-key` vs `claude-oauth`) while the
+/// CLI `--provider` enum uses `anthropic-api` / `claude`. Passing a raw runtime
+/// key straight to `--provider` makes clap reject it (`invalid value
+/// 'anthropic-api-key'`) and the spawned process exits immediately.
+///
+/// Returns `None` when there is no clean, unambiguous CLI provider to pass; in
+/// that case callers should omit the flag entirely and rely on the persisted
+/// session (model + provider_key + route_api_method) to reconstruct the exact
+/// route on resume.
+pub fn cli_provider_arg_for_session_key(key: &str) -> Option<&'static str> {
+    let normalized = key.trim().to_ascii_lowercase();
+    let base = normalized
+        .split_once(':')
+        .map(|(prefix, _rest)| prefix)
+        .unwrap_or(normalized.as_str());
+    // Dual-auth (Anthropic/OpenAI OAuth-vs-API) keys share one canonical alias
+    // table, so the CLI arg never drifts from the route/runtime vocabularies.
+    if let Some(route) = crate::auth_mode::AuthRoute::parse(base) {
+        return Some(route.cli_provider_arg());
+    }
+    match base {
+        "openrouter" => Some("openrouter"),
+        "copilot" => Some("copilot"),
+        "gemini" => Some("gemini"),
+        "cursor" => Some("cursor"),
+        "bedrock" => Some("bedrock"),
+        "antigravity" => Some("antigravity"),
+        "code-assist-oauth" | "google" => Some("google"),
+        // openai-compatible / custom profiles, remote-catalog, current, and any
+        // unknown key have no clean standalone CLI provider value (they need a
+        // profile too), so omit the flag and let the persisted session route.
+        _ => None,
+    }
+}
+
 pub fn explicit_model_provider_prefix(model: &str) -> Option<(ActiveProvider, &'static str, &str)> {
-    if let Some(rest) = model.strip_prefix("claude:") {
+    if let Some(rest) = model.strip_prefix("claude-api:") {
+        Some((ActiveProvider::Claude, "claude-api:", rest))
+    } else if let Some(rest) = model.strip_prefix("claude-oauth:") {
+        Some((ActiveProvider::Claude, "claude-oauth:", rest))
+    } else if let Some(rest) = model.strip_prefix("claude:") {
         Some((ActiveProvider::Claude, "claude:", rest))
     } else if let Some(rest) = model.strip_prefix("anthropic:") {
         Some((ActiveProvider::Claude, "anthropic:", rest))
+    } else if let Some(rest) = model.strip_prefix("openai-api:") {
+        Some((ActiveProvider::OpenAI, "openai-api:", rest))
+    } else if let Some(rest) = model.strip_prefix("openai-oauth:") {
+        Some((ActiveProvider::OpenAI, "openai-oauth:", rest))
     } else if let Some(rest) = model.strip_prefix("openai:") {
         Some((ActiveProvider::OpenAI, "openai:", rest))
     } else if let Some(rest) = model.strip_prefix("copilot:") {
@@ -300,6 +350,58 @@ mod tests {
     }
 
     #[test]
+    fn cli_provider_arg_translates_runtime_keys() {
+        // Anthropic API key (the regression: this is NOT a valid --provider
+        // value verbatim; it must map to `anthropic-api`).
+        assert_eq!(
+            cli_provider_arg_for_session_key("anthropic-api-key"),
+            Some("anthropic-api")
+        );
+        assert_eq!(
+            cli_provider_arg_for_session_key("claude-api"),
+            Some("anthropic-api")
+        );
+        // Anthropic OAuth -> claude.
+        assert_eq!(
+            cli_provider_arg_for_session_key("claude-oauth"),
+            Some("claude")
+        );
+        assert_eq!(cli_provider_arg_for_session_key("claude"), Some("claude"));
+        // OpenAI variants.
+        assert_eq!(
+            cli_provider_arg_for_session_key("openai-oauth"),
+            Some("openai")
+        );
+        assert_eq!(
+            cli_provider_arg_for_session_key("openai-api-key"),
+            Some("openai-api")
+        );
+        // Passthrough providers.
+        assert_eq!(
+            cli_provider_arg_for_session_key("openrouter"),
+            Some("openrouter")
+        );
+        assert_eq!(cli_provider_arg_for_session_key("copilot"), Some("copilot"));
+        assert_eq!(cli_provider_arg_for_session_key("gemini"), Some("gemini"));
+        assert_eq!(cli_provider_arg_for_session_key("bedrock"), Some("bedrock"));
+        // Case-insensitive and whitespace tolerant.
+        assert_eq!(
+            cli_provider_arg_for_session_key("  Anthropic-API-Key "),
+            Some("anthropic-api")
+        );
+        // Profile-scoped openai-compatible keys have no clean standalone CLI
+        // value, so we omit the flag and let the persisted session route.
+        assert_eq!(
+            cli_provider_arg_for_session_key("openai-compatible:zai"),
+            None
+        );
+        assert_eq!(cli_provider_arg_for_session_key("openai-compatible"), None);
+        assert_eq!(cli_provider_arg_for_session_key("remote-catalog"), None);
+        assert_eq!(cli_provider_arg_for_session_key("current"), None);
+        assert_eq!(cli_provider_arg_for_session_key("totally-unknown"), None);
+    }
+
+    #[test]
     fn parses_model_provider_prefixes() {
         assert_eq!(
             provider_from_model_key("gemini"),
@@ -308,6 +410,18 @@ mod tests {
         assert_eq!(provider_from_model_key("missing"), None);
 
         for (raw, expected_provider, expected_prefix, expected_model) in [
+            (
+                "claude-api:sonnet",
+                ActiveProvider::Claude,
+                "claude-api:",
+                "sonnet",
+            ),
+            (
+                "claude-oauth:sonnet",
+                ActiveProvider::Claude,
+                "claude-oauth:",
+                "sonnet",
+            ),
             ("claude:sonnet", ActiveProvider::Claude, "claude:", "sonnet"),
             (
                 "anthropic:sonnet",
@@ -316,6 +430,18 @@ mod tests {
                 "sonnet",
             ),
             ("openai:gpt-5", ActiveProvider::OpenAI, "openai:", "gpt-5"),
+            (
+                "openai-oauth:gpt-5",
+                ActiveProvider::OpenAI,
+                "openai-oauth:",
+                "gpt-5",
+            ),
+            (
+                "openai-api:gpt-5",
+                ActiveProvider::OpenAI,
+                "openai-api:",
+                "gpt-5",
+            ),
             (
                 "copilot:gpt-5",
                 ActiveProvider::Copilot,

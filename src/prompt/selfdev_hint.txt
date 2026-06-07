@@ -1,6 +1,0 @@
-# Self-Development Access
-
-You have access to `selfdev` in all sessions.
-
-- Use `selfdev enter` when the task is to work on jcode itself.
-- Outside self-dev mode, advanced self-dev actions and debug socket access are unavailable.

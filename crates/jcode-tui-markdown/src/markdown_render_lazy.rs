@@ -18,6 +18,11 @@ pub fn render_markdown_lazy(
     // Style stack for nested formatting
     let mut bold = false;
     let mut italic = false;
+    // True while inside an emphasis run that opened with the reasoning sentinel.
+    // Smart-punctuation (e.g. apostrophes) splits a single reasoning line into
+    // multiple text events; only the first carries the sentinel, so we latch the
+    // dim/italic styling for the whole emphasis span.
+    let mut reasoning_emphasis = false;
     let mut strike = false;
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
@@ -93,7 +98,10 @@ pub fn render_markdown_lazy(
             Event::End(TagEnd::Strong) => bold = false,
 
             Event::Start(Tag::Emphasis) => italic = true,
-            Event::End(TagEnd::Emphasis) => italic = false,
+            Event::End(TagEnd::Emphasis) => {
+                italic = false;
+                reasoning_emphasis = false;
+            }
 
             Event::Start(Tag::Strikethrough) => strike = true,
             Event::End(TagEnd::Strikethrough) => strike = false,
@@ -569,7 +577,24 @@ pub fn render_markdown_lazy(
                 } else {
                     let is_thinking_duration =
                         text.starts_with("Thought for ") && text.ends_with('s');
-                    let mut style = if is_thinking_duration {
+                    // The sentinel can appear at the start and/or end of the line
+                    // (and smart-punctuation may split it across events), so latch
+                    // on its presence anywhere and strip every occurrence.
+                    let has_sentinel = text.contains(crate::REASONING_SENTINEL);
+                    if has_sentinel {
+                        // Latch for the rest of this emphasis span so smart-
+                        // punctuation splits keep the dim/italic styling.
+                        reasoning_emphasis = true;
+                    }
+                    let is_reasoning = reasoning_emphasis;
+                    let stripped;
+                    let text: &str = if has_sentinel {
+                        stripped = text.replace(crate::REASONING_SENTINEL, "");
+                        &stripped
+                    } else {
+                        &text
+                    };
+                    let mut style = if is_thinking_duration || is_reasoning {
                         Style::default().fg(md_dim_color()).italic()
                     } else {
                         match (bold, italic) {

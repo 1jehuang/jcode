@@ -275,6 +275,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::ClaudeApiKey => {
+                login_anthropic_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAi => login_openai_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -302,9 +305,11 @@ pub async fn run_login_provider(
             LoginProviderTarget::Antigravity => login_antigravity_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Google => login_google_flow(options.no_browser)
-                .await
-                .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Google => {
+                login_google_flow(options.no_browser, options.google_access_tier)
+                    .await
+                    .map(|_| LoginFlowOutcome::Completed)
+            }
         }
     };
     let outcome = match login_result {
@@ -563,6 +568,35 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
     Ok(())
 }
 
+fn login_anthropic_api_key_flow() -> Result<()> {
+    eprintln!("Setting up Anthropic API...");
+    eprintln!("Get your API key from: https://console.anthropic.com/settings/keys\n");
+    eprint!("Paste your Anthropic API key: ");
+    io::stdout().flush()?;
+
+    let key = read_secret_line()?;
+
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    if !key.starts_with("sk-ant-") {
+        eprintln!("Warning: Anthropic API keys typically start with 'sk-ant-'. Saving anyway.");
+    }
+
+    save_named_api_key("anthropic.env", "ANTHROPIC_API_KEY", &key)?;
+    eprintln!("\nSuccessfully saved Anthropic API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join("anthropic.env")
+            .display()
+    );
+    eprintln!("Provider: claude (native Anthropic Messages API)");
+    crate::telemetry::record_auth_success("anthropic-api", "api_key");
+    Ok(())
+}
+
 async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
     let label = auth::codex::login_target_label(requested_label)?;
     eprintln!("Logging in to OpenAI/Codex (account: {})...", label);
@@ -745,7 +779,10 @@ fn login_openai_compatible_flow(
     let mut resolved = resolve_openai_compatible_profile(*profile);
 
     eprintln!("Setting up {}...", resolved.display_name);
-    eprintln!("See setup details: {}\n", resolved.setup_url);
+    let setup_url_depends_on_key = profile.id == crate::provider_catalog::MINIMAX_PROFILE.id;
+    if !setup_url_depends_on_key {
+        eprintln!("See setup details: {}\n", resolved.setup_url);
+    }
 
     if is_custom_profile {
         if !io::stdin().is_terminal()
@@ -819,7 +856,6 @@ fn login_openai_compatible_flow(
         resolved.default_model = Some(model.to_string());
     }
 
-    eprintln!("Endpoint: {}", resolved.api_base);
     let auth_method = if resolved.requires_api_key {
         eprintln!("API key env variable: {}\n", resolved.api_key_env);
         let key = match options.openai_compatible_api_key.as_deref() {
@@ -833,6 +869,14 @@ fn login_openai_compatible_flow(
         if key.is_empty() {
             anyhow::bail!("No API key provided.");
         }
+        resolved = crate::provider_catalog::resolve_openai_compatible_profile_with_api_key_hint(
+            *profile,
+            Some(&key),
+        );
+        eprintln!("Endpoint: {}", resolved.api_base);
+        if setup_url_depends_on_key {
+            eprintln!("See setup details: {}", resolved.setup_url);
+        }
 
         crate::provider_catalog::save_env_value_to_env_file(
             OPENAI_COMPAT_LOCAL_ENABLED_ENV,
@@ -843,6 +887,10 @@ fn login_openai_compatible_flow(
         eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
         "api_key"
     } else {
+        eprintln!("Endpoint: {}", resolved.api_base);
+        if setup_url_depends_on_key {
+            eprintln!("See setup details: {}", resolved.setup_url);
+        }
         eprintln!("This provider uses a local OpenAI-compatible endpoint.");
         eprintln!(
             "An API key is optional here. Press Enter to skip if your local server does not require one.\n"
@@ -882,6 +930,27 @@ fn login_openai_compatible_flow(
         }
     };
 
+    if !resolved.requires_api_key && resolved.default_model.is_none() {
+        match resolved.id.as_str() {
+            "ollama" => {
+                eprintln!(
+                    "Next step: install a model with `ollama pull llama3.2`, then run `jcode --provider ollama --model llama3.2 run 'hello'`."
+                );
+            }
+            "lmstudio" => {
+                eprintln!(
+                    "Next step: load a chat model in LM Studio's Local Server, then run jcode with that exact model id, for example `jcode --provider lmstudio --model <model-id> run 'hello'`."
+                );
+            }
+            _ => {
+                eprintln!(
+                    "Next step: run jcode with a model available on this endpoint, for example `jcode --provider {} --model <model-id> run 'hello'`.",
+                    resolved.id
+                );
+            }
+        }
+    }
+
     eprintln!(
         "Stored at {}",
         crate::storage::app_config_dir()?
@@ -895,63 +964,7 @@ fn login_openai_compatible_flow(
     Ok(())
 }
 
-pub fn read_secret_line() -> Result<String> {
-    use crossterm::terminal;
-
-    if !io::stdin().is_terminal() {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        return Ok(input.trim().to_string());
-    }
-
-    let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-    if !was_raw && terminal::enable_raw_mode().is_err() {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        return Ok(input.trim().to_string());
-    }
-
-    struct RawModeGuard(bool);
-    impl Drop for RawModeGuard {
-        fn drop(&mut self) {
-            if self.0 {
-                let _ = crossterm::terminal::disable_raw_mode();
-            }
-        }
-    }
-
-    let _guard = RawModeGuard(!was_raw);
-
-    let mut input = String::new();
-    loop {
-        if let crossterm::event::Event::Key(key_event) =
-            crossterm::event::read().context("Failed to read key input")?
-        {
-            use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                continue;
-            }
-            match key_event.code {
-                KeyCode::Enter => {
-                    eprintln!();
-                    break;
-                }
-                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    anyhow::bail!("Cancelled.");
-                }
-                KeyCode::Backspace => {
-                    input.pop();
-                }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(input.trim().to_string())
-}
+pub use crate::secret_input::read_secret_line;
 
 fn read_line_trimmed(prompt: &str) -> Result<String> {
     print!("{}", prompt);
@@ -1099,6 +1112,21 @@ async fn login_antigravity_flow(no_browser: bool) -> Result<()> {
 }
 
 async fn login_gemini_flow(no_browser: bool) -> Result<()> {
+    // Offer the auth-method choice only on an interactive terminal so scripted
+    // / piped invocations preserve the historical OAuth-only behavior.
+    if io::stdin().is_terminal() {
+        eprintln!("Gemini login. Choose an authentication method:");
+        eprintln!("  [1] Google account OAuth (free Code Assist tier, default)");
+        eprintln!(
+            "  [2] Gemini Developer API key (Google AI Studio, generativelanguage.googleapis.com)"
+        );
+        eprintln!();
+        let choice = read_line_trimmed("Enter 1-2 [1]: ")?;
+        if choice == "2" {
+            return login_gemini_api_key_flow();
+        }
+    }
+
     eprintln!("Starting native Gemini login...");
     eprintln!(
         "If your student/education plan is attached to your Google account, use that account in the browser flow."
@@ -1125,7 +1153,36 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
     Ok(())
 }
 
-async fn login_google_flow(no_browser: bool) -> Result<()> {
+fn login_gemini_api_key_flow() -> Result<()> {
+    eprintln!("Setting up Gemini Developer API key...");
+    eprintln!("Get your API key from: https://aistudio.google.com/apikey\n");
+    eprint!("Paste your Gemini API key: ");
+    io::stdout().flush()?;
+
+    let key = read_secret_line()?;
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    crate::auth::gemini::save_api_key(&key)?;
+    eprintln!("\nSuccessfully saved Gemini Developer API key!");
+    eprintln!(
+        "Stored at {}",
+        crate::storage::app_config_dir()?
+            .join(crate::auth::gemini::GEMINI_API_KEY_ENV_FILE)
+            .display()
+    );
+    eprintln!(
+        "Provider: gemini (official Gemini Developer API, generativelanguage.googleapis.com)"
+    );
+    crate::telemetry::record_auth_success("gemini", "api_key");
+    Ok(())
+}
+
+async fn login_google_flow(
+    no_browser: bool,
+    access_tier: Option<auth::google::GmailAccessTier>,
+) -> Result<()> {
     use auth::google::{GmailAccessTier, GoogleCredentials};
 
     eprintln!("╔══════════════════════════════════════════╗");
@@ -1315,24 +1372,28 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
         }
     };
 
-    eprintln!("── Gmail Access Level ──\n");
-    eprintln!("  [1] Full Access (recommended)");
-    eprintln!("      Search, read, draft, send, and manage emails.");
-    eprintln!("      Send and delete always require your confirmation.\n");
-    eprintln!("  [2] Read & Draft Only");
-    eprintln!("      Search, read emails, create drafts. Cannot send or delete.");
-    eprintln!("      API-level restriction - impossible even if the AI tries.\n");
-    eprint!("Choose [1/2] (default: 1): ");
-    io::stdout().flush()?;
+    let tier = if let Some(tier) = access_tier {
+        tier
+    } else {
+        eprintln!("── Gmail Access Level ──\n");
+        eprintln!("  [1] Full Access (recommended)");
+        eprintln!("      Search, read, draft, send, and manage emails.");
+        eprintln!("      Send and delete always require your confirmation.\n");
+        eprintln!("  [2] Read & Draft Only");
+        eprintln!("      Search, read emails, create drafts. Cannot send or delete.");
+        eprintln!("      API-level restriction - impossible even if the AI tries.\n");
+        eprint!("Choose [1/2] (default: 1): ");
+        io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let tier = match input.trim() {
-        "" | "1" => GmailAccessTier::Full,
-        "2" => GmailAccessTier::ReadOnly,
-        _ => {
-            eprintln!("Invalid choice, defaulting to Full Access.");
-            GmailAccessTier::Full
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        match input.trim() {
+            "" | "1" => GmailAccessTier::Full,
+            "2" => GmailAccessTier::ReadOnly,
+            _ => {
+                eprintln!("Invalid choice, defaulting to Full Access.");
+                GmailAccessTier::Full
+            }
         }
     };
 
@@ -1357,8 +1418,10 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
         "  Tokens:       {}\n",
         auth::google::tokens_path()?.display()
     );
-    eprintln!("The 'gmail' tool is now available to the AI agent.");
-    eprintln!("Try asking: \"check my recent emails\" or \"search emails from ...\"");
+    eprintln!("The 'gmail' tool is configured, but it is disabled by default for privacy.");
+    eprintln!("To expose it to the AI agent, add this to [tools] in config.toml:");
+    eprintln!("  enabled = [\"*\"]");
+    eprintln!("Then try asking: \"check my recent emails\" or \"search emails from ...\"");
 
     crate::telemetry::record_auth_success("google", "oauth");
     Ok(())
