@@ -61,10 +61,7 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 const PLAIN_FONT_STYLE_ENV: &str = "JCODE_TUI_PLAIN_FONT_STYLE";
-const FONT_VARIANT_MODIFIERS: Modifier = Modifier::BOLD
-    .union(Modifier::DIM)
-    .union(Modifier::ITALIC)
-    .union(Modifier::REVERSED);
+static PLAIN_FONT_STYLE_REQUESTED: OnceLock<bool> = OnceLock::new();
 
 #[path = "ui_animations.rs"]
 mod animations;
@@ -1974,33 +1971,47 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 
 fn plain_font_style_requested() -> bool {
-    std::env::var_os(PLAIN_FONT_STYLE_ENV)
-        .and_then(|value| value.into_string().ok())
-        .map(|value| {
-            let value = value.trim();
-            value == "1"
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
-        })
-        .unwrap_or(false)
+    *PLAIN_FONT_STYLE_REQUESTED.get_or_init(|| {
+        std::env::var_os(PLAIN_FONT_STYLE_ENV)
+            .and_then(|value| value.into_string().ok())
+            .as_deref()
+            .is_some_and(parse_plain_font_style_value)
+    })
+}
+
+fn parse_plain_font_style_value(value: &str) -> bool {
+    let value = value.trim();
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+}
+
+fn font_variant_modifiers() -> Modifier {
+    Modifier::BOLD | Modifier::DIM | Modifier::ITALIC | Modifier::REVERSED
 }
 
 fn strip_font_variant_modifiers_if_requested(frame: &mut Frame) {
-    if !plain_font_style_requested() {
-        return;
-    }
+    let requested = plain_font_style_requested();
+    let frame_area = frame.area();
+    let buf = frame.buffer_mut();
+    let area = frame_area.intersection(*buf.area());
+    strip_font_variant_modifiers_if(buf, area, requested);
+}
 
-    let area = frame.area().intersection(*frame.buffer_mut().area());
-    strip_font_variant_modifiers(frame.buffer_mut(), area);
+fn strip_font_variant_modifiers_if(buf: &mut ratatui::buffer::Buffer, area: Rect, requested: bool) {
+    if requested {
+        strip_font_variant_modifiers(buf, area);
+    }
 }
 
 fn strip_font_variant_modifiers(buf: &mut ratatui::buffer::Buffer, area: Rect) {
+    let modifiers = font_variant_modifiers();
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
             let cell = &mut buf[(x, y)];
-            if cell.modifier.intersects(FONT_VARIANT_MODIFIERS) {
-                cell.modifier.remove(FONT_VARIANT_MODIFIERS);
+            if cell.modifier.intersects(modifiers) {
+                cell.modifier.remove(modifiers);
             }
         }
     }
@@ -2841,8 +2852,7 @@ pub(crate) fn render_native_scrollbar(
 mod font_style_tests {
     use super::*;
 
-    #[test]
-    fn strip_font_variant_modifiers_preserves_ascii_symbols() {
+    fn styled_ascii_buffer() -> ratatui::buffer::Buffer {
         let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 32, 1));
         let text = "browser continue Done Built";
         for (x, ch) in text.chars().enumerate() {
@@ -2851,6 +2861,45 @@ mod font_style_tests {
             cell.modifier
                 .insert(Modifier::BOLD | Modifier::DIM | Modifier::ITALIC | Modifier::REVERSED);
         }
+        buffer
+    }
+
+    #[test]
+    fn parse_plain_font_style_value_accepts_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON", "  true  "] {
+            assert!(
+                parse_plain_font_style_value(value),
+                "{value:?} should enable plain font style"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_plain_font_style_value_rejects_empty_and_falsey_values() {
+        for value in ["", "0", "false", "no", "off", "plain"] {
+            assert!(
+                !parse_plain_font_style_value(value),
+                "{value:?} should not enable plain font style"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_font_variant_modifiers_if_is_noop_when_not_requested() {
+        let mut buffer = styled_ascii_buffer();
+
+        strip_font_variant_modifiers_if(&mut buffer, Rect::new(0, 0, 32, 1), false);
+
+        assert!(
+            buffer[(0, 0)].modifier.intersects(font_variant_modifiers()),
+            "font modifiers should remain when plain font style is disabled"
+        );
+    }
+
+    #[test]
+    fn strip_font_variant_modifiers_preserves_ascii_symbols() {
+        let mut buffer = styled_ascii_buffer();
+        let text = "browser continue Done Built";
 
         strip_font_variant_modifiers(&mut buffer, Rect::new(0, 0, 32, 1));
 
@@ -2860,7 +2909,7 @@ mod font_style_tests {
         assert_eq!(rendered, text);
         for x in 0..text.len() as u16 {
             assert!(
-                !buffer[(x, 0)].modifier.intersects(FONT_VARIANT_MODIFIERS),
+                !buffer[(x, 0)].modifier.intersects(font_variant_modifiers()),
                 "cell {x} should not keep font-variant modifiers"
             );
         }
