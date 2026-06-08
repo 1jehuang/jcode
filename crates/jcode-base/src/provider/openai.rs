@@ -29,6 +29,10 @@ const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const ORIGINATOR: &str = "codex_cli_rs";
+const OPENAI_API_BASE_ENV: &str = "OPENAI_API_BASE";
+const OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
+const JCODE_OPENAI_API_BASE_ENV: &str = "JCODE_OPENAI_API_BASE";
+const OPENAI_ENV_FILE: &str = "openai.env";
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
@@ -836,11 +840,42 @@ impl OpenAIProvider {
         parsed
     }
 
+    fn configured_openai_api_base() -> &'static str {
+        static CONFIGURED_BASE: LazyLock<String> = LazyLock::new(|| {
+            for env_key in [
+                JCODE_OPENAI_API_BASE_ENV,
+                OPENAI_API_BASE_ENV,
+                OPENAI_BASE_URL_ENV,
+            ] {
+                if let Some(raw) = crate::provider_catalog::load_env_value_from_env_or_config(
+                    env_key,
+                    OPENAI_ENV_FILE,
+                ) {
+                    if let Some(normalized) = crate::provider_catalog::normalize_api_base(&raw) {
+                        crate::logging::info(&format!(
+                            "OpenAI API base configured via {}: {}",
+                            env_key, normalized
+                        ));
+                        return normalized;
+                    }
+                    crate::logging::warn(&format!(
+                        "Ignoring invalid {}='{}'; use https://... or http://localhost/private-lan.",
+                        env_key, raw
+                    ));
+                }
+            }
+
+            OPENAI_API_BASE.to_string()
+        });
+
+        CONFIGURED_BASE.as_str()
+    }
+
     fn responses_url(credentials: &CodexCredentials) -> String {
         let base = if Self::is_chatgpt_mode(credentials) {
             CHATGPT_API_BASE
         } else {
-            OPENAI_API_BASE
+            Self::configured_openai_api_base()
         };
         format!("{}/{}", base.trim_end_matches('/'), RESPONSES_PATH)
     }

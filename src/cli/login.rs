@@ -282,7 +282,7 @@ pub async fn run_login_provider(
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenAiApiKey => {
-                login_openai_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+                login_openai_api_key_flow(&options).map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::OpenRouter => {
                 login_openrouter_flow().map(|_| LoginFlowOutcome::Completed)
@@ -512,13 +512,16 @@ fn login_jcode_flow() -> Result<()> {
     Ok(())
 }
 
-fn login_openai_api_key_flow() -> Result<()> {
+fn login_openai_api_key_flow(options: &LoginOptions) -> Result<()> {
     eprintln!("Setting up OpenAI API key...");
     eprintln!("Get your API key from: https://platform.openai.com/api-keys\n");
-    eprint!("Paste your OpenAI API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
+    let key = if let Some(key) = options.openai_compatible_api_key.as_deref() {
+        key.trim().to_string()
+    } else {
+        eprint!("Paste your OpenAI API key: ");
+        io::stdout().flush()?;
+        read_secret_line()?
+    };
     if key.is_empty() {
         anyhow::bail!("No API key provided.");
     }
@@ -527,6 +530,15 @@ fn login_openai_api_key_flow() -> Result<()> {
     }
 
     save_named_api_key("openai.env", "OPENAI_API_KEY", &key)?;
+    if let Some(api_base) = options.openai_compatible_api_base.as_deref() {
+        let api_base = crate::provider_catalog::normalize_api_base(api_base).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid OpenAI API base URL '{}'. Use https://... or http://localhost/private-lan.",
+                api_base
+            )
+        })?;
+        save_named_api_key("openai.env", "JCODE_OPENAI_API_BASE", &api_base)?;
+    }
     eprintln!("\nSuccessfully saved OpenAI API key!");
     eprintln!(
         "Stored at {}",
@@ -535,6 +547,9 @@ fn login_openai_api_key_flow() -> Result<()> {
             .display()
     );
     eprintln!("Provider: openai-api (native OpenAI Responses API)");
+    if options.openai_compatible_api_base.is_some() {
+        eprintln!("Base URL: custom native Responses API endpoint");
+    }
     crate::telemetry::record_auth_success("openai-api", "api_key");
     Ok(())
 }

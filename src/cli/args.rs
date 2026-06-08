@@ -190,11 +190,11 @@ pub(crate) enum Command {
         #[arg(long, value_enum)]
         google_access_tier: Option<GoogleAccessTierArg>,
 
-        /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
+        /// API base URL. Used with --provider openai-api for native Responses API or --provider openai-compatible/custom profiles.
         #[arg(long)]
         api_base: Option<String>,
 
-        /// OpenAI-compatible API key. If omitted, jcode prompts securely when needed.
+        /// API key. Used with --provider openai-api or OpenAI-compatible providers. If omitted, jcode prompts securely when needed.
         #[arg(long)]
         api_key: Option<String>,
 
