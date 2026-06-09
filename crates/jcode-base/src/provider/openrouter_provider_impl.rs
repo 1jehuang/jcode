@@ -308,7 +308,26 @@ impl Provider for OpenRouterProvider {
             // Generic OpenAI-compatible backends often use arbitrary model IDs.
             // Only real OpenRouter supports the model@provider pin syntax, so
             // preserve the caller's model string exactly for custom endpoints.
-            (trimmed.to_string(), None)
+            //
+            // However, the caller may pass a `{profile_id}:{model}` switch spec
+            // (e.g. "deepseek:deepseek-v4-flash") that was produced by
+            // model_switch_request_for_session_route or fork_model_switch_request.
+            // Strip the known profile prefix for direct profiles so the model
+            // string used in the API request is the bare model name.
+            if let Some(profile_id) = self.profile_id.as_deref() {
+                if let Some(stripped) = trimmed
+                    .strip_prefix(profile_id)
+                    .and_then(|rest| rest.strip_prefix(':'))
+                    .map(str::trim)
+                    .filter(|rest| !rest.is_empty())
+                {
+                    (stripped.to_string(), None)
+                } else {
+                    (trimmed.to_string(), None)
+                }
+            } else {
+                (trimmed.to_string(), None)
+            }
         };
         if let Some(profile_id) = self.profile_id.as_deref()
             && !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
