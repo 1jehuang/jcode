@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build target'
+        required: false
+        default: 'aarch64-unknown-linux-gnu'
 
 concurrency:
   group: release-${{ github.ref }}
@@ -53,27 +59,82 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Get rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install nightly for emulated TLS (aarch64 only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-unknown-linux-gnu
+          components: rust-src
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+        id: sccache
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-all-crates: "true"
+
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux' && matrix.compat_container != true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
 
       - name: Build release binary
+        if: matrix.compat_container != true
         shell: bash
         run: |
-          mkdir -p dist
-          cargo build --release --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
-          chmod +x dist/${{ matrix.artifact }}
-          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+          mkdir -p .cargo
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cat > .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          [target.aarch64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Z", "tls-model=emulated"]
+          EOF
+          fi
+          if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
+            export RUSTC_WRAPPER=sccache
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            cargo build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Build portable Linux x86_64 release binary
+        if: matrix.compat_container == true
+        shell: bash
+        run: scripts/build_linux_compat.sh dist
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ github.ref_name }}
+          JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+
+      - name: Package binary
+        if: matrix.compat_container != true
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
+          chmod +x dist/${{ matrix.artifact }}
+          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
@@ -83,7 +144,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.ref_name }}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
+          gh release upload "${GITHUB_REF_NAME}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
 
   build-windows:
     name: Build (${{ matrix.target }})
@@ -100,44 +161,112 @@ jobs:
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             artifact: jcode-windows-aarch64
+            cargo_args: "--no-default-features --features pdf"
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure MSVC build environment (x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Configure MSVC build environment (ARM64)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+        id: sccache
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-all-crates: "true"
 
       - name: Build release binary
         shell: pwsh
         run: |
-          cargo build --release --target ${{ matrix.target }}
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/jcode.exe" "dist/${{ matrix.artifact }}.exe"
-          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C dist "${{ matrix.artifact }}.exe"
+          if (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --start-server *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $env:RUSTC_WRAPPER = "sccache"
+            }
+          }
+
+          $cargoArgs = @("build", "--release", "--target", "${{ matrix.target }}")
+          $extraArgs = "${{ matrix.cargo_args }}"
+          if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
+            $cargoArgs += $extraArgs -split ' '
+          }
+
+          & cargo @cargoArgs
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
 
-      - name: Verify launched
+      - name: Run Windows runtime smoke tests (x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $tests = @(
+            'provider_behavior::test_socket_model_cycle_supported_models',
+            'provider_behavior::test_model_switch_resets_provider_session'
+          )
+
+          foreach ($testName in $tests) {
+            & cargo test --locked --target ${{ matrix.target }} --test e2e $testName -- --exact --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows smoke test failed: $testName"
+            }
+          }
+
+      - name: Verify built Windows binary launches
         shell: pwsh
         run: |
           & "target/${{ matrix.target }}/release/jcode.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Built Windows binary failed to run --version"
+          }
 
-      - uses: actions/upload-artifact@v4
+      - name: Verify Windows installer with local artifact
+        shell: pwsh
+        run: |
+          & ./.github/scripts/verify_windows_install.ps1 `
+            -ArtifactExePath "target/${{ matrix.target }}/release/jcode.exe" `
+            -Version "${{ github.ref_name }}"
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/jcode.exe" "dist/${{ matrix.artifact }}.exe"
+          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C dist "${{ matrix.artifact }}.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
             dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.exe
 
       - name: Publish asset to release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${env:GITHUB_REF_NAME}" "dist/${{ matrix.artifact }}.tar.gz" --clobber
+          gh release upload "${env:GITHUB_REF_NAME}" "dist/${{ matrix.artifact }}.tar.gz" "dist/${{ matrix.artifact }}.exe" --clobber
 
   release:
     name: Finalize release
@@ -148,6 +277,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -159,16 +289,18 @@ jobs:
           python3 - << 'PY'
           import hashlib
           from pathlib import Path
+
           files = sorted(
               p for p in Path("artifacts").rglob("*")
               if p.is_file() and (p.name.endswith(".tar.gz") or p.name.endswith(".exe"))
           )
           if not files:
-            raise SystemExit("No release assets found for checksum generation")
+              raise SystemExit("No release assets found for checksum generation")
+
           with Path("SHA256SUMS").open("w", encoding="utf-8") as out:
-            for path in files:
-              digest = hashlib.sha256(path.read_bytes()).hexdigest()
-              out.write(f"{digest}  {path.name}\n")
+              for path in files:
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  out.write(f"{digest}  {path.name}\n")
           PY
           cat SHA256SUMS
 
@@ -176,4 +308,187 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.ref_name }}" SHA256SUMS --clobber
+          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS --clobber
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
+        if: env.HOMEBREW_DEPLOY_KEY != ''
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NUM="${VERSION#v}"
+
+          LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          LINUX_ARM_SHA=$(sha256sum artifacts/jcode-linux-aarch64/jcode-linux-aarch64.tar.gz | cut -d' ' -f1)
+          MACOS_ARM_SHA=$(sha256sum artifacts/jcode-macos-aarch64/jcode-macos-aarch64.tar.gz | cut -d' ' -f1)
+          MACOS_INTEL_SHA=$(sha256sum artifacts/jcode-macos-x86_64/jcode-macos-x86_64.tar.gz | cut -d' ' -f1)
+
+          mkdir -p ~/.ssh
+          echo "$HOMEBREW_DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          git clone git@github.com:1jehuang/homebrew-jcode.git /tmp/homebrew-jcode
+
+          cat > /tmp/homebrew-jcode/Formula/jcode.rb << FORMULA
+          class Jcode < Formula
+            desc "AI coding agent powered by Claude and ChatGPT"
+            homepage "https://github.com/1jehuang/jcode"
+            version "${VERSION_NUM}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
+                sha256 "${MACOS_ARM_SHA}"
+
+                def install
+                  bin.install "jcode-macos-aarch64" => "jcode"
+                end
+              end
+
+              on_intel do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-x86_64.tar.gz"
+                sha256 "${MACOS_INTEL_SHA}"
+
+                def install
+                  bin.install "jcode-macos-x86_64" => "jcode"
+                end
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+                sha256 "${LINUX_SHA}"
+
+                def install
+                  libexec.install "jcode-linux-x86_64", "jcode-linux-x86_64.bin"
+                  libexec.install Dir["libssl.so*"], Dir["libcrypto.so*"] unless Dir["libssl.so*", "libcrypto.so*"].empty?
+                  (bin/"jcode").write <<~SH
+                    #!/bin/sh
+                    exec "#{libexec}/jcode-linux-x86_64" "$@"
+                  SH
+                end
+              end
+
+              on_arm do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
+                sha256 "${LINUX_ARM_SHA}"
+
+                def install
+                  bin.install "jcode-linux-aarch64" => "jcode"
+                end
+              end
+            end
+
+            test do
+              assert_match "jcode", shell_output("#{bin}/jcode --version")
+            end
+          end
+          FORMULA
+
+          sed -i 's/^          //' /tmp/homebrew-jcode/Formula/jcode.rb
+
+          cd /tmp/homebrew-jcode
+          git config user.name "jcode-release-bot"
+          git config user.email "release@jcode.dev"
+          git add Formula/jcode.rb
+          git commit -m "Update to ${VERSION}" || echo "No changes"
+          git push
+
+      - name: Update AUR package
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        if: env.AUR_SSH_KEY != ''
+        run: |
+          set -euo pipefail
+
+          retry() {
+            local attempts="$1"
+            local delay="$2"
+            shift 2
+            local try=1
+
+            until "$@"; do
+              local exit_code=$?
+              if [ "$try" -ge "$attempts" ]; then
+                return "$exit_code"
+              fi
+              echo "Attempt ${try}/${attempts} failed; retrying in ${delay}s..."
+              sleep "$delay"
+              try=$((try + 1))
+            done
+          }
+
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NUM="${VERSION#v}"
+
+          LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          LINUX_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          touch ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          retry 3 5 bash -lc 'ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts'
+
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ConnectionAttempts=3"
+
+          retry 3 5 bash -lc 'rm -rf /tmp/jcode-aur && git clone --depth 1 ssh://aur@aur.archlinux.org/jcode-bin.git /tmp/jcode-aur'
+          cd /tmp/jcode-aur
+          git remote set-url origin ssh://aur@aur.archlinux.org/jcode-bin.git
+
+          cat > PKGBUILD << 'PKGBUILD_END'
+          # Maintainer: Jeremy Huang <jeremyhuang55555@gmail.com>
+          pkgname=jcode-bin
+          pkgver=VERSION_PLACEHOLDER
+          pkgrel=1
+          pkgdesc="AI coding agent powered by Claude and ChatGPT"
+          arch=('x86_64')
+          url="https://github.com/1jehuang/jcode"
+          license=('MIT')
+          provides=('jcode')
+          conflicts=('jcode')
+          source=("URL_PLACEHOLDER")
+          sha256sums=('SHA_PLACEHOLDER')
+
+          package() {
+              install -Dm755 "${srcdir}/jcode-linux-x86_64" "${pkgdir}/usr/lib/jcode/jcode-linux-x86_64"
+              install -Dm755 "${srcdir}/jcode-linux-x86_64.bin" "${pkgdir}/usr/lib/jcode/jcode-linux-x86_64.bin"
+              if compgen -G "${srcdir}/libssl.so*" >/dev/null; then
+                  install -Dm644 "${srcdir}"/libssl.so* "${pkgdir}/usr/lib/jcode/"
+              fi
+              if compgen -G "${srcdir}/libcrypto.so*" >/dev/null; then
+                  install -Dm644 "${srcdir}"/libcrypto.so* "${pkgdir}/usr/lib/jcode/"
+              fi
+              mkdir -p "${pkgdir}/usr/bin"
+              ln -s /usr/lib/jcode/jcode-linux-x86_64 "${pkgdir}/usr/bin/jcode"
+          }
+          PKGBUILD_END
+
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION_NUM}|" PKGBUILD
+          sed -i "s|URL_PLACEHOLDER|${LINUX_URL}|" PKGBUILD
+          sed -i "s|SHA_PLACEHOLDER|${LINUX_SHA}|" PKGBUILD
+          sed -i 's/^          //' PKGBUILD
+
+          printf 'pkgbase = jcode-bin\n' > .SRCINFO
+          printf '\tpkgdesc = AI coding agent powered by Claude and ChatGPT\n' >> .SRCINFO
+          printf '\tpkgver = %s\n' "${VERSION_NUM}" >> .SRCINFO
+          printf '\tpkgrel = 1\n' >> .SRCINFO
+          printf '\turl = https://github.com/1jehuang/jcode\n' >> .SRCINFO
+          printf '\tarch = x86_64\n' >> .SRCINFO
+          printf '\tlicense = MIT\n' >> .SRCINFO
+          printf '\tprovides = jcode\n' >> .SRCINFO
+          printf '\tconflicts = jcode\n' >> .SRCINFO
+          printf '\tsource = %s\n' "${LINUX_URL}" >> .SRCINFO
+          printf '\tsha256sums = %s\n' "${LINUX_SHA}" >> .SRCINFO
+          printf '\npkgname = jcode-bin\n' >> .SRCINFO
+
+          git config user.name "Jeremy Huang"
+          git config user.email "jeremyhuang55555@gmail.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${VERSION}" || echo "No changes"
+          retry 3 5 git push origin master
