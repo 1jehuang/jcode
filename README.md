@@ -386,10 +386,10 @@ printf '%s' "$MY_API_KEY" | jcode provider add my-api \
   --json
 
 # Smoke test the profile.
-jcode --provider-profile-profile my-api auth-test --prompt 'Reply exactly JCODE_PROVIDER_SETUP_OK'
+jcode --provider-profile my-api auth-test --prompt 'Reply exactly JCODE_PROVIDER_SETUP_OK'
 
 # Use it directly.
-jcode --provider-profile-profile my-api run 'hello'
+jcode --provider-profile my-api run 'hello'
 ```
 
 For local servers that do not require auth:
