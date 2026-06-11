@@ -96,7 +96,9 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
         .as_ref()
         .map(|p| p.as_path())
         .and_then(binary_mtime);
-    let candidate_mtime = binary_mtime(candidate_canonical.as_path());
+    // A wrapper's own mtime says nothing about the code it runs; compare the
+    // `.bin` behind it so the downgrade guard sees real binary ages.
+    let candidate_mtime = binary_mtime(comparison_path(candidate_canonical.clone()).as_path());
 
     match guarded_reload_target(
         candidate.clone(),
@@ -156,7 +158,9 @@ fn newest_reload_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'stati
     ];
     let with_mtimes = ordered.into_iter().flatten().map(|candidate| {
         let canonical = canonicalize_or(candidate.0.clone());
-        let mtime = binary_mtime(canonical.as_path());
+        // Freshness of a launcher wrapper is the freshness of the `.bin` it
+        // exec's, not of the wrapper file written moments later.
+        let mtime = binary_mtime(comparison_path(canonical.clone()).as_path());
         (candidate, canonical, mtime)
     });
     pick_newest_candidate(with_mtimes)
@@ -253,6 +257,71 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
         return PathBuf::from(stripped);
     }
     path
+}
+
+/// Resolve a launcher wrapper script to the platform binary it exec's.
+///
+/// Linux compat releases install the real binary as `jcode-<target>.bin` plus a
+/// tiny `jcode` sh wrapper that exec's it (see `scripts/build_linux_compat.sh`).
+/// Channel symlinks point at the *wrapper*, while the running server is the
+/// *`.bin`* the wrapper exec'd into, so the two never compare path-equal and
+/// their mtimes are written at different instants during install. Mtime or
+/// identity comparisons must therefore look *through* the wrapper to the `.bin`
+/// beside it; exec targets keep using the wrapper so it can still set up
+/// `LD_LIBRARY_PATH` for bundled libraries.
+///
+/// Returns `None` when `path` is not a wrapper script (e.g. it is the real
+/// binary already) or the target `.bin` cannot be identified.
+fn launcher_wrapper_target(path: &Path) -> Option<PathBuf> {
+    // Wrappers are a few hundred bytes; never read a real multi-MB binary.
+    const WRAPPER_MAX_LEN: u64 = 4096;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > WRAPPER_MAX_LEN {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    if !content.starts_with("#!") {
+        return None;
+    }
+    let dir = path.parent()?;
+
+    // Preferred: parse the `exec "$self_dir/<name>.bin" "$@"` line the build
+    // script emits.
+    let parsed = content.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("exec ")?;
+        let (_, after) = rest.split_once("$self_dir/")?;
+        let name = after.split('"').next()?;
+        name.ends_with(".bin").then(|| dir.join(name))
+    });
+    if let Some(target) = parsed
+        && target.is_file()
+    {
+        return Some(target);
+    }
+
+    // Fallback for a wrapper whose text changed shape: a single sibling
+    // platform binary is unambiguous.
+    let stem = crate::build::binary_stem();
+    let mut siblings = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.extension().is_some_and(|ext| ext == "bin")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(stem))
+                && p.is_file()
+        });
+    let first = siblings.next()?;
+    siblings.next().is_none().then_some(first)
+}
+
+/// Path whose mtime/identity represents the *code* at `path`: the `.bin` behind
+/// a launcher wrapper, or `path` itself otherwise. See [`launcher_wrapper_target`]
+/// for why comparing the wrapper directly reports phantom updates forever.
+fn comparison_path(path: PathBuf) -> PathBuf {
+    launcher_wrapper_target(&path).unwrap_or(path)
 }
 
 pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
@@ -383,12 +452,16 @@ pub(crate) fn server_has_newer_binary() -> bool {
         .and_then(|m| m.modified().ok());
     let current_canonical = current_exe
         .as_ref()
-        .map(|path| canonicalize_or(path.clone()));
+        .map(|path| comparison_path(canonicalize_or(path.clone())));
 
+    // Compare against the `.bin` behind a launcher wrapper, not the wrapper
+    // itself: the installer writes the wrapper a moment after the binary, so the
+    // wrapper's mtime is always "newer" than the very code it exec's, and a
+    // wrapper path can never compare equal to the running `.bin`.
     let mut candidates = HashSet::new();
     for is_selfdev_session in [false, true] {
         if let Some((candidate, _label)) = server_update_candidate(is_selfdev_session) {
-            candidates.insert(canonicalize_or(candidate));
+            candidates.insert(comparison_path(canonicalize_or(candidate)));
         }
     }
 
@@ -758,7 +831,9 @@ mod newest_reload_candidate_integration_tests {
     //! a temp `JCODE_HOME`. This reproduces the field "/update -> new client,
     //! stale server" state and proves the fix: a self-dev daemon now reloads into
     //! the freshly installed release instead of its old pinned binary.
-    use super::{canonicalize_or, newer_binary_available, newest_reload_candidate};
+    use super::{
+        canonicalize_or, comparison_path, newer_binary_available, newest_reload_candidate,
+    };
     use crate::build;
     use std::path::Path;
     use std::time::{Duration, SystemTime};
@@ -778,6 +853,38 @@ mod newest_reload_candidate_integration_tests {
             .set_modified(mtime)
             .expect("set mtime");
         path
+    }
+
+    /// Model a Linux compat install: `versions/<ver>/` holds the real
+    /// `jcode-linux-x86_64.bin` plus the sh wrapper at `binary_name()` that
+    /// exec's it. The wrapper is written (and therefore stamped) *after* the
+    /// binary, exactly like the installer does. Returns the `.bin` path —
+    /// what the daemon actually runs as.
+    fn install_wrapped_versioned_binary(
+        version: &str,
+        bin_mtime: SystemTime,
+    ) -> std::path::PathBuf {
+        let dir = build::builds_dir()
+            .expect("builds dir")
+            .join("versions")
+            .join(version);
+        std::fs::create_dir_all(&dir).expect("create version dir");
+
+        let bin = dir.join(super::wrapper_fixture::PLATFORM_BIN_NAME);
+        std::fs::write(&bin, format!("platform binary for {version}")).expect("write .bin");
+        std::fs::File::open(&bin)
+            .expect("open .bin")
+            .set_modified(bin_mtime)
+            .expect("set .bin mtime");
+
+        let wrapper = dir.join(build::binary_name());
+        std::fs::write(&wrapper, super::wrapper_fixture::wrapper_script()).expect("write wrapper");
+        std::fs::File::open(&wrapper)
+            .expect("open wrapper")
+            .set_modified(bin_mtime + Duration::from_millis(5))
+            .expect("set wrapper mtime");
+
+        bin
     }
 
     fn candidate_version_for(is_selfdev: bool) -> Option<String> {
@@ -867,11 +974,11 @@ mod newest_reload_candidate_integration_tests {
     /// candidate set (both flavors) and uses the same `newer_binary_available`
     /// core the production function uses.
     fn daemon_reports_update(running: &Path, running_mtime: SystemTime) -> bool {
-        let running_canonical = canonicalize_or(running.to_path_buf());
+        let running_canonical = comparison_path(canonicalize_or(running.to_path_buf()));
         let mut candidates = std::collections::HashSet::new();
         for is_selfdev in [false, true] {
             if let Some((candidate, _label)) = super::server_update_candidate(is_selfdev) {
-                candidates.insert(canonicalize_or(candidate));
+                candidates.insert(comparison_path(canonicalize_or(candidate)));
             }
         }
         let with_mtimes = candidates.into_iter().map(|candidate| {
@@ -935,6 +1042,150 @@ mod newest_reload_candidate_integration_tests {
             Some(new_release),
             "normal-user daemon should reload into the freshly installed release"
         );
+    }
+
+    /// Regression: a Linux compat install (wrapper + `.bin`) must NOT report an
+    /// update against itself. The installer stamps the wrapper a few ms after
+    /// the `.bin`, the channel symlinks point at the wrapper, and the daemon
+    /// runs the `.bin` — comparing wrapper mtime vs `.bin` mtime made
+    /// `server_has_update` stick to `true` forever, so every client demanded a
+    /// reload that changed nothing (reload loop).
+    #[test]
+    fn wrapped_install_does_not_report_phantom_update_against_itself() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let release = "0.25.1";
+        let running_bin = install_wrapped_versioned_binary(release, base);
+
+        build::update_stable_symlink(release).expect("stable");
+        build::update_current_symlink(release).expect("current");
+        build::update_shared_server_symlink(release).expect("shared");
+
+        assert!(
+            !daemon_reports_update(&running_bin, base),
+            "daemon running the .bin of the installed release must not see the \
+             sibling wrapper as a newer binary"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    /// A genuine update must still be detected when both versions are wrapped
+    /// installs, and the reload must target the new version.
+    #[test]
+    fn wrapped_install_still_detects_real_update() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let old_release = "0.25.0";
+        let new_release = "0.25.1";
+        let old_bin = install_wrapped_versioned_binary(old_release, base);
+        install_wrapped_versioned_binary(new_release, base + Duration::from_secs(60));
+
+        build::update_stable_symlink(old_release).expect("stable old");
+        build::update_shared_server_symlink(old_release).expect("shared old");
+        build::advance_shared_server_if_tracking_stable(new_release).expect("advance shared");
+        build::update_stable_symlink(new_release).expect("stable new");
+        build::update_current_symlink(new_release).expect("current new");
+
+        assert!(
+            daemon_reports_update(&old_bin, base),
+            "daemon running the old .bin must see the newly installed wrapped release"
+        );
+        assert_eq!(
+            candidate_version_for(false).as_deref(),
+            Some(new_release),
+            "reload must target the freshly installed wrapped release"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+}
+
+/// Shared fixture for the launcher-wrapper layout (`jcode` sh script next to
+/// the platform `.bin` it exec's), so the unit and integration tests below
+/// cannot drift apart on the wrapper shape they model.
+#[cfg(test)]
+pub(crate) mod wrapper_fixture {
+    pub(crate) const PLATFORM_BIN_NAME: &str = "jcode-linux-x86_64.bin";
+
+    pub(crate) fn wrapper_script() -> String {
+        format!(
+            "#!/usr/bin/env sh\nset -eu\nself_dir=$(dirname -- \"$0\")\nexec \"$self_dir/{PLATFORM_BIN_NAME}\" \"$@\"\n"
+        )
+    }
+}
+
+#[cfg(test)]
+mod launcher_wrapper_tests {
+    use super::wrapper_fixture::{PLATFORM_BIN_NAME, wrapper_script};
+    use super::{comparison_path, launcher_wrapper_target};
+
+    #[test]
+    fn resolves_wrapper_to_sibling_bin() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let bin = dir.path().join(PLATFORM_BIN_NAME);
+        std::fs::write(&bin, "elf bytes").expect("write bin");
+        let wrapper = dir.path().join("jcode");
+        std::fs::write(&wrapper, wrapper_script()).expect("write wrapper");
+
+        assert_eq!(launcher_wrapper_target(&wrapper), Some(bin.clone()));
+        assert_eq!(comparison_path(wrapper), bin);
+    }
+
+    #[test]
+    fn falls_back_to_unique_sibling_bin_when_exec_line_is_unrecognized() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let bin = dir.path().join("jcode-linux-aarch64.bin");
+        std::fs::write(&bin, "elf bytes").expect("write bin");
+        let wrapper = dir.path().join("jcode");
+        std::fs::write(&wrapper, "#!/bin/sh\n# reshaped wrapper\nrun_it\n").expect("write wrapper");
+
+        assert_eq!(launcher_wrapper_target(&wrapper), Some(bin));
+    }
+
+    #[test]
+    fn leaves_real_binaries_alone() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        // Non-script content: not a wrapper even though it is small.
+        let exe = dir.path().join("jcode");
+        std::fs::write(&exe, "\x7fELF...").expect("write exe");
+        assert_eq!(launcher_wrapper_target(&exe), None);
+        assert_eq!(comparison_path(exe.clone()), exe);
+    }
+
+    #[test]
+    fn ignores_script_without_any_bin_sibling() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wrapper = dir.path().join("jcode");
+        std::fs::write(&wrapper, wrapper_script()).expect("write wrapper");
+        // exec target missing and no sibling .bin: treat as a plain file.
+        assert_eq!(launcher_wrapper_target(&wrapper), None);
+    }
+
+    #[test]
+    fn refuses_ambiguous_sibling_fallback() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        std::fs::write(dir.path().join(PLATFORM_BIN_NAME), "a").expect("write bin a");
+        std::fs::write(dir.path().join("jcode-linux-aarch64.bin"), "b").expect("write bin b");
+        let wrapper = dir.path().join("jcode");
+        std::fs::write(&wrapper, "#!/bin/sh\nrun_it\n").expect("write wrapper");
+        assert_eq!(launcher_wrapper_target(&wrapper), None);
     }
 }
 

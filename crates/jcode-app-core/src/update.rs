@@ -1065,6 +1065,7 @@ pub fn download_and_install_blocking_with_progress(
             }
         }
         let _ = fs::remove_dir_all(&extract_dir);
+        sync_wrapper_mtime_to_platform_binary(&dest_dir);
         installed_version_dir = Some(dest_dir.join(build::binary_name()));
     } else {
         fs::write(&temp_path, &bytes).context("Failed to write temp file")?;
@@ -1098,6 +1099,44 @@ pub fn download_and_install_blocking_with_progress(
     record_release_update_duration(started.elapsed());
 
     Ok(versioned_path)
+}
+
+/// Give the launcher wrapper the same mtime as the platform `.bin` it exec's.
+///
+/// The install loop above copies files in `read_dir` order and `fs::copy`
+/// stamps each destination with its copy time, so the tiny wrapper script
+/// usually lands a few ms *after* the `.bin`. The server's update detection
+/// compares binary mtimes; a wrapper that is forever "newer" than the very
+/// code it runs would otherwise read as a permanently pending update (the
+/// reload-loop family of issue #277). Best-effort: detection also resolves
+/// wrappers to their `.bin`, this just keeps the on-disk state honest.
+fn sync_wrapper_mtime_to_platform_binary(dest_dir: &Path) {
+    let wrapper = dest_dir.join(build::binary_name());
+    let bin_mtime = fs::read_dir(dest_dir).ok().and_then(|entries| {
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension().is_some_and(|ext| ext == "bin")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(build::binary_stem()))
+            })
+            .and_then(|bin| fs::metadata(bin).ok())
+            .and_then(|meta| meta.modified().ok())
+    });
+    let Some(bin_mtime) = bin_mtime else {
+        return; // No platform .bin (e.g. macOS/Windows install): nothing to sync.
+    };
+    let synced = fs::File::open(&wrapper).and_then(|file| file.set_modified(bin_mtime));
+    if let Err(error) = synced {
+        crate::logging::warn(&format!(
+            "update: failed to sync wrapper mtime to platform binary in {}: {}",
+            dest_dir.display(),
+            error
+        ));
+    }
 }
 
 pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
