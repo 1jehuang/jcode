@@ -325,17 +325,17 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 
 ### Supported built-in login flows
 
-- **Claude** (`jcode login --provider claude`)
-- **OpenAI / ChatGPT / Codex** (`jcode login --provider openai`)
-- **Google Gemini** (`jcode login --provider gemini`)
-- **GitHub Copilot** (`jcode login --provider copilot`)
-- **Azure OpenAI** (`jcode login --provider azure`)
-- **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
-- **Fireworks** (`jcode login --provider fireworks`)
-- **MiniMax** (`jcode login --provider minimax`)
-- **LM Studio** (`jcode login --provider lmstudio`)
-- **Ollama** (`jcode login --provider ollama`)
-- **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
+- **Claude** (`jcode login --provider-profile claude`)
+- **OpenAI / ChatGPT / Codex** (`jcode login --provider-profile openai`)
+- **Google Gemini** (`jcode login --provider-profile gemini`)
+- **GitHub Copilot** (`jcode login --provider-profile copilot`)
+- **Azure OpenAI** (`jcode login --provider-profile azure`)
+- **Alibaba Cloud Coding Plan** (`jcode login --provider-profile alibaba-coding-plan`)
+- **Fireworks** (`jcode login --provider-profile fireworks`)
+- **MiniMax** (`jcode login --provider-profile minimax`)
+- **LM Studio** (`jcode login --provider-profile lmstudio`)
+- **Ollama** (`jcode login --provider-profile ollama`)
+- **Custom OpenAI-compatible endpoint** (`jcode login --provider-profile openai-compatible`)
 
 For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
 
@@ -352,17 +352,17 @@ There are two ways to set one up:
 - **Built-in named profiles** — jcode ships ready-made profiles for several popular OpenAI-compatible services. Log in by id and jcode fills in the base URL and key environment variable for you:
 
   ```bash
-  jcode login --provider <profile-id>
+  jcode login --provider-profile <profile-id>
   # for example:
-  jcode login --provider openrouter
-  jcode login --provider deepseek
-  jcode login --provider opencode      # OpenCode Zen
-  jcode login --provider moonshotai
+  jcode login --provider-profile openrouter
+  jcode login --provider-profile deepseek
+  jcode login --provider-profile opencode      # OpenCode Zen
+  jcode login --provider-profile moonshotai
   ```
 
   Built-in OpenAI-compatible profile ids include: `openrouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
 
-- **Any other endpoint** — point jcode at an arbitrary OpenAI-compatible API (hosted or local) with `jcode login --provider openai-compatible` or the scriptable `jcode provider add` command described below.
+- **Any other endpoint** — point jcode at an arbitrary OpenAI-compatible API (hosted or local) with `jcode login --provider-profile openai-compatible` or the scriptable `jcode provider add` command described below.
 
 Useful environment overrides for these endpoints:
 
@@ -386,10 +386,10 @@ printf '%s' "$MY_API_KEY" | jcode provider add my-api \
   --json
 
 # Smoke test the profile.
-jcode --provider-profile my-api auth-test --prompt 'Reply exactly JCODE_PROVIDER_SETUP_OK'
+jcode --provider-profile-profile my-api auth-test --prompt 'Reply exactly JCODE_PROVIDER_SETUP_OK'
 
 # Use it directly.
-jcode --provider-profile my-api run 'hello'
+jcode --provider-profile-profile my-api run 'hello'
 ```
 
 For local servers that do not require auth:
@@ -407,13 +407,13 @@ Built-in local profiles are available for the common desktop/local runtimes:
 ```bash
 # Ollama: start the local server and install a model first.
 ollama pull llama3.2
-jcode login --provider ollama
-jcode --provider ollama --model llama3.2 run 'hello'
+jcode login --provider-profile ollama
+jcode --provider-profile ollama --model llama3.2 run 'hello'
 
 # LM Studio: start the Local Server, load a chat model, then use the exact
 # model identifier shown by LM Studio or by curl http://localhost:1234/v1/models.
-jcode login --provider lmstudio
-jcode --provider lmstudio --model '<model-id>' run 'hello'
+jcode login --provider-profile lmstudio
+jcode --provider-profile lmstudio --model '<model-id>' run 'hello'
 ```
 
 Ollama and LM Studio both expose OpenAI-compatible `/v1/models` and `/v1/chat/completions` endpoints. jcode uses streaming chat completions, function/tool calling, and OpenAI-style image content for vision-capable local models. If a local server requires a token, enter it during `jcode login` or create a named profile with `--api-key-stdin`.
@@ -488,7 +488,7 @@ OPENAI_COMPAT_API_KEY=your-token-here
 
 Notes:
 
-- `jcode login --provider openai-compatible` can create or update this for you.
+- `jcode login --provider-profile openai-compatible` can create or update this for you.
 - Plain `http://` is accepted for `localhost` and private LAN IPs. Public remote HTTP is still rejected.
 - HTTPS endpoints work as usual.
 
@@ -522,29 +522,29 @@ Example MCP config:
 
 On first run, jcode also tries to import MCP servers from `~/.claude/mcp.json` and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
 
-For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
+For headless or SSH sessions, OAuth-style providers support `jcode login --provider-profile <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 
 For more scriptable remote flows, `claude`, `openai`, `gemini`, and `antigravity` also support a two-step pattern:
 
 ```bash
 # Step 1: print a resumable auth URL
-jcode login --provider openai --print-auth-url --json
+jcode login --provider-profile openai --print-auth-url --json
 
 # Step 2: complete later with the callback URL or auth code
-jcode login --provider openai --callback-url 'http://localhost:1455/auth/callback?...'
-jcode login --provider gemini --auth-code '...'
+jcode login --provider-profile openai --callback-url 'http://localhost:1455/auth/callback?...'
+jcode login --provider-profile gemini --auth-code '...'
 ```
 
 Additional scriptable cases:
 
 ```bash
 # Copilot device flow: print URL + user code, then complete later
-jcode login --provider copilot --print-auth-url --json
-jcode login --provider copilot --complete
+jcode login --provider-profile copilot --print-auth-url --json
+jcode login --provider-profile copilot --complete
 
 # Gmail/Google OAuth after credentials are already configured
-jcode login --provider google --print-auth-url --google-access-tier readonly
-jcode login --provider google --callback-url 'http://127.0.0.1:8456?...'
+jcode login --provider-profile google --print-auth-url --google-access-tier readonly
+jcode login --provider-profile google --callback-url 'http://127.0.0.1:8456?...'
 ```
 
 Pending scriptable login state is stored under `~/.jcode/pending-login/`, automatically expires, and stale entries are cleaned up when new scriptable logins start or resume.
@@ -755,15 +755,15 @@ Set up jcode on this machine for me.
    - Alibaba Cloud Coding Plan: existing jcode config/env if present
 5. Prefer whichever provider is already configured and verify it with `jcode auth-test --all-configured` or a provider-specific auth test when appropriate.
 6. Only if no usable provider is already configured, guide me through the minimal manual step needed:
-   - Claude: `jcode login --provider claude`
-   - GitHub Copilot: `jcode login --provider copilot`
-   - OpenAI: `jcode login --provider openai`
-   - Gemini: `jcode login --provider gemini`
-   - Azure OpenAI: `jcode login --provider azure`
-   - Fireworks: `jcode login --provider fireworks`
-   - MiniMax: `jcode login --provider minimax`
-   - NVIDIA NIM: `jcode login --provider nvidia-nim`
-   - Alibaba Cloud Coding Plan: `jcode login --provider alibaba-coding-plan`
+   - Claude: `jcode login --provider-profile claude`
+   - GitHub Copilot: `jcode login --provider-profile copilot`
+   - OpenAI: `jcode login --provider-profile openai`
+   - Gemini: `jcode login --provider-profile gemini`
+   - Azure OpenAI: `jcode login --provider-profile azure`
+   - Fireworks: `jcode login --provider-profile fireworks`
+   - MiniMax: `jcode login --provider-profile minimax`
+   - NVIDIA NIM: `jcode login --provider-profile nvidia-nim`
+   - Alibaba Cloud Coding Plan: `jcode login --provider-profile alibaba-coding-plan`
    - OpenRouter: help me set `OPENROUTER_API_KEY`
    - Anthropic direct API: help me set `ANTHROPIC_API_KEY`
 7. After setup, run a simple smoke test with `jcode run "say hello"` and confirm it works.
