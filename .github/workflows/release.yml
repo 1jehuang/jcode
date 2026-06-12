@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build target'
+        required: false
+        default: 'aarch64-unknown-linux-gnu'
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,10 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Publish the (empty) release up front so each platform build can attach
-      # its own asset the moment it finishes, instead of everyone waiting for
-      # the slowest job. action-gh-release is idempotent: it creates the release
-      # for this tag if missing and updates it otherwise.
       - name: Create release if missing
         uses: softprops/action-gh-release@v2
         with:
@@ -41,10 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - # Build Linux x86_64 release assets on a CentOS 7 / manylinux2014
-            # glibc 2.17 baseline so they run on older distros as well as newer
-            # Debian/Ubuntu containers used by many TB tasks.
-            os: ubuntu-22.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
             compat_container: true
@@ -61,18 +60,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
-          submodules: recursive
           fetch-depth: 0
-
-      - name: Configure SSH for cargo git dependencies
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install nightly for emulated TLS (aarch64 only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-unknown-linux-gnu
+          components: rust-src
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
@@ -100,12 +99,19 @@ jobs:
           [target.x86_64-unknown-linux-gnu]
           linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          [target.aarch64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Z", "tls-model=emulated"]
           EOF
           fi
           if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
             export RUSTC_WRAPPER=sccache
           fi
-          cargo build --release --target ${{ matrix.target }}
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            cargo build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
@@ -133,9 +139,6 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
 
-      # Attach this platform's asset to the release immediately, so e.g. the
-      # macOS binary is downloadable ~15 min in without waiting for the slower
-      # Windows/Linux x86_64 jobs.
       - name: Publish asset to release
         shell: bash
         env:
@@ -147,9 +150,6 @@ jobs:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     needs: create-release
-    # Windows x64 release smoke tests compile the e2e harness after the release
-    # binary. GitHub-hosted Windows runners sometimes exceed 25 minutes, which
-    # cancels otherwise healthy releases before artifacts can be uploaded.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -304,8 +304,6 @@ jobs:
           PY
           cat SHA256SUMS
 
-      # Per-platform assets were already attached by their own build jobs as
-      # they finished; here we only add the cross-cutting checksums file.
       - name: Upload checksums to release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -476,7 +474,6 @@ jobs:
           sed -i "s|SHA_PLACEHOLDER|${LINUX_SHA}|" PKGBUILD
           sed -i 's/^          //' PKGBUILD
 
-          # Generate .SRCINFO without makepkg (AUR uses tab indentation)
           printf 'pkgbase = jcode-bin\n' > .SRCINFO
           printf '\tpkgdesc = AI coding agent powered by Claude and ChatGPT\n' >> .SRCINFO
           printf '\tpkgver = %s\n' "${VERSION_NUM}" >> .SRCINFO
