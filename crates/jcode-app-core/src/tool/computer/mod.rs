@@ -226,7 +226,20 @@ impl Tool for ComputerTool {
                 },
                 "script": { "type": "string", "description": "AppleScript (run_applescript) or JS (run_jxa) source." },
                 "depth": { "type": "integer", "description": "Max AX tree depth for ui/find_element (default 12)." },
-                "dry_run": { "type": "boolean", "description": "For mutating actions: report the intended action without performing it." }
+                "to_x": { "type": "number" },
+                "to_y": { "type": "number" },
+                "dx": { "type": "integer" },
+                "dy": { "type": "integer" },
+                "w": { "type": "number" },
+                "h": { "type": "number" },
+                "window_id": { "type": "integer", "description": "window_screenshot id (from list_windows)." },
+                "menu_path": { "type": "array", "items": { "type": "string" }, "description": "select_menu path, e.g. [\"File\",\"Save\"]." },
+                "ax_action": { "type": "string", "description": "perform_action AX action, e.g. AXShowMenu." },
+                "contains": { "type": "string", "description": "wait_for: substring to await." },
+                "timeout_ms": { "type": "integer" },
+                "region": { "type": "array", "items": { "type": "number" }, "description": "ocr region [x,y,w,h]; omit for full screen." },
+                "level": { "type": "number", "description": "set_brightness 0..1." },
+                "dry_run": { "type": "boolean", "description": "Mutating actions: report intended action without doing it." }
             }
         })
     }

@@ -281,6 +281,17 @@ swarm_spawn_mode = "visible"
 #
 # Whether the memory sidecar handles relevance/extraction.
 # memory_sidecar_enabled = false
+#
+# ScrollWM integration (macOS): when you spawn headed swarm agents and the
+# ScrollWM window manager (https://github.com/1jehuang/scrollwm) is running,
+# jcode can focus each new agent's window in the scrolling strip. Best-effort:
+# a no-op when ScrollWM is absent, and it never rearranges your desktop unless
+# you explicitly enable arrange_on_spawn. Env overrides: JCODE_SCROLLWM,
+# JCODE_SCROLLWM_FOCUS_ACTIVE, JCODE_SCROLLWM_ARRANGE_ON_SPAWN.
+# [agents.scrollwm]
+# enabled = false          # master switch (opt-in)
+# focus_active = true      # focus the just-spawned agent's strip column
+# arrange_on_spawn = false # adopt the whole Space into the strip (use with care)
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase

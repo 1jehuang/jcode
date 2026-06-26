@@ -107,3 +107,109 @@ fn onboarding_welcome_centers_within_tall_area() {
         "content should be vertically padded from the top:\n{text}"
     );
 }
+
+#[test]
+fn onboarding_login_card_renders_searched_not_found_panel() {
+    use crate::tui::{NotFoundRow, OnboardingWelcomeKind};
+
+    let not_found = vec![
+        NotFoundRow {
+            label: "Codex".to_string(),
+            path: "~/.codex/auth.json".to_string(),
+        },
+        NotFoundRow {
+            label: "Cursor".to_string(),
+            path: "~/.cursor/auth.json".to_string(),
+        },
+    ];
+    let state = TestState {
+        onboarding_preview: true,
+        onboarding_welcome_kind: Some(OnboardingWelcomeKind::LoginOpenAi {
+            yes_highlighted: true,
+            not_found,
+            not_found_scroll: 0,
+        }),
+        ..Default::default()
+    };
+    let text = render_onboarding(&state, 80, 40);
+    assert!(
+        text.contains("Searched, not found"),
+        "should render the not-found header:\n{text}"
+    );
+    assert!(
+        text.contains("Codex") && text.contains("Cursor"),
+        "should list the absent sources:\n{text}"
+    );
+}
+
+#[test]
+fn onboarding_not_found_panel_shows_scroll_affordance_when_overflowing() {
+    use crate::tui::{NotFoundRow, OnboardingWelcomeKind};
+
+    let not_found: Vec<NotFoundRow> = (0..9)
+        .map(|i| NotFoundRow {
+            label: format!("Source {i}"),
+            path: format!("~/path/{i}"),
+        })
+        .collect();
+    let state = TestState {
+        onboarding_preview: true,
+        onboarding_welcome_kind: Some(OnboardingWelcomeKind::LoginOpenAi {
+            yes_highlighted: true,
+            not_found,
+            not_found_scroll: 0,
+        }),
+        ..Default::default()
+    };
+    let text = render_onboarding(&state, 80, 44);
+    assert!(
+        text.contains("more") && text.contains("scroll"),
+        "overflowing panel should show a scroll affordance:\n{text}"
+    );
+}
+
+
+
+#[test]
+fn onboarding_scrollwm_optin_card_renders_decision_and_progress() {
+    use crate::tui::{OnboardingWelcomeKind, ScrollWmInstallProgress};
+
+    // Decision state: shows the pitch + Yes/No + countdown.
+    let decision = TestState {
+        onboarding_preview: true,
+        onboarding_welcome_kind: Some(OnboardingWelcomeKind::ScrollWmOptIn {
+            yes_highlighted: false,
+            seconds_left: 60,
+            progress: None,
+        }),
+        ..Default::default()
+    };
+    let text = render_onboarding(&decision, 80, 34);
+    assert!(text.contains("Set up ScrollWM?"), "pitch title:\n{text}");
+    assert!(text.contains("Accessibility"), "permission note:\n{text}");
+    assert!(
+        text.contains("Yes") && text.contains("No"),
+        "Yes/No row:\n{text}"
+    );
+    assert!(text.contains("Skips automatically"), "countdown:\n{text}");
+
+    // Running state: shows the install progress line, no Yes/No countdown.
+    let running = TestState {
+        onboarding_preview: true,
+        onboarding_welcome_kind: Some(OnboardingWelcomeKind::ScrollWmOptIn {
+            yes_highlighted: false,
+            seconds_left: 60,
+            progress: Some(ScrollWmInstallProgress::Running),
+        }),
+        ..Default::default()
+    };
+    let text = render_onboarding(&running, 80, 34);
+    assert!(
+        text.contains("Installing ScrollWM"),
+        "running progress line:\n{text}"
+    );
+    assert!(
+        !text.contains("Skips automatically"),
+        "countdown should be gone while installing:\n{text}"
+    );
+}

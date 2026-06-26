@@ -317,6 +317,12 @@ Spawn two or more agents in the same repo, and they will automatically be manage
 
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
 
+### Window management on macOS: ScrollWM
+
+When you spawn **headed** swarm agents on macOS, jcode can tile them with [ScrollWM](https://github.com/1jehuang/scrollwm), a scrolling window manager (PaperWM-style). With `agents.scrollwm.enabled = true` (and ScrollWM running), jcode focuses each freshly spawned agent's window in the scrolling strip so a wall of agent terminals stays navigable. It's best-effort: a no-op when ScrollWM isn't installed, and it never rearranges your desktop unless you opt into `arrange_on_spawn`.
+
+jcode's first-run onboarding offers to install ScrollWM for you (one permission: Accessibility). Or install both at once: `brew install --cask 1jehuang/jstack/jstack`. See [`docs/scrollwm-integration/CONTRACT.md`](docs/scrollwm-integration/CONTRACT.md) for the integration details.
+
 ---
 
 ## OAuth and Providers

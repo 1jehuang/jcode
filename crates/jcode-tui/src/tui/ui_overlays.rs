@@ -168,6 +168,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Show loaded skills and jcode-endorsed recommendations",
     ));
     lines.push(help_entry("/info", "Show session info and token usage"));
+    lines.push(help_entry(
+        "/keys",
+        "Show keybinding conflicts with your terminal/OS",
+    ));
     lines.push(help_entry("/usage", "Show connected provider usage limits"));
     lines.push(help_entry("/version", "Show version and build details"));
     lines.push(help_entry(

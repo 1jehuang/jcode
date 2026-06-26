@@ -89,6 +89,31 @@ fn test_env_override_swarm_spawn_mode() {
 }
 
 #[test]
+fn test_env_override_scrollwm_integration() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_enabled = std::env::var_os("JCODE_SCROLLWM");
+    let prev_arrange = std::env::var_os("JCODE_SCROLLWM_ARRANGE_ON_SPAWN");
+
+    // Default is opt-out.
+    let cfg = Config::default();
+    assert!(!cfg.agents.scrollwm.enabled);
+    assert!(cfg.agents.scrollwm.focus_active);
+    assert!(!cfg.agents.scrollwm.arrange_on_spawn);
+
+    crate::env::set_var("JCODE_SCROLLWM", "1");
+    crate::env::set_var("JCODE_SCROLLWM_ARRANGE_ON_SPAWN", "true");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert!(cfg.agents.scrollwm.enabled);
+    assert!(cfg.agents.scrollwm.arrange_on_spawn);
+    // Unset override leaves the default intact.
+    assert!(cfg.agents.scrollwm.focus_active);
+
+    restore_env_var("JCODE_SCROLLWM", prev_enabled);
+    restore_env_var("JCODE_SCROLLWM_ARRANGE_ON_SPAWN", prev_arrange);
+}
+
+#[test]
 fn test_env_override_swarm_model() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_SWARM_MODEL");

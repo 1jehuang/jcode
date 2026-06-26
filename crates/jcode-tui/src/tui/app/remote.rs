@@ -485,6 +485,9 @@ pub(super) async fn handle_bus_event(
         Ok(BusEvent::OnboardingModelValidated(result)) => {
             app.handle_onboarding_model_validated(result)
         }
+        Ok(BusEvent::ScrollWmInstallCompleted(ev)) => {
+            app.handle_scrollwm_install_completed(ev)
+        }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
             true
@@ -1387,6 +1390,7 @@ async fn parse_and_inject_key(
 
 fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
     let handled = super::commands::handle_help_command(app, trimmed)
+        || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_session_command(app, trimmed)
         || super::commands::handle_test_command(app, trimmed)
         || super::commands::handle_disabled_mission_command(app, trimmed)

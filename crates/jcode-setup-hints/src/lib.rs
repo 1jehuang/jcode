@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
+pub mod keymap;
+
 #[cfg(any(test, target_os = "macos"))]
 mod macos_launcher;
 #[cfg(any(test, target_os = "macos"))]
@@ -64,6 +66,22 @@ pub struct SetupHintsState {
     /// the hotkey actually fire). `0` = legacy/unknown.
     #[serde(default)]
     pub hotkey_listener_version: u32,
+    /// Canonical signature of the keybinding conflicts we last warned the user
+    /// about (sorted, joined chord+field pairs). Empty means "no conflicts known
+    /// / never warned". We only re-show the startup conflict notice when this
+    /// signature changes, so users are warned once per distinct conflict set and
+    /// never nagged about the same conflicts on every launch.
+    #[serde(default)]
+    pub keymap_conflict_signature: String,
+    /// True once the user has answered the onboarding "Set up ScrollWM?" opt-in
+    /// (Yes, No, or a timeout skip). When set we never show the opt-in again.
+    #[serde(default)]
+    pub scrollwm_optin_answered: bool,
+    /// True if the user chose "Yes" and we kicked off (or completed) a ScrollWM
+    /// install. Lets a later launch optionally remind the user to finish
+    /// granting Accessibility without re-asking the opt-in.
+    #[serde(default)]
+    pub scrollwm_install_started: bool,
 }
 
 /// Current macOS hotkey listener implementation version.
@@ -701,6 +719,91 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         startup_hints
+    }
+}
+
+/// Pure debounce decision for the keybinding-conflict notice.
+///
+/// Given the freshly-computed conflict `signature` and the `previous` signature
+/// we last stored, decide what to do. Separated from I/O so the
+/// warn-once-per-change policy can be unit-tested without touching the machine
+/// or the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConflictHintDecision {
+    /// Nothing changed since last time; stay silent and leave state untouched.
+    Unchanged,
+    /// The conflict set changed but is now empty (resolved); update the stored
+    /// signature but show nothing.
+    ResolvedSilently,
+    /// New or changed conflicts; update the stored signature and show a notice.
+    Warn,
+}
+
+pub(crate) fn conflict_hint_decision(signature: &str, previous: &str) -> ConflictHintDecision {
+    if signature == previous {
+        ConflictHintDecision::Unchanged
+    } else if signature.is_empty() {
+        ConflictHintDecision::ResolvedSilently
+    } else {
+        ConflictHintDecision::Warn
+    }
+}
+
+/// Check whether jcode's keybindings conflict with shortcuts owned by the
+/// terminal or the OS, and return a one-time startup notice when the set of
+/// conflicts has changed since we last warned.
+///
+/// This is config-aware (the caller passes the user's live keybindings) and
+/// debounced via a stored signature: a user is warned once per distinct
+/// conflict set and never nagged about the same conflicts on subsequent
+/// launches. Returns `None` when there are no conflicts, when nothing changed,
+/// or when input is not a real TTY.
+///
+/// The actual diagnostics are always available on demand via the `/keys`
+/// command; this only surfaces the proactive heads-up.
+pub fn maybe_show_keymap_conflict_hint(
+    keybindings: &jcode_config_types::KeybindingsConfig,
+) -> Option<StartupHints> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return None;
+    }
+
+    let snapshot = keymap::snapshot_cached_or_refresh();
+    let mut state = SetupHintsState::load();
+    let (hint, changed) = keymap_conflict_hint_for(keybindings, &snapshot, &mut state);
+    if changed {
+        let _ = state.save();
+    }
+    hint
+}
+
+/// Core of [`maybe_show_keymap_conflict_hint`], separated from TTY detection and
+/// disk I/O so the full decision + state-update path is unit-testable.
+///
+/// Returns the optional notice and whether `state` was mutated (and therefore
+/// should be persisted by the caller).
+pub(crate) fn keymap_conflict_hint_for(
+    keybindings: &jcode_config_types::KeybindingsConfig,
+    snapshot: &keymap::KeymapSnapshot,
+    state: &mut SetupHintsState,
+) -> (Option<StartupHints>, bool) {
+    let conflicts = keymap::detect_conflicts(keybindings, snapshot);
+    let signature = keymap::conflict_signature(&conflicts);
+
+    match conflict_hint_decision(&signature, &state.keymap_conflict_signature) {
+        ConflictHintDecision::Unchanged => (None, false),
+        ConflictHintDecision::ResolvedSilently => {
+            state.keymap_conflict_signature = signature;
+            (None, true)
+        }
+        ConflictHintDecision::Warn => {
+            state.keymap_conflict_signature = signature;
+            let hint = keymap::render_status_line(keybindings, snapshot).map(|status| {
+                let display = keymap::render_report(keybindings, snapshot);
+                StartupHints::with_status_and_display(status, "Keybindings", display)
+            });
+            (hint, true)
+        }
     }
 }
 

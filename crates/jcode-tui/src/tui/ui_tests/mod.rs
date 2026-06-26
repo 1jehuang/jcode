@@ -135,6 +135,9 @@ struct TestState {
     chat_native_scrollbar: bool,
     onboarding_preview: bool,
     suggestions: Vec<(String, String)>,
+    /// Optional explicit welcome-screen body kind for onboarding render tests.
+    /// When `None`, the default (`Suggestions`) is used.
+    onboarding_welcome_kind: Option<crate::tui::OnboardingWelcomeKind>,
     compacted_hidden_user_prompts: usize,
     reasoning_retained: Option<String>,
     reasoning_collapse: Option<(String, f32)>,
@@ -452,6 +455,11 @@ impl crate::tui::TuiState for TestState {
     }
     fn onboarding_preview_mode(&self) -> bool {
         self.onboarding_preview
+    }
+    fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
+        self.onboarding_welcome_kind
+            .clone()
+            .unwrap_or(crate::tui::OnboardingWelcomeKind::Suggestions)
     }
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
         None

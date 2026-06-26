@@ -462,6 +462,64 @@ async fn register_visible_spawned_member(
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
+/// Best-effort ScrollWM reconcile after a headed agent window is spawned.
+///
+/// Gated on `agents.scrollwm.enabled`. Spawns a short, detached task (never
+/// blocking or failing the spawn) that waits for ScrollWM's auto-adopt to place
+/// the new window, then focuses the agent's strip column by matching its unique
+/// session name in the window title. When ScrollWM is absent / not running /
+/// not managing, every step is a quiet no-op. We never call `arrange` unless the
+/// user explicitly opted into `arrange_on_spawn` (it adopts the whole Space).
+fn maybe_reconcile_scrollwm_after_spawn(session_id: &str) {
+    // macOS only: ScrollWM is a macOS window manager.
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let cfg = crate::config::config().agents.scrollwm;
+    if !cfg.enabled {
+        return;
+    }
+    // The agent's session name is unique and embedded in its window title
+    // (`resumed_window_title` -> `terminal_session_label_for_id`), so it is a
+    // reliable focus key without depending on volatile column indices.
+    let needle = crate::process_title::session_name(session_id);
+    if needle.trim().is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        // Run the blocking socket I/O off the async reactor.
+        let _ = tokio::task::spawn_blocking(move || {
+            let sw = jcode_scrollwm::ScrollWm::discover();
+            if !sw.is_running() {
+                return;
+            }
+            // Optionally start managing (adopts the whole Space) before focusing.
+            if cfg.arrange_on_spawn {
+                match sw.status() {
+                    Ok(status) if !status.managing => {
+                        let _ = sw.arrange();
+                    }
+                    _ => {}
+                }
+            }
+            if !cfg.focus_active {
+                return;
+            }
+            // The window appears asynchronously (open -na Ghostty detaches and the
+            // new jcode process sets its OSC title ~0.3-2s later). Poll a bounded
+            // number of times for the agent's column, then give up quietly.
+            for _ in 0..6 {
+                match sw.focus_title(&needle) {
+                    Ok(_) => return,
+                    Err(jcode_scrollwm::ScrollWmError::NotRunning) => return,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                }
+            }
+        })
+        .await;
+    });
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -598,6 +656,10 @@ pub(super) async fn spawn_swarm_agent(
             swarm_event_tx,
         )
         .await;
+        // Best-effort: ask ScrollWM (if the user opted in and it is running) to
+        // focus the freshly-spawned agent window. Detached so socket/window I/O
+        // never blocks or fails the spawn.
+        maybe_reconcile_scrollwm_after_spawn(&new_session_id);
     }
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),

@@ -144,6 +144,18 @@ pub struct InputShellCompleted {
     pub result: crate::message::InputShellResult,
 }
 
+/// Result of the onboarding "Set up ScrollWM?" background install. Published by
+/// the async installer task and consumed on the UI thread to advance the flow.
+#[derive(Clone, Debug)]
+pub struct ScrollWmInstallCompleted {
+    /// Session the install was started for; stale results are ignored.
+    pub session_id: String,
+    /// Whether the installer command exited successfully.
+    pub ok: bool,
+    /// Optional short failure detail shown after a failed install.
+    pub detail: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum ClipboardPasteKind {
     Smart,
@@ -363,6 +375,8 @@ pub enum BusEvent {
     LoginCompleted(LoginCompleted),
     /// First-run onboarding finished validating the auto-selected default model.
     OnboardingModelValidated(OnboardingModelValidated),
+    /// Onboarding "Set up ScrollWM?" background install finished
+    ScrollWmInstallCompleted(ScrollWmInstallCompleted),
     /// Local `!cmd` shell command completed from the input line
     InputShellCompleted(InputShellCompleted),
     /// Clipboard paste/image URL work completed off the UI thread

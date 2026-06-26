@@ -3319,6 +3319,7 @@ dependencies = [
  "jcode-provider-metadata",
  "jcode-provider-openai",
  "jcode-provider-openrouter",
+ "jcode-scrollwm",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-setup-hints",
@@ -3438,6 +3439,7 @@ dependencies = [
  "jcode-protocol",
  "jcode-provider-core",
  "jcode-provider-metadata",
+ "jcode-scrollwm",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-setup-hints",
@@ -3966,6 +3968,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-scrollwm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jcode-selfdev-types"
 version = "0.1.0"
 dependencies = [
@@ -3991,9 +4003,11 @@ dependencies = [
  "dirs",
  "global-hotkey",
  "jcode-build-meta",
+ "jcode-config-types",
  "jcode-logging",
  "jcode-storage",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 

@@ -22,10 +22,94 @@ use ratatui::{prelude::*, widgets::Paragraph};
 const DONUT_HEIGHT: u16 = 12;
 const TELEMETRY_LINES: u16 = 4;
 const GAP: u16 = 1;
+/// Maximum number of "Searched, not found" rows shown at once before the panel
+/// scrolls. Keeps the centered welcome card from overflowing on short
+/// terminals; the rest are reachable via the scroll keys.
+const NOT_FOUND_VISIBLE: usize = 5;
 
 /// Accent color for the welcome title.
 fn welcome_accent() -> Color {
     rgb(138, 180, 248)
+}
+
+/// Clamp a not-found scroll offset to the maximum that still shows a full
+/// window of rows (so scrolling never strands the panel past its end).
+pub(crate) fn clamp_not_found_scroll(total: usize, scroll: u16) -> u16 {
+    let max_offset = total.saturating_sub(NOT_FOUND_VISIBLE);
+    scroll.min(max_offset as u16)
+}
+
+/// Build the "Searched, not found" panel lines for a login decision card.
+///
+/// Renders a dim header, then a scrolled window of up to [`NOT_FOUND_VISIBLE`]
+/// rows (`label  path`) plus "↑/↓ N more" affordances when the list overflows.
+/// Returns an empty vec when there is nothing to show.
+fn not_found_panel_lines(
+    rows: &[crate::tui::NotFoundRow],
+    scroll: u16,
+) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let align = Alignment::Center;
+    let dim = Style::default().fg(dim_color());
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(Span::styled(
+            format!("Searched, not found ({})", rows.len()),
+            Style::default()
+                .fg(dim_color())
+                .add_modifier(Modifier::ITALIC),
+        ))
+        .alignment(align),
+    );
+
+    let total = rows.len();
+    let overflow = total > NOT_FOUND_VISIBLE;
+    let offset = clamp_not_found_scroll(total, scroll) as usize;
+    let end = (offset + NOT_FOUND_VISIBLE).min(total);
+
+    if overflow && offset > 0 {
+        lines.push(
+            Line::from(Span::styled(format!("↑ {} more", offset), dim)).alignment(align),
+        );
+    }
+    // Widest label in the *current window* for a light column alignment.
+    let label_w = rows[offset..end]
+        .iter()
+        .map(|r| r.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    for row in &rows[offset..end] {
+        let pad = label_w.saturating_sub(row.label.chars().count());
+        lines.push(
+            Line::from(vec![
+                Span::styled("• ", dim),
+                Span::styled(
+                    row.label.clone(),
+                    Style::default().fg(rgb(170, 170, 170)),
+                ),
+                Span::raw(" ".repeat(pad + 2)),
+                Span::styled(row.path.clone(), dim),
+            ])
+            .alignment(align),
+        );
+    }
+    if overflow && end < total {
+        lines.push(
+            Line::from(Span::styled(
+                format!("↓ {} more  (PgUp/PgDn to scroll)", total - end),
+                dim,
+            ))
+            .alignment(align),
+        );
+    } else if overflow {
+        lines.push(
+            Line::from(Span::styled("(PgUp/PgDn to scroll)", dim)).alignment(align),
+        );
+    }
+    lines
 }
 
 /// Grayed telemetry notice shown at the very top of the onboarding screen.
@@ -78,7 +162,11 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
 
     use crate::tui::OnboardingWelcomeKind;
     match app.onboarding_welcome_kind() {
-        OnboardingWelcomeKind::Login { import } => {
+        OnboardingWelcomeKind::Login {
+            import,
+            not_found,
+            not_found_scroll,
+        } => {
             lines.push(Line::from(""));
             match import {
                 None => {
@@ -180,9 +268,14 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     );
                 }
             }
+            lines.extend(not_found_panel_lines(&not_found, not_found_scroll));
             return lines;
         }
-        OnboardingWelcomeKind::LoginOpenAi { yes_highlighted } => {
+        OnboardingWelcomeKind::LoginOpenAi {
+            yes_highlighted,
+            not_found,
+            not_found_scroll,
+        } => {
             lines.push(Line::from(""));
             lines.push(
                 Line::from(Span::styled(
@@ -244,6 +337,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                 ))
                 .alignment(align),
             );
+            lines.extend(not_found_panel_lines(&not_found, not_found_scroll));
             return lines;
         }
         OnboardingWelcomeKind::ContinuePrompt {
@@ -302,6 +396,124 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                 ))
                 .alignment(align),
             );
+            return lines;
+        }
+        OnboardingWelcomeKind::ScrollWmOptIn {
+            yes_highlighted,
+            seconds_left,
+            progress,
+        } => {
+            use crate::tui::ScrollWmInstallProgress;
+            lines.push(Line::from(""));
+            lines.push(
+                Line::from(Span::styled(
+                    "Set up ScrollWM?",
+                    Style::default()
+                        .fg(welcome_accent())
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .alignment(align),
+            );
+            lines.push(
+                Line::from(Span::styled(
+                    "Arrange your swarm agents into a tidy scrolling strip.",
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            lines.push(
+                Line::from(Span::styled(
+                    "One permission (Accessibility). macOS only.",
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+            lines.push(Line::from(""));
+
+            match progress {
+                // Install in flight / finished: show a status line instead of
+                // the Yes/No row so the card stops inviting input.
+                Some(ScrollWmInstallProgress::Running) => {
+                    lines.push(
+                        Line::from(Span::styled(
+                            "Installing ScrollWM… (this opens a menu-bar app)",
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .alignment(align),
+                    );
+                    lines.push(
+                        Line::from(Span::styled(
+                            "When it finishes, grant Accessibility in System Settings.",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                }
+                Some(ScrollWmInstallProgress::Succeeded) => {
+                    lines.push(
+                        Line::from(Span::styled(
+                            "✓ ScrollWM installed — grant Accessibility to finish.",
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .alignment(align),
+                    );
+                }
+                Some(ScrollWmInstallProgress::Failed { detail }) => {
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("✕ Install didn't finish: {detail}"),
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                }
+                None => {
+                    // Yes / No options; the highlighted one is bold + accented.
+                    // Default highlight is "No" (never install on a timeout).
+                    let (yes_style, no_style) = if yes_highlighted {
+                        (
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                            Style::default().fg(dim_color()),
+                        )
+                    } else {
+                        (
+                            Style::default().fg(dim_color()),
+                            Style::default()
+                                .fg(welcome_accent())
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                        )
+                    };
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled("  Yes  ", yes_style),
+                            Span::raw("   "),
+                            Span::styled("  No  ", no_style),
+                        ])
+                        .alignment(align),
+                    );
+                    lines.push(Line::from(""));
+                    lines.push(
+                        Line::from(Span::styled(
+                            "Left/right or h/l to move, Enter or Space to choose (y / n also work).",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("Skips automatically in {seconds_left}s."),
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
+                }
+            }
             return lines;
         }
         OnboardingWelcomeKind::Suggestions => {}

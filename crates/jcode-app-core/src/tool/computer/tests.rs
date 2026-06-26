@@ -98,15 +98,34 @@ fn is_mutating_classifies() {
 }
 
 #[test]
+fn schema_declares_every_input_field() {
+    // Regression guard for the "schema omits half its fields" bug: every field
+    // `dispatch` can require must be declared in `parameters_schema()`, or the
+    // model can never send it and the action is dead on arrival.
+    let tool = ComputerTool::new();
+    let schema = tool.parameters_schema();
+    let props = schema["properties"].as_object().expect("properties object");
+    for field in [
+        "action", "category", "x", "y", "to_x", "to_y", "w", "h", "text", "keys", "dx", "dy",
+        "depth", "app", "role", "title", "value", "element", "ax_action", "menu_path",
+        "window_id", "script", "contains", "timeout_ms", "region", "level", "dry_run",
+    ] {
+        assert!(props.contains_key(field), "schema is missing field `{field}`");
+    }
+}
+
+#[test]
 fn schema_is_compact() {
     // Guard against context bloat: the always-on schema + description must stay
-    // small. Measured well under this bound; alert if it balloons.
+    // small. Action *specs* live in `discover` (progressive disclosure), but
+    // every input *field* must be declared here or the model can't send it, so
+    // the field set (not the action set) sets the floor. Keep always-on cost
+    // roughly under ~900 tokens; alert if it balloons past that.
     let tool = ComputerTool::new();
     let schema = serde_json::to_string(&tool.parameters_schema()).unwrap();
     let total = tool.description().len() + schema.len();
-    // ~4 chars/token; keep always-on cost roughly under ~700 tokens.
     assert!(
-        total < 2800,
+        total < 3500,
         "computer tool always-on size grew to {total} chars (~{} tokens)",
         total / 4
     );

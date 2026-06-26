@@ -113,6 +113,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/config", "Show or edit configuration"),
     RegisteredCommand::public("/log", "Mark the current location in the jcode logs"),
     RegisteredCommand::public(
+        "/keys",
+        "Show keybinding conflicts with your terminal and OS (/keys refresh to rescan)",
+    ),
+    RegisteredCommand::public(
         "/diff",
         "Cycle or set diff display mode (off/inline/full/pinned/file)",
     ),
@@ -1147,6 +1151,21 @@ impl App {
     pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
         use crate::tui::OnboardingWelcomeKind;
         use crate::tui::app::onboarding_flow::OnboardingPhase;
+        // Families we probed but did not find, shared across the login phases.
+        let not_found_rows: Vec<crate::tui::NotFoundRow> = self
+            .onboarding_flow
+            .as_ref()
+            .map(|flow| {
+                flow.login_not_found
+                    .iter()
+                    .map(|t| crate::tui::NotFoundRow {
+                        label: t.label.clone(),
+                        path: t.path.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let not_found_scroll = self.onboarding_notfound_scroll;
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
                 let prompt = import.as_ref().and_then(|review| {
@@ -1161,11 +1180,17 @@ impl App {
                             seconds_left: review.seconds_remaining(),
                         })
                 });
-                OnboardingWelcomeKind::Login { import: prompt }
+                OnboardingWelcomeKind::Login {
+                    import: prompt,
+                    not_found: not_found_rows,
+                    not_found_scroll,
+                }
             }
             Some(OnboardingPhase::LoginOpenAi { yes_highlighted }) => {
                 OnboardingWelcomeKind::LoginOpenAi {
                     yes_highlighted: *yes_highlighted,
+                    not_found: not_found_rows,
+                    not_found_scroll,
                 }
             }
             Some(OnboardingPhase::ModelSelect) => OnboardingWelcomeKind::Suggestions,
@@ -1180,6 +1205,18 @@ impl App {
                     cli_label: cli.label().to_string(),
                     yes_highlighted: *yes_highlighted,
                     seconds_left,
+                }
+            }
+            Some(OnboardingPhase::ScrollWmOptIn {
+                yes_highlighted,
+                shown_at,
+            }) => {
+                let total = crate::tui::app::onboarding_flow::DECISION_TIMEOUT.as_secs();
+                let seconds_left = total.saturating_sub(shown_at.elapsed().as_secs());
+                OnboardingWelcomeKind::ScrollWmOptIn {
+                    yes_highlighted: *yes_highlighted,
+                    seconds_left,
+                    progress: self.scrollwm_install_progress.clone(),
                 }
             }
             _ => OnboardingWelcomeKind::Suggestions,
@@ -1197,6 +1234,7 @@ impl App {
             Some(OnboardingPhase::Login { .. })
                 | Some(OnboardingPhase::LoginOpenAi { .. })
                 | Some(OnboardingPhase::ContinuePrompt { .. })
+                | Some(OnboardingPhase::ScrollWmOptIn { .. })
         )
     }
 

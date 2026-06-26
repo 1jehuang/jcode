@@ -278,6 +278,141 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
     Ok(candidates)
 }
 
+/// One external credential source the auto-import sweep probes for, plus
+/// whether an artifact was actually located on disk.
+///
+/// "Present" here means *only* presence of the credential artifact, NOT
+/// whether it was consented/imported. A present-but-already-trusted source is
+/// still `present: true`; it simply won't show up as a pending candidate. The
+/// onboarding "searched, not found" UI lists the targets with `present == false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthSearchTarget {
+    /// Stable family id ("codex", "claude_code", "cursor", ...).
+    pub family: &'static str,
+    /// Human label for the row ("Codex", "Claude Code", "GitHub Copilot").
+    pub label: String,
+    /// Representative path we looked at (best-effort; some families probe
+    /// several files and this is the canonical one).
+    pub path: String,
+    /// True when a credential artifact exists on disk.
+    pub present: bool,
+}
+
+/// Outcome of one import-detection sweep: what we found (the same pending
+/// candidates the rest of the flow consumes) and the full set of sources we
+/// probed, each flagged present/absent. `not_found()` derives the
+/// "searched, but nothing here" list for the onboarding card.
+#[derive(Debug, Clone, Default)]
+pub struct ExternalAuthSearchReport {
+    /// Importable, unconsented candidates (mirrors
+    /// [`pending_external_auth_review_candidates`]).
+    pub found: Vec<ExternalAuthReviewCandidate>,
+    /// Every source family we probed, with its presence flag.
+    pub targets: Vec<AuthSearchTarget>,
+}
+
+impl ExternalAuthSearchReport {
+    /// The probed source families that did not have a credential artifact.
+    pub fn not_found(&self) -> Vec<&AuthSearchTarget> {
+        self.targets.iter().filter(|t| !t.present).collect()
+    }
+}
+
+/// Best-effort string form of a path-returning helper, for display only.
+fn search_path_string(path: Result<std::path::PathBuf>, fallback: &str) -> String {
+    path.map(|p| p.display().to_string())
+        .unwrap_or_else(|_| fallback.to_string())
+}
+
+/// Build the canonical list of credential families the import sweep looks at,
+/// each tagged with whether an artifact is present. Keyed on **presence only**
+/// (via the existing `*_exists()` / `preferred_*().is_some()` helpers), so an
+/// already-trusted login reads as present and never shows up as "not found".
+///
+/// Keep this in lockstep with [`pending_external_auth_review_candidates`]: every
+/// family probed there should appear here.
+pub fn external_auth_search_targets() -> Vec<AuthSearchTarget> {
+    use auth::external::ExternalAuthSource;
+
+    let copilot_present = {
+        use auth::copilot::ExternalCopilotAuthSource as C;
+        [C::ConfigJson, C::HostsJson, C::AppsJson]
+            .into_iter()
+            .any(|s| s.path().exists())
+    };
+
+    vec![
+        AuthSearchTarget {
+            family: "codex",
+            label: "Codex".to_string(),
+            path: search_path_string(auth::codex::legacy_auth_file_path(), "~/.codex/auth.json"),
+            present: auth::codex::legacy_auth_source_exists(),
+        },
+        AuthSearchTarget {
+            family: "claude_code",
+            label: "Claude Code".to_string(),
+            path: "~/.claude/.credentials.json".to_string(),
+            present: matches!(
+                auth::claude::preferred_external_auth_source(),
+                Some(auth::claude::ExternalClaudeAuthSource::ClaudeCode)
+            ),
+        },
+        AuthSearchTarget {
+            family: "gemini_cli",
+            label: "Gemini CLI".to_string(),
+            path: search_path_string(
+                auth::gemini::gemini_cli_oauth_path(),
+                "~/.gemini/oauth_creds.json",
+            ),
+            present: auth::gemini::gemini_cli_auth_source_exists(),
+        },
+        AuthSearchTarget {
+            family: "copilot",
+            label: "GitHub Copilot".to_string(),
+            path: "~/.copilot/config.json".to_string(),
+            present: copilot_present,
+        },
+        AuthSearchTarget {
+            family: "cursor",
+            label: "Cursor".to_string(),
+            path: search_path_string(auth::cursor::cursor_auth_file_path(), "~/.cursor/auth.json"),
+            present: auth::cursor::preferred_external_auth_source().is_some(),
+        },
+        AuthSearchTarget {
+            family: "opencode",
+            label: "OpenCode".to_string(),
+            path: search_path_string(
+                ExternalAuthSource::OpenCode.path(),
+                "~/.local/share/opencode/auth.json",
+            ),
+            present: ExternalAuthSource::OpenCode
+                .path()
+                .map(|p| p.exists())
+                .unwrap_or(false),
+        },
+        AuthSearchTarget {
+            family: "pi",
+            label: "pi".to_string(),
+            path: search_path_string(ExternalAuthSource::Pi.path(), "~/.pi/agent/auth.json"),
+            present: ExternalAuthSource::Pi
+                .path()
+                .map(|p| p.exists())
+                .unwrap_or(false),
+        },
+    ]
+}
+
+/// Run the import-detection sweep and return both the importable candidates and
+/// the full searched-target list (with presence flags). Additive wrapper over
+/// [`pending_external_auth_review_candidates`] used by onboarding to show a
+/// "Searched, not found" panel beneath the import decision rows.
+pub fn external_auth_search_report() -> Result<ExternalAuthSearchReport> {
+    Ok(ExternalAuthSearchReport {
+        found: pending_external_auth_review_candidates()?,
+        targets: external_auth_search_targets(),
+    })
+}
+
 pub fn parse_external_auth_review_selection(input: &str, count: usize) -> Result<Vec<usize>> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -683,5 +818,32 @@ mod render_markdown_tests {
             candidate.telemetry_auth_labels(),
             vec![("openai", "import")]
         );
+    }
+
+    #[test]
+    fn search_targets_cover_every_probed_family() {
+        // The "searched, not found" UI relies on this canonical family list
+        // staying in lockstep with `pending_external_auth_review_candidates`.
+        let targets = super::external_auth_search_targets();
+        let families: Vec<&str> = targets.iter().map(|t| t.family).collect();
+        for expected in [
+            "codex",
+            "claude_code",
+            "gemini_cli",
+            "copilot",
+            "cursor",
+            "opencode",
+            "pi",
+        ] {
+            assert!(
+                families.contains(&expected),
+                "missing search family {expected}; got {families:?}"
+            );
+        }
+        // Every target carries a non-empty label and representative path.
+        for t in &targets {
+            assert!(!t.label.is_empty(), "empty label for {}", t.family);
+            assert!(!t.path.is_empty(), "empty path for {}", t.family);
+        }
     }
 }

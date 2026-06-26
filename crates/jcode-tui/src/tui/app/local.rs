@@ -179,6 +179,9 @@ pub(super) fn handle_bus_event(
         Ok(BusEvent::OnboardingModelValidated(result)) => {
             app.handle_onboarding_model_validated(result)
         }
+        Ok(BusEvent::ScrollWmInstallCompleted(ev)) => {
+            app.handle_scrollwm_install_completed(ev)
+        }
         Ok(BusEvent::ModelsUpdated) => {
             app.invalidate_model_picker_cache();
             true

@@ -409,6 +409,40 @@ pub struct AgentsConfig {
     pub memory_model: Option<String>,
     /// Whether memory should use the sidecar for relevance/extraction.
     pub memory_sidecar_enabled: bool,
+    /// ScrollWM window-manager integration for headed swarm spawns (macOS).
+    pub scrollwm: ScrollwmIntegrationConfig,
+}
+
+/// ScrollWM (macOS scrolling window manager) integration settings for headed
+/// swarm spawns. All best-effort: when ScrollWM is absent every option is a
+/// no-op and never affects spawning.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ScrollwmIntegrationConfig {
+    /// Master switch. When true and ScrollWM is running, jcode drives it after
+    /// spawning a headed agent (e.g. focus the new agent's strip column).
+    /// Default `false` (opt-in) so jcode never touches the window manager unless
+    /// the user asks.
+    pub enabled: bool,
+    /// After spawning a headed agent, focus its column in the strip (matched by
+    /// the agent's unique session name in the window title). Default `true`,
+    /// only meaningful when `enabled`.
+    pub focus_active: bool,
+    /// Call `arrange` to adopt the agent windows into the strip when ScrollWM is
+    /// not already managing. WARNING: `arrange` adopts the *entire* current
+    /// Space, so this is `false` by default; jcode otherwise relies on
+    /// ScrollWM's auto-adopt of new windows while it is already managing.
+    pub arrange_on_spawn: bool,
+}
+
+impl Default for ScrollwmIntegrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            focus_active: true,
+            arrange_on_spawn: false,
+        }
+    }
 }
 
 /// How swarm-created agents should be spawned.

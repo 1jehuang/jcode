@@ -817,6 +817,14 @@ pub struct App {
     /// Active guided first-run onboarding flow (model select -> continue ->
     /// transcript pick -> suggestions). `None` when not onboarding.
     onboarding_flow: Option<onboarding_flow::OnboardingFlow>,
+    /// Scroll offset (in lines) into the onboarding "Searched, not found" panel
+    /// rendered beneath the login decision rows. Reset to 0 when the decision
+    /// row advances or the login phase changes.
+    onboarding_notfound_scroll: u16,
+    /// Live progress of the onboarding "Set up ScrollWM?" background install.
+    /// `None` while waiting for the user's decision; `Some(..)` once an install
+    /// is running or has finished (drives the card's status line).
+    scrollwm_install_progress: Option<crate::tui::ScrollWmInstallProgress>,
     /// One-shot guard: have we evaluated whether to auto-start the onboarding
     /// flow on startup yet? The fresh-install path logs in at the CLI before the
     /// TUI launches, so no in-TUI login event fires; this lets us still begin the

@@ -841,6 +841,38 @@ pub(super) fn handle_help_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+/// `/keys` shows the keymap diagnostics: detected terminal, discovered terminal
+/// and macOS shortcuts, and any conflicts with jcode's own keybindings.
+/// `/keys refresh` forces a fresh scan of the machine (otherwise a cached
+/// snapshot up to a day old is reused).
+pub(super) fn handle_keys_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/keys")
+        .or_else(|| slash_command_rest(trimmed, "/keybindings"))
+    else {
+        return false;
+    };
+
+    let force_refresh = matches!(rest.trim(), "refresh" | "rescan" | "reload");
+    let snapshot = if force_refresh {
+        crate::setup_hints::keymap::refresh_and_save()
+    } else {
+        crate::setup_hints::keymap::snapshot_cached_or_refresh()
+    };
+
+    let cfg = crate::config::config();
+    let report = crate::setup_hints::keymap::render_report(&cfg.keybindings, &snapshot);
+    app.push_display_message(DisplayMessage::system(report));
+
+    if let Some(status) =
+        crate::setup_hints::keymap::render_status_line(&cfg.keybindings, &snapshot)
+    {
+        app.set_status_notice(status);
+    } else {
+        app.set_status_notice("No keybinding conflicts detected");
+    }
+    true
+}
+
 pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = slash_command_rest(trimmed, "/provider-test-coverage")
         .or_else(|| slash_command_rest(trimmed, "/model-status"))

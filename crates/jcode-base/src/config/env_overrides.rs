@@ -311,6 +311,23 @@ impl Config {
                 self.agents.memory_sidecar_enabled = parsed;
             }
         }
+        // ScrollWM window-manager integration (macOS). Quick toggles for
+        // testing the headed-swarm tiling without editing the config file.
+        if let Ok(v) = std::env::var("JCODE_SCROLLWM") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.agents.scrollwm.enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SCROLLWM_FOCUS_ACTIVE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.agents.scrollwm.focus_active = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SCROLLWM_ARRANGE_ON_SPAWN") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.agents.scrollwm.arrange_on_spawn = parsed;
+            }
+        }
 
         // Web search
         if let Ok(v) = std::env::var("JCODE_WEBSEARCH_ENGINE")

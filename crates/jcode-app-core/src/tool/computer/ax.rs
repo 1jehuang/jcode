@@ -289,40 +289,54 @@ pub fn select_menu(app: &str, path: &[String]) -> Result<ToolOutput> {
 
 /// Return the element at a screen point (role/title), useful to confirm targets.
 pub fn element_at(app: &str, x: f64, y: f64) -> Result<ToolOutput> {
-    // System Events can hit-test via "UI element N" is awkward; use AX position
-    // matching by walking and finding the deepest element containing the point.
+    // Hit-test by walking the AX tree, but PRUNE: only descend into a subtree
+    // whose own frame contains the point. A child's frame is contained in its
+    // parent's, so a parent that doesn't contain the point can't have a matching
+    // descendant. This turns a full-tree walk (which times out on huge apps like
+    // System Settings) into a path-length walk. Also bound the depth defensively.
     let script = format!(
         r#"
 using terms from application "System Events"
-    on hit(el, px, py, idxPath, best)
-        set result to best
+    on inFrame(el, px, py)
         try
             set p to position of el
             set sz to size of el
             set x1 to item 1 of p
             set y1 to item 2 of p
-            set x2 to x1 + (item 1 of sz)
-            set y2 to y1 + (item 2 of sz)
-            if px >= x1 and px <= x2 and py >= y1 and py <= y2 then
-                set r to ""
-                try
-                    set r to (role of el as text)
-                end try
-                set t to ""
-                try
-                    set t to (title of el as text)
-                end try
-                set result to idxPath & "  " & r & " \"" & t & "\" @(" & x1 & "," & y1 & " " & (item 1 of sz) & "x" & (item 2 of sz) & ")"
+            if px >= x1 and px <= (x1 + (item 1 of sz)) and py >= y1 and py <= (y1 + (item 2 of sz)) then
+                return true
             end if
         end try
+        return false
+    end inFrame
+    on hit(el, px, py, idxPath, maxlvl, lvl, best)
+        set bestHit to best
+        if lvl > maxlvl then return bestHit
+        -- Record this element if it contains the point (deepest wins).
+        if my inFrame(el, px, py) then
+            set r to ""
+            try
+                set r to (role of el as text)
+            end try
+            set t to ""
+            try
+                set t to (title of el as text)
+            end try
+            set p to position of el
+            set sz to size of el
+            set bestHit to idxPath & "  " & r & " \"" & t & "\" @(" & (item 1 of p) & "," & (item 2 of p) & " " & (item 1 of sz) & "x" & (item 2 of sz) & ")"
+        end if
+        -- Only descend into children that themselves contain the point.
         try
             set i to 0
             repeat with child in (UI elements of el)
                 set i to i + 1
-                set result to my hit(child, px, py, idxPath & "." & i, result)
+                if my inFrame(child, px, py) then
+                    set bestHit to my hit(child, px, py, idxPath & "." & i, maxlvl, lvl + 1, bestHit)
+                end if
             end repeat
         end try
-        return result
+        return bestHit
     end hit
 end using terms from
 
@@ -330,7 +344,7 @@ tell application "System Events"
     set frontApp to first application process whose name is {app}
     try
         set win to front window of frontApp
-        set out to my hit(win, {x}, {y}, "", "(none)")
+        set out to my hit(win, {x}, {y}, "", 40, 0, "(none)")
     on error errMsg
         set out to "(error: " & errMsg & ")"
     end try
@@ -341,7 +355,7 @@ end tell
         x = x,
         y = y
     );
-    let res = osa::run_applescript(&script)?;
+    let res = osa::run_applescript_timeout(&script, Duration::from_secs(12))?;
     Ok(ToolOutput::new(format!("Deepest element at ({x:.0},{y:.0}) in {app}:\n{res}"))
         .with_title("element_at")
         .with_metadata(json!({"app": app, "x": x, "y": y})))

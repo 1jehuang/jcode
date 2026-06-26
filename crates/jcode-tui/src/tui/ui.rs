@@ -89,7 +89,7 @@ mod memory_ui;
 #[path = "ui_messages.rs"]
 mod messages;
 #[path = "ui_onboarding.rs"]
-mod onboarding;
+pub(crate) mod onboarding;
 #[path = "ui_overlays.rs"]
 mod overlays;
 #[path = "ui_pinned.rs"]
