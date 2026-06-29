@@ -219,6 +219,13 @@ impl SkillRegistry {
             }
         }
 
+        // Load from ~/.agents/skills/ (shared cross-tool `.agents` convention)
+        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
+            && agents_skills.exists()
+        {
+            registry.load_from_dir(&agents_skills)?;
+        }
+
         registry.load_project_local_dirs(working_dir)?;
 
         Ok(registry)
@@ -234,6 +241,12 @@ impl SkillRegistry {
         let local_jcode = Self::project_local_dir(working_dir, ".jcode");
         if local_jcode.exists() {
             self.load_from_dir(&local_jcode)?;
+        }
+
+        // Load from ./.agents/skills/ (shared cross-tool `.agents` convention)
+        let local_agents = Self::project_local_dir(working_dir, ".agents");
+        if local_agents.exists() {
+            self.load_from_dir(&local_agents)?;
         }
 
         // Fallback: ./.claude/skills/ (project-local Claude skills for compatibility)
@@ -376,10 +389,23 @@ impl SkillRegistry {
             }
         }
 
+        // Load from ~/.agents/skills/ (shared cross-tool `.agents` convention)
+        if let Ok(agents_skills) = crate::storage::user_home_path(".agents/skills")
+            && agents_skills.exists()
+        {
+            count += self.load_from_dir_count(&agents_skills)?;
+        }
+
         // Load from ./.jcode/skills/ (project-local jcode skills)
         let local_jcode = Self::project_local_dir(working_dir, ".jcode");
         if local_jcode.exists() {
             count += self.load_from_dir_count(&local_jcode)?;
+        }
+
+        // Load from ./.agents/skills/ (shared cross-tool `.agents` convention)
+        let local_agents = Self::project_local_dir(working_dir, ".agents");
+        if local_agents.exists() {
+            count += self.load_from_dir_count(&local_agents)?;
         }
 
         // Fallback: ./.claude/skills/ (project-local Claude skills for compatibility)
@@ -783,6 +809,20 @@ mod tests {
             .get("wd-only")
             .expect("working-dir local skill should load");
         assert_eq!(skill.description, "Test skill wd-only");
+        assert!(skill.path.starts_with(temp.path()));
+    }
+
+    #[test]
+    fn load_for_working_dir_reads_project_local_agents_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_skill(temp.path(), ".agents", "agents-only");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
+
+        let skill = registry
+            .get("agents-only")
+            .expect("project-local .agents skill should load");
+        assert_eq!(skill.description, "Test skill agents-only");
         assert!(skill.path.starts_with(temp.path()));
     }
 
