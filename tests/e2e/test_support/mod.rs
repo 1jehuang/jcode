@@ -79,6 +79,12 @@ impl TestEnvGuard {
         jcode::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
         jcode::env::set_var("JCODE_TEST_SESSION", "1");
         jcode::env::set_var("JCODE_DEBUG_CONTROL", "1");
+        // Disable the memory sidecar/extraction in e2e runs. Its background
+        // extraction makes its own provider `complete()` call, which would steal
+        // a queued mock response from the scenario under test and make turn
+        // outcomes nondeterministic across transports.
+        jcode::env::set_var("JCODE_MEMORY_ENABLED", "0");
+        jcode::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", "0");
 
         Ok(Self {
             _lock: lock,
@@ -580,6 +586,25 @@ pub(crate) async fn run_unix_transport_scenario() -> Result<TransportScenarioRes
             }
         }
 
+        // The assistant message persists asynchronously after `Done`. Poll the
+        // live session history (the same `agent.messages()` that resume reads)
+        // until both the user and assistant messages are present, so the resume
+        // snapshot is deterministic across transports.
+        let persist_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let messages = client.get_history().await?;
+            if messages.len() >= 2 {
+                break;
+            }
+            if Instant::now() >= persist_deadline {
+                anyhow::bail!(
+                    "unix: timed out waiting for assistant message to persist (history had {} message(s))",
+                    messages.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         let resume_id = client.resume_session(&server_session_id).await?;
         let resume_events = collect_until_history_unix(&mut client, resume_id).await?;
 
@@ -652,6 +677,31 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
 
         let message_id = client.send_message("hello over transport").await?;
         collect_until_done_ws(&mut client, message_id).await?;
+
+        // Wait for the assistant message to persist (see the unix scenario): poll
+        // the live history until both messages are present so the resume snapshot
+        // matches across transports rather than racing async persistence.
+        let persist_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let history_id = client.get_history().await?;
+            let events = collect_until_history_ws(&mut client, history_id).await?;
+            let message_count = events
+                .iter()
+                .find_map(|event| match event {
+                    ServerEvent::History { messages, .. } => Some(messages.len()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            if message_count >= 2 {
+                break;
+            }
+            if Instant::now() >= persist_deadline {
+                anyhow::bail!(
+                    "websocket: timed out waiting for assistant message to persist (history had {message_count} message(s))"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         let resume_id = client.resume_session(&server_session_id).await?;
         let resume_events = collect_until_history_ws(&mut client, resume_id).await?;
