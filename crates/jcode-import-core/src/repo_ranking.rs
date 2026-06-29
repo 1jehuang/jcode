@@ -287,7 +287,7 @@ pub fn build_launch_hotkey_plan(
 
     chords
         .iter()
-        .zip(dirs.into_iter())
+        .zip(dirs)
         .map(|(chord, (dir, label))| PlannedHotkey {
             chord: (*chord).to_string(),
             dir,

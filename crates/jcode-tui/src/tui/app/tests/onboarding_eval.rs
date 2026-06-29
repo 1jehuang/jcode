@@ -2747,7 +2747,7 @@ fn onboarding_meta_scorecard() {
     let meta_trust = (passed as f64 / results.len() as f64) * 100.0;
 
     println!("\n============ META-EVALUATION (Tier M): is the scorer trustworthy? ============");
-    println!("{:<16} {:>6}  {}", "property", "result", "guarantees");
+    println!("{:<16} {:>6}  guarantees", "property", "result");
     for (name, ok, desc) in &results {
         println!("{:<16} {:>6}  {}", name, if *ok { "PASS" } else { "FAIL" }, desc);
     }
@@ -3052,7 +3052,7 @@ fn signal_coverage_scorecard() {
         // ---- Report ----
         println!("\n============ SIGNAL COVERAGE ============");
         println!("-- Layer A: registry ({} signals) --", registry.len());
-        println!("{:<22} {:<9} {}", "signal", "status", "rationale");
+        println!("{:<22} {:<9} rationale", "signal", "status");
         for s in &registry {
             let st = match s.status {
                 SignalStatus::Scored => "SCORED",

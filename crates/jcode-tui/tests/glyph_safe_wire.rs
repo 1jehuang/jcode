@@ -9,7 +9,6 @@
 
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Cell;
-use ratatui::layout::Position;
 use ratatui::style::Color;
 
 /// Drive the backend to draw a single cell with the given fg color and return
@@ -22,9 +21,7 @@ fn emitted_bytes_for(fg: Color) -> Vec<u8> {
         cell.set_symbol("X");
         cell.set_fg(fg);
         let content = [(0u16, 0u16, &cell)];
-        backend
-            .draw(content.into_iter().map(|(x, y, c)| (x, y, c)))
-            .expect("draw");
+        backend.draw(content.into_iter()).expect("draw");
         backend.flush().expect("flush");
     }
     out

@@ -265,8 +265,8 @@ pub(crate) fn fuzzy_match(needle: &str, haystack: &str) -> Option<FuzzyMatch> {
     // a trailing typo cannot silently expand the query into an unrelated command
     // (e.g. `/goals sh` must not also match `/goals resume`).
     let mut answer: Option<Cell> = None;
-    for j in 0..=n {
-        if let Some(cell) = dp[m][j].clone()
+    for row in dp[m].iter().take(n + 1) {
+        if let Some(cell) = row.clone()
             && cell.tail_true
         {
             keep_best(&mut answer, cell);

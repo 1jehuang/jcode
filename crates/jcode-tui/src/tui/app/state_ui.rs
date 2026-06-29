@@ -1842,7 +1842,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         if let Some(ref provider_id) = app.provider_session_id {
             info.push_str(&format!(
                 "Provider Session: {}...\n",
-                jcode_core::util::truncate_str(&provider_id, 16)
+                jcode_core::util::truncate_str(provider_id, 16)
             ));
         }
 

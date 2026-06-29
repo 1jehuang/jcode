@@ -31,6 +31,7 @@ impl From<SessionCounts> for CountsReport {
 /// Always shows both the streaming and total counts directly in the menu bar
 /// (e.g. "0/3" idle, "2/7" while streaming) so the live state is visible at a
 /// glance without opening the dropdown. Icon-only when no sessions are running.
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn format_menubar_title(counts: SessionCounts) -> String {
     if counts.total == 0 {
         String::new()

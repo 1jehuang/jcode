@@ -397,7 +397,7 @@ pub fn debug_image_scroll_benchmark(
     // image this also performs the decode+scale+transmit inline (the work the
     // real app pushes to its prewarm worker); on a warm image it is the cheap
     // placeholder re-address that every steady-state scroll frame pays.
-    let mut draw_visible = |buf: &mut Buffer, id: u64| {
+    let draw_visible = |buf: &mut Buffer, id: u64| {
         let _ = inline_fit_readiness(id, content_width, image_rows, true);
         let _ = render_image_widget_fit_stable(
             id,

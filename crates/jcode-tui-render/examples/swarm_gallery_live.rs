@@ -340,29 +340,29 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
         terminal.draw(|f| draw(f, &workers, max_pct, paused))?;
 
         let timeout = tick.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                let ctrl_c =
-                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    _ if ctrl_c => break,
-                    KeyCode::Char('+') | KeyCode::Char('=') => {
-                        n_agents = (n_agents + 1).min(8);
-                        workers = make_workers(n_agents);
-                    }
-                    KeyCode::Char('-') | KeyCode::Char('_') => {
-                        n_agents = n_agents.saturating_sub(1).max(1);
-                        workers = make_workers(n_agents);
-                    }
-                    KeyCode::Char(']') => max_pct = (max_pct + 5).min(90),
-                    KeyCode::Char('[') => max_pct = max_pct.saturating_sub(5).max(5),
-                    KeyCode::Char(' ') => paused = !paused,
-                    KeyCode::Char('r') => {
-                        workers = make_workers(n_agents);
-                    }
-                    _ => {}
+        if event::poll(timeout)?
+            && let Event::Key(key) = event::read()?
+        {
+            let ctrl_c =
+                key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                _ if ctrl_c => break,
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    n_agents = (n_agents + 1).min(8);
+                    workers = make_workers(n_agents);
                 }
+                KeyCode::Char('-') | KeyCode::Char('_') => {
+                    n_agents = n_agents.saturating_sub(1).max(1);
+                    workers = make_workers(n_agents);
+                }
+                KeyCode::Char(']') => max_pct = (max_pct + 5).min(90),
+                KeyCode::Char('[') => max_pct = max_pct.saturating_sub(5).max(5),
+                KeyCode::Char(' ') => paused = !paused,
+                KeyCode::Char('r') => {
+                    workers = make_workers(n_agents);
+                }
+                _ => {}
             }
         }
 
@@ -372,11 +372,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
                     w.tick();
                 }
                 // When everything is done, loop the demo after a short beat.
-                if workers.iter().all(|w| w.status == "completed") {
-                    if workers.iter().all(|w| w.age_secs() > 1) {
-                        // restart so the demo keeps streaming
-                        workers = make_workers(n_agents);
-                    }
+                if workers.iter().all(|w| w.status == "completed")
+                    && workers.iter().all(|w| w.age_secs() > 1)
+                {
+                    // restart so the demo keeps streaming
+                    workers = make_workers(n_agents);
                 }
             }
             last_tick = Instant::now();

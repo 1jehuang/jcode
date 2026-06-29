@@ -269,6 +269,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
     lines
 }
 
+#[allow(dead_code)] // Retained for status-bar model rendering; currently unused after a layout change.
 pub(crate) fn shorten_model_name(model: &str) -> String {
     if model.contains("claude") {
         if model.contains("opus-4-5") || model.contains("opus-4.5") {

@@ -168,7 +168,7 @@ fn nearest_cube_components(v: u8) -> ([u8; 2], usize) {
     let next = best as usize + 1;
     if next < CUBE_VALUES.len() && (v as i16 - CUBE_VALUES[next] as i16).unsigned_abs() == best_dist
     {
-        ([best, best as u8 + 1], 2)
+        ([best, best + 1], 2)
     } else {
         ([best, best], 1)
     }

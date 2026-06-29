@@ -220,11 +220,11 @@ pub fn render_swarm_panel(
     }
 
     // ---- Detail viewport for the selected agent ----
-    if detail_budget >= 3 {
-        if let Some(tile) = tiles.get(display_index_to_tile_index(&ordered, members, selected)) {
-            let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget);
-            out.extend(detail);
-        }
+    if detail_budget >= 3
+        && let Some(tile) = tiles.get(display_index_to_tile_index(&ordered, members, selected))
+    {
+        let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget);
+        out.extend(detail);
     }
 
     out

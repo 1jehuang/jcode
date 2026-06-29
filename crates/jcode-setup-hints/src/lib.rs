@@ -8,6 +8,14 @@
 //! Each nudge can be dismissed permanently with "Don't ask again".
 //! State is persisted in `~/.jcode/setup_hints.json`.
 
+// Several launch-hotkey helpers are gated `#[cfg(any(test, target_os = "macos"))]`
+// because the unit tests exercise the macOS launch-hotkey notice logic on every
+// platform. In a non-macOS *test* build their only production callers (the
+// `#[cfg(target_os = "macos")]` notice/install paths) are compiled out, so the
+// helpers the tests don't call directly look dead. They are real macOS code, so
+// silence dead_code only for that specific build shape instead of deleting them.
+#![cfg_attr(all(test, not(target_os = "macos")), allow(dead_code))]
+
 #[cfg(target_os = "macos")]
 use anyhow::Context;
 use anyhow::Result;
@@ -147,7 +155,9 @@ pub const HOTKEY_LISTENER_VERSION: u32 = 5;
 /// to a user (across all launches and platforms). After this many nudges we stop
 /// asking, even if the user never explicitly picked "Don't ask again".
 pub const MAX_TERMINAL_NUDGES: u64 = 5;
+#[cfg(any(test, target_os = "macos"))]
 const LAUNCH_HOTKEY_LEARNED_USES: u64 = 3;
+#[cfg(any(test, target_os = "macos"))]
 const LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP: u64 = 10;
 
 #[derive(Debug, Clone, Default)]
@@ -1168,6 +1178,7 @@ pub(crate) struct LaunchHotkeyRow {
 ///   least `LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP` times, drop the whole
 ///   notice so it never lingers for an experienced user.
 /// - Returns `None` when nothing should be shown.
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn launch_hotkey_notice_lines(
     rows: &[LaunchHotkeyRow],
     usage: &HashMap<String, u64>,
