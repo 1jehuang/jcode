@@ -120,6 +120,15 @@ fn spawn_hook_defaults_to_none_and_parses_from_toml() {
 }
 
 #[test]
+fn terminal_preferred_defaults_to_none_and_parses_from_toml() {
+    assert_eq!(Config::default().terminal.preferred, None);
+
+    let cfg: Config = toml::from_str("[terminal]\npreferred = \"ghostty\"\n")
+        .expect("preferred should parse");
+    assert_eq!(cfg.terminal.preferred.as_deref(), Some("ghostty"));
+}
+
+#[test]
 fn hooks_config_defaults_and_parses_from_toml() {
     let defaults = Config::default().hooks;
     assert_eq!(defaults.turn_start, None);

@@ -98,7 +98,25 @@ pub(super) fn save_preferred_macos_terminal(terminal: MacTerminalKind) -> Result
 }
 
 pub(super) fn effective_macos_terminal() -> MacTerminalKind {
-    load_preferred_macos_terminal().unwrap_or_else(detect_macos_terminal)
+    // Precedence: config.toml `[terminal] preferred` (discoverable, documented)
+    // > legacy `~/.jcode/preferred_terminal.json` > runtime detection.
+    config_preferred_macos_terminal()
+        .or_else(load_preferred_macos_terminal)
+        .unwrap_or_else(detect_macos_terminal)
+}
+
+/// Read `[terminal] preferred` from `~/.jcode/config.toml`, if present and valid.
+fn config_preferred_macos_terminal() -> Option<MacTerminalKind> {
+    #[derive(Deserialize, Default)]
+    struct Wrapper {
+        #[serde(default)]
+        terminal: jcode_config_types::TerminalConfig,
+    }
+    let dir = storage::jcode_dir().ok()?;
+    let text = std::fs::read_to_string(dir.join("config.toml")).ok()?;
+    let wrapper = toml::from_str::<Wrapper>(&text).ok()?;
+    let preferred = wrapper.terminal.preferred?;
+    MacTerminalKind::from_cli_value(&preferred)
 }
 
 fn detect_macos_terminal() -> MacTerminalKind {
@@ -265,6 +283,32 @@ mod tests {
         MacTerminalKind, applescript_command_for_iterm, applescript_command_for_terminal,
         launch_command_for_macos_terminal, open_command_for_terminal,
     };
+
+    #[test]
+    fn from_cli_value_maps_documented_config_values() {
+        // These are the values documented for `[terminal] preferred` in
+        // config.toml; they must round-trip to a known terminal kind (#401).
+        let cases = [
+            ("ghostty", MacTerminalKind::Ghostty),
+            ("iterm2", MacTerminalKind::Iterm2),
+            ("iterm", MacTerminalKind::Iterm2),
+            ("terminal", MacTerminalKind::AppleTerminal),
+            ("wezterm", MacTerminalKind::WezTerm),
+            ("warp", MacTerminalKind::Warp),
+            ("alacritty", MacTerminalKind::Alacritty),
+            ("vscode", MacTerminalKind::Vscode),
+            ("code", MacTerminalKind::Vscode),
+            ("  Ghostty  ", MacTerminalKind::Ghostty),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                MacTerminalKind::from_cli_value(value),
+                Some(expected),
+                "config value {value:?} should map to {expected:?}"
+            );
+        }
+        assert_eq!(MacTerminalKind::from_cli_value("nope"), None);
+    }
 
     #[test]
     fn open_command_terminals_use_open_with_expected_args() {

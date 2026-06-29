@@ -635,6 +635,16 @@ pub struct TerminalConfig {
     ///
     /// Env override: `JCODE_FOCUS_HOOK` (set empty to disable a config hook).
     pub focus_hook: Option<String>,
+    /// Terminal used by the macOS Cmd+; launch hotkey and in-app session spawns.
+    ///
+    /// One of: `ghostty`, `iterm2`, `wezterm`, `warp`, `alacritty`, `vscode`,
+    /// `terminal` (Apple Terminal). When set, this is the source of truth for
+    /// which terminal jcode launches into and is preferred over the legacy
+    /// `~/.jcode/preferred_terminal.json` file. Re-run `jcode setup-hotkey`
+    /// after changing it so the generated launcher script picks up the change.
+    ///
+    /// macOS only; ignored on other platforms.
+    pub preferred: Option<String>,
 }
 
 /// Lifecycle hooks: external commands jcode runs at well-defined points.
