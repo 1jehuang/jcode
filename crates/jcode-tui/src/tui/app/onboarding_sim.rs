@@ -45,9 +45,7 @@ impl App {
     pub(super) fn start_onboarding_simulator(&mut self) {
         // Don't fight a genuinely-running live guided flow.
         if self.onboarding_flow_active() && self.onboarding_sim.is_none() {
-            self.set_status_notice(
-                "Onboarding flow already active; can't start the simulator now",
-            );
+            self.set_status_notice("Onboarding flow already active; can't start the simulator now");
             return;
         }
         self.onboarding_sim = Some(0);
@@ -201,7 +199,9 @@ impl App {
         if let Some(flow) = self.onboarding_flow.as_mut() {
             match &mut flow.phase {
                 OnboardingPhase::LoginOpenAi { yes_highlighted }
-                | OnboardingPhase::ContinuePrompt { yes_highlighted, .. } => {
+                | OnboardingPhase::ContinuePrompt {
+                    yes_highlighted, ..
+                } => {
                     *yes_highlighted = yes;
                 }
                 OnboardingPhase::Login {

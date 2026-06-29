@@ -2520,7 +2520,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let swarm_strip_lines: Vec<Line<'static>> = if app.inline_swarm_gallery_active() {
         let members = app.inline_swarm_members();
         if chat_area.width >= 24 {
-            let focus_key = crate::config::config().keybindings.swarm_panel_focus.clone();
+            let focus_key = crate::config::config()
+                .keybindings
+                .swarm_panel_focus
+                .clone();
             super::info_widget::swarm_gallery::render_swarm_strip_lines(
                 &members,
                 app.swarm_panel_selected(),

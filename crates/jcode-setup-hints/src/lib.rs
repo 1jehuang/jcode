@@ -1190,7 +1190,10 @@ pub(crate) fn launch_hotkey_notice_lines(
         .filter(|row| uses_for(&row.chord) < LAUNCH_HOTKEY_LEARNED_USES)
         .map(|row| {
             let suffix = if row.self_dev { " [self-dev]" } else { "" };
-            format!("{} → {} ({}){}", row.chord, row.label, row.cwd_display, suffix)
+            format!(
+                "{} → {} ({}){}",
+                row.chord, row.label, row.cwd_display, suffix
+            )
         })
         .collect();
 

@@ -720,10 +720,7 @@ pub fn load_codex_external_session(
         source: "codex",
         session_id: session_id.to_string(),
         short_name: Some(format!("codex {}", truncate_str(&session_id, 8))),
-        title: Some(format!(
-            "Codex session {}",
-            truncate_str(&session_id, 8)
-        )),
+        title: Some(format!("Codex session {}", truncate_str(&session_id, 8))),
         working_dir,
         provider_key: Some("openai-codex".to_string()),
         model: None,
@@ -815,10 +812,7 @@ pub fn load_pi_external_session(
         source: "pi",
         session_id: session_id.to_string(),
         short_name: Some(format!("pi {}", truncate_str(&session_id, 8))),
-        title: Some(format!(
-            "Pi session {}",
-            truncate_str(&session_id, 8)
-        )),
+        title: Some(format!("Pi session {}", truncate_str(&session_id, 8))),
         working_dir,
         provider_key,
         model,
@@ -862,12 +856,7 @@ pub fn load_opencode_external_session(
         .get("title")
         .and_then(|v| v.as_str())
         .map(|title| truncate_title_text(title, 72))
-        .unwrap_or_else(|| {
-            format!(
-                "OpenCode session {}",
-                truncate_str(&session_id, 8)
-            )
-        });
+        .unwrap_or_else(|| format!("OpenCode session {}", truncate_str(&session_id, 8)));
     let mut provider_key = Some("opencode".to_string());
     let mut model = None;
     let mut messages = Vec::new();
@@ -930,10 +919,7 @@ pub fn load_opencode_external_session(
     Ok(Some(ExternalSessionRecord {
         source: "opencode",
         session_id: session_id.to_string(),
-        short_name: Some(format!(
-            "opencode {}",
-            truncate_str(&session_id, 8)
-        )),
+        short_name: Some(format!("opencode {}", truncate_str(&session_id, 8))),
         title: Some(title),
         working_dir,
         provider_key,

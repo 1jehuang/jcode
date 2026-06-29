@@ -39,7 +39,6 @@ fn model_supports_image_generation(model_id: &str) -> bool {
     !model_id.to_ascii_lowercase().contains("codex")
 }
 
-
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
 

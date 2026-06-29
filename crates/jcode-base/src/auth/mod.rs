@@ -727,11 +727,7 @@ impl AuthStatus {
                 {
                     summarize_sources(vec![
                         env_source(&key_env),
-                        config_source(
-                            &key_env,
-                            &env_file,
-                            format!("~/.config/jcode/{}", env_file),
-                        ),
+                        config_source(&key_env, &env_file, format!("~/.config/jcode/{}", env_file)),
                         external_api_key_source(&key_env),
                     ])
                 } else {

@@ -1495,9 +1495,7 @@ impl crate::tui::TuiState for App {
             Some(self.session.id.as_str())
         };
         match self_id {
-            Some(self_id) => {
-                filter_inline_swarm_subtree(&self.remote_swarm_members, self_id)
-            }
+            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
             None => self.remote_swarm_members.clone(),
         }
     }
@@ -1838,7 +1836,8 @@ impl App {
 
         let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match jcode_app_core::session_launch::spawn_resume_in_new_terminal(&exe, &session_id, &cwd) {
+        match jcode_app_core::session_launch::spawn_resume_in_new_terminal(&exe, &session_id, &cwd)
+        {
             Ok(true) => self.set_status_notice(format!("Opened {label} in a new window")),
             Ok(false) => self.set_status_notice(format!(
                 "Could not open a terminal for {label} (no emulator found)"

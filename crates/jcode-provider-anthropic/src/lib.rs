@@ -890,7 +890,10 @@ mod cache_prefix_invariant_tests {
 
         // Curated builtins are present under their OAuth names.
         for builtin in ["Bash", "Read", "Agent", "Write", "Edit", "Glob", "Grep"] {
-            assert!(names.contains(&builtin), "missing builtin {builtin} in {names:?}");
+            assert!(
+                names.contains(&builtin),
+                "missing builtin {builtin} in {names:?}"
+            );
         }
         // The previously-dropped custom tools are now forwarded.
         for custom in ["websearch", "webfetch", "browser", "codesearch", "memory"] {

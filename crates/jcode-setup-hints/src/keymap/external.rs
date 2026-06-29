@@ -90,7 +90,9 @@ fn chord_from_tokens<'a>(
         }
     }
     let key = key?;
-    Some(KeyChord::new(mods.cmd, mods.ctrl, mods.alt, mods.shift, &key))
+    Some(KeyChord::new(
+        mods.cmd, mods.ctrl, mods.alt, mods.shift, &key,
+    ))
 }
 
 // ---------------------------------------------------------------------------

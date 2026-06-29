@@ -197,7 +197,6 @@ mod tests {
         assert!(s.starts_with(truncated));
     }
 
-
     #[test]
     fn test_sse_data_line_accepts_optional_space() {
         assert_eq!(sse_data_line("data: {\"ok\":true}"), Some("{\"ok\":true}"));

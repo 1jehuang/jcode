@@ -504,7 +504,10 @@ fn launch_hotkey_notice_lists_all_unlearned_bindings() {
 
 #[test]
 fn launch_hotkey_notice_hides_individually_learned_bindings() {
-    let rows = vec![row("cmd+;", "home", false), row("cmd+'", "last project", false)];
+    let rows = vec![
+        row("cmd+;", "home", false),
+        row("cmd+'", "last project", false),
+    ];
     let mut usage = std::collections::HashMap::new();
     // cmd+; used enough to be considered learned; cmd+' still new.
     usage.insert("cmd+;".to_string(), LAUNCH_HOTKEY_LEARNED_USES);
@@ -515,7 +518,10 @@ fn launch_hotkey_notice_hides_individually_learned_bindings() {
 
 #[test]
 fn launch_hotkey_notice_stops_once_learned_and_experienced() {
-    let rows = vec![row("cmd+;", "home", false), row("cmd+'", "last project", false)];
+    let rows = vec![
+        row("cmd+;", "home", false),
+        row("cmd+'", "last project", false),
+    ];
     let mut usage = std::collections::HashMap::new();
     usage.insert("cmd+;".to_string(), LAUNCH_HOTKEY_LEARNED_USES);
     // Learned at least one binding AND launched enough overall -> stop entirely,
@@ -531,6 +537,7 @@ fn launch_hotkey_notice_keeps_showing_for_new_user_with_many_launches() {
     // Many launches but no binding learned yet: keep showing so they can adopt it.
     let rows = vec![row("cmd+;", "home", false)];
     let usage = std::collections::HashMap::new();
-    let lines = launch_hotkey_notice_lines(&rows, &usage, 50).expect("never learned -> keep showing");
+    let lines =
+        launch_hotkey_notice_lines(&rows, &usage, 50).expect("never learned -> keep showing");
     assert_eq!(lines.len(), 1);
 }

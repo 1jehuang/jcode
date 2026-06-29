@@ -662,7 +662,10 @@ fn build_raw_mime(
         ));
     }
 
-    let boundary = format!("jcode_boundary_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let boundary = format!(
+        "jcode_boundary_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
     let mut raw = format!(
         "To: {}\r\nSubject: {}\r\n{}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"{}\"\r\n\r\n",
         to, subject, reply_headers, boundary
@@ -723,9 +726,7 @@ fn guess_mime_type(path: &std::path::Path) -> &'static str {
         Some("json") => "application/json",
         Some("zip") => "application/zip",
         Some("doc") => "application/msword",
-        Some("docx") => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        }
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         _ => "application/octet-stream",
     }
 }

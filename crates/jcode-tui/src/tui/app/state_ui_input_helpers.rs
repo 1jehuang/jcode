@@ -154,10 +154,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/unsave", "Remove bookmark from session"),
     RegisteredCommand::public("/rename", "Rename current session"),
     RegisteredCommand::public("/split", "Split session into a new window"),
-    RegisteredCommand::public(
-        "/fork",
-        "Arm next prompt to launch in a new forked session",
-    ),
+    RegisteredCommand::public("/fork", "Arm next prompt to launch in a new forked session"),
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),

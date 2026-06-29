@@ -1144,7 +1144,9 @@ fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
     apply_openai_compatible_profile_env(selection);
 
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_KEY_NAME").ok().as_deref(),
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
         Some("OPENAI_API_KEY"),
         "MiniMax profile must use OPENAI_API_KEY, not OPENROUTER_API_KEY"
     );

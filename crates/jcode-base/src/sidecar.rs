@@ -1282,18 +1282,15 @@ mod tests {
     #[test]
     fn test_anthropic_sidecar_prefers_api_key_respects_pinned_mode() {
         // Pinning the runtime to API-key mode must make the sidecar prefer the key.
-        let _g = EnvVarGuard::set_path(
-            "JCODE_RUNTIME_PROVIDER",
-            std::path::Path::new("claude-api"),
-        );
+        let _g =
+            EnvVarGuard::set_path("JCODE_RUNTIME_PROVIDER", std::path::Path::new("claude-api"));
         assert!(
             anthropic_sidecar_prefers_api_key(),
             "claude-api runtime => prefer API key"
         );
 
         // Pinning to OAuth mode must NOT prefer the key.
-        let _g2 =
-            EnvVarGuard::set_path("JCODE_RUNTIME_PROVIDER", std::path::Path::new("claude"));
+        let _g2 = EnvVarGuard::set_path("JCODE_RUNTIME_PROVIDER", std::path::Path::new("claude"));
         assert!(
             !anthropic_sidecar_prefers_api_key(),
             "claude (oauth) runtime => do not force API key"

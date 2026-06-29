@@ -1272,7 +1272,8 @@ impl Provider for AnthropicProvider {
                     crate::logging::info(
                         "Anthropic OAuth model catalog auth failed; forcing token refresh and retrying...",
                     );
-                    let refreshed_token = force_refresh_oauth_token(Arc::clone(&self.credentials)).await?;
+                    let refreshed_token =
+                        force_refresh_oauth_token(Arc::clone(&self.credentials)).await?;
                     crate::provider::fetch_anthropic_model_catalog_oauth(&refreshed_token).await
                 }
                 Err(err) => Err(err),
