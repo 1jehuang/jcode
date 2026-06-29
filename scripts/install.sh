@@ -49,7 +49,10 @@ else
   INSTALL_DIR="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
 fi
 
-VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+# Extract the tag_name value, working for both pretty-printed (multi-line) and
+# compact (single-line) GitHub API JSON. `grep -o` isolates just the tag_name
+# field so `cut` no longer matches an unrelated string like the release url.
+VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name" *: *"[^"]*"' | head -1 | cut -d'"' -f4)
 [ -n "$VERSION" ] || err "Failed to determine latest version"
 
 URL_TGZ="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT.tar.gz"
