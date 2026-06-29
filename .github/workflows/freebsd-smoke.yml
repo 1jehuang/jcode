@@ -1,0 +1,88 @@
+name: FreeBSD Smoke
+
+# Builds and smoke-tests jcode inside a real FreeBSD VM.
+#
+# GitHub does not offer native FreeBSD runners, so we boot a FreeBSD guest
+# (via QEMU) on a standard Ubuntu runner using vmactions/freebsd-vm. This runs
+# the actual FreeBSD kernel and userland, giving a true build + run check
+# instead of a cross-compile that can never link platform C dependencies
+# (e.g. aws-lc-sys). See issue #416.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Build in release mode (slower, matches shipping binary)
+        required: false
+        default: false
+        type: boolean
+  push:
+    paths:
+      - '.github/workflows/freebsd-smoke.yml'
+  schedule:
+    # Weekly drift check so FreeBSD breakage is caught even without a push.
+    - cron: '0 7 * * 1'
+
+concurrency:
+  group: freebsd-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: FreeBSD Smoke (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and test in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          # Give the build VM enough room: aws-lc-sys + tract pull in heavy C/Rust.
+          mem: 6144
+          cpu: 4
+          # Install the toolchain jcode needs. The project is OpenSSL-free
+          # (rustls + aws-lc-rs), so we only need a C/C++ toolchain, cmake, and
+          # rust. pkgconf is handy for any transitive pkg-config probes.
+          prepare: |
+            pkg install -y rust cmake gmake pkgconf bash git
+          # CARGO_BUILD_JOBS keeps memory in check; aws-lc-sys is memory hungry.
+          run: |
+            set -e
+            echo "::group::Toolchain versions"
+            uname -a
+            cc --version | head -1
+            cargo --version
+            rustc --version
+            echo "::endgroup::"
+
+            export CARGO_TERM_COLOR=always
+            export CARGO_BUILD_JOBS=3
+
+            if [ "${{ inputs.release }}" = "true" ]; then
+              PROFILE_FLAG="--release"
+              TARGET_DIR="release"
+            else
+              PROFILE_FLAG=""
+              TARGET_DIR="debug"
+            fi
+
+            echo "::group::cargo build (jcode binary)"
+            cargo build --locked $PROFILE_FLAG -p jcode --bin jcode
+            echo "::endgroup::"
+
+            echo "::group::Verify binary launches"
+            ./target/$TARGET_DIR/jcode --version
+            echo "::endgroup::"
+
+            echo "::group::Compile platform unit tests"
+            cargo test --locked $PROFILE_FLAG -p jcode-base --lib --no-run
+            echo "::endgroup::"
+
+            echo "::group::Run platform unit tests"
+            cargo test --locked $PROFILE_FLAG -p jcode-base --lib -- --nocapture platform
+            echo "::endgroup::"

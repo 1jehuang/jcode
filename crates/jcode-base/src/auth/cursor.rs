@@ -249,6 +249,12 @@ fn cursor_vscdb_paths() -> Vec<PathBuf> {
         "AppData/Roaming/Cursor/User/globalStorage/state.vscdb",
         "AppData/Roaming/cursor/User/globalStorage/state.vscdb",
     ];
+    // Other Unix platforms (e.g. FreeBSD) follow the XDG-style layout like Linux.
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let relatives = [
+        ".config/Cursor/User/globalStorage/state.vscdb",
+        ".config/cursor/User/globalStorage/state.vscdb",
+    ];
 
     relatives
         .into_iter()

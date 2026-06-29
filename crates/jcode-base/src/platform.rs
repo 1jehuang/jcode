@@ -203,8 +203,14 @@ pub fn raise_nofile_limit_best_effort(minimum_soft_limit: u64) {
             return;
         }
 
-        let current: u64 = limit.rlim_cur;
-        let hard: u64 = limit.rlim_max;
+        // `rlim_cur`/`rlim_max` are `u64` on Linux/macOS but `i64` on some
+        // platforms (e.g. FreeBSD), so cast explicitly to keep builds portable.
+        // The cast is a no-op (and clippy-flagged) where the field is already
+        // `u64`, hence the allow.
+        #[allow(clippy::unnecessary_cast)]
+        let current: u64 = limit.rlim_cur as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let hard: u64 = limit.rlim_max as u64;
         let Some(desired) = desired_nofile_soft_limit(current, hard, minimum_soft_limit) else {
             return;
         };
