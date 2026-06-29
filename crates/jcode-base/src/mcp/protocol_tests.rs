@@ -111,7 +111,10 @@ fn test_load_claude_json_global_and_project_servers() {
 
     let config = McpConfig::load_claude_json(&claude_json, Some(&cwd));
     assert_eq!(config.servers.len(), 2);
-    assert_eq!(config.servers.get("global-srv").unwrap().command, "global-bin");
+    assert_eq!(
+        config.servers.get("global-srv").unwrap().command,
+        "global-bin"
+    );
     assert_eq!(
         config.servers.get("project-srv").unwrap().command,
         "project-bin"

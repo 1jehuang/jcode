@@ -1050,8 +1050,7 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
     oauth_app.is_remote = true;
     oauth_app.remote_provider_name = Some("Claude".to_string());
     oauth_app.remote_provider_model = Some("claude-sonnet-4-6".to_string());
-    oauth_app.remote_resolved_credential =
-        Some(jcode_provider_core::ResolvedCredential::Oauth);
+    oauth_app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     oauth_app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
             input: 1_000,
@@ -1111,8 +1110,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     oauth_app.is_remote = true;
     oauth_app.remote_provider_name = Some("Claude".to_string());
     oauth_app.remote_provider_model = Some("claude-sonnet-4-6".to_string());
-    oauth_app.remote_resolved_credential =
-        Some(jcode_provider_core::ResolvedCredential::Oauth);
+    oauth_app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     oauth_app.seed_cost_from_history_totals(&totals);
     assert_eq!(oauth_app.cost.total_cost, 0.0);
 }

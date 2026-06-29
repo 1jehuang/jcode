@@ -383,10 +383,9 @@ impl McpConfig {
 
         // Global servers under top-level `mcpServers`.
         if let Some(map) = value.get("mcpServers")
-            && let Ok(servers) =
-                serde_json::from_value::<std::collections::HashMap<String, McpServerConfig>>(
-                    map.clone(),
-                )
+            && let Ok(servers) = serde_json::from_value::<
+                std::collections::HashMap<String, McpServerConfig>,
+            >(map.clone())
         {
             config.servers.extend(servers);
         }
@@ -398,10 +397,9 @@ impl McpConfig {
             let cwd_str = cwd.to_string_lossy();
             if let Some(project) = projects.get(cwd_str.as_ref())
                 && let Some(map) = project.get("mcpServers")
-                && let Ok(servers) =
-                    serde_json::from_value::<std::collections::HashMap<String, McpServerConfig>>(
-                        map.clone(),
-                    )
+                && let Ok(servers) = serde_json::from_value::<
+                    std::collections::HashMap<String, McpServerConfig>,
+                >(map.clone())
             {
                 config.servers.extend(servers);
             }
