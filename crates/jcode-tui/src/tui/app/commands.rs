@@ -3138,7 +3138,31 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                 tool_data: None,
             });
 
-            let _ = std::process::Command::new(&editor).arg(&path).spawn();
+            // $EDITOR may contain arguments (e.g. "zed --wait" or "code -w"), so
+            // split on whitespace and use the first token as the binary, passing
+            // the rest as leading args before the file path. Report spawn errors
+            // instead of swallowing them so the user is not left confused.
+            let mut parts = editor.split_whitespace();
+            match parts.next() {
+                Some(bin) => {
+                    let extra: Vec<&str> = parts.collect();
+                    if let Err(e) = std::process::Command::new(bin)
+                        .args(&extra)
+                        .arg(&path)
+                        .spawn()
+                    {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to launch editor '{}': {}",
+                            editor, e
+                        )));
+                    }
+                }
+                None => {
+                    app.push_display_message(DisplayMessage::error(
+                        "$EDITOR is set to an empty value; cannot open config.".to_string(),
+                    ));
+                }
+            }
         }
         return true;
     }
