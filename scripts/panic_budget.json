@@ -1,5 +1,5 @@
 {
-  "total": 34,
+  "total": 35,
   "tracked_files": {
     "crates/jcode-app-core/src/session_launch.rs": 1,
     "crates/jcode-app-core/src/tool/computer/win.rs": 3,
@@ -12,7 +12,8 @@
     "crates/jcode-tui-core/src/stream_buffer.rs": 3,
     "crates/jcode-tui/src/tui/app/helpers.rs": 1,
     "crates/jcode-tui/src/tui/session_picker.rs": 2,
-    "src/bin/memory_recall_bench.rs": 14
+    "src/bin/memory_recall_bench.rs": 14,
+    "src/cli/commands/menubar.rs": 1
   },
   "version": 1
 }
