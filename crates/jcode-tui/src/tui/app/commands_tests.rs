@@ -75,3 +75,31 @@ fn transient_server_error_remains_retryable_for_auto_poke() {
     let err = "OpenAI-compatible chat request failed\n  status: 503 Service Unavailable";
     assert!(!is_non_retryable_auto_poke_error(err));
 }
+
+#[test]
+fn volcengine_ark_unsupported_model_is_fatal_model_endpoint_error() {
+    use super::{is_fatal_model_endpoint_error, is_non_retryable_auto_poke_error};
+    let err = "OpenAI-compatible chat request failed\n  endpoint: \
+        https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions\n  model: \
+        volcengine:ark-code-latest\n  auth: ARK_API_KEY\n  status: 404 Not Found\n  response: \
+        {\"error\":{\"code\":\"UnsupportedModel\",\"message\":\"The requested model does not \
+        support the coding plan feature.\"}}";
+    // It is both a fatal model/endpoint error (fail fast, no retries) and a
+    // non-retryable auto-poke error (don't keep poking).
+    assert!(is_fatal_model_endpoint_error(err));
+    assert!(is_non_retryable_auto_poke_error(err));
+}
+
+#[test]
+fn transient_5xx_is_not_a_fatal_model_endpoint_error() {
+    use super::is_fatal_model_endpoint_error;
+    let err = "OpenAI-compatible chat request failed\n  status: 503 Service Unavailable";
+    assert!(!is_fatal_model_endpoint_error(err));
+}
+
+#[test]
+fn model_not_found_is_fatal_model_endpoint_error() {
+    use super::is_fatal_model_endpoint_error;
+    let err = "chat request failed: 404 model_not_found: The model `gpt-foo` does not exist";
+    assert!(is_fatal_model_endpoint_error(err));
+}

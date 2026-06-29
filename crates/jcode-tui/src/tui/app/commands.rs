@@ -128,6 +128,10 @@ pub(super) fn is_non_retryable_auto_poke_error(error: &str) -> bool {
         "invalid model",
         "model_not_found",
         "model_not_supported",
+        "unsupportedmodel",
+        "unsupported model",
+        "does not support the coding plan",
+        "coding plan feature",
         "unsupported parameter",
         "unsupported_value",
         "invalid parameter",
@@ -184,6 +188,35 @@ pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
     ];
 
     connectivity_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// Whether `error` is a deterministic model/endpoint-capability failure that can
+/// never succeed by resending the identical request: the configured model is not
+/// valid for the configured endpoint (e.g. Volcengine Ark's coding-plan endpoint
+/// returning `404 UnsupportedModel` for a model that lacks the coding plan
+/// feature, or a plain model-not-found). Unlike the broader
+/// [`is_non_retryable_auto_poke_error`] set (which also covers billing, payload
+/// size, auth, etc.), this is narrow enough that we can fail fast *regardless of
+/// auto-poke* during reconnect/recovery continuation instead of burning the
+/// retry budget on a request that is structurally guaranteed to 4xx. See #387.
+pub(super) fn is_fatal_model_endpoint_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+
+    let model_endpoint_markers = [
+        "unsupportedmodel",
+        "unsupported model",
+        "does not support the coding plan",
+        "coding plan feature",
+        "model_not_found",
+        "model_not_supported",
+        "invalid model",
+        "the model does not exist",
+        "model does not exist",
+    ];
+
+    model_endpoint_markers
         .iter()
         .any(|marker| lower.contains(marker))
 }
