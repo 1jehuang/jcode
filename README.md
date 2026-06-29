@@ -501,15 +501,19 @@ Primary config files:
 - `~/.jcode/mcp.json` for global MCP servers
 - `.jcode/mcp.json` for project-local MCP servers
 
-Compatibility fallback:
+Claude Code compatibility:
 
-- `.claude/mcp.json`
+- `~/.claude.json` (Claude Code's user config): top-level `mcpServers`, plus per-project servers under `projects.<abs_path>.mcpServers` for the current directory
+- `.mcp.json` at the repo root (Claude Code's project config)
+- `.claude/mcp.json` (legacy fallback)
+
+Both the canonical `mcpServers` key and jcode's historical `servers` key are accepted. jcode currently supports stdio (command-based) servers only; HTTP/SSE entries (`"type": "http"`/`"sse"`) are recognized and skipped with a log line.
 
 Example MCP config:
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "filesystem": {
       "command": "/path/to/mcp-server",
       "args": ["--root", "/workspace"],
@@ -520,7 +524,7 @@ Example MCP config:
 }
 ```
 
-On first run, jcode also tries to import MCP servers from `~/.claude/mcp.json` and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
+On first run, jcode also tries to import MCP servers from `~/.claude.json` (falling back to the legacy `~/.claude/mcp.json`) and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
 
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 

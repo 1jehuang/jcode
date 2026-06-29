@@ -55,6 +55,70 @@ fn test_mcp_config_empty() {
 }
 
 #[test]
+fn test_mcp_config_accepts_claude_mcp_servers_key() {
+    // Claude Code uses `mcpServers`, not `servers`.
+    let json = r#"{
+            "mcpServers": {
+                "claude-server": {
+                    "command": "npx",
+                    "args": ["-y", "some-mcp"]
+                }
+            }
+        }"#;
+    let config: McpConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(config.servers.len(), 1);
+    let server = config.servers.get("claude-server").unwrap();
+    assert_eq!(server.command, "npx");
+    assert!(server.is_stdio());
+}
+
+#[test]
+fn test_mcp_http_server_is_not_stdio() {
+    let json = r#"{
+            "mcpServers": {
+                "remote": {
+                    "type": "http",
+                    "url": "https://example.com/mcp"
+                }
+            }
+        }"#;
+    let config: McpConfig = serde_json::from_str(json).unwrap();
+    let server = config.servers.get("remote").unwrap();
+    assert!(!server.is_stdio());
+    assert_eq!(server.url.as_deref(), Some("https://example.com/mcp"));
+}
+
+#[test]
+fn test_load_claude_json_global_and_project_servers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path().join("myproject");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_json = temp.path().join(".claude.json");
+
+    let body = serde_json::json!({
+        "mcpServers": {
+            "global-srv": { "command": "global-bin" }
+        },
+        "projects": {
+            cwd.to_string_lossy(): {
+                "mcpServers": {
+                    "project-srv": { "command": "project-bin", "args": ["--flag"] }
+                }
+            }
+        }
+    });
+    std::fs::write(&claude_json, serde_json::to_string_pretty(&body).unwrap()).unwrap();
+
+    let config = McpConfig::load_claude_json(&claude_json, Some(&cwd));
+    assert_eq!(config.servers.len(), 2);
+    assert_eq!(config.servers.get("global-srv").unwrap().command, "global-bin");
+    assert_eq!(
+        config.servers.get("project-srv").unwrap().command,
+        "project-bin"
+    );
+}
+
+#[test]
 fn test_tool_def_deserialization() {
     let json = r#"{
             "name": "read_file",

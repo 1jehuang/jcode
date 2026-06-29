@@ -492,6 +492,8 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 shared: false,
+                transport: None,
+                url: None,
             },
         );
         let manager = McpManager::with_config(config);

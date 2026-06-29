@@ -169,6 +169,9 @@ pub struct ResourceContent {
 /// MCP server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
+    /// Command for stdio servers. Empty for HTTP/SSE servers, which jcode does
+    /// not yet support (such entries are skipped at load time).
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -179,6 +182,28 @@ pub struct McpServerConfig {
     /// Stateful servers (Playwright browser) should not be shared.
     #[serde(default = "default_shared")]
     pub shared: bool,
+    /// Transport type from Claude Code configs ("stdio", "http", "sse"). Used
+    /// only to recognize and skip non-stdio servers; defaults to stdio.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// URL for HTTP/SSE servers (Claude Code compat). Unused by jcode today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl McpServerConfig {
+    /// jcode currently only supports stdio (command-based) MCP servers. A config
+    /// entry is stdio when it has a command and is not explicitly an http/sse
+    /// transport.
+    pub fn is_stdio(&self) -> bool {
+        if let Some(t) = &self.transport {
+            let t = t.to_ascii_lowercase();
+            if t == "http" || t == "sse" || t == "streamable-http" {
+                return false;
+            }
+        }
+        !self.command.trim().is_empty()
+    }
 }
 
 fn default_shared() -> bool {
@@ -188,7 +213,9 @@ fn default_shared() -> bool {
 /// Full MCP configuration file
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpConfig {
-    #[serde(default)]
+    /// Server map. Accepts the canonical Claude Code key `mcpServers` as well as
+    /// jcode's historical `servers` key.
+    #[serde(default, alias = "mcpServers")]
     pub servers: std::collections::HashMap<String, McpServerConfig>,
 }
 
@@ -228,13 +255,26 @@ impl McpConfig {
         let mut imported = Self::default();
         let mut sources = Vec::new();
 
-        // Import from Claude Code (~/.claude/mcp.json)
+        // Import from Claude Code. The canonical user config is `~/.claude.json`
+        // (top-level `mcpServers` + per-project entries); fall back to the older
+        // `~/.claude/mcp.json` layout for users who still have it.
+        if let Ok(claude_json) = crate::storage::user_home_path(".claude.json") {
+            if claude_json.exists() {
+                let cwd = std::env::current_dir().ok();
+                let config = Self::load_claude_json(&claude_json, cwd.as_deref());
+                let count = config.servers.len();
+                if count > 0 {
+                    sources.push(format!("{} from Claude Code", count));
+                    imported.servers.extend(config.servers);
+                }
+            }
+        }
         if let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json") {
             if claude_mcp.exists() {
                 if let Ok(config) = Self::load_from_file(&claude_mcp) {
                     let count = config.servers.len();
                     if count > 0 {
-                        sources.push(format!("{} from Claude Code", count));
+                        sources.push(format!("{} from Claude Code (legacy)", count));
                         imported.servers.extend(config.servers);
                     }
                 }
@@ -316,12 +356,58 @@ impl McpConfig {
                             args,
                             env,
                             shared,
+                            transport: None,
+                            url: None,
                         },
                     );
                 }
             }
         }
         Ok(config)
+    }
+
+    /// Parse MCP servers from Claude Code's `~/.claude.json`.
+    ///
+    /// Claude Code stores a global set under the top-level `mcpServers` key, and
+    /// per-project sets under `projects.<abs_path>.mcpServers`. We merge the
+    /// global set first, then overlay the entry for `cwd` (if any) so a
+    /// project-specific server wins for the active directory.
+    fn load_claude_json(path: &std::path::Path, cwd: Option<&std::path::Path>) -> Self {
+        let mut config = Self::default();
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return config;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return config;
+        };
+
+        // Global servers under top-level `mcpServers`.
+        if let Some(map) = value.get("mcpServers")
+            && let Ok(servers) =
+                serde_json::from_value::<std::collections::HashMap<String, McpServerConfig>>(
+                    map.clone(),
+                )
+        {
+            config.servers.extend(servers);
+        }
+
+        // Per-project servers under `projects.<abs_path>.mcpServers`.
+        if let (Some(cwd), Some(projects)) =
+            (cwd, value.get("projects").and_then(|p| p.as_object()))
+        {
+            let cwd_str = cwd.to_string_lossy();
+            if let Some(project) = projects.get(cwd_str.as_ref())
+                && let Some(map) = project.get("mcpServers")
+                && let Ok(servers) =
+                    serde_json::from_value::<std::collections::HashMap<String, McpServerConfig>>(
+                        map.clone(),
+                    )
+            {
+                config.servers.extend(servers);
+            }
+        }
+
+        config
     }
 
     /// Load from default locations (merges jcode global + local, local overrides)
@@ -345,10 +431,28 @@ impl McpConfig {
             }
         }
 
+        // Claude Code user/global config (~/.claude.json): top-level mcpServers
+        // plus per-project entries for the current working directory.
+        if let Ok(claude_json) = crate::storage::user_home_path(".claude.json") {
+            if claude_json.exists() {
+                let cwd = std::env::current_dir().ok();
+                let config = Self::load_claude_json(&claude_json, cwd.as_deref());
+                merged.servers.extend(config.servers);
+            }
+        }
+
         // Load project-local jcode config (.jcode/mcp.json)
         let local_jcode = std::path::Path::new(".jcode/mcp.json");
         if local_jcode.exists() {
             if let Ok(config) = Self::load_from_file(local_jcode) {
+                merged.servers.extend(config.servers);
+            }
+        }
+
+        // Claude Code project config: `.mcp.json` at the repo root.
+        let local_mcp = std::path::Path::new(".mcp.json");
+        if local_mcp.exists() {
+            if let Ok(config) = Self::load_from_file(local_mcp) {
                 merged.servers.extend(config.servers);
             }
         }
@@ -360,6 +464,21 @@ impl McpConfig {
                 merged.servers.extend(config.servers);
             }
         }
+
+        // jcode only supports stdio servers today. Drop HTTP/SSE entries (common
+        // in Claude Code configs) so they don't fail to spawn, but log them so
+        // the omission is visible.
+        merged.servers.retain(|name, cfg| {
+            let keep = cfg.is_stdio();
+            if !keep {
+                crate::logging::info(&format!(
+                    "MCP: Skipping non-stdio server '{}' ({}); HTTP/SSE transports are not yet supported",
+                    name,
+                    cfg.transport.as_deref().unwrap_or("http")
+                ));
+            }
+            keep
+        });
 
         merged
     }
