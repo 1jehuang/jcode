@@ -583,9 +583,7 @@ impl SessionPicker {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<OverlayAction> {
-        if self.pending_claude_takeover.is_none() {
-            return None;
-        }
+        self.pending_claude_takeover.as_ref()?;
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             self.pending_claude_takeover = None;
             return Some(OverlayAction::Close);
