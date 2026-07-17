@@ -409,8 +409,15 @@ async fn download_browser_binary() -> Result<()> {
     let asset_name = get_platform_asset_name();
     let client = jcode_provider_core::shared_http_client();
 
-    let release_info: serde_json::Value = client
+    let mut request = client
         .get(GITHUB_API_LATEST)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+    // Avoid the shared unauthenticated 60 req/h per-IP GitHub bucket when a
+    // token is available (see crate::github).
+    if let Some(token) = crate::github::github_public_api_token() {
+        request = request.bearer_auth(token);
+    }
+    let release_info: serde_json::Value = request
         .send()
         .await?
         .json()

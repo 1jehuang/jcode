@@ -223,8 +223,7 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
         .user_agent("jcode-updater")
         .build()?;
 
-    let response = client
-        .get(&url)
+    let response = github_api_request(&client, &url)
         .send()
         .context("Failed to fetch release info")?;
 
@@ -241,6 +240,26 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     Ok(release)
 }
 
+fn github_api_request(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> reqwest::blocking::RequestBuilder {
+    let request = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+
+    // Authenticated requests use the user's 5000 req/h quota instead of the
+    // shared unauthenticated 60 req/h per-IP bucket, which other tools on the
+    // same machine or NAT can exhaust and cause spurious 403s on update
+    // checks. Falls back to unauthenticated when no token is available.
+    if let Some(token) = jcode_base::github::github_public_api_token() {
+        request.bearer_auth(token)
+    } else {
+        request
+    }
+}
+
 fn latest_main_sha_blocking() -> Result<String> {
     let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
     let client = reqwest::blocking::Client::builder()
@@ -248,8 +267,7 @@ fn latest_main_sha_blocking() -> Result<String> {
         .user_agent("jcode-updater")
         .build()?;
 
-    let response = client
-        .get(&url)
+    let response = github_api_request(&client, &url)
         .send()
         .context("Failed to check main branch")?;
     if !response.status().is_success() {
@@ -1711,5 +1729,17 @@ mod tests {
             total as u64,
             "final progress must reach the full size"
         );
+    }
+}
+
+#[cfg(test)]
+mod github_auth_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "live network test"]
+    fn live_fetch_latest_release_uses_auth() {
+        let release = fetch_latest_release_blocking().expect("release fetch should succeed");
+        assert!(!release.tag_name.is_empty());
     }
 }
