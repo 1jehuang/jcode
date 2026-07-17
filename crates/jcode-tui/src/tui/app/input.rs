@@ -2112,6 +2112,19 @@ pub(super) fn handle_modal_key(
         if modifiers.contains(KeyModifiers::CONTROL)
             && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'))
         {
+            // Ctrl+C over an active selection is universal copy muscle
+            // memory. Falling through here used to reach the global handler,
+            // which quits when idle, so trying to copy an error message
+            // closed jcode and lost the error (issue #497). Only fall
+            // through (interrupt/quit) when nothing is selected.
+            if code == KeyCode::Char('c')
+                && app
+                    .current_copy_selection_text()
+                    .is_some_and(|text| !text.is_empty())
+            {
+                app.copy_current_selection_to_clipboard();
+                return Ok(true);
+            }
             return Ok(false);
         }
 

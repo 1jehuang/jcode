@@ -380,31 +380,52 @@ pub(super) fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Copy text to clipboard, trying wl-copy first (Wayland), then OSC 52 (works
-/// over SSH / Docker / tmux), then arboard as a final fallback.
+/// Copy text to clipboard. On Windows, the Win32 clipboard (arboard) is
+/// authoritative, with OSC 52 as a remote-session fallback. Elsewhere, try
+/// wl-copy first (Wayland), then OSC 52 (works over SSH / Docker / tmux),
+/// then arboard as a final fallback.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
-    if let Ok(mut child) = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+    // On Windows, the native clipboard API must run before OSC 52. Writing an
+    // OSC 52 sequence to stdout "succeeds" even when the console (conhost,
+    // older Windows Terminal) silently ignores it, which reported "Copied"
+    // while leaving the clipboard empty (issue #497). arboard talks to the
+    // Win32 clipboard directly and is authoritative there.
+    #[cfg(windows)]
     {
-        use std::io::Write;
-        if let Some(stdin) = child.stdin.as_mut()
-            && stdin.write_all(text.as_bytes()).is_ok()
+        if arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text.to_string()))
+            .is_ok()
         {
-            drop(child.stdin.take());
-            if child.wait().map(|s| s.success()).unwrap_or(false) {
-                return true;
+            return true;
+        }
+        return copy_to_clipboard_osc52(text);
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(mut child) = std::process::Command::new("wl-copy")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut()
+                && stdin.write_all(text.as_bytes()).is_ok()
+            {
+                drop(child.stdin.take());
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return true;
+                }
             }
         }
+        if copy_to_clipboard_osc52(text) {
+            return true;
+        }
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text.to_string()))
+            .is_ok()
     }
-    if copy_to_clipboard_osc52(text) {
-        return true;
-    }
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text.to_string()))
-        .is_ok()
 }
 
 /// Copy to clipboard using the OSC 52 terminal escape sequence. This asks the
