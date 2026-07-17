@@ -3326,7 +3326,8 @@ impl App {
         }
 
         let trimmed = input.trim();
-        let handled = commands::handle_help_command(self, trimmed)
+        let handled = commands::handle_cancel_command(self, trimmed)
+            || commands::handle_help_command(self, trimmed)
             || commands::handle_keys_command(self, trimmed)
             || commands::handle_ssh_command(self, trimmed)
             || commands::handle_session_command(self, trimmed)

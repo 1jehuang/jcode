@@ -2164,6 +2164,29 @@ impl App {
                     });
                     return;
                 }
+                // Real API keys are never short digit strings. Users sometimes
+                // type a menu number like `1` here, trying to select from a
+                // numbered list shown earlier; silently saving that as the key
+                // bricks the provider until they log in again (issue #496).
+                if !key.is_empty() && key.len() < 8 && key.chars().all(|c| c.is_ascii_digit()) {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "'{}' looks like a menu selection, not an API key. This prompt is waiting for the {} API key itself. Paste the key (see {}), or type /cancel to abort.",
+                        key, provider, docs_url
+                    )));
+                    self.pending_login = Some(PendingLogin::ApiKeyProfile {
+                        provider_id,
+                        provider,
+                        auth_method,
+                        docs_url,
+                        env_file,
+                        key_name,
+                        default_model,
+                        endpoint,
+                        api_key_optional,
+                        openai_compatible_profile,
+                    });
+                    return;
+                }
                 if key_name == "OPENROUTER_API_KEY" && !key.starts_with("sk-or-") {
                     self.push_display_message(DisplayMessage::system(
                         "OpenRouter keys typically start with sk-or-. Saving anyway...".to_string(),

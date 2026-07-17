@@ -1088,6 +1088,23 @@ impl App {
 
     /// Get command suggestions based on current input
     pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        // While an interactive prompt is waiting for typed input (API key,
+        // OAuth callback, account label, SSH target), the composer is an
+        // answer box, not a command line. Rendering the full command palette
+        // there is misleading (issue #496): the only command those prompts
+        // advertise is /cancel, so suggest exactly that and nothing else.
+        if self.pending_login.is_some()
+            || self.pending_account_input.is_some()
+            || self.pending_ssh_remote_name.is_some()
+        {
+            let input = self.input.trim_start();
+            let typed = input.trim_end();
+            if !typed.is_empty() && typed.starts_with('/') && "/cancel".starts_with(typed) {
+                return vec![("/cancel".into(), "Cancel the pending prompt")];
+            }
+            return Vec::new();
+        }
+
         // While an inline picker preview is open for the command being typed,
         // the picker itself is the suggestion surface. Rendering the textual
         // suggestion list underneath would duplicate it (and its rows are not

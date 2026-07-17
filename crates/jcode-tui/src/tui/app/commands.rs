@@ -863,6 +863,34 @@ fn handle_subagent_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+/// `/cancel` (and `/stop`) interrupt the in-flight turn, mirroring Ctrl+C
+/// while processing. The command has long been registered and advertised by
+/// interactive prompts, but had no top-level dispatch, so typing it outside a
+/// pending prompt fell through to skill parsing and produced
+/// "Unknown skill: /cancel" (issue #496).
+pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/cancel" && trimmed != "/stop" {
+        return false;
+    }
+
+    if app.is_processing {
+        app.cancel_requested = true;
+        app.interleave_message = None;
+        app.pending_soft_interrupts.clear();
+        app.pending_soft_interrupt_requests.clear();
+        if app.cancel_overnight_for_interrupt() {
+            app.set_status_notice("Interrupting... Overnight cancelled");
+        } else {
+            app.set_status_notice("Interrupting...");
+        }
+    } else {
+        app.push_display_message(DisplayMessage::system(
+            "Nothing to cancel: no prompt or operation is in progress.".to_string(),
+        ));
+    }
+    true
+}
+
 pub(super) fn handle_help_command(app: &mut App, trimmed: &str) -> bool {
     if let Some(topic) = trimmed
         .strip_prefix("/help ")
