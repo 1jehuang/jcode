@@ -1,0 +1,50 @@
+name: Announce release on Discord
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release notes to Discord
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ github.event.release.tag_name }}
+          NAME: ${{ github.event.release.name }}
+          BODY: ${{ github.event.release.body }}
+          URL: ${{ github.event.release.html_url }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, urllib.request
+
+          tag = os.environ["TAG"]
+          name = os.environ.get("NAME") or tag
+          body = os.environ.get("BODY") or ""
+          url = os.environ["URL"]
+
+          # Strip platform-availability boilerplate and collapse blank lines
+          body = re.sub(r"<!-- jcode-platform-availability:start -->.*", "", body, flags=re.S)
+          body = re.sub(r"\n{3,}", "\n\n", body).strip()
+
+          title = f"## {tag}" + (f" \u2014 {name}" if name != tag else "")
+          msg = f"{title}\n{body}"
+          suffix = f"\n\u2026 (full notes: <{url}>)"
+          if len(msg) > 1995:
+              msg = msg[:1995 - len(suffix)] + suffix
+
+          req = urllib.request.Request(
+              os.environ["WEBHOOK_URL"],
+              data=json.dumps({"content": msg}).encode(),
+              headers={
+                  "Content-Type": "application/json",
+                  "User-Agent": "jcode-release-bot/1.0",
+              },
+          )
+          urllib.request.urlopen(req)
+          print(f"Posted {tag} to Discord")
+          EOF
