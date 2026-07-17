@@ -431,6 +431,15 @@ function Set-JcodeProcessPath([string]$InstallDir) {
     return $update
 }
 
+function Remove-JcodeStaleLauncherBackups {
+    param(
+        [Parameter(Mandatory = $true)][string]$LauncherDir
+    )
+
+    Get-ChildItem -LiteralPath $LauncherDir -Filter '.jcode-launcher-old-*.exe' -File -Force -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 function Install-JcodeLauncher {
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
@@ -440,15 +449,48 @@ function Install-JcodeLauncher {
     $launcherDir = Split-Path -Parent $LauncherPath
     New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
 
-    $tempLauncher = Join-Path $launcherDir (".jcode-launcher-{0}.tmp.exe" -f ([guid]::NewGuid().ToString('N')))
+    $operationId = [guid]::NewGuid().ToString('N')
+    $tempLauncher = Join-Path $launcherDir (".jcode-launcher-{0}.tmp.exe" -f $operationId)
+    $oldLauncher = Join-Path $launcherDir (".jcode-launcher-old-{0}.exe" -f $operationId)
+    $movedExistingLauncher = $false
     try {
         Copy-Item -Path $SourcePath -Destination $tempLauncher -Force
-        Move-Item -Path $tempLauncher -Destination $LauncherPath -Force
+        if (Test-Path -LiteralPath $LauncherPath) {
+            # Windows will not overwrite a loaded executable, but it does allow
+            # the directory entry to be renamed while the process keeps running
+            # from its existing file handle. Move the old launcher aside first,
+            # then atomically put the new binary at the stable PATH location.
+            Move-Item -LiteralPath $LauncherPath -Destination $oldLauncher
+            $movedExistingLauncher = $true
+        }
+
+        try {
+            Move-Item -LiteralPath $tempLauncher -Destination $LauncherPath
+        } catch {
+            if ($movedExistingLauncher -and -not (Test-Path -LiteralPath $LauncherPath)) {
+                Move-Item -LiteralPath $oldLauncher -Destination $LauncherPath
+                $movedExistingLauncher = $false
+            }
+            throw
+        }
+
+        if ($movedExistingLauncher) {
+            # Removal succeeds immediately for an idle launcher. If an older
+            # jcode process still has the renamed executable loaded, Windows
+            # keeps it until that process exits and the next install cleans it.
+            Remove-Item -LiteralPath $oldLauncher -Force -ErrorAction SilentlyContinue
+        }
+
+        # Only prune backups after the stable path contains the new launcher.
+        # Doing this before replacement could delete another concurrent
+        # installer's rollback file during its short rename window.
+        Remove-JcodeStaleLauncherBackups -LauncherDir $launcherDir
     } finally {
-        Remove-Item -Path $tempLauncher -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tempLauncher -Force -ErrorAction SilentlyContinue
     }
 
-    return $LauncherPath}
+    return $LauncherPath
+}
 
 function Resolve-OptionalPath([string]$PathValue) {
     if (-not $PathValue) {
