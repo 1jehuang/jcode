@@ -396,12 +396,16 @@ if [ "$IS_WINDOWS" = true ]; then
       win_path_persisted=true
       # Broadcast WM_SETTINGCHANGE (0x001A) with the "Environment" lParam to
       # HWND_BROADCAST so running shells learn about the new PATH. Best-effort.
-      powershell.exe -NoProfile -NonInteractive -Command '
-        $sig = "[DllImport(\"user32.dll\", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);"
-        $type = Add-Type -MemberDefinition $sig -Name "JcodeEnvBroadcast" -Namespace Win32 -PassThru
-        [UIntPtr]$result = [UIntPtr]::Zero
-        $type::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
-      ' >/dev/null 2>&1 || true
+      # The script lives in a quoted heredoc so no bash expansion touches it;
+      # setup_friction_eval.sh parse-checks this exact block with real pwsh.
+      win_broadcast_ps=$(cat <<'JCODE_PS_BROADCAST_EOF'
+$sig = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+$type = Add-Type -MemberDefinition $sig -Name 'JcodeEnvBroadcast' -Namespace Win32 -PassThru
+[UIntPtr]$result = [UIntPtr]::Zero
+$type::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null
+JCODE_PS_BROADCAST_EOF
+)
+      powershell.exe -NoProfile -NonInteractive -Command "$win_broadcast_ps" >/dev/null 2>&1 || true
     fi
   fi
 

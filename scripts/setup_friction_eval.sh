@@ -280,6 +280,25 @@ printf '%s' "$sh_text" | grep -q '_win_path_key'
 check "install.sh dedupes stale Windows PATH entries" \
   "case/slash-insensitive dedupe helper present" "no dedupe logic" "$?"
 
+# The WM_SETTINGCHANGE broadcast is PowerShell source embedded in bash. Parse
+# that exact block with a REAL PowerShell parser so a quoting/escaping bug
+# (bash-escaped quotes are not PowerShell-escaped quotes) fails here instead
+# of silently no-oping on end-user machines.
+if command -v pwsh >/dev/null 2>&1; then
+  broadcast_block=$(awk "/<<'JCODE_PS_BROADCAST_EOF'/{inblock=1; next} /^JCODE_PS_BROADCAST_EOF\$/{inblock=0} inblock" "$install_sh")
+  printf '%s' "$broadcast_block" > "$work/broadcast.ps1"
+  parse_errors=$(JCODE_EVAL_PS_FILE="$work/broadcast.ps1" pwsh -NoProfile -NonInteractive -Command '
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($env:JCODE_EVAL_PS_FILE, [ref]$null, [ref]$errors) | Out-Null
+    $errors.Count
+  ' 2>/dev/null | tr -d '[:space:]')
+  [ -n "$broadcast_block" ] && [ "$parse_errors" = "0" ]
+  check "embedded WM_SETTINGCHANGE PowerShell parses cleanly (real pwsh)" \
+    "0 parse errors" "${parse_errors:-<block not found>} parse errors" "$?"
+else
+  skip "embedded WM_SETTINGCHANGE PowerShell parses cleanly (real pwsh)" "pwsh not installed"
+fi
+
 # Runtime: drive the REAL install.sh Windows (Git Bash) branch with a mocked
 # powershell.exe and confirm it PERSISTS the user PATH (deduping a stale
 # uppercase duplicate) and broadcasts WM_SETTINGCHANGE. This is the regression
