@@ -2078,13 +2078,23 @@ pub fn current_provider_model() -> Option<(String, String)> {
 }
 
 fn show_first_run_notice() {
-    eprintln!("\x1b[90m");
+    // This can print before any terminal setup enables VT processing. Legacy
+    // Windows consoles (conhost without ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    // exactly the double-click-the-exe path) render raw escapes as `←[90m`
+    // garbage (issue #498), so only colorize when the console accepts ANSI
+    // (the helper also opportunistically enables VT mode on Windows).
+    let (dim, reset) = if jcode_core::console::stderr_supports_ansi() {
+        ("\x1b[90m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    eprintln!("{dim}");
     eprintln!("  jcode collects anonymous usage statistics (install count, version, OS,");
     eprintln!("  session activity, tool counts, and crash/exit reasons). No code, filenames,");
     eprintln!("  prompts, or personal data is sent.");
     eprintln!("  To opt out: export JCODE_NO_TELEMETRY=1");
     eprintln!("  Details: https://github.com/1jehuang/jcode/blob/master/TELEMETRY.md");
-    eprintln!("\x1b[0m");
+    eprintln!("{reset}");
 }
 
 #[cfg(test)]

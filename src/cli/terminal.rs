@@ -224,19 +224,28 @@ pub fn show_crash_resume_hint() {
     let (id, name) = &crashed[0];
     let session_label = id::extract_session_name(id).unwrap_or(name.as_str());
 
+    // Crash hints print outside the TUI, possibly on a console that never had
+    // VT processing enabled (issue #498), so gate the color codes.
+    let ansi = crate::console::stderr_supports_ansi();
+    let (yellow, bold, reset) = if ansi {
+        ("\x1b[33m", "\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+
     if crashed.len() == 1 {
         eprintln!(
-            "\x1b[33m💥 Session \x1b[1m{}\x1b[0m\x1b[33m crashed. Resume with:\x1b[0m  jcode --resume {}",
+            "{yellow}💥 Session {bold}{}{reset}{yellow} crashed. Resume with:{reset}  jcode --resume {}",
             session_label, id
         );
     } else {
         eprintln!(
-            "\x1b[33m💥 {} sessions crashed recently. Most recent: \x1b[1m{}\x1b[0m",
+            "{yellow}💥 {} sessions crashed recently. Most recent: {bold}{}{reset}",
             crashed.len(),
             session_label
         );
-        eprintln!("\x1b[33m   Resume with:\x1b[0m  jcode --resume {}", id);
-        eprintln!("\x1b[33m   List all:\x1b[0m     jcode --resume");
+        eprintln!("{yellow}   Resume with:{reset}  jcode --resume {}", id);
+        eprintln!("{yellow}   List all:{reset}     jcode --resume");
     }
     eprintln!();
 }

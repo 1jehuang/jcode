@@ -1,3 +1,4 @@
+pub mod console;
 pub mod env;
 pub mod fs;
 pub mod id;
