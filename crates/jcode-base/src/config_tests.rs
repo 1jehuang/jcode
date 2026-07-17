@@ -1019,11 +1019,8 @@ fn migrate_legacy_swarm_spawn_mode_flips_visible_to_inline_once() {
     assert_eq!(parsed.agents.swarm_spawn_mode, SwarmSpawnMode::Inline);
 
     // Marker written: a later explicit "visible" survives future launches.
-    std::fs::write(
-        &config_path,
-        "[agents]\nswarm_spawn_mode = \"visible\"\n",
-    )
-    .expect("write config");
+    std::fs::write(&config_path, "[agents]\nswarm_spawn_mode = \"visible\"\n")
+        .expect("write config");
     assert!(
         !Config::migrate_legacy_swarm_spawn_mode_once(),
         "migration must run at most once"
