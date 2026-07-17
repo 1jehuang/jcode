@@ -333,6 +333,26 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                     })
                     .unwrap_or(serde_json::Value::Null),
             ),
+            // Keep the draft/send body so the Gmail draft card still renders
+            // its content after storage compaction (previously dropped, which
+            // made every reloaded draft card show "(empty body)").
+            (
+                "body",
+                input
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        serde_json::Value::String(crate::util::truncate_str(s, 4000).to_string())
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "attachments",
+                input
+                    .get("attachments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
         ]),
         "browser" => obj(vec![
             (
@@ -658,6 +678,35 @@ mod tests {
         assert!(
             summary.contains("search") && summary.contains("is:unread"),
             "summary should keep the gmail action and query: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn compaction_keeps_gmail_draft_body_and_attachments_for_draft_card() {
+        let mut message = tool_message(
+            "gmail",
+            serde_json::json!({
+                "action": "draft",
+                "to": "someone@example.com",
+                "subject": "Hello",
+                "body": "Dear someone,\n\nThis is the body.\n",
+                "attachments": ["/tmp/lease.pdf"]
+            }),
+        );
+        compact_display_message_tool_data(&mut message);
+        let tool = message.tool_data.expect("tool data");
+        assert_eq!(
+            tool.input.get("body").and_then(|v| v.as_str()),
+            Some("Dear someone,\n\nThis is the body.\n"),
+            "draft body must survive compaction so the draft card doesn't render '(empty body)'"
+        );
+        assert_eq!(
+            tool.input
+                .get("attachments")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1),
+            "attachments must survive compaction"
         );
     }
 
