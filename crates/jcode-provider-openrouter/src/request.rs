@@ -78,8 +78,93 @@ pub fn sanitize_tool_parameters_schema(schema: &Value) -> Value {
     {
         obj.insert("type".to_string(), Value::String("object".to_string()));
     }
+    flatten_top_level_combinators(&mut sanitized);
     walk(&mut sanitized);
     sanitized
+}
+
+/// Flatten `oneOf`/`anyOf`/`allOf` at the top level of a tool parameters
+/// schema into a single object schema (issue #495).
+///
+/// OpenRouter forwards tool schemas to whichever upstream serves the model,
+/// and Anthropic-family backends (Anthropic, Google Vertex, Amazon Bedrock)
+/// reject `input_schema` combinators at the top level with HTTP 400
+/// ("input_schema does not support oneOf, allOf, or anyOf at the top level").
+/// One such tool bricks every request, so first-time OpenRouter logins fail on
+/// their first message when the registry contains a multi-action tool that
+/// models its action branches with top-level `anyOf`.
+///
+/// Mirror the direct Anthropic provider's `anthropic_input_schema`: keep the
+/// common object shape, merge branch `properties` in as optional fields, and
+/// only promote `required` from `allOf` branches (whose constraints all
+/// apply). Runtime tool deserialization remains the authority for
+/// action-specific constraints. Nested combinators inside properties are left
+/// untouched; upstreams accept those.
+fn flatten_top_level_combinators(schema: &mut Value) {
+    let Some(output) = schema.as_object_mut() else {
+        return;
+    };
+
+    let mut merged_properties = output
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut all_of_required = Vec::new();
+    let mut saw_combinator = false;
+
+    for keyword in ["oneOf", "anyOf", "allOf"] {
+        let Some(branches) = output
+            .remove(keyword)
+            .and_then(|value| value.as_array().cloned())
+        else {
+            continue;
+        };
+        saw_combinator = true;
+        for branch in branches {
+            let Some(branch) = branch.as_object() else {
+                continue;
+            };
+            if let Some(properties) = branch.get("properties").and_then(Value::as_object) {
+                for (name, property) in properties {
+                    merged_properties
+                        .entry(name.clone())
+                        .or_insert_with(|| property.clone());
+                }
+            }
+            if keyword == "allOf"
+                && let Some(required) = branch.get("required").and_then(Value::as_array)
+            {
+                for name in required.iter().filter_map(Value::as_str) {
+                    if !all_of_required.iter().any(|existing| existing == name) {
+                        all_of_required.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if !saw_combinator {
+        return;
+    }
+
+    output.insert("type".to_string(), Value::String("object".to_string()));
+    output.insert("properties".to_string(), Value::Object(merged_properties));
+    if !all_of_required.is_empty() {
+        let required = output
+            .entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Value::Array(required) = required {
+            for name in all_of_required {
+                if !required
+                    .iter()
+                    .any(|existing| existing.as_str() == Some(&name))
+                {
+                    required.push(Value::String(name));
+                }
+            }
+        }
+    }
 }
 
 /// Build OpenAI-compatible chat `messages` for OpenRouter/direct compatible providers.
@@ -599,6 +684,89 @@ pub fn build_chat_messages(
 mod sanitize_schema_tests {
     use super::sanitize_tool_parameters_schema;
     use serde_json::json;
+
+    #[test]
+    fn top_level_any_of_is_flattened_for_anthropic_family_upstreams() {
+        // The swarm-tool shape from issue #495: top-level anyOf action
+        // branches make Anthropic/Vertex/Bedrock upstreams reject the whole
+        // request with HTTP 400, bricking fresh OpenRouter logins.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+            },
+            "required": ["action"],
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["action", "label"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["spawn"]},
+                        "label": {"type": "string"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list"]}
+                    }
+                }
+            ]
+        });
+
+        let sanitized = sanitize_tool_parameters_schema(&schema);
+
+        for keyword in ["oneOf", "anyOf", "allOf"] {
+            assert!(
+                sanitized.get(keyword).is_none(),
+                "top-level {keyword} must be flattened away: {sanitized}"
+            );
+        }
+        // Branch-only properties merge in as optional fields.
+        assert!(sanitized["properties"]["label"].is_object());
+        // Pre-existing top-level shape is preserved.
+        assert_eq!(sanitized["type"], "object");
+        assert_eq!(sanitized["required"], json!(["action"]));
+        // anyOf branch `required` must NOT be promoted (branches are
+        // alternatives, not conjunctions).
+        assert!(
+            !sanitized["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "label"),
+            "anyOf branch required must not become unconditional: {sanitized}"
+        );
+    }
+
+    #[test]
+    fn top_level_all_of_promotes_required_fields() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "allOf": [
+                {
+                    "type": "object",
+                    "required": ["b"],
+                    "properties": {"b": {"type": "string"}}
+                }
+            ]
+        });
+
+        let sanitized = sanitize_tool_parameters_schema(&schema);
+
+        assert!(sanitized.get("allOf").is_none());
+        assert!(sanitized["properties"]["b"].is_object());
+        assert!(
+            sanitized["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "b"),
+            "allOf required applies unconditionally and must be promoted: {sanitized}"
+        );
+    }
 
     #[test]
     fn bare_object_schema_gains_empty_properties() {
