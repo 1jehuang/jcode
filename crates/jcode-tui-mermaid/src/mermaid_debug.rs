@@ -113,7 +113,13 @@ pub fn debug_memory_profile() -> MermaidMemoryProfile {
         process_virtual_bytes: process_mem.virtual_bytes,
         render_cache_limit: RENDER_CACHE_MAX,
         image_state_limit: IMAGE_STATE_MAX,
+        image_state_source_limit_bytes: IMAGE_STATE_MAX_SOURCE_BYTES,
         source_cache_limit: SOURCE_CACHE_MAX,
+        source_cache_limit_bytes: SOURCE_CACHE_MAX_BYTES,
+        fitted_source_cache_limit: FITTED_SOURCE_CACHE_MAX,
+        fitted_source_cache_limit_bytes: FITTED_SOURCE_CACHE_MAX_BYTES,
+        kitty_viewport_state_limit: KITTY_VIEWPORT_STATE_MAX,
+        kitty_pending_transmit_limit_bytes: KITTY_VIEWPORT_PENDING_MAX_BYTES,
         active_diagrams_limit: ACTIVE_DIAGRAMS_MAX,
         cache_disk_limit_bytes: CACHE_MAX_SIZE_BYTES,
         cache_disk_max_age_secs: CACHE_MAX_AGE_SECS,
@@ -143,28 +149,22 @@ pub fn debug_memory_profile() -> MermaidMemoryProfile {
 
     if let Ok(state) = IMAGE_STATE.lock() {
         out.image_state_entries = state.entries.len();
-        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
-        for (_, image_state) in state.iter() {
-            if seen_paths.insert(image_state.source_path.clone())
-                && let Some((w, h)) = get_png_dimensions(&image_state.source_path)
-            {
-                out.image_state_protocol_min_estimate_bytes = out
-                    .image_state_protocol_min_estimate_bytes
-                    .saturating_add(rgba_bytes_estimate(w, h));
-            }
-        }
+        out.image_state_protocol_min_estimate_bytes = state.total_source_bytes as u64;
     }
 
     if let Ok(source) = SOURCE_CACHE.lock() {
         out.source_cache_entries = source.entries.len();
-        for entry in source.entries.values() {
-            out.source_cache_decoded_estimate_bytes = out
-                .source_cache_decoded_estimate_bytes
-                .saturating_add(rgba_bytes_estimate(
-                    entry.image.width(),
-                    entry.image.height(),
-                ));
-        }
+        out.source_cache_decoded_estimate_bytes = source.total_decoded_bytes as u64;
+    }
+
+    if let Ok(fitted) = FITTED_SOURCE_CACHE.lock() {
+        out.fitted_source_cache_entries = fitted.entries.len();
+        out.fitted_source_cache_decoded_bytes = fitted.total_decoded_bytes as u64;
+    }
+
+    if let Ok(kitty) = KITTY_VIEWPORT_STATE.lock() {
+        out.kitty_viewport_state_entries = kitty.entries.len();
+        out.kitty_pending_transmit_bytes = kitty.total_pending_transmit_bytes as u64;
     }
 
     out.active_diagrams = active_diagram_count();
@@ -178,6 +178,8 @@ pub fn debug_memory_profile() -> MermaidMemoryProfile {
         .render_cache_metadata_estimate_bytes
         .saturating_add(out.image_state_protocol_min_estimate_bytes)
         .saturating_add(out.source_cache_decoded_estimate_bytes)
+        .saturating_add(out.fitted_source_cache_decoded_bytes)
+        .saturating_add(out.kitty_pending_transmit_bytes)
         .saturating_add(layout_bytes);
 
     out
@@ -381,6 +383,7 @@ pub fn debug_image_scroll_benchmark(
     // Force a Kitty picker so the stable-fit fast path (the one used for real
     // inline screenshots) is exercised even in a headless benchmark process.
     force_test_kitty_picker();
+    clear_image_state();
 
     let images = images.clamp(1, 4096);
     let frames = frames.clamp(1, 100_000);
@@ -472,6 +475,7 @@ pub fn debug_image_scroll_benchmark(
 
     let stat_after = super::cache_stat_syscalls();
     let stats_after = debug_stats();
+    let memory_after = debug_memory_profile();
     let stat_syscalls = stat_after.saturating_sub(stat_before);
 
     ImageScrollBenchmark {
@@ -489,6 +493,10 @@ pub fn debug_image_scroll_benchmark(
         fit_state_reuse_hits: stats_after
             .fit_state_reuse_hits
             .saturating_sub(stats_before.fit_state_reuse_hits),
+        retained_image_state_source_bytes: memory_after.image_state_protocol_min_estimate_bytes,
+        retained_source_cache_decoded_bytes: memory_after.source_cache_decoded_estimate_bytes,
+        retained_fitted_source_decoded_bytes: memory_after.fitted_source_cache_decoded_bytes,
+        retained_working_set_estimate_bytes: memory_after.mermaid_working_set_estimate_bytes,
     }
 }
 
@@ -509,12 +517,6 @@ fn scan_cache_dir_png_usage(cache_dir: &Path) -> (usize, u64) {
         }
     }
     (file_count, total_bytes)
-}
-
-fn rgba_bytes_estimate(width: u32, height: u32) -> u64 {
-    (width as u64)
-        .saturating_mul(height as u64)
-        .saturating_mul(4)
 }
 
 fn max_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {

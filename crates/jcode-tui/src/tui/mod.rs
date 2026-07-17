@@ -138,6 +138,22 @@ pub(crate) fn hash_rendered_image_anchor(
     }
 }
 
+/// Hash every field that affects inline image rendering. The production App
+/// memoizes this signature until its image set changes, so exact payload hashing
+/// happens on image updates rather than during scrolling. Correctness matters
+/// here: sampling can miss a same-length change and reuse a stale prepared frame.
+pub(crate) fn hash_rendered_image_signature_fields(
+    image: &crate::session::RenderedImage,
+    hasher: &mut impl std::hash::Hasher,
+) {
+    use std::hash::Hash;
+
+    image.media_type.hash(hasher);
+    image.data.hash(hasher);
+    image.label.hash(hasher);
+    hash_rendered_image_anchor(image.anchor.as_ref(), hasher);
+}
+
 /// Trait for TUI state consumed by the shared renderer.
 ///
 /// This is a wide (114-method) presentation interface: the read-only surface the
@@ -163,22 +179,11 @@ pub trait TuiState {
     /// The default implementation derives it from `side_pane_images`; overrides
     /// can provide a cheaper path.
     fn side_pane_images_signature(&self) -> (usize, u64) {
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hasher;
         let images = self.side_pane_images();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for image in &images {
-            image.media_type.hash(&mut hasher);
-            image.data.len().hash(&mut hasher);
-            // A short prefix is enough to distinguish distinct payloads cheaply.
-            image
-                .data
-                .as_bytes()
-                .iter()
-                .take(64)
-                .for_each(|b| b.hash(&mut hasher));
-            // The anchor determines where the image renders in the transcript,
-            // so anchor changes must invalidate prepared frames too.
-            hash_rendered_image_anchor(image.anchor.as_ref(), &mut hasher);
+            hash_rendered_image_signature_fields(image, &mut hasher);
         }
         (images.len(), hasher.finish())
     }

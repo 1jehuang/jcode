@@ -37,6 +37,11 @@ pub(super) struct MermaidCache {
     pub(super) order: VecDeque<(u64, RenderProfile)>,
     /// Cache directory
     pub(super) cache_dir: PathBuf,
+    /// Largest requested width for which disk discovery found no satisfying
+    /// rendition. This preserves the zero-I/O steady-state fallback for uploads
+    /// while allowing a pane expansion to discover an already-rendered wider PNG
+    /// exactly once. A later insert clears the memo for that content hash.
+    pub(super) width_miss_floor: HashMap<u64, u32>,
 }
 
 #[derive(Clone)]
@@ -59,6 +64,7 @@ impl MermaidCache {
             entries: HashMap::new(),
             order: VecDeque::new(),
             cache_dir,
+            width_miss_floor: HashMap::new(),
         }
     }
 
@@ -152,18 +158,71 @@ impl MermaidCache {
     /// profile, while the draw thread runs outside that aspect scope, so an
     /// exact-profile lookup would never find it.
     fn get_in_memory_any_profile(&mut self, hash: u64) -> Option<CachedDiagram> {
+        self.get_in_memory_any_profile_for_width(hash, None)
+    }
+
+    fn get_in_memory_any_profile_for_width(
+        &mut self,
+        hash: u64,
+        min_width: Option<u32>,
+    ) -> Option<CachedDiagram> {
         let key = self
             .order
             .iter()
             .rev()
-            .find(|(entry_hash, _)| *entry_hash == hash)
+            .find(|key| {
+                key.0 == hash
+                    && self
+                        .entries
+                        .get(key)
+                        .is_some_and(|entry| cached_width_satisfies(entry.width, min_width))
+            })
             .copied()?;
         let existing = self.entries.get(&key).cloned()?;
         self.touch(key);
         Some(existing)
     }
 
+    fn get_preferred_width_or_any_in_memory(
+        &mut self,
+        hash: u64,
+        min_width: Option<u32>,
+    ) -> Option<CachedDiagram> {
+        if let Some(existing) = self.get_in_memory_any_profile_for_width(hash, min_width) {
+            return Some(existing);
+        }
+        let Some(min_width) = min_width.filter(|width| *width > 0) else {
+            return self.get_in_memory_any_profile(hash);
+        };
+
+        let already_missed = self
+            .width_miss_floor
+            .get(&hash)
+            .is_some_and(|missed_width| *missed_width >= min_width);
+        if !already_missed {
+            if let Some(found) = self.discover_on_disk(hash, Some(min_width), None) {
+                let profile = parse_cache_filename(&found.path)
+                    .map(|(_, _, profile)| profile)
+                    .unwrap_or_default();
+                self.insert(hash, profile, found.clone());
+                return Some(found);
+            }
+            if self.width_miss_floor.len() >= RENDER_CACHE_MAX
+                && !self.width_miss_floor.contains_key(&hash)
+            {
+                self.width_miss_floor.clear();
+            }
+            self.width_miss_floor
+                .entry(hash)
+                .and_modify(|width| *width = (*width).max(min_width))
+                .or_insert(min_width);
+        }
+
+        self.get_in_memory_any_profile(hash)
+    }
+
     pub(super) fn insert(&mut self, hash: u64, profile: RenderProfile, diagram: CachedDiagram) {
+        self.width_miss_floor.remove(&hash);
         let key = (hash, profile);
         if let std::collections::hash_map::Entry::Occupied(mut entry) = self.entries.entry(key) {
             entry.insert(diagram);
@@ -643,6 +702,16 @@ pub(super) fn get_cached_diagram_in_memory(hash: u64) -> Option<CachedDiagram> {
         .or_else(|| cache.get_in_memory_any_profile(hash))
 }
 
+pub(super) fn get_cached_diagram_prefer_width(
+    hash: u64,
+    min_width: Option<u32>,
+) -> Option<CachedDiagram> {
+    RENDER_CACHE
+        .lock()
+        .ok()?
+        .get_preferred_width_or_any_in_memory(hash, min_width)
+}
+
 fn get_cached_diagram_for_profile(
     hash: u64,
     min_width: Option<u32>,
@@ -666,6 +735,9 @@ fn invalidate_cached_image(hash: u64) {
     }
     if let Ok(mut source) = SOURCE_CACHE.lock() {
         source.remove(hash);
+    }
+    if let Ok(mut fitted) = FITTED_SOURCE_CACHE.lock() {
+        fitted.remove_hash(hash);
     }
 }
 
@@ -1329,5 +1401,67 @@ mod font_prewarm_tests {
             crate::SVG_FONT_DB_PREWARM_STARTED.get().is_some(),
             "first mermaid sighting must kick off the font-DB prewarm"
         );
+    }
+}
+
+#[cfg(test)]
+mod width_selection_tests {
+    use super::*;
+
+    fn test_cache(name: &str) -> MermaidCache {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "jcode-mermaid-width-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&cache_dir);
+        fs::create_dir_all(&cache_dir).expect("create cache fixture");
+        MermaidCache {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            cache_dir,
+            width_miss_floor: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn pane_expansion_prefers_wider_disk_rendition_then_memoizes_misses() {
+        const HASH: u64 = 0xA11C_E55D_1A6A_0001;
+        let mut cache = test_cache("prefer-wide");
+        let narrow = CachedDiagram {
+            path: cache.cache_dir.join(format!("{HASH:016x}_w100.png")),
+            width: 100,
+            height: 50,
+        };
+        cache.insert(
+            HASH,
+            RenderProfile {
+                preferred_aspect_per_mille: Some(1000),
+            },
+            narrow,
+        );
+        let wide_path = cache.cache_dir.join(format!("{HASH:016x}_w220.png"));
+        fs::write(&wide_path, []).expect("write wider cache fixture");
+
+        let selected = cache
+            .get_preferred_width_or_any_in_memory(HASH, Some(200))
+            .expect("wider rendition");
+        assert_eq!(selected.width, 220);
+
+        fs::remove_file(&wide_path).expect("remove wider fixture");
+        cache.entries.retain(|_, entry| entry.width == 100);
+        cache.order.retain(|key| cache.entries.contains_key(key));
+        let selected = cache
+            .get_preferred_width_or_any_in_memory(HASH, Some(300))
+            .expect("narrow fallback");
+        assert_eq!(selected.width, 100);
+        assert_eq!(cache.width_miss_floor.get(&HASH), Some(&300));
+        let selected_again = cache
+            .get_preferred_width_or_any_in_memory(HASH, Some(300))
+            .expect("memoized narrow fallback");
+        assert_eq!(selected_again.width, 100);
+        assert_eq!(cache.width_miss_floor.get(&HASH), Some(&300));
+
+        let _ = fs::remove_dir_all(&cache.cache_dir);
     }
 }

@@ -1301,6 +1301,22 @@ fn main() -> Result<()> {
         println!("visible_draw_skips: {}", result.visible_draw_skips);
         println!("fit_protocol_rebuilds: {}", result.fit_protocol_rebuilds);
         println!("fit_state_reuse_hits: {}", result.fit_state_reuse_hits);
+        println!(
+            "retained_image_state_source_bytes: {}",
+            result.retained_image_state_source_bytes
+        );
+        println!(
+            "retained_source_cache_decoded_bytes: {}",
+            result.retained_source_cache_decoded_bytes
+        );
+        println!(
+            "retained_fitted_source_decoded_bytes: {}",
+            result.retained_fitted_source_decoded_bytes
+        );
+        println!(
+            "retained_working_set_estimate_bytes: {}",
+            result.retained_working_set_estimate_bytes
+        );
         return Ok(());
     }
 

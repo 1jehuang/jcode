@@ -24,12 +24,12 @@ pub use jcode_tui_mermaid::{
     render_image_widget_fit_stable, render_image_widget_scale, render_image_widget_viewport,
     render_image_widget_viewport_precise, render_mermaid, render_mermaid_deferred,
     render_mermaid_deferred_with_registration, render_mermaid_deferred_with_stream_scope,
-    render_mermaid_sized, render_mermaid_untracked, reset_debug_stats, restore_active_diagrams,
-    result_to_content, result_to_lines, set_log_hooks, set_memory_snapshot_hook,
-    set_render_completed_hook, set_streaming_preview_diagram, set_video_export_mode,
-    snapshot_active_diagrams, transcript_preferred_aspect_ratio,
-    transcript_preferred_aspect_ratio_with_font, with_image_protocol_override,
-    with_preferred_aspect_ratio, write_video_export_marker,
+    render_mermaid_sized, render_mermaid_untracked, render_pending_terminal_image_cleanup,
+    reset_debug_stats, restore_active_diagrams, result_to_content, result_to_lines, set_log_hooks,
+    set_memory_snapshot_hook, set_render_completed_hook, set_streaming_preview_diagram,
+    set_video_export_mode, snapshot_active_diagrams, take_terminal_image_cleanup_payload,
+    transcript_preferred_aspect_ratio, transcript_preferred_aspect_ratio_with_font,
+    with_image_protocol_override, with_preferred_aspect_ratio, write_video_export_marker,
 };
 pub use jcode_tui_mermaid::{ImageScrollBenchmark, cache_stat_syscalls};
 

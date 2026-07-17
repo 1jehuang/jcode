@@ -2445,6 +2445,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Doing this at the buffer level covers every widget and overlay without
     // touching individual color call sites.
     jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
+    // Cache eviction/clearing can outlive the last visible image. Carry Kitty
+    // deletion commands on any completed frame so terminal-side pixel storage
+    // is reclaimed even when no image widget renders again.
+    crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
 }
 
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {

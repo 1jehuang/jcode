@@ -259,8 +259,9 @@ pub(crate) fn prewarm_svg_font_db_async() {
 /// By default jcode uses environment-based detection and never blocks startup
 /// on terminal capability responses. Set JCODE_MERMAID_PICKER_PROBE=1 to run an
 /// authoritative stdio probe when a multiplexer masks the outer terminal, or
-/// =0 to explicitly retain the fast path. Also triggers cache eviction on first
-/// call.
+/// =0 to explicitly retain the fast path. Cache eviction runs once before image
+/// rendering can begin so it cannot delete a file between materialization and
+/// in-memory cache registration.
 pub fn init_picker() {
     PICKER.get_or_init(|| {
         let env_protocol = infer_protocol_from_env(
@@ -291,10 +292,10 @@ pub fn init_picker() {
     // init_picker() runs on every TUI startup, and the font load is only
     // needed if a mermaid diagram is actually rendered; see
     // prewarm_svg_font_db_async() for the lazy trigger.
-    // Evict old cache files once per process
-    CACHE_EVICTED.get_or_init(|| {
-        evict_old_cache();
-    });
+    // This is intentionally synchronous. An asynchronous pass can observe an
+    // image file after it is written but before it is registered in RENDER_CACHE,
+    // delete it, and leave stale in-memory metadata that suppresses recovery.
+    CACHE_EVICTED.get_or_init(evict_old_cache);
 }
 
 /// Force the global picker into Kitty protocol for deterministic benchmarks and

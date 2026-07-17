@@ -120,7 +120,10 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
         KeyCode::Char('I'),
         KeyModifiers::ALT | KeyModifiers::SHIFT,
     ));
-    assert!(app.inline_images_visible, "second toggle should show images");
+    assert!(
+        app.inline_images_visible,
+        "second toggle should show images"
+    );
     assert!(crate::tui::app::ui_prefs::inline_images_visible());
 
     if let Some(prev_home) = prev_home {
@@ -161,6 +164,40 @@ fn text_only_transcript_updates_keep_inline_image_signature_cached() {
         crate::tui::TuiState::side_pane_images_signature(&app),
         signature
     );
+}
+
+#[test]
+fn inline_image_signature_distinguishes_labels_and_same_prefix_payloads() {
+    use std::hash::Hasher as _;
+
+    let signature = |image: &crate::session::RenderedImage| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        crate::tui::hash_rendered_image_signature_fields(image, &mut hasher);
+        hasher.finish()
+    };
+    let base = crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: format!("{}tail-a", "A".repeat(128)),
+        label: Some("first.png".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: None,
+    };
+    let mut changed_tail = base.clone();
+    changed_tail.data = format!("{}tail-b", "A".repeat(128));
+    let mut changed_label = base.clone();
+    changed_label.label = Some("second.png".to_string());
+    let middle_base = crate::session::RenderedImage {
+        data: format!("{}middle-a{}", "A".repeat(128), "Z".repeat(128)),
+        ..base.clone()
+    };
+    let middle_changed = crate::session::RenderedImage {
+        data: format!("{}middle-b{}", "A".repeat(128), "Z".repeat(128)),
+        ..middle_base.clone()
+    };
+
+    assert_ne!(signature(&base), signature(&changed_tail));
+    assert_ne!(signature(&base), signature(&changed_label));
+    assert_ne!(signature(&middle_base), signature(&middle_changed));
 }
 
 #[test]
@@ -225,7 +262,9 @@ fn make_edit_badge_test_app(
                     "old_string": old_string,
                     "new_string": new_string,
                 }),
-                intent: None, thought_signature: None, },
+                intent: None,
+                thought_signature: None,
+            },
         ),
     ];
     app.bump_display_messages_version();
@@ -429,7 +468,9 @@ fn test_expand_badge_shortcut_opens_full_inline_from_non_inline_mode() {
                 "old_string": "old line\n",
                 "new_string": "new line\n",
             }),
-            intent: None, thought_signature: None, },
+            intent: None,
+            thought_signature: None,
+        },
     ));
     app.bump_display_messages_version();
     app.diff_mode = crate::config::DiffDisplayMode::Off;
@@ -458,7 +499,9 @@ fn test_expand_badge_shortcut_uses_display_messages_when_edit_count_is_stale() {
                 "old_string": "old line\n",
                 "new_string": "new line\n",
             }),
-            intent: None, thought_signature: None, },
+            intent: None,
+            thought_signature: None,
+        },
     ));
     app.bump_display_messages_version();
     app.diff_mode = crate::config::DiffDisplayMode::Off;
@@ -705,7 +748,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         "expected a Fit image region anchored under the label line"
     );
 
-    let prepared = std::sync::Arc::new(PreparedChatFrame::from_single(std::sync::Arc::new(section)));
+    let prepared =
+        std::sync::Arc::new(PreparedChatFrame::from_single(std::sync::Arc::new(section)));
     let visible_end = prepared.wrapped_plain_line_count();
     let content_area = Rect::new(0, 0, chat_width, visible_end as u16 + 1);
 
@@ -863,8 +907,8 @@ const REPRO_TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 /// path actually used in production, not the isolated `build_section` helper.
 #[test]
 fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
-    use crate::tui::ui::inline_image_ui::ImageExpandLevel;
     use crate::message::{ContentBlock, Role};
+    use crate::tui::ui::inline_image_ui::ImageExpandLevel;
 
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
@@ -978,8 +1022,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
             }
         }
     }
-    let (badge_col, badge_row) =
-        badge.expect("image label cell should be visible in the frame");
+    let (badge_col, badge_row) = badge.expect("image label cell should be visible in the frame");
 
     assert_eq!(
         app.image_expand_level(image_id),

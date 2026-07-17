@@ -650,6 +650,10 @@ pub(super) fn prepare_messages(
     width: u16,
     height: u16,
 ) -> Arc<PreparedChatFrame> {
+    // A cached prepared frame intentionally owns only image ids. Recover any
+    // staged source evicted by the byte budget or a visibility toggle before an
+    // exact frame-cache hit can bypass the normal anchored-image resolver.
+    super::inline_image_ui::restage_requested_payloads(app);
     if cfg!(test) {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
@@ -666,7 +670,14 @@ pub(super) fn prepare_messages(
         streaming_text_len: app.streaming_text().len(),
         streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
         batch_progress_hash: active_batch_progress_hash(app),
-        inline_images_signature: app.side_pane_images_signature(),
+        // An unpinned transcript must not reuse a previously prepared frame
+        // containing anchored images. With no images, both modes are visually
+        // identical and `(0, 0)` reuse is safe.
+        inline_images_signature: if app.pin_images() {
+            app.side_pane_images_signature()
+        } else {
+            (0, 0)
+        },
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),

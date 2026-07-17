@@ -560,19 +560,11 @@ impl crate::tui::TuiState for App {
         if let Some(signature) = self.side_pane_images_signature_cache.get() {
             return signature;
         }
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hasher;
         let images = self.side_pane_images();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for image in &images {
-            image.media_type.hash(&mut hasher);
-            image.data.len().hash(&mut hasher);
-            image
-                .data
-                .as_bytes()
-                .iter()
-                .take(64)
-                .for_each(|b| b.hash(&mut hasher));
-            crate::tui::hash_rendered_image_anchor(image.anchor.as_ref(), &mut hasher);
+            crate::tui::hash_rendered_image_signature_fields(image, &mut hasher);
         }
         let signature = (images.len(), hasher.finish());
         self.side_pane_images_signature_cache.set(Some(signature));

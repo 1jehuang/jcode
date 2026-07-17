@@ -97,9 +97,8 @@ fn mmdr_size_api_fits_natural_aspect_into_target_canvas() {
     // Wide linear chain: natural layout is much wider than the ~4:3 target
     // box, so forcing the raw target canvas would letterbox ~80% of the PNG
     // with transparent padding above and below the ink.
-    let content = format!(
-        "flowchart LR\nA[Start {unique}] --> B[Step] --> C[Step] --> D[Step] --> E[End]"
-    );
+    let content =
+        format!("flowchart LR\nA[Start {unique}] --> B[Step] --> C[Step] --> D[Step] --> E[End]");
 
     let result = super::render_mermaid_untracked(&content, Some(100));
     let (width, height) = match result {
@@ -149,6 +148,7 @@ fn mmdr_size_api_fits_natural_aspect_into_target_canvas() {
 /// test pins the corrected steady-state behavior via the image-scroll benchmark.
 #[test]
 fn image_scroll_steady_state_has_no_per_frame_stats_or_rebuilds() {
+    let _stats_guard = render_stats_test_lock();
     // 60 images > the historical fit-state cap (24); 800 frames is plenty of
     // steady-state scrolling to surface any per-frame stat/rebuild regression.
     let result = super::debug_image_scroll_benchmark(60, 800, 3);
@@ -175,6 +175,45 @@ fn image_scroll_steady_state_has_no_per_frame_stats_or_rebuilds() {
         result.fit_state_reuse_hits,
         (result.frames * result.visible_per_frame) as u64,
         "expected one cheap fit-state reuse per visible image per frame"
+    );
+    assert_eq!(
+        result.retained_source_cache_decoded_bytes, 0,
+        "Kitty owns transmitted pixels, so decoded full sources should be released"
+    );
+    assert!(
+        result.retained_image_state_source_bytes <= crate::IMAGE_STATE_MAX_SOURCE_BYTES as u64,
+        "protocol source memory must remain within its byte budget"
+    );
+}
+
+#[test]
+fn warm_fit_draws_do_not_stat_the_render_cache() {
+    let _stats_guard = render_stats_test_lock();
+    use base64::Engine as _;
+    use image::ImageEncoder as _;
+
+    crate::force_test_kitty_picker();
+    let image = image::RgbaImage::from_pixel(32, 16, image::Rgba([17, 29, 43, 255]));
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(image.as_raw(), 32, 16, image::ExtendedColorType::Rgba8)
+        .expect("encode fixture");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    let (hash, _, _) = crate::materialize_inline_image("image/png", &b64).expect("materialize");
+    let area = ratatui::layout::Rect::new(0, 0, 20, 6);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+
+    // The first expanded draw may probe disk once for a wider cached rendition.
+    // Measure after that preference decision has been memoized: steady-state
+    // draws must never repeat the lookup.
+    crate::render_image_widget_fit(hash, area, &mut buf, false, true);
+    let before = crate::cache_stat_syscalls();
+    crate::render_image_widget_fit(hash, area, &mut buf, false, true);
+    crate::render_image_widget_fit(hash, area, &mut buf, false, true);
+    assert_eq!(
+        crate::cache_stat_syscalls() - before,
+        0,
+        "warm draw paths must stay entirely in memory"
     );
 }
 
@@ -223,6 +262,144 @@ fn bounded_bookkeeping_insert_caps_map_growth() {
     assert_eq!(map.len(), before, "existing-key update must not clear");
 }
 
+#[test]
+fn source_image_cache_enforces_decoded_byte_budget() {
+    let mut cache = crate::SourceImageCache::new();
+    let accounted = crate::SOURCE_CACHE_MAX_BYTES / 2 + 1;
+    for hash in 1..=2u64 {
+        cache.insert_with_decoded_bytes(
+            hash,
+            std::path::PathBuf::from(format!("source-{hash}.png")),
+            image::DynamicImage::new_rgba8(1, 1),
+            accounted,
+        );
+    }
+    assert!(cache.total_decoded_bytes <= crate::SOURCE_CACHE_MAX_BYTES);
+    assert_eq!(cache.entries.len(), 1, "oldest decoded source should evict");
+    assert!(cache.entries.contains_key(&2));
+
+    let mut oversized = crate::SourceImageCache::new();
+    oversized.insert_with_decoded_bytes(
+        9,
+        std::path::PathBuf::from("oversized.png"),
+        image::DynamicImage::new_rgba8(1, 1),
+        crate::SOURCE_CACHE_MAX_BYTES + 1,
+    );
+    assert_eq!(
+        oversized.entries.len(),
+        1,
+        "single oversized source must remain drawable"
+    );
+}
+
+#[test]
+fn fitted_source_cache_enforces_budget_and_replaces_resize_variants() {
+    let mut cache = crate::FittedSourceCache::new();
+    let accounted = crate::FITTED_SOURCE_CACHE_MAX_BYTES / 2 + 1;
+    for hash in 1..=2u64 {
+        let key = crate::FittedSourceKey {
+            hash,
+            target_cols: 80,
+            target_rows: 16,
+            font_size: (8, 16),
+        };
+        cache.insert_with_decoded_bytes(
+            key,
+            std::path::PathBuf::from(format!("fitted-{hash}.png")),
+            image::DynamicImage::new_rgba8(1, 1),
+            accounted,
+        );
+    }
+    assert!(cache.total_decoded_bytes <= crate::FITTED_SOURCE_CACHE_MAX_BYTES);
+    assert_eq!(cache.entries.len(), 1, "oldest fitted source should evict");
+    assert!(cache.entries.keys().any(|key| key.hash == 2));
+
+    let replacement = crate::FittedSourceKey {
+        hash: 2,
+        target_cols: 96,
+        target_rows: 20,
+        font_size: (8, 16),
+    };
+    cache.insert_with_decoded_bytes(
+        replacement,
+        std::path::PathBuf::from("fitted-2.png"),
+        image::DynamicImage::new_rgba8(1, 1),
+        4,
+    );
+    assert_eq!(
+        cache.entries.keys().filter(|key| key.hash == 2).count(),
+        1,
+        "terminal resize must replace rather than accumulate fitted variants"
+    );
+    assert!(cache.entries.contains_key(&replacement));
+}
+
+#[test]
+fn fitted_scroll_crop_tracks_arbitrary_middle_rows_without_rescaling() {
+    // 800x320 at 10x20 pixels/cell occupies 80x16 cells. Scrolling four
+    // rows down into a five-row viewport must crop source pixels 80..180, not
+    // squeeze the full image or jump to its bottom edge.
+    assert_eq!(
+        super::viewport_render::fitted_scroll_crop(800, 320, (10, 20), 80, 5, 4),
+        Some((80, 100, 80, 5))
+    );
+    // The final partial row is bounded by the actual source height.
+    assert_eq!(
+        super::viewport_render::fitted_scroll_crop(800, 305, (10, 20), 80, 4, 15),
+        Some((300, 5, 80, 1))
+    );
+    assert_eq!(
+        super::viewport_render::fitted_scroll_crop(800, 320, (10, 20), 80, 5, 16),
+        None,
+        "rows entirely below the fitted image should remain blank"
+    );
+}
+
+#[test]
+fn image_state_cache_enforces_source_byte_budget() {
+    crate::force_test_kitty_picker();
+    let picker = crate::PICKER
+        .get()
+        .and_then(|picker| picker.as_ref())
+        .expect("test picker");
+    let mut cache = crate::ImageStateCache::new();
+    let accounted = crate::IMAGE_STATE_MAX_SOURCE_BYTES / 2 + 1;
+    for hash in 1..=2u64 {
+        let protocol = picker.new_resize_protocol(image::DynamicImage::new_rgba8(1, 1));
+        cache.insert(
+            hash,
+            crate::ImageState {
+                protocol,
+                source_path: std::path::PathBuf::from(format!("state-{hash}.png")),
+                source_bytes: accounted,
+                last_area: None,
+                resize_mode: crate::ResizeMode::Fit,
+                last_crop_top: false,
+                last_viewport: None,
+            },
+        );
+    }
+    assert!(cache.total_source_bytes <= crate::IMAGE_STATE_MAX_SOURCE_BYTES);
+    assert_eq!(cache.entries.len(), 1, "oldest protocol state should evict");
+    assert!(cache.entries.contains_key(&2));
+}
+
+#[test]
+fn png_dimension_probe_needs_only_the_header() {
+    let path = std::env::temp_dir().join(format!(
+        "jcode-png-header-{}-{}.png",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let mut header = [0u8; 24];
+    header[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    header[16..20].copy_from_slice(&123u32.to_be_bytes());
+    header[20..24].copy_from_slice(&456u32.to_be_bytes());
+    std::fs::write(&path, header).expect("write header fixture");
+    assert_eq!(crate::get_png_dimensions(&path), Some((123, 456)));
+    let _ = std::fs::remove_file(path);
+}
+
 /// Inline-fit geometry must preserve aspect ratio, respect the row cap, and
 /// return a marker-parsable placeholder that survives leading padding spans
 /// (centered mode inserts one).
@@ -249,7 +426,9 @@ fn inline_fit_geometry_and_marker_roundtrip() {
 
     // A leading whitespace span (centered-mode padding) must not break parsing.
     let mut padded = lines[0].clone();
-    padded.spans.insert(0, Span::styled("    ", Style::default()));
+    padded
+        .spans
+        .insert(0, Span::styled("    ", Style::default()));
     assert_eq!(
         crate::parse_inline_image_placeholder(&padded),
         Some((0xabcdef, rows, cols)),
@@ -269,9 +448,8 @@ fn inline_transcript_aspect_goal_produces_expected_bucketed_profile() {
     assert_eq!(goal, Some(1.75));
 
     // The goal flows through the standard profile bucketing (per-mille).
-    let bucket = crate::with_preferred_aspect_ratio(goal, || {
-        crate::current_preferred_aspect_ratio_bucket()
-    });
+    let bucket =
+        crate::with_preferred_aspect_ratio(goal, || crate::current_preferred_aspect_ratio_bucket());
     assert_eq!(bucket, Some(1750));
 
     // Narrow terminals floor at the 4:3 sizing default instead of requesting
@@ -297,7 +475,10 @@ fn inline_transcript_aspect_goal_is_stable_under_resize_jitter() {
     let b = crate::inline_transcript_aspect_goal_with_font(121, 40, Some((8, 16)));
     let c = crate::inline_transcript_aspect_goal_with_font(120, 39, Some((8, 16)));
     assert_eq!(a, b, "1-col width jitter must stay in the same aspect step");
-    assert_eq!(a, c, "1-row height jitter must stay in the same aspect step");
+    assert_eq!(
+        a, c,
+        "1-row height jitter must stay in the same aspect step"
+    );
 
     let bucket_a = crate::preferred_aspect_ratio_bucket(a);
     let bucket_b = crate::preferred_aspect_ratio_bucket(b);
@@ -331,19 +512,14 @@ fn inline_transcript_aspect_goal_no_geometry_yields_none() {
 #[test]
 fn transcript_profile_keeps_pinned_pane_aspect_when_present() {
     let pane_aspect = Some(0.5);
-    let combined = crate::transcript_preferred_aspect_ratio_with_font(
-        pane_aspect,
-        120,
-        40,
-        Some((8, 16)),
-    );
+    let combined =
+        crate::transcript_preferred_aspect_ratio_with_font(pane_aspect, 120, 40, Some((8, 16)));
     assert_eq!(
         combined, pane_aspect,
         "pinned pane aspect must win over the inline goal"
     );
 
-    let fallback =
-        crate::transcript_preferred_aspect_ratio_with_font(None, 120, 40, Some((8, 16)));
+    let fallback = crate::transcript_preferred_aspect_ratio_with_font(None, 120, 40, Some((8, 16)));
     assert_eq!(fallback, Some(1.75), "no pane -> inline goal");
 
     let no_geometry = crate::transcript_preferred_aspect_ratio_with_font(None, 120, 40, None);
@@ -354,8 +530,9 @@ fn transcript_profile_keeps_pinned_pane_aspect_when_present() {
 /// `MermaidDebugStats` (`last_*` fields and counters), which concurrent
 /// renders in sibling tests would otherwise clobber.
 fn render_stats_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::IMAGE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Layout is terminal-width independent: rendering the same source at two
@@ -539,9 +716,15 @@ fn layout_cache_evicts_lru_and_clears_on_theme_change() {
     // Touch entry 0 so it becomes most-recently used, then overflow: entry 1
     // (now the LRU) must be evicted, entry 0 retained.
     assert!(cache.get(&key(0, 1)).is_some());
-    cache.insert(key(super::cache_render::LAYOUT_CACHE_MAX as u64, 1), empty_layout());
+    cache.insert(
+        key(super::cache_render::LAYOUT_CACHE_MAX as u64, 1),
+        empty_layout(),
+    );
     assert_eq!(cache.entries.len(), super::cache_render::LAYOUT_CACHE_MAX);
-    assert!(cache.get(&key(0, 1)).is_some(), "recently used entry survives");
+    assert!(
+        cache.get(&key(0, 1)).is_some(),
+        "recently used entry survives"
+    );
     assert!(cache.get(&key(1, 1)).is_none(), "LRU entry is evicted");
 
     // Theme change: a lookup with a new theme fingerprint clears stale entries.
@@ -592,7 +775,10 @@ fn streaming_preview_then_final_registration_does_not_double_count() {
     assert_eq!(combined[0].hash, HASH);
     // While the preview is still live, the preview entry wins (it is pushed
     // first and the registered duplicate is filtered by hash).
-    assert_eq!(combined[0].width, 100, "live preview entry shadows the registered one");
+    assert_eq!(
+        combined[0].width, 100,
+        "live preview entry shadows the registered one"
+    );
     let registered = super::snapshot_active_diagrams();
     assert_eq!(registered.len(), 1, "exactly one registered entry");
     assert_eq!(registered[0].hash, HASH);

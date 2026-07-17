@@ -930,8 +930,9 @@ pub(super) fn draw_messages(
                         let rows = if is_fit {
                             // Stable fit: scale once to the placeholder box and
                             // reuse the transmitted pixels for every frame.
-                            // Falls back to the per-area fit renderer on
-                            // non-Kitty protocols.
+                            // Kitty re-addresses terminal-retained pixels;
+                            // other protocols crop a pre-scaled source so the
+                            // visible slice never changes the image's scale.
                             if crate::tui::mermaid::render_image_widget_fit_stable(
                                 hash,
                                 image_area,
@@ -986,8 +987,8 @@ pub(super) fn draw_messages(
                         };
                         if is_fit {
                             // Top scrolled off: keep the same scaled pixels and
-                            // skip the hidden rows instead of rescaling into
-                            // the smaller visible portion.
+                            // skip the hidden rows instead of rescaling into the
+                            // smaller visible portion on every protocol.
                             let skip_rows = (visible_start - abs_idx) as u16;
                             if !crate::tui::mermaid::render_image_widget_fit_stable(
                                 hash,

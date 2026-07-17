@@ -15,6 +15,91 @@ fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
     Some(Arc::new(img))
 }
 
+/// Drop a decoded source once a stable Kitty fit transmission has been built.
+/// The terminal retains the transmitted pixels and the on-disk cache retains
+/// the source bytes, so keeping the full decoded image as well only adds tens of
+/// MiB to long screenshot-heavy conversations.
+fn release_source_image(hash: u64, path: &Path) {
+    if let Ok(mut cache) = SOURCE_CACHE.lock() {
+        cache.remove_if_path(hash, path);
+    }
+}
+
+fn fitted_source_key(
+    hash: u64,
+    target_cols: u16,
+    target_rows: u16,
+    font_size: (u16, u16),
+) -> FittedSourceKey {
+    FittedSourceKey {
+        hash,
+        target_cols,
+        target_rows,
+        font_size,
+    }
+}
+
+/// A fitted source is draw-ready when either its scaled variant is cached or
+/// the decoded original already fits the target and therefore needs no resize.
+fn fitted_source_is_ready(
+    hash: u64,
+    source_path: &Path,
+    target_cols: u16,
+    target_rows: u16,
+    font_size: (u16, u16),
+) -> bool {
+    let key = fitted_source_key(hash, target_cols, target_rows, font_size);
+    if let Ok(mut cache) = FITTED_SOURCE_CACHE.lock()
+        && cache.get(key, source_path).is_some()
+    {
+        return true;
+    }
+
+    let max_w_px = (target_cols as u32).saturating_mul(font_size.0.max(1) as u32);
+    let max_h_px = (target_rows as u32).saturating_mul(font_size.1.max(1) as u32);
+    SOURCE_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache.entries.get(&hash).map(|entry| {
+                entry.path == source_path
+                    && entry.image.width() <= max_w_px
+                    && entry.image.height() <= max_h_px
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn load_fitted_source(
+    hash: u64,
+    source_path: &Path,
+    target_cols: u16,
+    target_rows: u16,
+    font_size: (u16, u16),
+) -> Option<Arc<DynamicImage>> {
+    let key = fitted_source_key(hash, target_cols, target_rows, font_size);
+    if let Ok(mut cache) = FITTED_SOURCE_CACHE.lock()
+        && let Some(image) = cache.get(key, source_path)
+    {
+        return Some(image);
+    }
+
+    let source = load_source_image(hash, source_path)?;
+    let scaled = match scale_to_fit_box(source.as_ref(), target_cols, target_rows, font_size) {
+        Cow::Borrowed(_) => return Some(source),
+        Cow::Owned(image) => image,
+    };
+    let fitted = FITTED_SOURCE_CACHE
+        .lock()
+        .ok()
+        .map(|mut cache| cache.insert(key, source_path.to_path_buf(), scaled))?;
+    drop(source);
+    // The fitted variant now owns the pixels needed for scrolling. Keeping the
+    // full decoded original as well would double the resident cost.
+    release_source_image(hash, source_path);
+    Some(fitted)
+}
+
 pub(super) fn viewport_crop_should_scale_to_area(
     crop_w: u32,
     crop_h: u32,
@@ -25,8 +110,16 @@ pub(super) fn viewport_crop_should_scale_to_area(
 }
 
 fn kitty_viewport_unique_id(hash: u64) -> u32 {
-    let mixed = (hash as u32) ^ ((hash >> 32) as u32) ^ 0x4B49_5459;
-    mixed.max(1)
+    let _ = hash;
+    loop {
+        let sequence = NEXT_KITTY_IMAGE_ID.fetch_add(1, Ordering::Relaxed) & 0x00FF_FFFF;
+        if sequence != 0 {
+            // Reserve the 0x4Axxxxxx namespace ('J') for jcode's custom virtual
+            // placements so these ids do not collide with ratatui-image's Kitty
+            // protocol states in the same terminal process.
+            return 0x4A00_0000 | sequence;
+        }
+    }
 }
 
 fn kitty_is_tmux() -> bool {
@@ -35,35 +128,65 @@ fn kitty_is_tmux() -> bool {
 }
 
 fn kitty_transmit_payload(bytes: &[u8], id: u32, format: &str) -> String {
-    let (start, escape, end) = Parser::escape_tmux(kitty_is_tmux());
-    let mut data = String::from(start);
+    use std::fmt::Write as _;
 
+    let (start, escape, end) = Parser::escape_tmux(kitty_is_tmux());
     let chunks = bytes.chunks(4096 / 4 * 3);
     let chunk_count = chunks.len();
+    let encoded_len = bytes.len().saturating_add(2) / 3 * 4;
+    let mut data = String::with_capacity(
+        start
+            .len()
+            .saturating_add(end.len())
+            .saturating_add(encoded_len)
+            .saturating_add(chunk_count.saturating_mul(48)),
+    );
+    data.push_str(start);
     for (i, chunk) in chunks.enumerate() {
-        let payload = base64::engine::general_purpose::STANDARD.encode(chunk);
         data.push_str(escape);
 
         match i {
             0 => {
                 let more = if chunk_count > 1 { 1 } else { 0 };
-                data.push_str(&format!(
-                    "_Gq=2,i={id},a=T,U=1,{format},t=d,m={more};{payload}"
-                ));
+                let _ = write!(data, "_Gq=2,i={id},a=T,U=1,{format},t=d,m={more};");
             }
             n if n + 1 == chunk_count => {
-                data.push_str(&format!("_Gq=2,m=0;{payload}"));
+                data.push_str("_Gq=2,m=0;");
             }
             _ => {
-                data.push_str(&format!("_Gq=2,m=1;{payload}"));
+                data.push_str("_Gq=2,m=1;");
             }
         }
+        base64::engine::general_purpose::STANDARD.encode_string(chunk, &mut data);
         data.push_str(escape);
         data.push('\\');
     }
     data.push_str(end);
 
     data
+}
+
+fn kitty_delete_image_payload(id: u32) -> String {
+    use std::fmt::Write as _;
+
+    let (start, escape, end) = Parser::escape_tmux(kitty_is_tmux());
+    let mut data = String::with_capacity(start.len() + end.len() + 48);
+    data.push_str(start);
+    data.push_str(escape);
+    let _ = write!(data, "_Gq=2,a=d,d=I,i={id}");
+    data.push_str(escape);
+    data.push('\\');
+    data.push_str(end);
+    data
+}
+
+pub(super) fn take_kitty_delete_payloads() -> String {
+    let ids = take_kitty_delete_ids();
+    let mut payloads = String::with_capacity(ids.len().saturating_mul(48));
+    for id in ids {
+        payloads.push_str(&kitty_delete_image_payload(id));
+    }
+    payloads
 }
 
 fn kitty_transmit_virtual(img: &DynamicImage, id: u32) -> String {
@@ -84,12 +207,30 @@ fn kitty_transmit_virtual(img: &DynamicImage, id: u32) -> String {
     kitty_transmit_payload(rgba.as_raw(), id, &format!("f=32,s={w},v={h}"))
 }
 
-fn kitty_scaled_image_for_zoom(source: &DynamicImage, zoom_percent: u8) -> DynamicImage {
+/// Reuse an already-compressed PNG when the transmitted pixels are byte-for-byte
+/// the on-disk source. This avoids a full DynamicImage -> PNG deflate pass for
+/// unscaled Mermaid diagrams and small PNG screenshots.
+fn kitty_transmit_png_path(path: &Path, id: u32) -> Option<String> {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    Some(kitty_transmit_payload(&bytes, id, "f=100"))
+}
+
+fn kitty_scaled_image_for_zoom(source: &DynamicImage, zoom_percent: u8) -> Cow<'_, DynamicImage> {
     use image::imageops::FilterType;
 
     let zoom = zoom_percent.clamp(50, 200) as u32;
     if zoom == 100 {
-        return source.clone();
+        return Cow::Borrowed(source);
     }
 
     let scaled_w = ((source.width() as u64).saturating_mul(zoom as u64) / 100)
@@ -98,7 +239,7 @@ fn kitty_scaled_image_for_zoom(source: &DynamicImage, zoom_percent: u8) -> Dynam
     let scaled_h = ((source.height() as u64).saturating_mul(zoom as u64) / 100)
         .max(1)
         .min(u32::MAX as u64) as u32;
-    source.resize_exact(scaled_w, scaled_h, FilterType::Nearest)
+    Cow::Owned(source.resize_exact(scaled_w, scaled_h, FilterType::Nearest))
 }
 
 fn div_ceil_u32_local(value: u32, divisor: u32) -> u32 {
@@ -108,7 +249,7 @@ fn div_ceil_u32_local(value: u32, divisor: u32) -> u32 {
         .unwrap_or(value)
 }
 
-fn kitty_full_rect_for_image(img: &DynamicImage, font_size: (u16, u16)) -> (u16, u16) {
+fn cell_rect_for_image(img: &DynamicImage, font_size: (u16, u16)) -> (u16, u16) {
     (
         div_ceil_u32_local(img.width().max(1), font_size.0.max(1) as u32).min(u16::MAX as u32)
             as u16,
@@ -136,7 +277,7 @@ pub(super) fn ensure_kitty_viewport_state(
     }
 
     let scaled = kitty_scaled_image_for_zoom(source, zoom_percent);
-    let (full_cols, full_rows) = kitty_full_rect_for_image(&scaled, font_size);
+    let (full_cols, full_rows) = cell_rect_for_image(&scaled, font_size);
     if full_cols == 0 || full_rows == 0 {
         return None;
     }
@@ -146,6 +287,13 @@ pub(super) fn ensure_kitty_viewport_state(
         .map(|state| state.unique_id)
         .unwrap_or_else(|| kitty_viewport_unique_id(hash));
 
+    let pending_transmit = if zoom_percent == 100 {
+        kitty_transmit_png_path(source_path, unique_id)
+            .unwrap_or_else(|| kitty_transmit_virtual(&scaled, unique_id))
+    } else {
+        kitty_transmit_virtual(&scaled, unique_id)
+    };
+    let pending_transmit_bytes = pending_transmit.len();
     cache.insert(
         hash,
         KittyViewportState {
@@ -155,7 +303,8 @@ pub(super) fn ensure_kitty_viewport_state(
             unique_id,
             full_cols,
             full_rows,
-            pending_transmit: Some(kitty_transmit_virtual(&scaled, unique_id)),
+            pending_transmit: Some(pending_transmit),
+            pending_transmit_bytes,
             fit_target: None,
         },
     );
@@ -209,12 +358,18 @@ pub(super) fn ensure_kitty_fit_state(
     // worker against every scroll frame and reintroduce the very stall the
     // off-thread prewarm exists to avoid.
     let scaled = scale_to_fit_box(source, target_cols, target_rows, font_size);
-    let (full_cols, full_rows) = kitty_full_rect_for_image(&scaled, font_size);
+    let (full_cols, full_rows) = cell_rect_for_image(&scaled, font_size);
     if full_cols == 0 || full_rows == 0 {
         return None;
     }
     let unique_id = existing_unique_id.unwrap_or_else(|| kitty_viewport_unique_id(hash));
-    let pending_transmit = kitty_transmit_virtual(&scaled, unique_id);
+    let pending_transmit = if matches!(&scaled, Cow::Borrowed(_)) {
+        kitty_transmit_png_path(source_path, unique_id)
+            .unwrap_or_else(|| kitty_transmit_virtual(&scaled, unique_id))
+    } else {
+        kitty_transmit_virtual(&scaled, unique_id)
+    };
+    let pending_transmit_bytes = pending_transmit.len();
 
     let mut cache = KITTY_VIEWPORT_STATE.lock().ok()?;
     // Re-check under the lock: another thread may have built matching state
@@ -237,6 +392,7 @@ pub(super) fn ensure_kitty_fit_state(
             full_cols,
             full_rows,
             pending_transmit: Some(pending_transmit),
+            pending_transmit_bytes,
             fit_target: Some((target_cols, target_rows)),
         },
     );
@@ -252,18 +408,18 @@ pub(super) fn ensure_kitty_fit_state(
 
 /// Scale a source image once to fit a `(cols, rows)` cell box at `font_size`,
 /// preserving aspect ratio. Returns a clone when the source already fits.
-fn scale_to_fit_box(
-    source: &DynamicImage,
+fn scale_to_fit_box<'a>(
+    source: &'a DynamicImage,
     target_cols: u16,
     target_rows: u16,
     font_size: (u16, u16),
-) -> DynamicImage {
+) -> Cow<'a, DynamicImage> {
     let max_w_px = (target_cols as u32).saturating_mul(font_size.0.max(1) as u32);
     let max_h_px = (target_rows as u32).saturating_mul(font_size.1.max(1) as u32);
     if source.width() <= max_w_px && source.height() <= max_h_px {
-        source.clone()
+        Cow::Borrowed(source)
     } else {
-        source.resize(max_w_px, max_h_px, image::imageops::FilterType::Triangle)
+        Cow::Owned(source.resize(max_w_px, max_h_px, image::imageops::FilterType::Triangle))
     }
 }
 
@@ -284,12 +440,11 @@ pub(super) fn render_kitty_virtual_viewport(
         Ok(cache) => cache,
         Err(_) => return false,
     };
-    let Some(state) = cache.get_mut(hash) else {
+    let Some((unique_id, mut pending_transmit)) = cache.take_pending_transmit(hash) else {
         return false;
     };
-    let unique_id = state.unique_id;
-    let pending_transmit = state.pending_transmit.take();
     drop(cache);
+    let mut pending_deletes = Some(take_kitty_delete_payloads());
 
     if pending_transmit.is_none()
         && let Ok(mut dbg) = MERMAID_DEBUG.lock()
@@ -315,7 +470,9 @@ pub(super) fn render_kitty_virtual_viewport(
         }
 
         let mut symbol = if row == 0 {
-            pending_transmit.clone().unwrap_or_default()
+            let mut symbol = pending_deletes.take().unwrap_or_default();
+            symbol.push_str(&pending_transmit.take().unwrap_or_default());
+            symbol
         } else {
             String::new()
         };
@@ -692,25 +849,24 @@ fn probe_kitty_fit_state(
     .then_some((state.unique_id, state.full_cols, state.full_rows))
 }
 
-/// Readiness of the Kitty stable-fit fast path for an inline image at a given
-/// placeholder geometry.
+/// Readiness of the stable-fit path for an inline image at a given placeholder
+/// geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineFitReadiness {
-    /// Scale + transmit state already exists for this geometry; drawing is a
-    /// cheap placeholder re-address.
+    /// Protocol state (Kitty) or a pre-scaled decoded source (other protocols)
+    /// already exists for this geometry.
     Ready,
-    /// Kitty is active but the scaled/encoded state is missing. Building it on
-    /// the UI thread costs tens of milliseconds for a large screenshot, so
-    /// callers should prewarm it off-thread via [`prewarm_inline_fit_state`].
+    /// The scaled state is missing. Building it on the UI thread costs tens of
+    /// milliseconds for a large screenshot, so callers should prewarm it
+    /// off-thread via [`prewarm_inline_fit_state`].
     NeedsPrewarm,
-    /// The stable-fit fast path does not apply (no picker, non-Kitty protocol,
-    /// or video export); callers should use the regular synchronous path.
+    /// The stable-fit fast path does not apply (no picker or video export).
     Unsupported,
 }
 
-/// Check whether the Kitty stable-fit state for `hash` is ready at the
-/// `(target_cols, target_rows)` placeholder geometry. Cheap: a couple of mutex
-/// lookups, no decoding and no filesystem reads beyond a cache-path stat.
+/// Check whether stable-fit state for `hash` is ready at the
+/// `(target_cols, target_rows)` placeholder geometry. Cheap: bounded in-memory
+/// cache probes only, with no decoding or filesystem access.
 pub fn inline_fit_readiness(
     hash: u64,
     target_cols: u16,
@@ -724,9 +880,6 @@ pub fn inline_fit_readiness(
         Some(picker) => picker,
         None => return InlineFitReadiness::Unsupported,
     };
-    if picker.protocol_type() != ProtocolType::Kitty {
-        return InlineFitReadiness::Unsupported;
-    }
     // Hot path: runs on the UI thread for every visible and prefetched image,
     // every frame. Use the in-memory-only cache lookup so steady-state scrolling
     // never pays a `path.exists()` stat syscall per image per frame.
@@ -735,25 +888,36 @@ pub fn inline_fit_readiness(
     };
     let border_width = if draw_border { BORDER_WIDTH } else { 0 };
     let fit_cols = target_cols.saturating_sub(border_width);
-    if probe_kitty_fit_state(
-        hash,
-        &cached.path,
-        fit_cols,
-        target_rows,
-        picker.font_size(),
-    )
-    .is_some()
-    {
+    let ready = if picker.protocol_type() == ProtocolType::Kitty {
+        probe_kitty_fit_state(
+            hash,
+            &cached.path,
+            fit_cols,
+            target_rows,
+            picker.font_size(),
+        )
+        .is_some()
+    } else {
+        fitted_source_is_ready(
+            hash,
+            &cached.path,
+            fit_cols,
+            target_rows,
+            picker.font_size(),
+        )
+    };
+    if ready {
         InlineFitReadiness::Ready
     } else {
         InlineFitReadiness::NeedsPrewarm
     }
 }
 
-/// Build (decode + scale + escape-encode) the Kitty stable-fit state for an
-/// inline image, mirroring the geometry math of
-/// [`render_image_widget_fit_stable`]. Intended to run off the UI thread so the
-/// first visible frame of a large image does not hitch the render loop.
+/// Build the protocol-specific stable-fit state for an inline image, mirroring
+/// the geometry math of [`render_image_widget_fit_stable`]. Intended to run off
+/// the UI thread so the first visible frame of a large image does not hitch the
+/// render loop. Kitty builds its transmit state; other protocols retain a
+/// byte-bounded pre-scaled source for cheap visible-row crops.
 /// Returns true when the state exists afterwards.
 pub fn prewarm_inline_fit_state(
     hash: u64,
@@ -765,22 +929,22 @@ pub fn prewarm_inline_fit_state(
         Some(picker) => picker,
         None => return false,
     };
-    if picker.protocol_type() != ProtocolType::Kitty {
-        return false;
-    }
     let Some(cached) = get_cached_diagram(hash, None) else {
         return false;
     };
     let font_size = picker.font_size();
     let border_width = if draw_border { BORDER_WIDTH } else { 0 };
     let fit_cols = target_cols.saturating_sub(border_width);
+    if picker.protocol_type() != ProtocolType::Kitty {
+        return load_fitted_source(hash, &cached.path, fit_cols, target_rows, font_size).is_some();
+    }
     if probe_kitty_fit_state(hash, &cached.path, fit_cols, target_rows, font_size).is_some() {
         return true;
     }
     let Some(source) = load_source_image(hash, &cached.path) else {
         return false;
     };
-    ensure_kitty_fit_state(
+    let prepared = ensure_kitty_fit_state(
         hash,
         &cached.path,
         source.as_ref(),
@@ -788,7 +952,10 @@ pub fn prewarm_inline_fit_state(
         target_rows,
         font_size,
     )
-    .is_some()
+    .is_some();
+    drop(source);
+    release_source_image(hash, &cached.path);
+    prepared
 }
 
 /// Draw a rounded left border that hugs the image's real extent: `╭` on the
@@ -818,6 +985,172 @@ fn draw_fitted_left_border(buf: &mut Buffer, area: Rect, skip_rows: u16, full_ro
     }
 }
 
+/// Convert a row scroll over a fitted image into an exact source-pixel crop and
+/// visible cell extent. Kept protocol-independent so the geometry can be tested
+/// without a terminal.
+pub(super) fn fitted_scroll_crop(
+    image_width: u32,
+    image_height: u32,
+    font_size: (u16, u16),
+    available_cols: u16,
+    available_rows: u16,
+    skip_rows: u16,
+) -> Option<(u32, u32, u16, u16)> {
+    if image_width == 0 || image_height == 0 || available_cols == 0 || available_rows == 0 {
+        return None;
+    }
+    let font_w = font_size.0.max(1) as u32;
+    let font_h = font_size.1.max(1) as u32;
+    let full_cols = div_ceil_u32_local(image_width, font_w).min(u16::MAX as u32) as u16;
+    let full_rows = div_ceil_u32_local(image_height, font_h).min(u16::MAX as u32) as u16;
+    if skip_rows >= full_rows {
+        return None;
+    }
+    let visible_cols = available_cols.min(full_cols);
+    let visible_rows = available_rows.min(full_rows.saturating_sub(skip_rows));
+    if visible_cols == 0 || visible_rows == 0 {
+        return None;
+    }
+    let scroll_y_px = (skip_rows as u32).saturating_mul(font_h).min(image_height);
+    let crop_h_px = (visible_rows as u32)
+        .saturating_mul(font_h)
+        .min(image_height.saturating_sub(scroll_y_px));
+    (crop_h_px > 0).then_some((scroll_y_px, crop_h_px, visible_cols, visible_rows))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_non_kitty_fit_stable(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    target_cols: u16,
+    target_rows: u16,
+    skip_rows: u16,
+    centered: bool,
+    draw_border: bool,
+    picker: &Picker,
+    cached: CachedDiagram,
+) -> bool {
+    let border_width = if draw_border { BORDER_WIDTH } else { 0 };
+    let fit_cols = target_cols.saturating_sub(border_width);
+    let font_size = picker.font_size();
+    let source_path = cached.path;
+    let Some(source) = load_fitted_source(hash, &source_path, fit_cols, target_rows, font_size)
+    else {
+        return false;
+    };
+    let (full_cols, full_rows) = cell_rect_for_image(source.as_ref(), font_size);
+
+    let mut available = Rect {
+        x: area.x + border_width,
+        y: area.y,
+        width: area.width - border_width,
+        height: area.height,
+    };
+    let Some((scroll_y_px, crop_h_px, visible_cols, visible_rows)) = fitted_scroll_crop(
+        source.width(),
+        source.height(),
+        font_size,
+        available.width,
+        available.height,
+        skip_rows,
+    ) else {
+        clear_image_area(area, buf);
+        return true;
+    };
+
+    if draw_border {
+        draw_fitted_left_border(buf, area, skip_rows, full_rows);
+    }
+    if centered && full_cols < available.width {
+        available.x += (available.width - full_cols) / 2;
+    }
+    let render_area = Rect {
+        x: available.x,
+        y: available.y,
+        width: visible_cols,
+        height: visible_rows,
+    };
+    let viewport = ViewportState {
+        scroll_x_px: 0,
+        scroll_y_px,
+        view_w_px: source.width(),
+        view_h_px: crop_h_px,
+    };
+
+    {
+        let mut state = IMAGE_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let needs_reset = state
+            .get(&hash)
+            .map(|state| {
+                state.resize_mode != ResizeMode::FitViewport
+                    || state.source_path.as_path() != source_path.as_path()
+            })
+            .unwrap_or(false);
+        if needs_reset {
+            state.remove(&hash);
+        }
+        if let Some(image_state) = state.get_mut(hash)
+            && image_state.last_viewport == Some(viewport)
+        {
+            if let Ok(mut debug) = MERMAID_DEBUG.lock() {
+                debug.stats.image_state_hits += 1;
+                debug.stats.fit_state_reuse_hits += 1;
+            }
+            if !render_stateful_image_safe(
+                hash,
+                render_area,
+                buf,
+                &mut image_state.protocol,
+                Resize::Fit(None),
+            ) {
+                return false;
+            }
+            image_state.last_area = Some(render_area);
+            return true;
+        }
+    }
+
+    // Non-Kitty protocols must encode a new payload when the visible slice
+    // changes, but the expensive full-image decode and scale have already been
+    // completed off-thread and retained in FITTED_SOURCE_CACHE.
+    let cropped = source.crop_imm(0, scroll_y_px, source.width(), crop_h_px);
+    let source_bytes = cropped.as_bytes().len();
+    let protocol = picker.new_resize_protocol(cropped);
+    if let Ok(mut debug) = MERMAID_DEBUG.lock() {
+        debug.stats.image_state_misses += 1;
+        debug.stats.fit_protocol_rebuilds += 1;
+    }
+
+    let mut state = IMAGE_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.insert(
+        hash,
+        ImageState {
+            protocol,
+            source_path,
+            source_bytes,
+            last_area: Some(render_area),
+            resize_mode: ResizeMode::FitViewport,
+            last_crop_top: false,
+            last_viewport: Some(viewport),
+        },
+    );
+    let Some(image_state) = state.get_mut(hash) else {
+        return false;
+    };
+    render_stateful_image_safe(
+        hash,
+        render_area,
+        buf,
+        &mut image_state.protocol,
+        Resize::Fit(None),
+    )
+}
+
 /// Render an inline raster image scaled-to-fit a fixed placeholder box, with
 /// stable pixels while scrolling.
 ///
@@ -825,9 +1158,9 @@ fn draw_fitted_left_border(buf: &mut Buffer, area: Rect, skip_rows: u16, full_ro
 /// at prepare time; `skip_rows` is how many of the image's top rows are
 /// scrolled off-screen. On Kitty this reuses one transmitted image and just
 /// re-addresses rows via unicode placeholders, so partial visibility never
-/// rescales or retransmits. Returns true when handled; callers should fall
-/// back to `render_image_widget_fit` when it returns false (non-Kitty
-/// protocols or oversized images).
+/// rescales or retransmits. Other protocols reuse a pre-scaled source and only
+/// crop/re-encode when the visible row slice changes. Returns true when handled;
+/// callers should fall back to `render_image_widget_fit` on an actual failure.
 #[allow(clippy::too_many_arguments)]
 pub fn render_image_widget_fit_stable(
     hash: u64,
@@ -858,10 +1191,6 @@ pub fn render_image_widget_fit_stable(
         Some(picker) => picker,
         None => return false,
     };
-    if picker.protocol_type() != ProtocolType::Kitty {
-        return false;
-    }
-
     // Hot path: runs on the UI thread for every visible image every frame.
     // The in-memory-only lookup avoids a per-frame `path.exists()` stat; a
     // genuinely missing file degrades gracefully below when the source decode
@@ -870,6 +1199,20 @@ pub fn render_image_widget_fit_stable(
         Some(cached) => cached,
         None => return false,
     };
+    if picker.protocol_type() != ProtocolType::Kitty {
+        return render_non_kitty_fit_stable(
+            hash,
+            area,
+            buf,
+            target_cols,
+            target_rows,
+            skip_rows,
+            centered,
+            draw_border,
+            picker,
+            cached,
+        );
+    }
     let source_path = cached.path;
     let font_size = picker.font_size();
     let fit_cols = target_cols.saturating_sub(border_width);
@@ -879,14 +1222,17 @@ pub fn render_image_widget_fit_stable(
     let placement = probe_kitty_fit_state(hash, &source_path, fit_cols, target_rows, font_size)
         .or_else(|| {
             let source = load_source_image(hash, &source_path)?;
-            ensure_kitty_fit_state(
+            let placement = ensure_kitty_fit_state(
                 hash,
                 &source_path,
                 source.as_ref(),
                 fit_cols,
                 target_rows,
                 font_size,
-            )
+            );
+            drop(source);
+            release_source_image(hash, &source_path);
+            placement
         });
     let Some((_, full_cols, full_rows)) = placement else {
         return false;
@@ -1006,7 +1352,8 @@ pub fn render_image_widget_viewport_precise(
         None => return 0,
     };
 
-    let cached = match get_cached_diagram(hash, None) {
+    let cached = match get_cached_diagram_in_memory(hash).or_else(|| get_cached_diagram(hash, None))
+    {
         Some(cached) => cached,
         None => return 0,
     };
@@ -1148,6 +1495,7 @@ pub fn render_image_widget_viewport_precise(
     if let Ok(mut dbg) = MERMAID_DEBUG.lock() {
         dbg.stats.viewport_protocol_rebuilds += 1;
     }
+    let source_bytes = cropped.as_bytes().len();
     let protocol = picker.new_resize_protocol(cropped);
 
     let mut state = IMAGE_STATE
@@ -1158,6 +1506,7 @@ pub fn render_image_widget_viewport_precise(
         ImageState {
             protocol,
             source_path,
+            source_bytes,
             last_area: Some(image_area),
             resize_mode: ResizeMode::Viewport,
             last_crop_top: false,
@@ -1244,6 +1593,255 @@ mod kitty_viewport_leak_tests {
         );
     }
 
+    #[test]
+    fn kitty_ids_are_process_unique_and_delete_payload_targets_one_image() {
+        let first = kitty_viewport_unique_id(0x0000_0001_FFFF_FFFF);
+        let second = kitty_viewport_unique_id(0xFFFF_FFFF_0000_0001);
+        assert_ne!(
+            first, second,
+            "64-bit hash folds must never alias Kitty ids"
+        );
+
+        let delete = kitty_delete_image_payload(first);
+        assert!(delete.contains("a=d,d=I"));
+        assert!(delete.contains(&format!("i={first}")));
+    }
+
+    #[test]
+    fn kitty_cache_eviction_queues_terminal_image_deletion() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = take_kitty_delete_ids();
+        let mut cache = KittyViewportCache::new();
+        for index in 0..KITTY_VIEWPORT_STATE_MAX {
+            cache.insert(
+                index as u64,
+                KittyViewportState {
+                    source_path: PathBuf::from(format!("/test/evict-{index}.png")),
+                    zoom_percent: 100,
+                    font_size: (8, 16),
+                    unique_id: 10_000 + index as u32,
+                    full_cols: 10,
+                    full_rows: 10,
+                    pending_transmit: None,
+                    pending_transmit_bytes: 0,
+                    fit_target: Some((10, 10)),
+                },
+            );
+        }
+        cache.get_mut(0).expect("touch oldest state");
+        let index = KITTY_VIEWPORT_STATE_MAX;
+        cache.insert(
+            index as u64,
+            KittyViewportState {
+                source_path: PathBuf::from(format!("/test/evict-{index}.png")),
+                zoom_percent: 100,
+                font_size: (8, 16),
+                unique_id: 10_000 + index as u32,
+                full_cols: 10,
+                full_rows: 10,
+                pending_transmit: None,
+                pending_transmit_bytes: 0,
+                fit_target: Some((10, 10)),
+            },
+        );
+        assert_eq!(cache.entries.len(), KITTY_VIEWPORT_STATE_MAX);
+        assert!(
+            cache.entries.contains_key(&0),
+            "recently touched state stays hot"
+        );
+        assert!(
+            !cache.entries.contains_key(&1),
+            "least-recent state is evicted"
+        );
+        assert_eq!(take_kitty_delete_ids(), vec![10_001]);
+    }
+
+    #[test]
+    fn kitty_cache_bounds_not_yet_drawn_transmissions_by_bytes() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = take_kitty_delete_ids();
+        let mut cache = KittyViewportCache::new();
+        let accounted = KITTY_VIEWPORT_PENDING_MAX_BYTES / 2 + 1;
+        for index in 0..3u64 {
+            cache.insert(
+                index,
+                KittyViewportState {
+                    source_path: PathBuf::from(format!("/test/pending-{index}.png")),
+                    zoom_percent: 100,
+                    font_size: (8, 16),
+                    unique_id: 20_000 + index as u32,
+                    full_cols: 10,
+                    full_rows: 10,
+                    pending_transmit: Some(String::from("synthetic")),
+                    pending_transmit_bytes: accounted,
+                    fit_target: Some((10, 10)),
+                },
+            );
+        }
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "byte budget should evict old prewarms"
+        );
+        assert_eq!(cache.total_pending_transmit_bytes, accounted);
+        assert!(
+            take_kitty_delete_ids().is_empty(),
+            "never-drawn prewarms have no terminal allocation to delete"
+        );
+
+        let (_, pending) = cache.take_pending_transmit(2).expect("newest state");
+        assert_eq!(pending.as_deref(), Some("synthetic"));
+        assert_eq!(cache.total_pending_transmit_bytes, 0);
+    }
+
+    #[test]
+    fn pending_terminal_cleanup_renders_without_changing_visible_cell_text() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = take_kitty_delete_ids();
+        queue_kitty_delete(42_424);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf.cell_mut((0, 0)).expect("fixture cell").set_symbol("X");
+
+        assert!(crate::render_pending_terminal_image_cleanup(&mut buf));
+        let symbol = buf.cell((0, 0)).expect("cleanup cell").symbol();
+        assert!(symbol.contains("a=d,d=I,i=42424"));
+        assert!(symbol.ends_with('X'), "visible symbol must be preserved");
+        assert!(take_kitty_delete_ids().is_empty());
+    }
+
+    #[test]
+    fn unchanged_png_transmit_reuses_exact_file_bytes() {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(7, 5, image::Rgba([9, 71, 203, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(pixels.as_raw(), 7, 5, image::ExtendedColorType::Rgba8)
+            .expect("encode fixture");
+        let path = std::env::temp_dir().join(format!(
+            "jcode-kitty-source-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::write(&path, &png).expect("write fixture");
+
+        let actual = kitty_transmit_png_path(&path, 19).expect("direct PNG transmit");
+        let expected = kitty_transmit_payload(&png, 19, "f=100");
+        assert_eq!(actual, expected, "source PNG bytes must not be re-encoded");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn halfblocks_partial_scroll_reuses_fitted_source_and_identical_slice() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const HASH: u64 = 0x4841_4C46_424C_4B53;
+        let path = PathBuf::from("/test/halfblocks-scroll.png");
+        let source = DynamicImage::ImageRgba8(image::ImageBuffer::from_pixel(
+            160,
+            128,
+            image::Rgba([31, 127, 223, 255]),
+        ));
+        SOURCE_CACHE
+            .lock()
+            .unwrap()
+            .insert(HASH, path.clone(), source);
+        FITTED_SOURCE_CACHE.lock().unwrap().remove_hash(HASH);
+        IMAGE_STATE.lock().unwrap().remove(&HASH);
+
+        #[allow(deprecated)]
+        let mut picker = Picker::from_fontsize((2, 4));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let cached = CachedDiagram {
+            path: path.clone(),
+            width: 160,
+            height: 128,
+        };
+        let area = Rect::new(0, 0, 42, 5);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 42, 16));
+        let stats_before = debug_stats();
+
+        assert!(render_non_kitty_fit_stable(
+            HASH,
+            area,
+            &mut buf,
+            42,
+            16,
+            4,
+            false,
+            true,
+            &picker,
+            cached.clone(),
+        ));
+        let first_stats = debug_stats();
+        assert_eq!(
+            first_stats
+                .fit_protocol_rebuilds
+                .saturating_sub(stats_before.fit_protocol_rebuilds),
+            1,
+            "the first visible slice should build one protocol"
+        );
+        {
+            let state = IMAGE_STATE.lock().unwrap();
+            let state = state.get(&HASH).expect("halfblocks viewport state");
+            assert_eq!(state.resize_mode, ResizeMode::FitViewport);
+            assert_eq!(
+                state.last_viewport,
+                Some(ViewportState {
+                    scroll_x_px: 0,
+                    scroll_y_px: 16,
+                    view_w_px: 80,
+                    view_h_px: 20,
+                })
+            );
+        }
+        assert!(
+            SOURCE_CACHE.lock().unwrap().entries.get(&HASH).is_none(),
+            "full decoded original should be released after fitting"
+        );
+        assert_eq!(
+            FITTED_SOURCE_CACHE
+                .lock()
+                .unwrap()
+                .entries
+                .keys()
+                .filter(|key| key.hash == HASH)
+                .count(),
+            1
+        );
+
+        // Rendering the identical scroll slice must reuse protocol state rather
+        // than recropping/re-encoding it.
+        assert!(render_non_kitty_fit_stable(
+            HASH, area, &mut buf, 42, 16, 4, false, true, &picker, cached,
+        ));
+        let second_stats = debug_stats();
+        assert_eq!(
+            second_stats
+                .fit_protocol_rebuilds
+                .saturating_sub(first_stats.fit_protocol_rebuilds),
+            0
+        );
+        assert_eq!(
+            second_stats
+                .fit_state_reuse_hits
+                .saturating_sub(first_stats.fit_state_reuse_hits),
+            1
+        );
+
+        IMAGE_STATE.lock().unwrap().remove(&HASH);
+        SOURCE_CACHE.lock().unwrap().remove(HASH);
+        FITTED_SOURCE_CACHE.lock().unwrap().remove_hash(HASH);
+    }
+
     /// Seed `KITTY_VIEWPORT_STATE` with a fit entry so the emitter has an id to
     /// address without needing a real terminal/transmit.
     fn seed_state(hash: u64, full_cols: u16, full_rows: u16) {
@@ -1258,6 +1856,7 @@ mod kitty_viewport_leak_tests {
                 full_cols,
                 full_rows,
                 pending_transmit: Some(String::from("\x1b_Gtransmit\x1b\\")),
+                pending_transmit_bytes: "\x1b_Gtransmit\x1b\\".len(),
                 fit_target: Some((full_cols, full_rows)),
             },
         );
@@ -1277,6 +1876,9 @@ mod kitty_viewport_leak_tests {
     /// rows above the image area that stand in for the label/tag line.
     #[test]
     fn placeholders_never_leak_above_image_area() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let hash = 0xDEAD_BEEF_u64;
         let full_cols = 20;
         let full_rows = 30;

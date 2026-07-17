@@ -21,6 +21,7 @@ use jcode_tui_messages::{ImageRegion, ImageRegionRender, PreparedMessages};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
 
 /// One image to render inline, resolved from a `RenderedImage`.
@@ -115,6 +116,16 @@ impl ImageExpandLevels for AppExpandLevels<'_> {
 static PAYLOAD_REGISTRY: LazyLock<Mutex<PayloadRegistry>> =
     LazyLock::new(|| Mutex::new(PayloadRegistry::new()));
 
+/// Payloads can be dropped when images are hidden or when the staging byte
+/// budget is exceeded. Prepared frames intentionally retain only image ids, so
+/// a later draw asks the next prepare pass to restage the missing source from the
+/// App's canonical image list instead of leaving a cold image blank forever.
+static PAYLOAD_RESTAGE_IDS: LazyLock<Mutex<HashSet<u64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static PAYLOAD_RESTAGE_PENDING: AtomicBool = AtomicBool::new(false);
+static PAYLOAD_RESTAGE_ALL: AtomicBool = AtomicBool::new(false);
+const PAYLOAD_RESTAGE_MAX: usize = 512;
+
 const PAYLOAD_REGISTRY_MAX: usize = 512;
 /// Byte budget for the payload registry. Entries hold the *full base64
 /// payload* (a 5 MB screenshot is ~6.7 MB of base64), so a pure entry-count
@@ -182,6 +193,12 @@ impl PayloadRegistry {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+        self.total_bytes = 0;
+    }
 }
 
 /// Record an image payload so [`materialize_visible`] can decode it on demand.
@@ -191,6 +208,10 @@ impl PayloadRegistry {
 /// the base64 copy again would just hold multi-megabyte payloads resident
 /// twice. [`materialize_visible`] rediscovers evicted entries from disk.
 pub(crate) fn register_payload(id: u64, media_type: &str, data_b64: &str) {
+    if let Ok(mut requested) = PAYLOAD_RESTAGE_IDS.lock() {
+        requested.remove(&id);
+        PAYLOAD_RESTAGE_PENDING.store(!requested.is_empty(), Ordering::Release);
+    }
     if mermaid::inline_image_is_materialized(id) {
         return;
     }
@@ -200,8 +221,13 @@ pub(crate) fn register_payload(id: u64, media_type: &str, data_b64: &str) {
     };
     // A fresh payload may succeed where a previously evicted/corrupt one
     // failed, so give the prewarm pipeline its retries back.
-    if newly_inserted && let Ok(mut failures) = PREWARM_FAILURES.lock() {
-        failures.remove(&id);
+    if newly_inserted {
+        // The id hashes the complete payload, so re-registering the same id is
+        // not fresh content. Keep ID-wide decode failures capped across staging
+        // eviction; geometry preparation may still be retried.
+        if let Ok(mut failures) = PREWARM_FIT_FAILURES.lock() {
+            failures.retain(|req, _| req.id != id);
+        }
     }
 }
 
@@ -210,6 +236,82 @@ pub(crate) fn register_payload(id: u64, media_type: &str, data_b64: &str) {
 fn release_payload(id: u64) {
     if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
         reg.remove(id);
+    }
+}
+
+fn clear_staged_payloads() {
+    let mut cleared = false;
+    if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
+        cleared |= !reg.map.is_empty();
+        reg.clear();
+    }
+    // `pin_images == false` returns before computing a replacement cache key.
+    // Without invalidating this cache, re-enabling images can hit an old
+    // stage_payloads=true result even though its payload registry was cleared,
+    // permanently leaving unmaterialized images with nothing to decode.
+    if let Ok(mut cache) = ANCHORED_CACHE.lock() {
+        cleared |= cache.take().is_some();
+    }
+    if cleared {
+        PAYLOAD_RESTAGE_ALL.store(true, Ordering::Release);
+    }
+}
+
+fn request_payload_restage(id: u64) {
+    let mut newly_requested = false;
+    if let Ok(mut requested) = PAYLOAD_RESTAGE_IDS.lock() {
+        if requested.len() >= PAYLOAD_RESTAGE_MAX && !requested.contains(&id) {
+            requested.clear();
+            PAYLOAD_RESTAGE_ALL.store(true, Ordering::Release);
+            PAYLOAD_RESTAGE_PENDING.store(false, Ordering::Release);
+            newly_requested = true;
+        } else {
+            newly_requested = requested.insert(id);
+            PAYLOAD_RESTAGE_PENDING.store(true, Ordering::Release);
+        }
+    }
+    if newly_requested {
+        // Materialization normally happens on the worker. Wake the UI so the
+        // next prepare pass can recover the evicted source from App state.
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
+    }
+}
+
+/// Rare recovery path for payloads removed by the staging byte budget or an
+/// image visibility toggle. The steady-state fast path is one relaxed atomic
+/// load; only an actual miss clones/scans the App's image list.
+pub(crate) fn restage_requested_payloads(app: &dyn crate::tui::TuiState) {
+    if !app.pin_images() || !app.inline_images_visible() {
+        return;
+    }
+    let restage_all = PAYLOAD_RESTAGE_ALL.swap(false, Ordering::AcqRel);
+    if !restage_all && !PAYLOAD_RESTAGE_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    let requested = if restage_all {
+        HashSet::new()
+    } else {
+        PAYLOAD_RESTAGE_IDS
+            .lock()
+            .map(|ids| ids.clone())
+            .unwrap_or_default()
+    };
+    if !restage_all && requested.is_empty() {
+        PAYLOAD_RESTAGE_PENDING.store(false, Ordering::Release);
+        return;
+    }
+
+    let mut restored = HashSet::new();
+    for image in app.side_pane_images() {
+        let id = mermaid::inline_image_id(&image.media_type, &image.data);
+        if restage_all || requested.contains(&id) {
+            register_payload(id, &image.media_type, &image.data);
+            restored.insert(id);
+        }
+    }
+    if let Ok(mut pending) = PAYLOAD_RESTAGE_IDS.lock() {
+        pending.retain(|id| !restored.contains(id));
+        PAYLOAD_RESTAGE_PENDING.store(!pending.is_empty(), Ordering::Release);
     }
 }
 
@@ -240,24 +342,36 @@ pub(crate) fn materialize_visible(id: u64) -> bool {
     if mermaid::rediscover_inline_image(id).is_some() {
         return true;
     }
-    mermaid::get_cached_path(id).is_some()
+    if mermaid::get_cached_path(id).is_some() {
+        return true;
+    }
+    request_payload_restage(id);
+    false
 }
 
 /// One pending prewarm request: build everything needed to draw image `id`
 /// at the given placeholder geometry (decode payload, write cache file, scale
 /// to the target box, escape-encode for Kitty).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PrewarmRequest {
     id: u64,
     target_cols: u16,
     target_rows: u16,
 }
 
-static PREWARM_TX: OnceLock<mpsc::Sender<PrewarmRequest>> = OnceLock::new();
+const PREWARM_QUEUE_CAPACITY: usize = 32;
+static PREWARM_TX: OnceLock<mpsc::SyncSender<PrewarmRequest>> = OnceLock::new();
 /// Requests queued or in flight, so a 60fps scroll doesn't enqueue the same
-/// image dozens of times before the worker finishes it.
-static PREWARM_INFLIGHT: LazyLock<Mutex<HashSet<PrewarmRequest>>> =
+/// image dozens of times before the worker finishes it. Dedup by image id, not
+/// exact geometry: during a live resize only one request per image may consume
+/// CPU; completion triggers a repaint that queues the newest geometry if needed.
+static PREWARM_INFLIGHT: LazyLock<Mutex<HashSet<u64>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+/// A full bounded channel must not drop the newest visible request. Keep one
+/// coalesced overflow request; the worker drains it after every queued job.
+static PREWARM_OVERFLOW: LazyLock<Mutex<Option<PrewarmRequest>>> =
+    LazyLock::new(|| Mutex::new(None));
+static PREWARM_RETRY_NEEDED: AtomicBool = AtomicBool::new(false);
 
 /// Per-image count of failed materialize attempts. Without this memo an
 /// undecodable payload (or one evicted from the registry) would loop forever:
@@ -265,23 +379,31 @@ static PREWARM_INFLIGHT: LazyLock<Mutex<HashSet<PrewarmRequest>>> =
 /// repaint reschedules the same prewarm. After
 /// [`PREWARM_FAILURE_MAX_ATTEMPTS`] failures the id is skipped until
 /// [`register_payload`] sees a fresh payload for it.
-static PREWARM_FAILURES: LazyLock<Mutex<HashMap<u64, u8>>> =
+static PREWARM_MATERIALIZE_FAILURES: LazyLock<Mutex<HashMap<u64, u8>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static PREWARM_FIT_FAILURES: LazyLock<Mutex<HashMap<PrewarmRequest, u8>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const PREWARM_FAILURE_MAX_ATTEMPTS: u8 = 3;
 /// Bound the failure memo; it only holds pathological ids, so if it fills up
 /// something is systemically wrong and starting over is harmless.
 const PREWARM_FAILURES_MAX: usize = 512;
 
-fn prewarm_failures_exhausted(id: u64) -> bool {
-    PREWARM_FAILURES
+fn prewarm_failures_exhausted(req: PrewarmRequest) -> bool {
+    let materialize_exhausted = PREWARM_MATERIALIZE_FAILURES
         .lock()
         .ok()
-        .and_then(|failures| failures.get(&id).copied())
-        .is_some_and(|count| count >= PREWARM_FAILURE_MAX_ATTEMPTS)
+        .and_then(|failures| failures.get(&req.id).copied())
+        .is_some_and(|count| count >= PREWARM_FAILURE_MAX_ATTEMPTS);
+    materialize_exhausted
+        || PREWARM_FIT_FAILURES
+            .lock()
+            .ok()
+            .and_then(|failures| failures.get(&req).copied())
+            .is_some_and(|count| count >= PREWARM_FAILURE_MAX_ATTEMPTS)
 }
 
-fn record_prewarm_failure(id: u64) {
-    if let Ok(mut failures) = PREWARM_FAILURES.lock() {
+fn record_materialize_failure(id: u64) {
+    if let Ok(mut failures) = PREWARM_MATERIALIZE_FAILURES.lock() {
         if failures.len() >= PREWARM_FAILURES_MAX && !failures.contains_key(&id) {
             failures.clear();
         }
@@ -289,16 +411,34 @@ fn record_prewarm_failure(id: u64) {
         *count = count.saturating_add(1);
         if *count == PREWARM_FAILURE_MAX_ATTEMPTS {
             crate::logging::warn(&format!(
-                "inline image {id:#018x} failed to materialize {PREWARM_FAILURE_MAX_ATTEMPTS} times; \
-                 suspending prewarm until its payload is re-registered"
+                "inline image {id:#018x} failed to decode/materialize {} times; \
+                 suspending all geometries until its payload is re-registered",
+                PREWARM_FAILURE_MAX_ATTEMPTS
             ));
         }
     }
 }
 
-fn prewarm_sender() -> &'static mpsc::Sender<PrewarmRequest> {
+fn record_fit_failure(req: PrewarmRequest) {
+    if let Ok(mut failures) = PREWARM_FIT_FAILURES.lock() {
+        if failures.len() >= PREWARM_FAILURES_MAX && !failures.contains_key(&req) {
+            failures.clear();
+        }
+        let count = failures.entry(req).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count == PREWARM_FAILURE_MAX_ATTEMPTS {
+            crate::logging::warn(&format!(
+                "inline image {:#018x} failed to fit at {}x{} {} times; \
+                 suspending this geometry until its payload is re-registered",
+                req.id, req.target_cols, req.target_rows, PREWARM_FAILURE_MAX_ATTEMPTS
+            ));
+        }
+    }
+}
+
+fn prewarm_sender() -> &'static mpsc::SyncSender<PrewarmRequest> {
     PREWARM_TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<PrewarmRequest>();
+        let (tx, rx) = mpsc::sync_channel::<PrewarmRequest>(PREWARM_QUEUE_CAPACITY);
         if let Err(err) = std::thread::Builder::new()
             .name("jcode-inline-image-prewarm".to_string())
             .spawn(move || prewarm_worker(rx))
@@ -312,30 +452,99 @@ fn prewarm_sender() -> &'static mpsc::Sender<PrewarmRequest> {
     })
 }
 
-fn prewarm_worker(rx: mpsc::Receiver<PrewarmRequest>) {
-    for req in rx {
-        let materialized = materialize_visible(req.id);
-        if materialized {
-            mermaid::prewarm_inline_fit_state(req.id, req.target_cols, req.target_rows, true);
-            if let Ok(mut failures) = PREWARM_FAILURES.lock() {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrewarmOutcome {
+    Prepared,
+    SourceMissing,
+    MaterializeFailed,
+    FitFailed,
+}
+
+fn payload_restage_requested(id: u64) -> bool {
+    PAYLOAD_RESTAGE_ALL.load(Ordering::Acquire)
+        || PAYLOAD_RESTAGE_IDS
+            .lock()
+            .map(|requested| requested.contains(&id))
+            .unwrap_or(false)
+}
+
+fn prepare_prewarm_request(req: PrewarmRequest) -> PrewarmOutcome {
+    if !materialize_visible(req.id) {
+        return if payload_restage_requested(req.id) {
+            PrewarmOutcome::SourceMissing
+        } else {
+            PrewarmOutcome::MaterializeFailed
+        };
+    }
+    match mermaid::inline_fit_readiness(req.id, req.target_cols, req.target_rows, true) {
+        mermaid::InlineFitReadiness::Ready | mermaid::InlineFitReadiness::Unsupported => {
+            PrewarmOutcome::Prepared
+        }
+        mermaid::InlineFitReadiness::NeedsPrewarm => {
+            if mermaid::prewarm_inline_fit_state(req.id, req.target_cols, req.target_rows, true) {
+                PrewarmOutcome::Prepared
+            } else {
+                PrewarmOutcome::FitFailed
+            }
+        }
+    }
+}
+
+fn finish_prewarm_request(req: PrewarmRequest) {
+    let outcome = prepare_prewarm_request(req);
+    match outcome {
+        PrewarmOutcome::Prepared => {
+            if let Ok(mut failures) = PREWARM_MATERIALIZE_FAILURES.lock() {
                 failures.remove(&req.id);
             }
-        } else {
-            record_prewarm_failure(req.id);
+            if let Ok(mut failures) = PREWARM_FIT_FAILURES.lock() {
+                failures.remove(&req);
+            }
         }
-        if let Ok(mut inflight) = PREWARM_INFLIGHT.lock() {
-            inflight.remove(&req);
-        }
-        if !materialized {
-            // Nothing new to draw; nudging a repaint would only make the
-            // draw path reschedule this same failed request.
-            continue;
-        }
-        // Nudge the UI exactly like a finished deferred Mermaid render so the
-        // placeholder fills in on the next frame without user input. The
-        // prepared placeholder geometry is unchanged, so no prepare-cache
-        // invalidation is needed - just a repaint.
+        PrewarmOutcome::SourceMissing => {}
+        PrewarmOutcome::MaterializeFailed => record_materialize_failure(req.id),
+        PrewarmOutcome::FitFailed => record_fit_failure(req),
+    }
+    if let Ok(mut inflight) = PREWARM_INFLIGHT.lock() {
+        inflight.remove(&req.id);
+    }
+    if outcome == PrewarmOutcome::Prepared {
         crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
+    }
+}
+
+fn prewarm_worker(rx: mpsc::Receiver<PrewarmRequest>) {
+    for req in rx {
+        finish_prewarm_request(req);
+        // A producer never blocks the UI on a full channel. Drain the newest
+        // coalesced overflow request before waiting on the channel again.
+        while let Some(overflow) = PREWARM_OVERFLOW
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+        {
+            finish_prewarm_request(overflow);
+        }
+        if PREWARM_RETRY_NEEDED.swap(false, Ordering::AcqRel) {
+            // At least one older coalesced request was displaced. Space has now
+            // been made, so repaint once and let the current viewport resubmit
+            // whichever geometry is still relevant.
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
+        }
+    }
+}
+
+fn coalesce_overflow(req: PrewarmRequest) {
+    let displaced = PREWARM_OVERFLOW
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.replace(req));
+    if let Some(displaced) = displaced
+        && displaced.id != req.id
+        && let Ok(mut inflight) = PREWARM_INFLIGHT.lock()
+    {
+        inflight.remove(&displaced.id);
+        PREWARM_RETRY_NEEDED.store(true, Ordering::Release);
     }
 }
 
@@ -359,8 +568,8 @@ pub(crate) fn ensure_drawable(id: u64, target_cols: u16, target_rows: u16) -> bo
     match readiness {
         mermaid::InlineFitReadiness::Ready => true,
         mermaid::InlineFitReadiness::Unsupported => {
-            // Non-Kitty fallback renderers manage their own protocol state;
-            // just make sure the bytes are decoded, off-thread if possible.
+            // No picker or video export. Materialization is still useful so a
+            // picker becoming available later can draw without decoding here.
             if materialized {
                 true
             } else {
@@ -376,25 +585,43 @@ pub(crate) fn ensure_drawable(id: u64, target_cols: u16, target_rows: u16) -> bo
 }
 
 fn schedule_prewarm(id: u64, target_cols: u16, target_rows: u16) {
-    if prewarm_failures_exhausted(id) {
-        return;
-    }
     let req = PrewarmRequest {
         id,
         target_cols,
         target_rows,
     };
+    if prewarm_failures_exhausted(req) {
+        return;
+    }
     if let Ok(mut inflight) = PREWARM_INFLIGHT.lock()
-        && !inflight.insert(req)
+        && !inflight.insert(id)
     {
         return;
     }
-    if prewarm_sender().send(req).is_err() {
-        // Worker unavailable: fall back to synchronous work on next frame.
-        if let Ok(mut inflight) = PREWARM_INFLIGHT.lock() {
-            inflight.remove(&req);
+    match prewarm_sender().try_send(req) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(req)) => {
+            // Keep the UI thread non-blocking without dropping the newest
+            // request. The single worker drains this coalesced slot after every
+            // channel job, including failed ones that do not publish a repaint.
+            coalesce_overflow(req);
         }
-        materialize_visible(id);
+        Err(mpsc::TrySendError::Disconnected(req)) => {
+            if let Ok(mut inflight) = PREWARM_INFLIGHT.lock() {
+                inflight.remove(&id);
+            }
+            // Thread creation failure is rare; preserve correctness by doing the
+            // complete preparation synchronously instead of leaving Kitty images
+            // permanently blank after materialization alone.
+            match prepare_prewarm_request(req) {
+                PrewarmOutcome::Prepared => {
+                    crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
+                }
+                PrewarmOutcome::SourceMissing => {}
+                PrewarmOutcome::MaterializeFailed => record_materialize_failure(req.id),
+                PrewarmOutcome::FitFailed => record_fit_failure(req),
+            }
+        }
     }
 }
 
@@ -414,8 +641,7 @@ pub(crate) fn prefetch(id: u64, target_cols: u16, target_rows: u16) {
         mermaid::InlineFitReadiness::NeedsPrewarm
     };
     match readiness {
-        // Already drawable, or a protocol that builds its state synchronously
-        // at draw time (nothing useful to prewarm ahead).
+        // Already drawable, or no terminal protocol is currently available.
         mermaid::InlineFitReadiness::Ready | mermaid::InlineFitReadiness::Unsupported => {}
         mermaid::InlineFitReadiness::NeedsPrewarm => {
             schedule_prewarm(id, target_cols, target_rows);
@@ -423,9 +649,14 @@ pub(crate) fn prefetch(id: u64, target_cols: u16, target_rows: u16) {
     }
 }
 
-fn resolve_item(image: &crate::session::RenderedImage) -> Option<InlineImageItem> {
+fn resolve_item(
+    image: &crate::session::RenderedImage,
+    stage_payload: bool,
+) -> Option<InlineImageItem> {
     let (id, width, height) = mermaid::inline_image_dims(&image.media_type, &image.data)?;
-    register_payload(id, &image.media_type, &image.data);
+    if stage_payload {
+        register_payload(id, &image.media_type, &image.data);
+    }
     let label = image
         .label
         .clone()
@@ -505,12 +736,20 @@ impl AnchoredInlineImages {
 
 /// Resolve rendered images into anchored buckets (tool call / user prompt /
 /// unanchored). Same lazy header-only cost profile as [`resolve_item`].
+#[cfg(test)]
 pub(crate) fn resolve_anchored_items(
     images: &[crate::session::RenderedImage],
 ) -> AnchoredInlineImages {
+    resolve_anchored_items_inner(images, true)
+}
+
+fn resolve_anchored_items_inner(
+    images: &[crate::session::RenderedImage],
+    stage_payloads: bool,
+) -> AnchoredInlineImages {
     let mut result = AnchoredInlineImages::default();
     for image in images {
-        let Some(item) = resolve_item(image) else {
+        let Some(item) = resolve_item(image, stage_payloads) else {
             continue;
         };
         match &image.anchor {
@@ -530,7 +769,8 @@ pub(crate) fn resolve_anchored_items(
 /// signature. Resolving hashes every image payload (for ids), so body
 /// preparation must not redo it per rebuild; the signature is already cached
 /// per transcript version on the app side.
-type AnchoredCache = Mutex<Option<((usize, u64), std::sync::Arc<AnchoredInlineImages>)>>;
+type AnchoredCacheKey = ((usize, u64), bool);
+type AnchoredCache = Mutex<Option<(AnchoredCacheKey, std::sync::Arc<AnchoredInlineImages>)>>;
 static ANCHORED_CACHE: LazyLock<AnchoredCache> = LazyLock::new(|| Mutex::new(None));
 
 /// Resolve the app's images into anchored buckets, cached by the image-set
@@ -540,21 +780,31 @@ pub(crate) fn resolve_anchored_items_cached(
     app: &dyn crate::tui::TuiState,
 ) -> std::sync::Arc<AnchoredInlineImages> {
     if !app.pin_images() {
+        clear_staged_payloads();
         return std::sync::Arc::new(AnchoredInlineImages::default());
     }
     let signature = app.side_pane_images_signature();
     if signature.0 == 0 {
+        clear_staged_payloads();
         return std::sync::Arc::new(AnchoredInlineImages::default());
     }
+    let stage_payloads = app.inline_images_visible();
+    if !stage_payloads {
+        clear_staged_payloads();
+    }
+    let key = (signature, stage_payloads);
     if let Ok(cache) = ANCHORED_CACHE.lock()
         && let Some((cached_sig, cached)) = cache.as_ref()
-        && *cached_sig == signature
+        && *cached_sig == key
     {
         return cached.clone();
     }
-    let resolved = std::sync::Arc::new(resolve_anchored_items(&app.side_pane_images()));
+    let resolved = std::sync::Arc::new(resolve_anchored_items_inner(
+        &app.side_pane_images(),
+        stage_payloads,
+    ));
     if let Ok(mut cache) = ANCHORED_CACHE.lock() {
-        *cache = Some((signature, resolved.clone()));
+        *cache = Some((key, resolved.clone()));
     }
     resolved
 }
@@ -1087,23 +1337,101 @@ mod tests {
         );
     }
 
-    /// Re-registering a payload must clear the prewarm failure memo so a fresh
-    /// payload gets its decode retries back.
+    /// Re-registering a staged source may retry geometry preparation, but its
+    /// stable content id keeps corrupt-payload decode failures capped.
     #[test]
-    fn reregistering_payload_resets_prewarm_failures() {
+    fn reregistering_payload_resets_fit_failures() {
         const ID: u64 = 0xFA11_ED01;
+        let req = PrewarmRequest {
+            id: ID,
+            target_cols: 80,
+            target_rows: 16,
+        };
         for _ in 0..PREWARM_FAILURE_MAX_ATTEMPTS {
-            record_prewarm_failure(ID);
+            record_fit_failure(req);
         }
         assert!(
-            prewarm_failures_exhausted(ID),
+            prewarm_failures_exhausted(req),
             "failure memo should suspend prewarm after max attempts"
         );
         register_payload(ID, "image/png", "BBBB");
         assert!(
-            !prewarm_failures_exhausted(ID),
-            "fresh payload registration must reset the failure memo"
+            !prewarm_failures_exhausted(req),
+            "restaging may retry geometry preparation"
         );
+        PAYLOAD_REGISTRY.lock().unwrap().remove(ID);
+    }
+
+    #[test]
+    fn prewarm_failures_are_scoped_to_geometry() {
+        let failed = PrewarmRequest {
+            id: 0xFA11_ED02,
+            target_cols: 80,
+            target_rows: 16,
+        };
+        for _ in 0..PREWARM_FAILURE_MAX_ATTEMPTS {
+            record_fit_failure(failed);
+        }
+        let resized = PrewarmRequest {
+            target_cols: 100,
+            ..failed
+        };
+        assert!(prewarm_failures_exhausted(failed));
+        assert!(
+            !prewarm_failures_exhausted(resized),
+            "a failed stale resize must not block preparation at the new geometry"
+        );
+        PREWARM_FIT_FAILURES.lock().unwrap().remove(&failed);
+    }
+
+    #[test]
+    fn materialize_failures_apply_across_resize_geometries() {
+        let failed = PrewarmRequest {
+            id: 0xFA11_ED03,
+            target_cols: 80,
+            target_rows: 16,
+        };
+        for _ in 0..PREWARM_FAILURE_MAX_ATTEMPTS {
+            record_materialize_failure(failed.id);
+        }
+        let resized = PrewarmRequest {
+            target_cols: 120,
+            target_rows: 24,
+            ..failed
+        };
+        assert!(prewarm_failures_exhausted(failed));
+        assert!(
+            prewarm_failures_exhausted(resized),
+            "a corrupt payload must not get three more full decodes after every resize"
+        );
+        register_payload(failed.id, "image/png", "BBBB");
+        assert!(
+            prewarm_failures_exhausted(resized),
+            "restaging identical content must not reset its ID-wide decode cap"
+        );
+        PAYLOAD_REGISTRY.lock().unwrap().remove(failed.id);
+        PREWARM_MATERIALIZE_FAILURES
+            .lock()
+            .unwrap()
+            .remove(&failed.id);
+    }
+
+    #[test]
+    fn overflow_slot_keeps_the_newest_request() {
+        let first = PrewarmRequest {
+            id: 1,
+            target_cols: 80,
+            target_rows: 16,
+        };
+        let newest = PrewarmRequest {
+            id: 2,
+            target_cols: 100,
+            target_rows: 20,
+        };
+        let mut pending = None;
+        assert!(pending.replace(first).is_none());
+        assert_eq!(pending.replace(newest), Some(first));
+        assert_eq!(pending, Some(newest));
     }
 
     /// Materialization must release the staged base64 payload (the decoded
@@ -1195,6 +1523,63 @@ mod tests {
         assert_eq!(anchored.by_tool.get("tool-1").map(Vec::len), Some(1));
         assert_eq!(anchored.by_prompt.get(&2).map(Vec::len), Some(1));
         assert_eq!(anchored.unanchored.len(), 1);
+    }
+
+    #[test]
+    fn resolving_hidden_images_does_not_stage_payload_bytes() {
+        use base64::Engine as _;
+        use image::ImageEncoder as _;
+
+        clear_staged_payloads();
+        let pixels = image::RgbaImage::from_pixel(3, 2, image::Rgba([91, 37, 211, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(pixels.as_raw(), 3, 2, image::ExtendedColorType::Rgba8)
+            .expect("encode fixture");
+        let data = base64::engine::general_purpose::STANDARD.encode(png);
+        let image = crate::session::RenderedImage {
+            media_type: "image/png".to_string(),
+            data,
+            label: Some("hidden-fixture.png".to_string()),
+            source: crate::session::RenderedImageSource::ToolResult {
+                tool_name: "read".to_string(),
+            },
+            anchor: None,
+        };
+        let id = mermaid::inline_image_id(&image.media_type, &image.data);
+
+        let resolved = resolve_anchored_items_inner(std::slice::from_ref(&image), false);
+        assert_eq!(resolved.unanchored.len(), 1, "metadata still resolves");
+        assert!(
+            PAYLOAD_REGISTRY.lock().unwrap().get(id).is_none(),
+            "hidden image payload must not be copied into the staging registry"
+        );
+
+        let visible = resolve_anchored_items_inner(std::slice::from_ref(&image), true);
+        assert_eq!(visible.unanchored.len(), 1);
+        assert!(
+            PAYLOAD_REGISTRY.lock().unwrap().get(id).is_some(),
+            "visible image payload should be staged for lazy materialization"
+        );
+        PAYLOAD_REGISTRY.lock().unwrap().remove(id);
+    }
+
+    #[test]
+    fn clearing_staged_payloads_invalidates_resolved_image_cache() {
+        PAYLOAD_RESTAGE_ALL.store(false, Ordering::Release);
+        *ANCHORED_CACHE.lock().unwrap() = Some((
+            ((1, 99), true),
+            std::sync::Arc::new(AnchoredInlineImages::default()),
+        ));
+        clear_staged_payloads();
+        assert!(
+            ANCHORED_CACHE.lock().unwrap().is_none(),
+            "showing images again must resolve and restage their payloads"
+        );
+        assert!(
+            PAYLOAD_RESTAGE_ALL.load(Ordering::Acquire),
+            "a prepared-frame cache hit must know that every payload needs restaging"
+        );
     }
 
     #[test]

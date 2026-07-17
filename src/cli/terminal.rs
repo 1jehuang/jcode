@@ -373,6 +373,15 @@ fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
         state.keyboard_enhanced,
         state.focus_change,
     ));
+    crate::tui::mermaid::clear_image_state();
+    let image_cleanup = crate::tui::mermaid::take_terminal_image_cleanup_payload();
+    if !image_cleanup.is_empty() {
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(image_cleanup.as_bytes());
+        let _ = stdout.flush();
+    }
+
     if restore_terminal {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         if state.focus_change {
@@ -391,8 +400,6 @@ fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
         }
         ratatui::restore();
     }
-
-    crate::tui::mermaid::clear_image_state();
 }
 
 fn cleanup_tui_runtime_for_run_result(
