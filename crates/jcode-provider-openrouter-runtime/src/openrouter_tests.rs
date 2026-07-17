@@ -1252,6 +1252,35 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
 }
 
 #[test]
+fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
+    // The default OpenRouter api base matches the "openrouter" OpenAI-compat
+    // doctor profile, so `new()` can assign profile_id = Some("openrouter").
+    // That runtime is still real OpenRouter and must keep unified reasoning
+    // (regression: /effort failed with "Reasoning effort is not supported").
+    let provider = OpenRouterProvider {
+        profile_id: Some("openrouter".to_string()),
+        ..make_provider()
+    };
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec![
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "swarm",
+            "swarm-deep"
+        ]
+    );
+    provider
+        .set_reasoning_effort("high")
+        .expect("OpenRouter with doctor profile id should accept effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+}
+
+#[test]
 fn non_deepseek_compatible_profile_does_not_expose_reasoning_effort() {
     let provider = make_custom_compatible_provider();
 
