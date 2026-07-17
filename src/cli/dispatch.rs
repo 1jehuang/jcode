@@ -24,6 +24,12 @@ use provider_init::ProviderChoice;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     resolve_resume_arg(&mut args)?;
 
+    // One-time config migration: users whose config.toml still carries the old
+    // baked-in `swarm_spawn_mode = "visible"` default get flipped to the
+    // current `inline` default. Cheap (single file read, marker-gated), and it
+    // must run before the config cache is first populated.
+    crate::config::Config::migrate_legacy_swarm_spawn_mode_once();
+
     if let Some(profile_name) = args
         .provider_profile
         .as_deref()

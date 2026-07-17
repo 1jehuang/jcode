@@ -325,6 +325,96 @@ impl Config {
         false
     }
 
+    /// One-time migration: flip a persisted legacy `swarm_spawn_mode =
+    /// "visible"` to the current `"inline"` default.
+    ///
+    /// Historically `visible` was the default, and any full-config
+    /// `Config::save()` (model switches, display toggles, ...) baked that
+    /// then-default into the user's config.toml. When the default changed to
+    /// `inline`, those users stayed pinned to `visible` forever. This rewrites
+    /// exactly that one line (preserving the rest of the file byte-for-byte)
+    /// and drops a marker so it runs at most once. A user who explicitly sets
+    /// `visible` after the migration is never flipped again.
+    ///
+    /// Returns `true` when it rewrote the config. Best-effort: errors are
+    /// logged and swallowed.
+    pub fn migrate_legacy_swarm_spawn_mode_once() -> bool {
+        let Ok(dir) = jcode_dir() else {
+            return false;
+        };
+        let marker = dir.join("migrations").join("swarm-spawn-mode-inline");
+        if marker.exists() {
+            return false;
+        }
+        let write_marker = || {
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(
+                &marker,
+                "swarm_spawn_mode default migration: visible -> inline\n",
+            );
+        };
+
+        let path = dir.join("config.toml");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            // No config file (fresh install): nothing to migrate.
+            write_marker();
+            return false;
+        };
+
+        let mut changed = false;
+        let migrated: Vec<String> = content
+            .lines()
+            .map(|line| {
+                if changed {
+                    return line.to_string();
+                }
+                let trimmed = line.trim_start();
+                let Some(rest) = trimmed.strip_prefix("swarm_spawn_mode") else {
+                    return line.to_string();
+                };
+                let Some(value) = rest.trim_start().strip_prefix('=') else {
+                    return line.to_string();
+                };
+                let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+                if matches!(value, "visible" | "headed") {
+                    changed = true;
+                    let indent = &line[..line.len() - trimmed.len()];
+                    format!("{indent}swarm_spawn_mode = \"inline\"")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+
+        if !changed {
+            write_marker();
+            return false;
+        }
+
+        let mut new_content = migrated.join("\n");
+        if content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        match std::fs::write(&path, new_content) {
+            Ok(()) => {
+                Self::invalidate_cache();
+                write_marker();
+                crate::logging::info(
+                    "Migrated legacy swarm_spawn_mode \"visible\" to \"inline\" in config.toml",
+                );
+                true
+            }
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "swarm_spawn_mode migration failed to write config: {err}"
+                ));
+                false
+            }
+        }
+    }
+
     fn normalize_external_auth_source_id(source_id: &str) -> String {
         source_id.trim().to_ascii_lowercase()
     }

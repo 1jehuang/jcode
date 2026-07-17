@@ -991,3 +991,76 @@ fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
         "profile-qualified slash-path spec must resolve the configured context_window"
     );
 }
+
+#[test]
+fn migrate_legacy_swarm_spawn_mode_flips_visible_to_inline_once() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let config_path = dir.path().join("config.toml");
+    let original = "[display]\ncentered = true\n\n[agents]\nswarm_spawn_mode = \"visible\"\nswarm_max_concurrent_agents = 32\n";
+    std::fs::write(&config_path, original).expect("write config");
+
+    assert!(
+        Config::migrate_legacy_swarm_spawn_mode_once(),
+        "migration should rewrite a legacy visible spawn mode"
+    );
+    let migrated = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        migrated.contains("swarm_spawn_mode = \"inline\""),
+        "spawn mode should be flipped to inline: {migrated}"
+    );
+    // The rest of the file is untouched.
+    assert!(migrated.contains("centered = true"));
+    assert!(migrated.contains("swarm_max_concurrent_agents = 32"));
+    let parsed: Config = toml::from_str(&migrated).expect("migrated config parses");
+    assert_eq!(parsed.agents.swarm_spawn_mode, SwarmSpawnMode::Inline);
+
+    // Marker written: a later explicit "visible" survives future launches.
+    std::fs::write(
+        &config_path,
+        "[agents]\nswarm_spawn_mode = \"visible\"\n",
+    )
+    .expect("write config");
+    assert!(
+        !Config::migrate_legacy_swarm_spawn_mode_once(),
+        "migration must run at most once"
+    );
+    let content = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(content.contains("swarm_spawn_mode = \"visible\""));
+
+    restore_env_var("JCODE_HOME", prev_home);
+}
+
+#[test]
+fn migrate_legacy_swarm_spawn_mode_noops_without_visible_value() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    // No config file at all: no migration, but the marker is written.
+    assert!(!Config::migrate_legacy_swarm_spawn_mode_once());
+    assert!(
+        dir.path()
+            .join("migrations")
+            .join("swarm-spawn-mode-inline")
+            .exists(),
+        "marker should be written even when there is nothing to migrate"
+    );
+
+    // Explicit non-visible values are never rewritten (marker already set,
+    // but check the matcher too with a fresh home).
+    let dir2 = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir2.path());
+    let config_path = dir2.path().join("config.toml");
+    std::fs::write(&config_path, "[agents]\nswarm_spawn_mode = \"headless\"\n")
+        .expect("write config");
+    assert!(!Config::migrate_legacy_swarm_spawn_mode_once());
+    let content = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(content.contains("swarm_spawn_mode = \"headless\""));
+
+    restore_env_var("JCODE_HOME", prev_home);
+}
