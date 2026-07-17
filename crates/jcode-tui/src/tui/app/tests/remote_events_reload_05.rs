@@ -147,6 +147,54 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
 }
 
 #[test]
+fn test_completion_gate_nudges_stop_after_budget_exhausted() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+
+        // A completed todo with confidence below the gate threshold keeps the
+        // completion gate failing on every check.
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the fix".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(50),
+                completion_confidence: Some(50),
+                confidence_history: vec![50],
+                ..Default::default()
+            }],
+        )
+        .expect("save low-confidence completed todo");
+
+        // Each scheduled nudge consumes budget. Simulate the dispatch loop by
+        // clearing the queued state between iterations (as if the turn ran and
+        // the model made no todo progress).
+        for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+            assert!(
+                app.schedule_auto_poke_followup_if_needed(),
+                "attempt {attempt} should still schedule a gate nudge"
+            );
+            app.hidden_queued_system_messages.clear();
+            app.pending_queued_dispatch = false;
+        }
+
+        // Budget exhausted: the gate must stop scheduling and disarm auto-poke
+        // instead of looping forever (observed live as one API call per ~5s).
+        assert!(
+            !app.schedule_auto_poke_followup_if_needed(),
+            "exhausted gate must not schedule another nudge"
+        );
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert_eq!(app.todo_completion_gate_attempts, 0);
+    });
+}
+
+#[test]
 fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
     let mut app = create_test_app();
     let session_id = format!("test-391-stale-{}", std::process::id());

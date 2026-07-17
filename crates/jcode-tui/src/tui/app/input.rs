@@ -1284,7 +1284,13 @@ impl App {
                 super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
-            if confidence_summary.completion_confidence_needs_validation || needs_spike_challenge {
+            let gate_budget_left =
+                self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
+            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
+                && gate_budget_left
+            {
+                self.todo_completion_gate_attempts =
+                    self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
                     "🛑 Todo completion gate: completion confidence needs stronger validation."
@@ -1302,8 +1308,30 @@ impl App {
                 self.pending_queued_dispatch = true;
                 return true;
             }
+            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
+                && !gate_budget_left
+            {
+                // The gate keeps failing but the model is no longer making
+                // progress on it. Nudging again would loop forever, burning an
+                // API call per turn (observed live: an unattended session
+                // resent the same continuation every ~5s). Stop the cycle and
+                // surface the stall instead.
+                crate::logging::warn(&format!(
+                    "Todo completion gate exhausted after {} attempts; stopping auto-poke to avoid an infinite continuation loop",
+                    self.todo_completion_gate_attempts
+                ));
+                self.push_display_message(DisplayMessage::system(
+                    "⚠️ Todo completion gate: validation still failing after repeated nudges. Auto-poke stopped; review the remaining todos manually.",
+                ));
+                self.auto_poke_incomplete_todos = false;
+                self.todo_confidence_spike_challenged = false;
+                self.todo_completion_gate_attempts = 0;
+                self.pending_queued_dispatch = false;
+                return false;
+            }
             self.auto_poke_incomplete_todos = false;
             self.todo_confidence_spike_challenged = false;
+            self.todo_completion_gate_attempts = 0;
             self.push_display_message(DisplayMessage::system(format!(
                 "✅ Todos complete. Completion confidence: {}.",
                 confidence_label
@@ -1317,6 +1345,9 @@ impl App {
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
         )));
+        // Open todos mean the model is still iterating; completion-gate
+        // exhaustion should only trip when the gate itself stops moving.
+        self.todo_completion_gate_attempts = 0;
         self.queued_messages
             .push(super::commands::build_poke_message(&incomplete));
         self.pending_queued_dispatch = true;

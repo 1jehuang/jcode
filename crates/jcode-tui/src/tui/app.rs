@@ -859,6 +859,10 @@ pub struct App {
     /// final confidence increase. Low or missing completion confidence keeps
     /// retrying, but a spike gets one dedicated independent-validation turn.
     todo_confidence_spike_challenged: bool,
+    /// How many completion-confidence gate nudges the current auto-poke cycle
+    /// has sent. Without a budget, a model that stops updating its todos gets
+    /// nudged on every turn forever, silently burning an API call per tick.
+    todo_completion_gate_attempts: u8,
     // When armed by /overnight, automatically continue guarded follow-up turns until wake/wrap.
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
@@ -1541,6 +1545,12 @@ impl Provider for InertRuntimeProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
+    /// Budget for completion-confidence gate nudges per auto-poke cycle.
+    /// Observed live: a session that stopped updating its todos was re-nudged
+    /// with the same hidden continuation every ~5 seconds indefinitely, one
+    /// full API call per nudge. The counter resets whenever a nudge actually
+    /// changes the stored todos (progress) or auto-poke is re-armed.
+    const TODO_COMPLETION_GATE_MAX_ATTEMPTS: u8 = 5;
     /// Circuit breaker for credential failures: once this many consecutive
     /// turn errors classify as credential/auth failures, every automatic
     /// resend path (auto-retry, auto-poke, overnight poke, queued follow-ups)
