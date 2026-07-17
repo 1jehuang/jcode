@@ -991,6 +991,16 @@ async fn recover_stuck_remote_history(app: &mut App, remote: &mut RemoteConnecti
         return false;
     }
 
+    // A large newline-delimited History event may take longer than the
+    // watchdog delay to arrive. Once any part of a frame is buffered, the
+    // response was not dropped: it is actively being assembled by the reader.
+    // Re-requesting here queues another complete (potentially tens-of-MB)
+    // History payload behind the first and can keep the connection saturated
+    // for minutes. Let the in-flight frame finish instead.
+    if remote.has_buffered_inbound_frame() {
+        return false;
+    }
+
     if app.remote_history_recovery_attempts >= REMOTE_HISTORY_RECOVERY_MAX_ATTEMPTS {
         // We've exhausted re-requests. Surface a one-time actionable hint so the
         // user isn't stuck on a silent "loading session…" forever.

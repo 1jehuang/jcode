@@ -822,6 +822,55 @@ fn remote_history_watchdog_rerequests_history_when_stuck() {
     ));
 }
 
+/// A partial inbound frame proves that the original History response is in
+/// flight. The watchdog must not queue another full response behind it.
+#[test]
+fn remote_history_watchdog_does_not_rerequest_while_frame_is_arriving() {
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_large".to_string());
+    app.remote_history_wait_started = Instant::now().checked_sub(Duration::from_secs(60));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote
+            .take_dummy_peer()
+            .expect("dummy remote should retain peer stream");
+        let (reader, mut writer) = peer.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        // Deliberately omit the newline so next_event retains this partial
+        // History-sized frame when its future is cancelled by the tick.
+        writer
+            .write_all(b"{\"type\":\"history\",\"messages\":[")
+            .await
+            .expect("partial frame should reach remote");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), remote.next_event())
+                .await
+                .is_err(),
+            "partial frame must remain incomplete"
+        );
+        assert!(remote.has_buffered_inbound_frame());
+
+        let redraw = super::recover_stuck_remote_history(&mut app, &mut remote).await;
+        assert!(!redraw, "in-flight history should not trigger recovery");
+        assert_eq!(app.remote_history_recovery_attempts, 0);
+
+        let mut line = String::new();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reader.read_line(&mut line))
+                .await
+                .is_err(),
+            "watchdog must not write a duplicate GetHistory request"
+        );
+    });
+}
+
 /// Once history loads, the watchdog must clear its budget and do nothing.
 #[test]
 fn remote_history_watchdog_clears_budget_once_history_loads() {

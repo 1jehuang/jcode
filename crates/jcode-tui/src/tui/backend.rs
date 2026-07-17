@@ -245,6 +245,15 @@ pub struct RemoteConnection {
     /// `next_event` calls so a future cancelled by a `tokio::select!` peer
     /// branch never loses partially-read bytes.
     read_buffer: Vec<u8>,
+    /// First byte in `read_buffer` that has not yet been checked for a newline.
+    ///
+    /// Large History events can be tens of megabytes and arrive over thousands
+    /// of socket reads. Searching from byte zero after every read makes framing
+    /// quadratic and eventually backpressures the server writer. Keeping this
+    /// cursor makes each received byte participate in at most one newline scan.
+    read_buffer_scan_start: usize,
+    #[cfg(test)]
+    protocol_bytes_scanned: usize,
     has_loaded_history: bool,
     call_output_tokens_seen: u64,
 }
@@ -313,6 +322,9 @@ impl RemoteConnection {
             next_request_id: 1,
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
+            read_buffer_scan_start: 0,
+            #[cfg(test)]
+            protocol_bytes_scanned: 0,
             has_loaded_history: false,
             call_output_tokens_seen: 0,
         };
@@ -1047,6 +1059,7 @@ impl RemoteConnection {
                         self.client_instance_id
                     ));
                     self.read_buffer.clear();
+                    self.read_buffer_scan_start = 0;
                 }
                 return RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed);
             }
@@ -1060,9 +1073,26 @@ impl RemoteConnection {
     /// `\n`) from the persistent read buffer, leaving any partial remainder in
     /// place for the next read.
     fn take_buffered_line(&mut self) -> Option<Vec<u8>> {
-        let newline = self.read_buffer.iter().position(|&b| b == b'\n')?;
+        // Only inspect bytes appended since the previous unsuccessful scan.
+        // Without this cursor, a 27 MB History line delivered in 8 KB chunks
+        // causes roughly 45 GB of redundant memory scanning.
+        let scan_start = self.read_buffer_scan_start.min(self.read_buffer.len());
+        let unscanned = &self.read_buffer[scan_start..];
+        let relative_newline = unscanned.iter().position(|&b| b == b'\n');
+        #[cfg(test)]
+        {
+            self.protocol_bytes_scanned += relative_newline.map_or(unscanned.len(), |i| i + 1);
+        }
+        let Some(relative_newline) = relative_newline else {
+            self.read_buffer_scan_start = self.read_buffer.len();
+            return None;
+        };
+        let newline = scan_start + relative_newline;
         let mut line: Vec<u8> = self.read_buffer.drain(..=newline).collect();
         line.pop(); // drop trailing '\n'
+        // `position` stopped at the first newline, so none of the remaining
+        // bytes have been inspected yet.
+        self.read_buffer_scan_start = 0;
         // A single oversized line (e.g. a multi-megabyte `History` event)
         // permanently grows this persistent buffer. Once the line has been
         // split off, release the excess so each connection returns to a small
@@ -1187,6 +1217,9 @@ impl RemoteConnection {
             next_request_id: 1,
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
+            read_buffer_scan_start: 0,
+            #[cfg(test)]
+            protocol_bytes_scanned: 0,
             has_loaded_history: false,
             call_output_tokens_seen: 0,
         }
@@ -1205,6 +1238,14 @@ impl RemoteConnection {
     /// Check if history has been loaded
     pub fn has_loaded_history(&self) -> bool {
         self.has_loaded_history
+    }
+
+    /// Whether the socket reader already holds part of an inbound protocol
+    /// frame. A history recovery request must not be sent in this state: the
+    /// original response is in flight, and another request only queues another
+    /// full copy behind it.
+    pub fn has_buffered_inbound_frame(&self) -> bool {
+        !self.read_buffer.is_empty()
     }
 
     /// Mark history as loaded
@@ -1533,6 +1574,7 @@ mod tests {
             detail: big_text.clone(),
         };
         let encoded = crate::protocol::encode_event(&event);
+        let encoded_len = encoded.len();
 
         // Feed the encoded event in small chunks from a background task, so the
         // reader sees a partially-available line for most of the test.
@@ -1574,6 +1616,10 @@ mod tests {
             }
             other => panic!("expected intact event after cancellations, got {other:?}"),
         }
+        assert_eq!(
+            remote.protocol_bytes_scanned, encoded_len,
+            "fragmented frame assembly must inspect each protocol byte exactly once"
+        );
     }
 
     /// A single logical event split across multiple socket writes (no trailing
