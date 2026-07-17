@@ -1,9 +1,9 @@
 {
-  "total": 3037,
+  "total": 3057,
   "totals_by_pattern": {
-    "dot_ok": 1103,
-    "let_underscore": 1140,
-    "unwrap_or_default": 794
+    "dot_ok": 1111,
+    "let_underscore": 1147,
+    "unwrap_or_default": 799
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -673,7 +673,7 @@
     },
     "crates/jcode-base/src/config/config_file.rs": {
       "dot_ok": 1,
-      "let_underscore": 0,
+      "let_underscore": 2,
       "unwrap_or_default": 2
     },
     "crates/jcode-base/src/copilot_usage.rs": {
@@ -1549,7 +1549,7 @@
     "crates/jcode-provider-openrouter/src/request.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 2
     },
     "crates/jcode-render-core/src/math.rs": {
       "dot_ok": 0,
@@ -1687,9 +1687,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui-mermaid/src/lib.rs": {
-      "dot_ok": 1,
+      "dot_ok": 2,
       "let_underscore": 4,
-      "unwrap_or_default": 2
+      "unwrap_or_default": 3
     },
     "crates/jcode-tui-mermaid/src/mermaid_active.rs": {
       "dot_ok": 3,
@@ -1697,9 +1697,9 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-tui-mermaid/src/mermaid_cache_render.rs": {
-      "dot_ok": 8,
+      "dot_ok": 9,
       "let_underscore": 4,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 2
     },
     "crates/jcode-tui-mermaid/src/mermaid_content.rs": {
       "dot_ok": 4,
@@ -1727,9 +1727,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui-mermaid/src/mermaid_viewport.rs": {
-      "dot_ok": 5,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
+      "dot_ok": 8,
+      "let_underscore": 3,
+      "unwrap_or_default": 2
     },
     "crates/jcode-tui-mermaid/src/mermaid_widget.rs": {
       "dot_ok": 2,
@@ -2147,9 +2147,9 @@
       "unwrap_or_default": 3
     },
     "crates/jcode-tui/src/tui/ui_inline_image.rs": {
-      "dot_ok": 2,
+      "dot_ok": 5,
       "let_underscore": 0,
-      "unwrap_or_default": 0
+      "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/ui_inline_interactive.rs": {
       "dot_ok": 0,
@@ -2293,7 +2293,7 @@
     },
     "src/cli/terminal.rs": {
       "dot_ok": 2,
-      "let_underscore": 8,
+      "let_underscore": 10,
       "unwrap_or_default": 0
     },
     "src/cli/tui_launch.rs": {
