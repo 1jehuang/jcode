@@ -137,6 +137,71 @@ try {
     Assert-Equal $false $upgradePath.Changed 'upgrade should not add another PATH entry when launcher dir is already present'
     Assert-PathCount $upgradePath.Path $installDir 1 'upgrade should preserve exactly one launcher PATH entry'
 
+    Write-Host 'test_running_launcher_can_be_replaced'
+    $runningDir = Join-Path $testRoot 'running-launcher'
+    New-Item -ItemType Directory -Path $runningDir -Force | Out-Null
+    $runningLauncher = Join-Path $runningDir 'jcode.exe'
+    $replacementLauncher = Join-Path $runningDir 'replacement.exe'
+    Copy-Item -LiteralPath $env:ComSpec -Destination $runningLauncher
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\where.exe') -Destination $replacementLauncher
+    $runningProcess = Start-Process -FilePath $runningLauncher -ArgumentList @('/d', '/q', '/c', 'ping -n 30 127.0.0.1 > nul') -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 500
+        Assert-Equal $false $runningProcess.HasExited 'test launcher process should still be running before replacement'
+
+        Install-JcodeLauncher -SourcePath $replacementLauncher -LauncherPath $runningLauncher | Out-Null
+
+        Assert-Equal (Get-FileHash -LiteralPath $replacementLauncher -Algorithm SHA256).Hash (Get-FileHash -LiteralPath $runningLauncher -Algorithm SHA256).Hash 'live upgrade should place the replacement at the stable launcher path'
+        Assert-Equal $false $runningProcess.HasExited 'live upgrade should not terminate the process using the previous launcher'
+        $runningBackups = @(Get-ChildItem -LiteralPath $runningDir -Filter '.jcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue)
+        Assert-Equal 1 $runningBackups.Count 'live upgrade should retain exactly one locked old launcher until the process exits'
+    } finally {
+        Stop-ProcessTree -ProcessId $runningProcess.Id
+        try { Wait-Process -Id $runningProcess.Id -Timeout 10 -ErrorAction SilentlyContinue } catch {}
+    }
+    Remove-JcodeStaleLauncherBackups -LauncherDir $runningDir
+    $runningBackups = @(Get-ChildItem -LiteralPath $runningDir -Filter '.jcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue)
+    Assert-Equal 0 $runningBackups.Count 'stale live-upgrade launchers should be removable after the old process exits'
+
+    Write-Host 'test_launcher_replacement_failure_rolls_back'
+    $rollbackDir = Join-Path $testRoot 'launcher-rollback'
+    New-Item -ItemType Directory -Path $rollbackDir -Force | Out-Null
+    $rollbackLauncher = Join-Path $rollbackDir 'jcode.exe'
+    $rollbackSource = Join-Path $rollbackDir 'replacement.exe'
+    Set-Content -LiteralPath $rollbackLauncher -Value 'known-good' -NoNewline
+    Set-Content -LiteralPath $rollbackSource -Value 'replacement' -NoNewline
+    $script:injectLauncherMoveFailure = $true
+    function Move-Item {
+        [CmdletBinding()]
+        param(
+            [string]$Path,
+            [string]$LiteralPath,
+            [Parameter(Mandatory = $true)][string]$Destination,
+            [switch]$Force
+        )
+        $source = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+        if ($script:injectLauncherMoveFailure -and $source -like '*.tmp.exe' -and $Destination -eq $rollbackLauncher) {
+            $script:injectLauncherMoveFailure = $false
+            throw 'simulated final launcher move failure'
+        }
+        $moveArgs = @{ Destination = $Destination }
+        if ($PSBoundParameters.ContainsKey('LiteralPath')) { $moveArgs.LiteralPath = $LiteralPath } else { $moveArgs.Path = $Path }
+        if ($Force) { $moveArgs.Force = $true }
+        Microsoft.PowerShell.Management\Move-Item @moveArgs
+    }
+    $rollbackThrew = $false
+    try {
+        Install-JcodeLauncher -SourcePath $rollbackSource -LauncherPath $rollbackLauncher | Out-Null
+    } catch {
+        $rollbackThrew = $true
+    } finally {
+        Remove-Item Function:\Move-Item -ErrorAction SilentlyContinue
+    }
+    Assert-Equal $true $rollbackThrew 'launcher replacement should surface a final move failure'
+    Assert-Equal 'known-good' (Get-Content -LiteralPath $rollbackLauncher -Raw) 'launcher replacement should restore the previous stable launcher after a final move failure'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $rollbackDir -Filter '.jcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue).Count 'rollback should remove temporary launcher files'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $rollbackDir -Filter '.jcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue).Count 'rollback should restore rather than retain the previous launcher backup'
+
     Write-Host 'test_uninstall_removes_launcher_and_only_jcode_path'
     $removeCurrentPath = "$installDir;C:\Keep;$installVariant;C:\Keep"
     $removeUpdate = Resolve-JcodePathUpdate -InstallDir $installDir -CurrentPath $removeCurrentPath -RemoveOnly

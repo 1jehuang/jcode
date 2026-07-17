@@ -411,6 +411,8 @@ try {
         Assert-Equal $false (Test-JcodeSafePurgePath $profile.UserProfile) 'the user profile must never be accepted as a purge target'
         Assert-Equal $false (Test-JcodeSafePurgePath $profile.Root) 'a parent workspace must never be accepted as a purge target'
         Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath $profile.LauncherPath -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'the installed launcher should be recognized as managed'
+        Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir '.jcode-launcher-old-a1b2c3.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'a renamed live-upgrade launcher should be recognized as managed'
+        Assert-Equal $false (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir 'other-tool.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated executables beside the launcher must not be terminated'
         Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.BuildsDir 'stable\jcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'installed version binaries should be recognized as managed'
         Assert-Equal $false (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.Root 'development\jcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated development binaries must not be terminated'
     }
@@ -423,6 +425,8 @@ try {
         New-Item -ItemType Directory -Path $profile.HotkeyDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Split-Path -Parent $profile.StartupShortcutPath) -Force | Out-Null
         Set-Content -Path $profile.LauncherPath -Value 'installed launcher' -NoNewline
+        $oldLauncherPath = Join-Path $profile.InstallDir '.jcode-launcher-old-a1b2c3.exe'
+        Set-Content -Path $oldLauncherPath -Value 'previous running launcher' -NoNewline
         Set-Content -Path (Join-Path $profile.BuildsDir 'stable\jcode.exe') -Value 'stable build' -NoNewline
         Set-Content -Path (Join-Path $profile.JcodeHome 'config.toml') -Value 'kept = true' -NoNewline
         Set-Content -Path (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') -Value 'legacy listener' -NoNewline
@@ -436,6 +440,8 @@ try {
         $exitCode = Invoke-JcodeUninstall -InstallDir $profile.InstallDir -Yes
         Assert-Equal 0 $exitCode 'uninstall should complete successfully in the isolated profile'
         Assert-PathMissing $profile.LauncherPath 'uninstall should remove the launcher'
+        Assert-PathMissing $oldLauncherPath 'uninstall should remove renamed live-upgrade launchers'
+        Assert-PathMissing $profile.InstallDir 'uninstall should remove the empty launcher directory'
         Assert-PathMissing $profile.BuildsDir 'uninstall should remove installed build binaries'
         Assert-PathMissing $profile.StartupShortcutPath 'uninstall should remove the launch-hotkey Startup shortcut'
         Assert-PathMissing (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') 'uninstall should remove legacy launch-hotkey artifacts'

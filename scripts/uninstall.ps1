@@ -142,6 +142,16 @@ function Test-JcodeManagedExecutablePath([string]$ExecutablePath, [string]$Launc
     if (-not $executableKey) { return $false }
     if ($launcherKey -and $executableKey -eq $launcherKey) { return $true }
 
+    # A live upgrade may rename the loaded stable launcher before replacing it.
+    # Treat only that tightly-scoped backup pattern in the launcher directory as
+    # managed so uninstall can stop and remove it without touching other tools.
+    $launcherDirKey = ConvertTo-JcodePathKey (Split-Path -Parent $LauncherPath)
+    $executableDirKey = ConvertTo-JcodePathKey (Split-Path -Parent $ExecutablePath)
+    $executableName = Split-Path -Leaf $ExecutablePath
+    if ($launcherDirKey -and $executableDirKey -eq $launcherDirKey -and $executableName -like '.jcode-launcher-old-*.exe') {
+        return $true
+    }
+
     $separator = [string][System.IO.Path]::DirectorySeparatorChar
     return [bool]($buildsKey -and $executableKey.StartsWith($buildsKey + $separator, [System.StringComparison]::OrdinalIgnoreCase))
 }
@@ -279,12 +289,19 @@ $userDataDir = if ($env:JCODE_HOME) {
 }
 $startupShortcutPath = Get-JcodeStartupShortcutPath
 $hotkeyArtifactPaths = @(Get-JcodeHotkeyArtifactPaths -UserDataDir $userDataDir)
+$launcherBackupPaths = if (Test-Path -LiteralPath $InstallDir) {
+    @(Get-ChildItem -LiteralPath $InstallDir -Filter '.jcode-launcher-old-*.exe' -File -Force -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName })
+} else {
+    @()
+}
 if ($Purge -and -not (Test-JcodeSafePurgePath $userDataDir)) {
     Write-Err "Refusing to purge unsafe JCODE_HOME path '$userDataDir'. Use a dedicated .jcode or jcode-* directory."
 }
 
 $targets = @()
 if (Test-Path -LiteralPath $launcherPath) { $targets += "$launcherPath (launcher)" }
+foreach ($path in $launcherBackupPaths) { $targets += "$path (previous live-upgrade launcher)" }
 if (Test-Path -LiteralPath $buildsDir) { $targets += "$buildsDir (installed binaries)" }
 if (Test-Path -LiteralPath $startupShortcutPath) { $targets += "$startupShortcutPath (launch-hotkey startup shortcut)" }
 foreach ($path in $hotkeyArtifactPaths) {
@@ -322,9 +339,16 @@ if (-not $Yes) {
 }
 
 try {
-    Get-CimInstance Win32_Process -Filter "Name = 'jcode.exe'" -ErrorAction SilentlyContinue |
+    $managedProcessIds = @(Get-CimInstance Win32_Process -Filter "Name = 'jcode.exe'" -ErrorAction SilentlyContinue |
         Where-Object { Test-JcodeManagedExecutablePath -ExecutablePath $_.ExecutablePath -LauncherPath $launcherPath -BuildsDir $buildsDir } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        ForEach-Object { $_.ProcessId })
+    foreach ($processId in $managedProcessIds) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        if ($process) {
+            try { [void]$process.WaitForExit(10000) } catch {}
+        }
+    }
 } catch {}
 
 if (Test-Path -LiteralPath $startupShortcutPath) {
@@ -349,6 +373,13 @@ if (-not $Purge) {
 if (Test-Path -LiteralPath $launcherPath) {
     Remove-Item -LiteralPath $launcherPath -Force
     Write-Info "Removed $launcherPath"
+}
+
+foreach ($path in $launcherBackupPaths) {
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force
+        Write-Info "Removed $path"
+    }
 }
 
 if (Test-Path -LiteralPath $InstallDir) {
