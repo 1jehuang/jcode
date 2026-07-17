@@ -284,7 +284,12 @@ jobs:
             'pipe_name_is_stable_and_normalizes_case_and_separators',
             'pipe_name_falls_back_when_stem_is_empty',
             'stream_pair_round_trips_bytes',
-            'split_stream_supports_concurrent_read_and_write'
+            'split_stream_supports_concurrent_read_and_write',
+            'test_cancel_command_idle_reports_nothing_to_cancel',
+            'test_menu_number_rejected_as_api_key',
+            'test_command_palette_suppressed_while_api_key_prompt_pending',
+            'test_ctrl_c_with_active_copy_selection_copies_instead_of_quitting',
+            'test_ctrl_c_in_copy_mode_without_selection_still_falls_through'
           )
 
           foreach ($testName in $tests) {
