@@ -142,9 +142,9 @@ try {
     New-Item -ItemType Directory -Path $runningDir -Force | Out-Null
     $runningLauncher = Join-Path $runningDir 'jcode.exe'
     $replacementLauncher = Join-Path $runningDir 'replacement.exe'
-    Copy-Item -LiteralPath $env:ComSpec -Destination $runningLauncher
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\ping.exe') -Destination $runningLauncher
     Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\where.exe') -Destination $replacementLauncher
-    $runningProcess = Start-Process -FilePath $runningLauncher -ArgumentList @('/d', '/q', '/c', 'ping -n 30 127.0.0.1 > nul') -WindowStyle Hidden -PassThru
+    $runningProcess = Start-Process -FilePath $runningLauncher -ArgumentList @('-n', '30', '127.0.0.1') -WindowStyle Hidden -PassThru
     try {
         Start-Sleep -Milliseconds 500
         Assert-Equal $false $runningProcess.HasExited 'test launcher process should still be running before replacement'
