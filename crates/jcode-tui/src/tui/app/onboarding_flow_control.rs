@@ -860,7 +860,7 @@ impl App {
                 // session directory, but never turn a home-directory launch into
                 // a broad home review.
                 if !working_dir.as_os_str().is_empty()
-                    && !home.as_deref().is_some_and(|home| home == working_dir)
+                    && home.as_deref().is_none_or(|home| home != working_dir)
                 {
                     return Some(working_dir.to_path_buf());
                 }
