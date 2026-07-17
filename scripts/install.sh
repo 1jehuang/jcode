@@ -364,20 +364,65 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
 fi
 
 if [ "$IS_WINDOWS" = true ]; then
+  INSTALL_STAGE="path_configuration"
   win_install_dir=$(cygpath -w "$INSTALL_DIR" 2>/dev/null || echo "$INSTALL_DIR")
+
+  # Persist the launcher dir on the USER PATH so every future shell (PowerShell,
+  # cmd, Git Bash, Windows Terminal) finds jcode without manual setup. This is
+  # the Git Bash (`curl | sh`) counterpart of install.ps1's Set-JcodeUserPath:
+  # read the user PATH, drop stale jcode launcher entries (case- and trailing-
+  # slash-insensitive), prepend the canonical dir, and broadcast
+  # WM_SETTINGCHANGE so already-open apps can pick up the change.
+  win_path_persisted=false
+  _win_path_key() { printf '%s' "$1" | sed 's|[\\/]*$||' | tr '[:upper:]' '[:lower:]'; }
+  if command -v powershell.exe >/dev/null 2>&1; then
+    current_user_path=$(powershell.exe -NoProfile -NonInteractive -Command \
+      "[Environment]::GetEnvironmentVariable('Path','User')" 2>/dev/null | tr -d '\r' || true)
+    target_key=$(_win_path_key "$win_install_dir")
+    new_user_path="$win_install_dir"
+    set -f
+    IFS=';'
+    for entry in $current_user_path; do
+      [ -n "$entry" ] || continue
+      [ "$(_win_path_key "$entry")" = "$target_key" ] && continue
+      new_user_path="$new_user_path;$entry"
+    done
+    unset IFS
+    set +f
+    if [ "$new_user_path" = "$current_user_path" ]; then
+      win_path_persisted=true
+    elif JCODE_NEW_USER_PATH="$new_user_path" powershell.exe -NoProfile -NonInteractive -Command \
+      '[Environment]::SetEnvironmentVariable("Path", $env:JCODE_NEW_USER_PATH, "User")' >/dev/null 2>&1; then
+      win_path_persisted=true
+      # Broadcast WM_SETTINGCHANGE (0x001A) with the "Environment" lParam to
+      # HWND_BROADCAST so running shells learn about the new PATH. Best-effort.
+      powershell.exe -NoProfile -NonInteractive -Command '
+        $sig = "[DllImport(\"user32.dll\", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);"
+        $type = Add-Type -MemberDefinition $sig -Name "JcodeEnvBroadcast" -Namespace Win32 -PassThru
+        [UIntPtr]$result = [UIntPtr]::Zero
+        $type::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+      ' >/dev/null 2>&1 || true
+    fi
+  fi
+
   echo ""
   info "✅ jcode $VERSION installed successfully!"
   echo ""
+  if [ "$win_path_persisted" = true ]; then
+    info "Added $win_install_dir to your user PATH. New terminals will find jcode automatically."
+  fi
   if command -v jcode >/dev/null 2>&1; then
     info "Run 'jcode' to get started."
   else
-    echo "  To start using jcode right now, run:"
+    echo "  To start using jcode in THIS terminal right now, run:"
     echo ""
     printf '    \033[1;32mexport PATH="%s:$PATH" && jcode\033[0m\n' "$INSTALL_DIR"
-    echo ""
-    echo "  To add jcode to PATH permanently (PowerShell):"
-    echo ""
-    printf '    \033[1;32m[Environment]::SetEnvironmentVariable("Path", "%s;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")\033[0m\n' "$win_install_dir"
+    if [ "$win_path_persisted" != true ]; then
+      echo ""
+      echo "  To add jcode to PATH permanently (PowerShell):"
+      echo ""
+      printf '    \033[1;32m[Environment]::SetEnvironmentVariable("Path", "%s;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")\033[0m\n' "$win_install_dir"
+    fi
   fi
 else
   INSTALL_STAGE="path_configuration"

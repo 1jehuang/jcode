@@ -390,6 +390,22 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  setup-friction:
+    name: Setup Friction Eval (Linux installer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install probe shells
+        run: sudo apt-get update && sudo apt-get install -y fish zsh
+
+      - name: Installer conversion telemetry tests
+        run: bash scripts/test_install_conversion.sh
+
+      - name: Setup friction scorecard
+        run: bash scripts/setup_friction_eval.sh
+
   powershell-syntax:
     name: PowerShell Syntax
     runs-on: windows-latest
