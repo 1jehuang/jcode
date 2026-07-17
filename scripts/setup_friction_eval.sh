@@ -260,6 +260,29 @@ out=$(probe_shell "$home_c" bash -lc)
 [ "$out" = "jcode 1.3.0" ]; check "post-upgrade login shell still finds jcode" \
   "jcode 1.3.0" "${out:-<not found on PATH>}" "$?"
 
+# Uninstall (default, no --purge) must remove binaries but KEEP user data, so
+# a returning user's reinstall lands on their old config/auth. This is the
+# retention contract of leaving: coming back is cheap.
+uninstall_sh="$repo_dir/scripts/uninstall.sh"
+# uninstall.sh pkills running jcode servers; neuter that inside the sandbox so
+# the eval never touches real processes on the machine running it.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/pkill"
+chmod +x "$work/bin/pkill"
+PATH="$work/bin:/usr/bin:/bin" \
+HOME="$home_c" \
+bash "$uninstall_sh" --yes >/dev/null 2>&1
+uninstall_status=$?
+check "uninstall (no --purge) completes" "exit 0" "exit $uninstall_status" "$uninstall_status"
+
+[ ! -e "$home_c/.local/bin/jcode" ] && [ ! -d "$home_c/.jcode/builds" ]
+check "uninstall removes launcher and build channels" \
+  "launcher and builds gone" "still present" "$?"
+
+[ "$(cat "$home_c/.jcode/config.toml" 2>/dev/null)" = 'model = "kept"' ] \
+  && [ "$(cat "$home_c/.jcode/auth.json" 2>/dev/null)" = '{"kept":true}' ]
+check "uninstall keeps config/auth for a cheap return" \
+  "config.toml and auth.json intact" "user data lost" "$?"
+
 # ---------------------------------------------------------------------------
 # Section D: Windows parity (static audit of both installers).
 # ---------------------------------------------------------------------------
