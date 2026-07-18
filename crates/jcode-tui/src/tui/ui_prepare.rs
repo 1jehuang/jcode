@@ -730,9 +730,7 @@ pub(super) fn prepare_messages(
 
 fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> PreparedChatFrame {
     let header_start = Instant::now();
-    let mut all_header_lines = header::build_persistent_header(app, width);
-    all_header_lines.extend(header::build_header_lines(app, width));
-    let header_prepared = Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width));
+    let header_prepared = prepare_header_cached(app, width);
     let header_ms = header_start.elapsed().as_secs_f64() * 1000.0;
 
     let body_start = Instant::now();
@@ -909,6 +907,101 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         compose_ms: compose_start.elapsed().as_secs_f64() * 1000.0,
     });
     frame
+}
+
+/// TTL + cheap-signature cache for the prepared (built + wrapped) header.
+///
+/// `build_persistent_header`/`build_header_lines` look cheap but are not: per
+/// call they probe auth credential files (`AuthStatus::check_fast`), list and
+/// deserialize every goal JSON for the goal badge, reload the project skill
+/// overlay from disk, and stat release/binary channels for the update badges.
+/// On this hardware that costs 30-50ms, and it ran on every full-prep cache
+/// miss - i.e. on every streaming tick and every keystroke that changes the
+/// input-derived cache key - which showed up directly as input lag
+/// (TUI_SLOW_FRAME logs attributed 30-47ms of ~45ms slow frames to
+/// `full_prep_header_ms`).
+///
+/// The header's inputs fall into two groups:
+/// - cheap in-memory fields (model, session/server names, connection type,
+///   mcp list, ...) - hashed into a signature so changes rebuild immediately;
+/// - disk-backed surfaces (auth line, goal badge, skills list, update
+///   badges, changelog) - refreshed only when the TTL lapses, since they
+///   change rarely and independently of the render loop.
+const HEADER_PREP_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+struct HeaderPrepCacheState {
+    signature: u64,
+    built_at: Instant,
+    prepared: Arc<PreparedMessages>,
+}
+
+fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Hash of the header inputs that are cheap to read every frame. Anything
+/// expensive (disk probes) is intentionally excluded and covered by the TTL.
+fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    width.hash(&mut hasher);
+    app.provider_model().hash(&mut hasher);
+    app.provider_name().hash(&mut hasher);
+    app.session_display_name().hash(&mut hasher);
+    app.server_display_name().hash(&mut hasher);
+    app.server_display_version().hash(&mut hasher);
+    app.server_display_icon().hash(&mut hasher);
+    app.connection_type().hash(&mut hasher);
+    app.upstream_provider().hash(&mut hasher);
+    app.is_replay().hash(&mut hasher);
+    app.is_remote_mode().hash(&mut hasher);
+    app.is_canary().hash(&mut hasher);
+    app.server_update_available().hash(&mut hasher);
+    app.mcp_servers().hash(&mut hasher);
+    app.connected_clients().hash(&mut hasher);
+    app.server_sessions().len().hash(&mut hasher);
+    app.working_dir().hash(&mut hasher);
+    // The goal badge renders the focused side-panel page title when a goal
+    // page is focused; keying on it keeps focus changes instant.
+    if let Some(page) = app.side_panel().focused_page() {
+        page.id.hash(&mut hasher);
+        page.title.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
+    let build = || {
+        let mut all_header_lines = header::build_persistent_header(app, width);
+        all_header_lines.extend(header::build_header_lines(app, width));
+        Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
+    };
+
+    if cfg!(test) {
+        return build();
+    }
+
+    let signature = header_prep_signature(app, width);
+
+    if let Ok(cache) = header_prep_cache().lock()
+        && let Some(state) = cache.as_ref()
+        && state.signature == signature
+        && state.built_at.elapsed() < HEADER_PREP_CACHE_TTL
+    {
+        return state.prepared.clone();
+    }
+
+    let prepared = build();
+    if let Ok(mut cache) = header_prep_cache().lock() {
+        *cache = Some(HeaderPrepCacheState {
+            signature,
+            built_at: Instant::now(),
+            prepared: prepared.clone(),
+        });
+    }
+    prepared
 }
 
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
