@@ -742,12 +742,14 @@ fn save_openai_effort_setting_local(app: &mut App, value: Option<&str>) {
 }
 
 pub(crate) fn save_openai_fast_setting_local(app: &mut App, enabled: bool) {
-    let value = if enabled { Some("priority") } else { None };
-    match crate::config::Config::set_openai_service_tier(value) {
+    // Persist an explicit "off" instead of clearing the key. `None` serializes
+    // by removing `openai_service_tier` from config.toml entirely, which made
+    // "/fast default off" look like it never saved anything (issue #506). The
+    // OpenAI runtime already treats "off" as disabling the tier.
+    let value = if enabled { "priority" } else { "off" };
+    match crate::config::Config::set_openai_service_tier(Some(value)) {
         Ok(()) => {
-            let _ = app
-                .provider
-                .set_service_tier(if enabled { "priority" } else { "off" });
+            let _ = app.provider.set_service_tier(value);
             let label = if enabled { "on" } else { "off" };
             app.set_status_notice(format!("Fast mode: {}", label));
             app.push_display_message(DisplayMessage::system(format!(

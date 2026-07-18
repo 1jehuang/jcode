@@ -918,9 +918,9 @@ impl OpenAIProvider {
         match value.as_str() {
             "fast" | "priority" => Ok(Some("priority".to_string())),
             "flex" => Ok(Some("flex".to_string())),
-            "default" | "auto" | "none" | "off" => Ok(None),
+            "default" | "auto" | "none" | "off" | "standard" => Ok(None),
             other => anyhow::bail!(
-                "Unsupported OpenAI service tier '{}'; expected priority|fast|flex|default|off",
+                "Unsupported OpenAI service tier '{}'; expected priority|fast|flex|standard|default|off",
                 other
             ),
         }

@@ -565,8 +565,11 @@ pub(super) fn effort_bar(index: usize, total: usize) -> String {
 
 pub(super) fn service_tier_display_label(service_tier: &str) -> &str {
     match service_tier {
-        "priority" => "Fast",
+        "priority" | "fast" => "Fast",
         "flex" => "Flex",
+        // Explicit disable values persisted by "/fast default off" (issue
+        // #506) and accepted by the OpenAI runtime.
+        "off" | "default" | "auto" | "none" => "Standard",
         other => other,
     }
 }
