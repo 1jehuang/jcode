@@ -16,7 +16,7 @@ pub use catalog::{
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, ModelCapabilities, ModelRoute,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities, ModelRoute,
     context_limit_for_model_with_provider_and_cache, core_provider_for_model_with_hint,
     provider_key_from_hint, shared_http_client,
 };
@@ -682,7 +682,11 @@ pub fn known_anthropic_model_ids() -> Vec<String> {
 }
 
 pub fn known_openai_model_ids() -> Vec<String> {
-    cached_openai_model_ids().unwrap_or_else(openai_static_model_ids)
+    let mut models = cached_openai_model_ids().unwrap_or_else(openai_static_model_ids);
+    if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
+        models.push(CHATGPT_WEB_MODEL.to_string());
+    }
+    models
 }
 
 pub fn note_openai_model_catalog_refresh_attempt() {
@@ -962,6 +966,15 @@ pub fn is_model_available_for_account(model: &str) -> Option<bool> {
 }
 
 pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
+    if model.trim() == CHATGPT_WEB_MODEL {
+        return AccountModelAvailability {
+            state: AccountModelAvailabilityState::Unknown,
+            reason: Some("requires a logged-in ChatGPT web session".to_string()),
+            source: "browser-session",
+            observed_at: None,
+        };
+    }
+
     if let Some(runtime) = runtime_model_unavailability(model) {
         return AccountModelAvailability {
             state: AccountModelAvailabilityState::Unavailable,

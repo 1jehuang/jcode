@@ -23,7 +23,7 @@ jcode-provider-core = { path = "../jcode-provider-core" }
 jcode-provider-openai = { path = "../jcode-provider-openai" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 serde_json = { version = "1", features = ["raw_value"] }
-tokio = { version = "1", features = ["sync", "time", "rt", "net", "io-util"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "net", "io-util", "process"] }
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 dirs = "5"

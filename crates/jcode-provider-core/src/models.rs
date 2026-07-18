@@ -26,8 +26,14 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 
 /// Available OpenAI models used by model lists and provider routing.
 /// The list is curated best-first; position 0 is the quality-first default.
+pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
+
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
+    // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
+    // jcode model id so it can never be mistaken for an API/Codex model with
+    // the same upstream slug.
+    CHATGPT_WEB_MODEL,
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-pro",
