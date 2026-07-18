@@ -107,9 +107,7 @@ pub(super) async fn cleanup_client_connection(
     }
 
     {
-        let mut sessions_guard = sessions.write().await;
-        if let Some(agent_arc) = sessions_guard.remove(client_session_id) {
-            drop(sessions_guard);
+        if let Some(agent_arc) = super::remove_session_entry(sessions, client_session_id).await {
             let lock_result =
                 tokio::time::timeout(std::time::Duration::from_secs(2), agent_arc.lock()).await;
 

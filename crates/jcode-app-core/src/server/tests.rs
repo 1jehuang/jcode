@@ -2,7 +2,7 @@
 
 use super::{
     FileAccess, Server, SessionInterruptQueues, SwarmMember, dispatch_background_task_completion,
-    file_activity_scope_label, persist_swarm_state_snapshot,
+    file_activity_scope_label, persist_swarm_state_snapshot, remove_session_entry,
 };
 use crate::agent::Agent;
 use crate::bus::{
@@ -75,6 +75,30 @@ fn file_activity_scope_label_classifies_overlap() {
 
     let current = file_touch_with_summary(None);
     assert_eq!(file_activity_scope_label(&previous, &current), "same file");
+}
+
+#[tokio::test]
+async fn removing_server_session_clears_active_pid_marker() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let session_id = "session_marker_cleanup_test";
+    crate::storage::register_active_pid(session_id, std::process::id());
+
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        "agent",
+    )])));
+    let removed = remove_session_entry(&sessions, session_id).await;
+
+    assert_eq!(removed, Some("agent"));
+    assert!(!sessions.read().await.contains_key(session_id));
+    assert!(
+        !crate::storage::active_session_ids()
+            .iter()
+            .any(|id| id == session_id),
+        "removing a live server session must also remove its presence marker"
+    );
 }
 
 #[test]

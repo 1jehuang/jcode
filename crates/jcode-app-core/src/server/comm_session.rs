@@ -1049,14 +1049,13 @@ pub(super) async fn handle_comm_stop(
         return;
     };
 
-    let mut sessions_guard = sessions.write().await;
-    let removed_agent = sessions_guard.remove(&target_session);
+    let removed_agent = super::remove_session_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();
-    drop(sessions_guard);
     if let Some(agent_arc) = removed_agent {
         remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
         remove_background_tool_signal(&target_session);
-        if let Ok(agent) = agent_arc.try_lock() {
+        if let Ok(mut agent) = agent_arc.try_lock() {
+            agent.mark_closed();
             let memory_enabled = agent.memory_enabled();
             let transcript = if memory_enabled {
                 Some(agent.build_transcript_for_extraction())

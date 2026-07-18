@@ -109,6 +109,21 @@ pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
+/// Remove a live server session and its process-presence marker as one
+/// lifecycle operation. Server-owned sessions all share the long-running
+/// server PID, so leaving the marker behind makes presence UIs count the
+/// removed session forever.
+pub(super) async fn remove_session_entry<T>(
+    sessions: &Arc<RwLock<HashMap<String, T>>>,
+    session_id: &str,
+) -> Option<T> {
+    let removed = sessions.write().await.remove(session_id);
+    if removed.is_some() {
+        crate::storage::unregister_active_pid(session_id);
+    }
+    removed
+}
+
 const SERVER_NAME_ENV: &str = "JCODE_SERVER_NAME";
 const SERVER_DISPLAY_NAME_ENV: &str = "JCODE_SERVER_DISPLAY_NAME";
 const MAX_CONFIGURED_SERVER_NAME_LEN: usize = 64;
