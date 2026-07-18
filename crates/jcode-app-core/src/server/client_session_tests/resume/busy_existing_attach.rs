@@ -137,6 +137,41 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     )
     .await?;
 
+    // The desktop follows a target-aware resume with the normal subscribe
+    // bookkeeping while the original client can still be processing. That
+    // bookkeeping must never wait for the live agent lock, otherwise the
+    // desktop's immediately following state request remains unread and times
+    // out after ten seconds.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle_subscribe(
+            77,
+            Some("/tmp/jcode-busy-desktop-attach".to_string()),
+            Some(true),
+            false,
+            &mut client_selfdev,
+            target_session_id,
+            "conn_new",
+            &None,
+            &existing_agent,
+            &new_registry,
+            true,
+            &swarm_members,
+            &swarms_by_id,
+            &channel_subscriptions,
+            &channel_subscriptions_by_session,
+            &swarm_plans,
+            &swarm_coordinators,
+            &client_event_tx,
+            &mcp_pool,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+        ),
+    )
+    .await
+    .expect("subscribe bookkeeping must not wait for a busy live agent");
+
     let events = collect_events_until_done(&mut client_event_rx, 77).await;
     assert!(
         events

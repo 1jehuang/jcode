@@ -305,16 +305,34 @@ async fn ensure_client_swarm_member(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> bool {
     let (working_dir, derived_swarm_id, fallback_name) = {
-        let agent_guard = agent.lock().await;
-        let working_dir = agent_guard.working_dir().map(PathBuf::from);
+        // A target-aware subscribe can attach to an agent that is in the middle
+        // of a turn. Never wait for that turn's agent lock just to populate
+        // connection metadata: doing so prevents the subscribe request from
+        // completing, so subsequent state requests sit unread until the desktop
+        // client times out. The persisted startup stub has the same immutable
+        // identity metadata and is safe to read while the live agent is busy.
+        let (working_dir, fallback_name) = match agent.try_lock() {
+            Ok(agent_guard) => (
+                agent_guard.working_dir().map(PathBuf::from),
+                agent_guard
+                    .session_short_name()
+                    .map(|value| value.to_string()),
+            ),
+            Err(_) => {
+                crate::logging::info(&format!(
+                    "Subscribe metadata for busy session {} is using the persisted startup stub",
+                    client_session_id
+                ));
+                crate::session::Session::load_startup_stub(client_session_id)
+                    .map(|session| (session.working_dir.map(PathBuf::from), session.short_name))
+                    .unwrap_or((None, None))
+            }
+        };
         let derived_swarm_id = if swarm_enabled {
             swarm_id_for_dir(working_dir.clone())
         } else {
             None
         };
-        let fallback_name = agent_guard
-            .session_short_name()
-            .map(|value| value.to_string());
         (working_dir, derived_swarm_id, fallback_name)
     };
 
@@ -409,6 +427,51 @@ async fn ensure_client_swarm_member(
     inserted
 }
 
+fn apply_or_defer_subscribe_working_dir(
+    agent: &Arc<Mutex<Agent>>,
+    working_dir: &str,
+    session_id: &str,
+) {
+    if let Ok(mut agent_guard) = agent.try_lock() {
+        agent_guard.set_working_dir(working_dir);
+        return;
+    }
+
+    let agent = Arc::clone(agent);
+    let working_dir = working_dir.to_string();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.set_working_dir(&working_dir);
+        crate::logging::info(&format!(
+            "Applied deferred subscribe working directory for session {}",
+            session_id
+        ));
+    });
+}
+
+fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str) {
+    if let Ok(mut agent_guard) = agent.try_lock() {
+        if !agent_guard.is_canary() {
+            agent_guard.set_canary("self-dev");
+        }
+        return;
+    }
+
+    let agent = Arc::clone(agent);
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        let mut agent_guard = agent.lock().await;
+        if !agent_guard.is_canary() {
+            agent_guard.set_canary("self-dev");
+        }
+        crate::logging::info(&format!(
+            "Applied deferred self-dev subscribe metadata for session {}",
+            session_id
+        ));
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_subscribe(
     id: u64,
@@ -466,9 +529,7 @@ pub(super) async fn handle_subscribe(
     .await;
 
     if let Some(ref dir) = subscribe_working_dir {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.set_working_dir(dir);
-        drop(agent_guard);
+        apply_or_defer_subscribe_working_dir(agent, dir, client_session_id);
 
         let new_path = PathBuf::from(dir);
         let new_swarm_id = swarm_id_for_dir(Some(new_path.clone()));
@@ -604,11 +665,7 @@ pub(super) async fn handle_subscribe(
 
     if should_selfdev {
         *client_selfdev = true;
-        let mut agent_guard = agent.lock().await;
-        if !agent_guard.is_canary() {
-            agent_guard.set_canary("self-dev");
-        }
-        drop(agent_guard);
+        apply_or_defer_subscribe_selfdev(agent, client_session_id);
         registry.register_selfdev_tools().await;
     }
 
@@ -619,10 +676,15 @@ pub(super) async fn handle_subscribe(
         // request's dir; fall back to the agent's stored session dir.
         let mcp_working_dir = match subscribe_working_dir.as_ref() {
             Some(dir) => Some(PathBuf::from(dir)),
-            None => {
-                let agent_guard = agent.lock().await;
-                agent_guard.working_dir().map(PathBuf::from)
-            }
+            None => agent
+                .try_lock()
+                .ok()
+                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
+                .or_else(|| {
+                    crate::session::Session::load_startup_stub(client_session_id)
+                        .ok()
+                        .and_then(|session| session.working_dir.map(PathBuf::from))
+                }),
         };
         registry
             .register_mcp_tools_for_dir(
