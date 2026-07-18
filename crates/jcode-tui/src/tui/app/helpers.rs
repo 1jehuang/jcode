@@ -380,10 +380,10 @@ pub(super) fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Copy text to clipboard. On Windows, the Win32 clipboard (arboard) is
-/// authoritative, with OSC 52 as a remote-session fallback. Elsewhere, try
-/// wl-copy first (Wayland), then OSC 52 (works over SSH / Docker / tmux),
-/// then arboard as a final fallback.
+/// Copy text to clipboard. On Windows and macOS, the native clipboard API
+/// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
+/// Elsewhere, try wl-copy first (Wayland), then OSC 52 (works over SSH /
+/// Docker / tmux), then arboard as a final fallback.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
     // On Windows, the native clipboard API must run before OSC 52. Writing an
     // OSC 52 sequence to stdout "succeeds" even when the console (conhost,
@@ -401,7 +401,39 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         return copy_to_clipboard_osc52(text);
     }
 
-    #[cfg(not(windows))]
+    // Same class of bug on macOS: Apple Terminal (Terminal.app) silently
+    // ignores OSC 52, yet writing the sequence to stdout "succeeds", so we
+    // reported "Copied" while leaving the clipboard untouched. NSPasteboard
+    // via arboard (with pbcopy as a belt-and-braces fallback) is authoritative
+    // for local sessions; OSC 52 remains as the final remote-session fallback.
+    #[cfg(target_os = "macos")]
+    {
+        if arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text.to_string()))
+            .is_ok()
+        {
+            return true;
+        }
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut()
+                && stdin.write_all(text.as_bytes()).is_ok()
+            {
+                drop(child.stdin.take());
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return true;
+                }
+            }
+        }
+        return copy_to_clipboard_osc52(text);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         if let Ok(mut child) = std::process::Command::new("wl-copy")
             .stdin(std::process::Stdio::piped())
