@@ -17,12 +17,13 @@ const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const REQUIRED_STABLE_POLLS: usize = 8;
+const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Per-provider browser state. A single provider instance reuses one dedicated
-/// ChatGPT tab and serializes turns through it. Provider forks get a fresh state
-/// and therefore a separate tab, so parallel jcode agents do not cross streams.
+/// Per-provider browser state. A single provider instance serializes turns that
+/// each run in an isolated, temporary browser fork. Provider forks get a fresh
+/// state, so parallel jcode agents do not cross streams.
 pub(crate) struct ChatGptWebState {
     turn_lock: Mutex<()>,
 }
@@ -287,17 +288,26 @@ return { onboarding: false, model, temporary, signedOut };
 
     // Dismissing the temporary-chat explainer can remount the composer.
     wait_for_editor(tab_id).await?;
-    let verification = evaluate(
-        tab_id,
-        r#"
+    let verification = {
+        let deadline = Instant::now() + MODEL_SELECTION_TIMEOUT;
+        loop {
+            let current = evaluate(
+                tab_id,
+                r#"
 const model = Array.from(document.querySelectorAll('button.__composer-pill'))
   .map(b => b.innerText.trim()).find(Boolean) || '';
 const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
   || document.body.innerText.includes("This chat won't appear your conversation history");
 return { model, temporary };
 "#,
-    )
-    .await?;
+            )
+            .await?;
+            if page_verification_ready(&current) || Instant::now() >= deadline {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
     let selected_model = verification
         .get("model")
         .and_then(Value::as_str)
@@ -318,6 +328,11 @@ return { model, temporary };
         );
     }
     Ok(())
+}
+
+fn page_verification_ready(verification: &Value) -> bool {
+    verification.get("model").and_then(Value::as_str) == Some("Pro")
+        && verification.get("temporary").and_then(Value::as_bool) == Some(true)
 }
 
 async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
@@ -838,6 +853,22 @@ mod tests {
         let (len, hash) = utf16_fingerprint("a😀b");
         assert_eq!(len, 4);
         assert_eq!(hash, 2_412_414_209);
+    }
+
+    #[test]
+    fn page_verification_requires_exact_pro_and_temporary_chat() {
+        assert!(page_verification_ready(
+            &json!({ "model": "Pro", "temporary": true })
+        ));
+        assert!(!page_verification_ready(
+            &json!({ "model": "", "temporary": true })
+        ));
+        assert!(!page_verification_ready(
+            &json!({ "model": "Instant", "temporary": true })
+        ));
+        assert!(!page_verification_ready(
+            &json!({ "model": "Pro", "temporary": false })
+        ));
     }
 
     #[test]
