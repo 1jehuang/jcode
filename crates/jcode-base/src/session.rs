@@ -2,7 +2,8 @@ use crate::id::{extract_session_name, new_id, new_memorable_session_id_avoiding}
 use crate::message::{ContentBlock, Message, Role};
 pub use crate::storage::{
     SessionCounts, SessionPresence, active_session_ids, find_active_session_id_by_pid,
-    mark_streaming, session_counts, session_presence, unmark_streaming,
+    mark_streaming, session_counts, session_presence, unmark_streaming, user_session_counts,
+    user_session_presence,
 };
 use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
 
@@ -798,6 +799,11 @@ impl Session {
     /// Mark this session as a debug/test session
     pub fn set_debug(&mut self, is_debug: bool) {
         self.is_debug = is_debug;
+        // Debug status can change after activation (e.g. debug-socket created
+        // sessions); keep presence UIs in sync when we are the active owner.
+        if self.status == SessionStatus::Active {
+            self.sync_internal_presence_flag();
+        }
     }
 
     /// Save/bookmark this session with an optional label
@@ -1012,6 +1018,7 @@ request in this new forked session, using the inherited conversation only as con
         self.last_pid = Some(pid);
         self.last_active_at = Some(Utc::now());
         register_active_pid(&self.id, pid);
+        self.sync_internal_presence_flag();
     }
 
     /// Mark session as active for a specific PID
@@ -1020,6 +1027,17 @@ request in this new forked session, using the inherited conversation only as con
         self.last_pid = Some(pid);
         self.last_active_at = Some(Utc::now());
         register_active_pid(&self.id, pid);
+        self.sync_internal_presence_flag();
+    }
+
+    /// Keep the on-disk internal-session flag in sync with this session's
+    /// role. Debug/test sessions and spawned children (swarm workers,
+    /// subagents) are internal: they stay tracked for lifecycle purposes but
+    /// are hidden from user-facing presence UIs like the menu bar (issue
+    /// #508).
+    fn sync_internal_presence_flag(&self) {
+        let internal = self.is_debug || self.parent_id.is_some();
+        crate::storage::set_session_internal(&self.id, internal);
     }
 
     /// Detect if an active session likely crashed (process no longer running)

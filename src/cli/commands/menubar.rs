@@ -77,13 +77,13 @@ fn format_session_menu_item_title_with_display(
 
 pub fn run_menubar_command(once: bool, json: bool) -> Result<()> {
     if json {
-        let report = CountsReport::from(session::session_counts());
+        let report = CountsReport::from(session::user_session_counts());
         println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
 
     if once {
-        println!("{}", format_menubar_summary(session::session_counts()));
+        println!("{}", format_menubar_summary(session::user_session_counts()));
         return Ok(());
     }
 
@@ -99,7 +99,7 @@ pub fn run_menubar_command(once: bool, json: bool) -> Result<()> {
             "The live menu bar indicator is only available on macOS. \
              Showing current counts instead (use --once or --json for scripting):"
         );
-        println!("{}", format_menubar_summary(session::session_counts()));
+        println!("{}", format_menubar_summary(session::user_session_counts()));
         Ok(())
     }
 }
@@ -531,7 +531,7 @@ mod macos {
             // process won't auto-adopt the change on its own).
             sync_app_appearance(&app_for_refresh);
 
-            let mut sessions = session::session_presence();
+            let mut sessions = session::user_session_presence();
             sessions.sort_by_key(|s| (Reverse(s.streaming), s.session_id.clone()));
 
             let counts = SessionCounts {

@@ -22,6 +22,33 @@ pub fn streaming_pids_dir() -> Option<std::path::PathBuf> {
     jcode_dir().ok().map(|d| d.join("streaming_pids"))
 }
 
+/// Directory holding markers for internal sessions (debug/test sessions and
+/// spawned children such as swarm workers). These sessions keep their normal
+/// active-pid lifecycle markers, but presence UIs like the menu bar indicator
+/// only want to show top-level sessions the user opened directly, so internal
+/// ones are flagged here and filtered out of user-facing counts (issue #508).
+pub fn internal_pids_dir() -> Option<std::path::PathBuf> {
+    jcode_dir().ok().map(|d| d.join("internal_pids"))
+}
+
+/// Flag (or unflag) `session_id` as an internal session for presence UIs.
+pub fn set_session_internal(session_id: &str, internal: bool) {
+    let Some(dir) = internal_pids_dir() else {
+        return;
+    };
+    if internal {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(session_id), "");
+    } else {
+        let _ = std::fs::remove_file(dir.join(session_id));
+    }
+}
+
+/// Whether `session_id` is flagged as an internal session.
+pub fn session_is_internal(session_id: &str) -> bool {
+    internal_pids_dir().is_some_and(|dir| dir.join(session_id).exists())
+}
+
 /// Record that `session_id` is owned by process `pid`.
 pub fn register_active_pid(session_id: &str, pid: u32) {
     if let Some(dir) = active_pids_dir() {
@@ -35,8 +62,9 @@ pub fn unregister_active_pid(session_id: &str) {
     if let Some(dir) = active_pids_dir() {
         let _ = std::fs::remove_file(dir.join(session_id));
     }
-    // A closed session is never streaming.
+    // A closed session is never streaming, and its internal flag is moot.
     unmark_streaming(session_id);
+    set_session_internal(session_id, false);
 }
 
 /// Mark a session as actively streaming a model response.
@@ -146,6 +174,9 @@ pub struct SessionPresence {
     /// When the current streaming turn started (streaming marker mtime), if
     /// the session is streaming. Lets presence UIs show "working for 2m".
     pub streaming_since: Option<std::time::SystemTime>,
+    /// Whether this is an internal session (debug/test or a spawned child
+    /// such as a swarm worker) that user-facing presence UIs should hide.
+    pub internal: bool,
 }
 
 /// Snapshot per-session presence by scanning the active-pid registry and
@@ -161,6 +192,7 @@ pub fn session_presence() -> Vec<SessionPresence> {
     };
 
     let streaming_dir = streaming_pids_dir();
+    let internal_dir = internal_pids_dir();
     let mut sessions = Vec::new();
 
     for entry in entries.filter_map(|entry| entry.ok()) {
@@ -193,6 +225,9 @@ pub fn session_presence() -> Vec<SessionPresence> {
         };
 
         sessions.push(SessionPresence {
+            internal: internal_dir
+                .as_ref()
+                .is_some_and(|dir| dir.join(&session_id).exists()),
             session_id,
             pid,
             streaming,
@@ -206,6 +241,25 @@ pub fn session_presence() -> Vec<SessionPresence> {
 /// Compute the current session counts from [`session_presence`].
 pub fn session_counts() -> SessionCounts {
     let sessions = session_presence();
+    SessionCounts {
+        total: sessions.len(),
+        streaming: sessions.iter().filter(|s| s.streaming).count(),
+    }
+}
+
+/// [`session_presence`] filtered to sessions the user opened directly,
+/// excluding internal debug/test sessions and spawned children such as swarm
+/// workers (issue #508). Used by the menu bar indicator.
+pub fn user_session_presence() -> Vec<SessionPresence> {
+    session_presence()
+        .into_iter()
+        .filter(|s| !s.internal)
+        .collect()
+}
+
+/// Session counts over [`user_session_presence`] only.
+pub fn user_session_counts() -> SessionCounts {
+    let sessions = user_session_presence();
     SessionCounts {
         total: sessions.len(),
         streaming: sessions.iter().filter(|s| s.streaming).count(),
@@ -294,6 +348,45 @@ mod tests {
             assert_eq!(session_counts().streaming, 1);
         }
         assert_eq!(session_counts().streaming, 0);
+
+        jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// Issue #508: internal (debug/child) sessions stay in the raw registry
+    /// but are excluded from user-facing presence and counts.
+    #[test]
+    fn user_session_counts_exclude_internal_sessions() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let live = std::process::id();
+        register_active_pid("session_user", live);
+        register_active_pid("session_worker", live);
+        set_session_internal("session_worker", true);
+        mark_streaming("session_worker");
+
+        assert!(session_is_internal("session_worker"));
+        assert!(!session_is_internal("session_user"));
+
+        // Raw view keeps everything (lifecycle/crash detection needs it).
+        assert_eq!(session_counts().total, 2);
+        assert_eq!(session_counts().streaming, 1);
+
+        // User-facing view hides the internal worker.
+        let user_counts = user_session_counts();
+        assert_eq!(user_counts.total, 1);
+        assert_eq!(user_counts.streaming, 0);
+        let user_sessions = user_session_presence();
+        assert_eq!(user_sessions.len(), 1);
+        assert_eq!(user_sessions[0].session_id, "session_user");
+
+        // Unflagging restores visibility; unregistering clears the flag file.
+        set_session_internal("session_worker", false);
+        assert_eq!(user_session_counts().total, 2);
+        set_session_internal("session_worker", true);
+        unregister_active_pid("session_worker");
+        assert!(!session_is_internal("session_worker"));
 
         jcode_core::env::remove_var("JCODE_HOME");
     }

@@ -526,6 +526,7 @@ impl SessionPicker {
                         pid: session.pid,
                         streaming: false,
                         streaming_since: None,
+                        internal: false,
                     },
                 );
             }
