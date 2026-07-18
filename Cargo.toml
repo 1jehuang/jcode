@@ -172,7 +172,6 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 # PDF parsing (behind feature flag)
 jcode-build-meta = { path = "crates/jcode-build-meta" }
 # Tiny leaf helpers (console/env/fs/id) used directly by the cli layer.
-jcode-core = { path = "crates/jcode-core" }
 # Presentation layer: the terminal UI (`tui`) + offline replay (`video_export`),
 # compiled as a separate rustc unit. It re-exports the application core
 # (`jcode-app-core`, which re-exports `jcode-base`), so the root crate (cli +

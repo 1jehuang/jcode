@@ -3262,7 +3262,6 @@ dependencies = [
  "global-hotkey",
  "hex",
  "jcode-build-meta",
- "jcode-core",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
  "jcode-provider-claude-cli-runtime",
