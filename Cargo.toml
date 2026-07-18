@@ -303,6 +303,23 @@ opt-level = 3
 [profile.test.package."jcode-tui-anim"]
 opt-level = 3
 
+# The fuzzy matcher runs a char-level DP over every picker entry on every
+# keystroke (e.g. /model search across hundreds of routes). Like the anim
+# kernels above, it is small, pure, dependency-free code that rarely changes,
+# so keeping it fully optimized in dev/selfdev builds costs one compile and
+# removes visible input lag in unoptimized builds.
+[profile.dev.package."jcode-fuzzy"]
+opt-level = 3
+
+[profile.selfdev.package."jcode-fuzzy"]
+opt-level = 3
+
+[profile.test.package."jcode-fuzzy"]
+opt-level = 3
+
+[profile.release.package."jcode-fuzzy"]
+opt-level = 3
+
 # Keep the text-shaping stack optimized even in dev/selfdev/test builds.
 #
 # cosmic-text + rustybuzz + ttf-parser + swash + yazi do all of the desktop

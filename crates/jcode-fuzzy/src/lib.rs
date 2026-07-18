@@ -30,16 +30,64 @@ pub struct FuzzyMatch {
     pub positions: Vec<usize>,
 }
 
+/// Storage strategy for matched haystack positions inside the DP table.
+///
+/// Score-only callers (`fuzzy_score`, `fuzzy_score_tokens`) run the matcher
+/// once per entry per keystroke in picker filters, so they use the allocation
+/// free [`PositionSummary`] tracker. Highlighting callers use `Vec<usize>`.
+/// Both trackers produce identical scores because tie-breaking only inspects
+/// the match count and the anchor check only inspects the first position.
+trait PositionTracker: Clone + Default {
+    fn push_pos(&mut self, pos: usize);
+    fn pos_count(&self) -> usize;
+    fn first_pos(&self) -> Option<usize>;
+}
+
+impl PositionTracker for Vec<usize> {
+    fn push_pos(&mut self, pos: usize) {
+        self.push(pos);
+    }
+    fn pos_count(&self) -> usize {
+        self.len()
+    }
+    fn first_pos(&self) -> Option<usize> {
+        self.as_slice().first().copied()
+    }
+}
+
+/// Allocation-free tracker keeping only what scoring needs: the number of
+/// true matches (tie-breaking) and the first matched index (anchoring).
+#[derive(Clone, Copy, Default)]
+struct PositionSummary {
+    count: u32,
+    first: Option<usize>,
+}
+
+impl PositionTracker for PositionSummary {
+    fn push_pos(&mut self, pos: usize) {
+        if self.first.is_none() {
+            self.first = Some(pos);
+        }
+        self.count += 1;
+    }
+    fn pos_count(&self) -> usize {
+        self.count as usize
+    }
+    fn first_pos(&self) -> Option<usize> {
+        self.first
+    }
+}
+
 #[derive(Clone)]
-struct Cell {
+struct Cell<P: PositionTracker> {
     score: i32,
     errors: u8,
     last: i32,
     tail_true: bool,
-    positions: Vec<usize>,
+    positions: P,
 }
 
-fn keep_best(slot: &mut Option<Cell>, candidate: Cell) {
+fn keep_best<P: PositionTracker>(slot: &mut Option<Cell<P>>, candidate: Cell<P>) {
     let replace = match slot {
         None => true,
         Some(existing) => {
@@ -47,7 +95,7 @@ fn keep_best(slot: &mut Option<Cell>, candidate: Cell) {
                 || (candidate.score == existing.score && candidate.errors < existing.errors)
                 || (candidate.score == existing.score
                     && candidate.errors == existing.errors
-                    && candidate.positions.len() > existing.positions.len())
+                    && candidate.positions.pos_count() > existing.positions.pos_count())
         }
     };
     if replace {
@@ -63,13 +111,13 @@ fn error_budget(meaningful_len: usize) -> u8 {
     }
 }
 
-fn fuzzy_match_impl(
+fn fuzzy_match_impl<P: PositionTracker>(
     needle: &str,
     haystack: &str,
     anchor_first_true_match: bool,
     strip_leading_slash: bool,
     require_true_tail: bool,
-) -> Option<FuzzyMatch> {
+) -> Option<(i32, P, usize)> {
     let (hay_offset, hay_src) = if strip_leading_slash {
         match haystack.strip_prefix('/') {
             Some(rest) => (1usize, rest),
@@ -88,10 +136,7 @@ fn fuzzy_match_impl(
     let hay: Vec<char> = hay_src.chars().flat_map(char::to_lowercase).collect();
 
     if pat.iter().all(|c| c.is_whitespace()) {
-        return Some(FuzzyMatch {
-            score: 0,
-            positions: Vec::new(),
-        });
+        return Some((0, P::default(), hay_offset));
     }
     if hay.is_empty() {
         return None;
@@ -101,13 +146,13 @@ fn fuzzy_match_impl(
     let n = hay.len();
     let meaningful = pat.iter().filter(|c| !c.is_whitespace()).count();
     let max_err = error_budget(meaningful);
-    let mut dp: Vec<Vec<Option<Cell>>> = vec![vec![None; n + 1]; m + 1];
+    let mut dp: Vec<Vec<Option<Cell<P>>>> = vec![vec![None; n + 1]; m + 1];
     dp[0][0] = Some(Cell {
         score: 0,
         errors: 0,
         last: -1,
         tail_true: true,
-        positions: Vec::new(),
+        positions: P::default(),
     });
     for j in 1..=n {
         if let Some(prev) = dp[0][j - 1].clone() {
@@ -156,7 +201,7 @@ fn fuzzy_match_impl(
                         score += FIRST;
                     }
                     let mut positions = prev.positions.clone();
-                    positions.push(pos);
+                    positions.push_pos(pos);
                     keep_best(
                         &mut best,
                         Cell {
@@ -216,8 +261,8 @@ fn fuzzy_match_impl(
                     score += BOUNDARY;
                 }
                 let mut positions = prev.positions.clone();
-                positions.push(first);
-                positions.push(j - 1);
+                positions.push_pos(first);
+                positions.push_pos(j - 1);
                 keep_best(
                     &mut best,
                     Cell {
@@ -244,26 +289,64 @@ fn fuzzy_match_impl(
     }
 
     let cell = answer?;
-    if anchor_first_true_match && cell.positions.first() != Some(&0) {
+    if anchor_first_true_match && cell.positions.first_pos() != Some(0) {
         return None;
     }
 
     let exact = pat == hay;
+    Some((
+        cell.score + if exact { EXACT } else { 0 },
+        cell.positions,
+        hay_offset,
+    ))
+}
+
+fn fuzzy_match_full(
+    needle: &str,
+    haystack: &str,
+    anchor_first_true_match: bool,
+    strip_leading_slash: bool,
+    require_true_tail: bool,
+) -> Option<FuzzyMatch> {
+    let (score, positions, hay_offset) = fuzzy_match_impl::<Vec<usize>>(
+        needle,
+        haystack,
+        anchor_first_true_match,
+        strip_leading_slash,
+        require_true_tail,
+    )?;
     Some(FuzzyMatch {
-        score: cell.score + if exact { EXACT } else { 0 },
-        positions: cell.positions.into_iter().map(|p| p + hay_offset).collect(),
+        score,
+        positions: positions.into_iter().map(|p| p + hay_offset).collect(),
     })
+}
+
+fn fuzzy_score_only(
+    needle: &str,
+    haystack: &str,
+    anchor_first_true_match: bool,
+    strip_leading_slash: bool,
+    require_true_tail: bool,
+) -> Option<i32> {
+    fuzzy_match_impl::<PositionSummary>(
+        needle,
+        haystack,
+        anchor_first_true_match,
+        strip_leading_slash,
+        require_true_tail,
+    )
+    .map(|(score, _, _)| score)
 }
 
 /// Match free-form picker/search text. The match may begin at any word boundary
 /// or interior position, with earlier and boundary-aligned matches scoring higher.
 pub fn fuzzy_match(needle: &str, haystack: &str) -> Option<FuzzyMatch> {
-    fuzzy_match_impl(needle, haystack, false, false, false)
+    fuzzy_match_full(needle, haystack, false, false, false)
 }
 
 /// Return only the free-form fuzzy score.
 pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
-    fuzzy_match(needle, haystack).map(|matched| matched.score)
+    fuzzy_score_only(needle, haystack, false, false, false)
 }
 
 /// Score search text composed of whitespace-separated metadata fields. A
@@ -295,12 +378,12 @@ pub fn fuzzy_match_positions(needle: &str, haystack: &str) -> Vec<usize> {
 /// true character match remains anchored to the command's first letter to keep
 /// short slash suggestions precise.
 pub fn command_fuzzy_match(needle: &str, haystack: &str) -> Option<FuzzyMatch> {
-    fuzzy_match_impl(needle, haystack, true, true, true)
+    fuzzy_match_full(needle, haystack, true, true, true)
 }
 
 /// Return only the slash-command fuzzy score.
 pub fn command_fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
-    command_fuzzy_match(needle, haystack).map(|matched| matched.score)
+    fuzzy_score_only(needle, haystack, true, true, true)
 }
 
 /// Return matched positions for slash-command highlighting.
