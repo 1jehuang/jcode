@@ -28,12 +28,35 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 /// The list is curated best-first; position 0 is the quality-first default.
 pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
 
+/// GPT Pro reasoning models. These are exposed only on the OpenAI platform
+/// API (`api.openai.com` with an `OPENAI_API_KEY`); the ChatGPT/Codex OAuth
+/// backend rejects them ("not supported when using Codex with a ChatGPT
+/// account"). Keep them in their own list so the OAuth-scoped Codex catalog
+/// can never hide them from the picker and so route building can mark them
+/// API-key-only.
+pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] =
+    &["gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro", "gpt-5-pro"];
+
+/// True when `model` is a GPT Pro model that only works with an OpenAI
+/// platform API key (never ChatGPT/Codex OAuth).
+pub fn is_openai_api_only_pro_model(model: &str) -> bool {
+    let trimmed = model.trim();
+    OPENAI_API_ONLY_PRO_MODELS
+        .iter()
+        .any(|pro| trimmed.eq_ignore_ascii_case(pro))
+        || (trimmed.len() > 4
+            && OPENAI_API_ONLY_PRO_MODELS
+                .iter()
+                .any(|pro| trimmed.to_ascii_lowercase().starts_with(&format!("{pro}-"))))
+}
+
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
     // the same upstream slug.
     CHATGPT_WEB_MODEL,
+    "gpt-5.5-pro",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-pro",
@@ -554,5 +577,23 @@ mod tests {
             Some("claude-opus-4-6")
         );
         assert_eq!(normalize_copilot_model_name("claude-opus-4-6"), None);
+    }
+
+    #[test]
+    fn classifies_api_only_pro_models() {
+        assert!(is_openai_api_only_pro_model("gpt-5.5-pro"));
+        assert!(is_openai_api_only_pro_model("gpt-5-pro"));
+        assert!(is_openai_api_only_pro_model(" GPT-5.4-PRO "));
+        // Dated snapshots of a pro model count too.
+        assert!(is_openai_api_only_pro_model("gpt-5.5-pro-2026-04-23"));
+        // Non-pro and near-miss ids do not.
+        assert!(!is_openai_api_only_pro_model("gpt-5.5"));
+        assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
+        assert!(!is_openai_api_only_pro_model(CHATGPT_WEB_MODEL));
+        assert!(!is_openai_api_only_pro_model("gemini-2.5-pro"));
+        // Every listed pro model classifies as pro.
+        for pro in OPENAI_API_ONLY_PRO_MODELS {
+            assert!(is_openai_api_only_pro_model(pro));
+        }
     }
 }

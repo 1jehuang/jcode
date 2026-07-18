@@ -34,6 +34,22 @@ pub fn simplified_model_routes_for_picker(
             continue;
         }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
+            // Platform-API-only GPT Pro models: never advertise an OAuth route.
+            if jcode_provider_core::is_openai_api_only_pro_model(&model) {
+                routes.push(ModelRoute {
+                    model: model.clone(),
+                    provider: "OpenAI".to_string(),
+                    api_method: "openai-api-key".to_string(),
+                    available: auth.openai_has_api_key,
+                    detail: if auth.openai_has_api_key {
+                        String::new()
+                    } else {
+                        "requires OPENAI_API_KEY".to_string()
+                    },
+                    cheapness: None,
+                });
+                continue;
+            }
             if auth.openai_has_oauth {
                 routes.push(ModelRoute {
                     model: model.clone(),
@@ -382,6 +398,24 @@ fn append_openai_routes(
                 }
             }
         };
+        // GPT Pro models are platform-API-only: never offer an OAuth route
+        // for them (the Codex backend rejects them for ChatGPT accounts).
+        if jcode_provider_core::is_openai_api_only_pro_model(&model) {
+            if openai_auth.openai_has_api_key {
+                routes.push(build_openai_api_key_route(
+                    &model,
+                    provider.openai_provider().is_some(),
+                    String::new(),
+                ));
+            } else {
+                routes.push(build_openai_api_key_route(
+                    &model,
+                    false,
+                    "requires OPENAI_API_KEY",
+                ));
+            }
+            continue;
+        }
         if openai_auth.openai_has_oauth {
             routes.push(build_openai_oauth_route(&model, available, detail.clone()));
         }

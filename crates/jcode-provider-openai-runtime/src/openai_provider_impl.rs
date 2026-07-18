@@ -712,6 +712,28 @@ impl Provider for OpenAIProvider {
                 detail
             );
         }
+        // Platform-API-only GPT Pro models cannot run on ChatGPT/Codex OAuth
+        // tokens. If the loaded credential is OAuth-shaped, switch to the
+        // platform API key now so selecting the model from the picker just
+        // works instead of failing at request time with a backend rejection.
+        if jcode_provider_core::is_openai_api_only_pro_model(model) {
+            let is_chatgpt_shaped = self
+                .credentials
+                .try_read()
+                .map(|creds| Self::is_chatgpt_mode(&creds))
+                .unwrap_or(false);
+            if is_chatgpt_shaped {
+                self.set_credential_mode(OpenAICredentialMode::ApiKey)
+                    .map_err(|err| {
+                        anyhow::anyhow!(
+                            "'{}' is only available on the OpenAI platform API and needs an \
+                             OPENAI_API_KEY (ChatGPT/Codex OAuth cannot run it): {}",
+                            model,
+                            err
+                        )
+                    })?;
+            }
+        }
         if let Ok(mut current) = self.model.try_write() {
             let changed = current.as_str() != model;
             *current = model.to_string();
@@ -744,6 +766,15 @@ impl Provider for OpenAIProvider {
             jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()]);
         if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
             models.insert(0, CHATGPT_WEB_MODEL.to_string());
+        }
+        // Platform-API-only GPT Pro models are absent from the Codex OAuth
+        // catalog by design; surface them whenever an OPENAI_API_KEY exists.
+        if jcode_base::provider::openai_platform_api_key_configured() {
+            for pro in jcode_provider_core::OPENAI_API_ONLY_PRO_MODELS {
+                if !models.iter().any(|model| model == pro) {
+                    models.push((*pro).to_string());
+                }
+            }
         }
         models
     }
@@ -885,6 +916,17 @@ impl Provider for OpenAIProvider {
 
     fn available_efforts(&self) -> Vec<&'static str> {
         let model = jcode_provider_core::model_id::canonical(&self.model());
+        // Platform-API-only GPT Pro models never appear in the Codex catalog,
+        // so their ladders are pinned from live Responses API behavior:
+        // gpt-5-pro accepts only `high`; newer pro generations accept
+        // medium/high/xhigh.
+        if jcode_provider_core::is_openai_api_only_pro_model(&model) {
+            return if model.starts_with("gpt-5-pro") {
+                vec!["high", "swarm", "swarm-deep"]
+            } else {
+                vec!["medium", "high", "xhigh", "swarm", "swarm-deep"]
+            };
+        }
         let advertised = self
             .model_reasoning_efforts
             .read()

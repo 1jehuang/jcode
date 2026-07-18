@@ -17,8 +17,9 @@ pub use catalog::{
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities, ModelRoute,
-    context_limit_for_model_with_provider_and_cache, core_provider_for_model_with_hint,
-    provider_key_from_hint, shared_http_client,
+    OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
+    core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
+    shared_http_client,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -697,10 +698,31 @@ pub fn known_anthropic_model_ids() -> Vec<String> {
     cached_anthropic_model_ids().unwrap_or_else(anthropic_static_model_ids)
 }
 
+/// True when an OpenAI platform API key is configured (env or openai.env).
+/// Deliberately a direct credential probe: routing/list decisions must not
+/// populate the process-global cached `AuthStatus` snapshot as a side effect
+/// (callers like `known_openai_model_ids` run before auth fixtures/state are
+/// finalized, and a poisoned cache misreports every subsequent route).
+pub fn openai_platform_api_key_configured() -> bool {
+    crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 pub fn known_openai_model_ids() -> Vec<String> {
     let mut models = cached_openai_model_ids().unwrap_or_else(openai_static_model_ids);
     if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
         models.push(CHATGPT_WEB_MODEL.to_string());
+    }
+    // GPT Pro models never appear in the ChatGPT/Codex OAuth catalog (they are
+    // platform-API-only), so a live OAuth catalog must not hide them when the
+    // user has an OPENAI_API_KEY that can actually reach them.
+    if openai_platform_api_key_configured() {
+        for pro in OPENAI_API_ONLY_PRO_MODELS {
+            if !models.iter().any(|model| model == pro) {
+                models.push((*pro).to_string());
+            }
+        }
     }
     models
 }
@@ -997,6 +1019,32 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
             reason: Some(runtime.reason),
             source: "runtime-error",
             observed_at: Some(runtime.observed_at),
+        };
+    }
+
+    // GPT Pro models are platform-API-only: the ChatGPT/Codex OAuth account
+    // snapshot never contains them, so judging them against it would report
+    // "not available for your account" to every OAuth user who also has a
+    // perfectly working OPENAI_API_KEY. Key presence is the real signal.
+    if is_openai_api_only_pro_model(model) {
+        return if openai_platform_api_key_configured() {
+            AccountModelAvailability {
+                state: AccountModelAvailabilityState::Available,
+                reason: None,
+                source: "api-key",
+                observed_at: None,
+            }
+        } else {
+            AccountModelAvailability {
+                state: AccountModelAvailabilityState::Unavailable,
+                reason: Some(
+                    "requires an OpenAI platform API key (OPENAI_API_KEY); \
+                     not available via ChatGPT/Codex OAuth"
+                        .to_string(),
+                ),
+                source: "api-key",
+                observed_at: None,
+            }
         };
     }
 

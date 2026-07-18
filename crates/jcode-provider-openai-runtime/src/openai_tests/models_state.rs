@@ -219,6 +219,11 @@ async fn test_set_model_clears_persistent_ws_state() {
 
 #[tokio::test]
 async fn test_switching_to_https_clears_persistent_ws_state() {
+    // Serialize with the tests that set JCODE_OPENAI_MODEL via EnvVarGuard:
+    // provider construction reads that process-global env var, so an
+    // unsynchronized overlap can construct this provider pinned to the
+    // browser-only web model and fail the HTTPS transport switch below.
+    let _guard = jcode_base::storage::lock_test_env();
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
         refresh_token: String::new(),

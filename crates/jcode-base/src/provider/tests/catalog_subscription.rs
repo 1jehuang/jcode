@@ -59,12 +59,21 @@ fn test_openai_live_catalog_replaces_static_fallback_list() {
     let models = known_openai_model_ids();
 
     assert_eq!(
-        models,
-        vec![
+        models[..2],
+        [
             "gpt-5.4-live-only".to_string(),
             jcode_provider_core::CHATGPT_WEB_MODEL.to_string()
         ]
     );
+    // The only entries allowed past the live catalog are the platform-API-only
+    // GPT Pro models, appended when an OPENAI_API_KEY is configured on the
+    // machine running the tests.
+    for extra in &models[2..] {
+        assert!(
+            jcode_provider_core::is_openai_api_only_pro_model(extra),
+            "unexpected non-pro extra model '{extra}' in live catalog list"
+        );
+    }
 
     crate::auth::codex::set_active_account_override(None);
 }
