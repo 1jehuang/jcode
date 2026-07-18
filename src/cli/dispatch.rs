@@ -1189,7 +1189,13 @@ pub(crate) async fn spawn_server(
 
         let mut child = cmd.spawn()?;
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(5);
+        // Windows server bootstrap can legitimately take tens of seconds on
+        // slow hosts (auth preflights + provider init were observed at 15-60s
+        // on a Windows Server VPS, issue #503). The child's liveness is
+        // checked every poll, so a generous budget only delays the error for
+        // a genuinely hung server, while a crashed server still fails fast
+        // with its stderr.
+        let timeout = std::time::Duration::from_secs(120);
         while start.elapsed() < timeout {
             if crate::transport::is_socket_path(&server::socket_path()) {
                 if crate::transport::Stream::connect(server::socket_path())
