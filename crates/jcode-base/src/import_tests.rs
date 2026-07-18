@@ -372,6 +372,92 @@ fn takeover_with_no_complete_messages_leaves_claude_running() {
     claude.wait().unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn takeover_rejects_a_transcript_from_a_different_live_session() {
+    use std::process::{Command, Stdio};
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let external = temp.path().join("external/.claude");
+    let transcript = external.join("projects/demo/wrong-session.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    write_claude_transcript(&transcript, "different-session");
+    let mut claude = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    write_live_claude_record(&external.join("sessions"), &claude, "live-session");
+    let target = jcode_session_types::ResumeTarget::ClaudeCodeSession {
+        session_id: "live-session".to_string(),
+        session_path: transcript.to_string_lossy().to_string(),
+    };
+
+    let error = take_over_live_claude_session(&target).unwrap_err();
+    assert!(format!("{error:#}").contains("different-session"));
+    assert!(claude.try_wait().unwrap().is_none());
+    assert!(!temp.path().join("sessions").exists());
+
+    claude.kill().unwrap();
+    claude.wait().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn takeover_timeout_preserves_the_staged_jcode_session_after_sigterm() {
+    use std::process::{Command, Stdio};
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let external = temp.path().join("external/.claude");
+    let transcript = external.join("projects/demo/slow-exit.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    write_claude_transcript(&transcript, "slow-exit");
+    let mut claude = Command::new("sh")
+        .args(["-c", "trap '' TERM; exec sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    write_live_claude_record(&external.join("sessions"), &claude, "slow-exit");
+    let target = jcode_session_types::ResumeTarget::ClaudeCodeSession {
+        session_id: "slow-exit".to_string(),
+        session_path: transcript.to_string_lossy().to_string(),
+    };
+
+    let error =
+        take_over_live_claude_session_with_timeout(&target, std::time::Duration::from_millis(50))
+            .unwrap_err();
+    assert!(error.to_string().contains("was preserved"));
+    assert!(claude.try_wait().unwrap().is_none());
+
+    let snapshots = std::fs::read_dir(temp.path().join("sessions"))
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1);
+    let staged = Session::load(
+        snapshots[0]
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(staged.provider_session_id.as_deref(), Some("slow-exit"));
+    assert_eq!(staged.messages.len(), 2);
+
+    claude.kill().unwrap();
+    claude.wait().unwrap();
+}
+
 #[test]
 fn cached_imported_session_preserves_existing_history_verbatim() {
     let _guard = crate::storage::lock_test_env();
