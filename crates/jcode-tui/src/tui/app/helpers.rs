@@ -548,76 +548,7 @@ pub(super) fn inferred_reasoning_efforts(
     provider_name: Option<&str>,
     model_name: Option<&str>,
 ) -> Vec<&'static str> {
-    let provider = provider_name.unwrap_or_default().to_ascii_lowercase();
-    let model = model_name.unwrap_or_default().to_ascii_lowercase();
-
-    if provider.contains("openrouter") {
-        return vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep",
-        ];
-    }
-
-    let is_anthropic = provider.contains("anthropic")
-        || provider.contains("claude")
-        || model.starts_with("claude-");
-    if is_anthropic {
-        // Shared capability table (optimistic for unknown 5.x+ generations);
-        // see `jcode_provider_core::anthropic_reasoning_caps`. Keeps the effort
-        // cycler in lockstep with what the Anthropic runtime actually sends.
-        let caps = jcode_provider_core::anthropic_reasoning_caps(&model);
-        if !caps.supports_reasoning_effort() {
-            return Vec::new();
-        }
-        let mut efforts = vec!["none", "low", "medium", "high"];
-        if caps.xhigh_effort {
-            efforts.push("xhigh");
-        }
-        if caps.max_effort {
-            efforts.push("max");
-        }
-        efforts.extend(["swarm", "swarm-deep"]);
-        return efforts;
-    }
-
-    let is_deepseek = provider.contains("deepseek") || model.contains("deepseek");
-    if is_deepseek {
-        return vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep",
-        ];
-    }
-
-    let is_openai = provider.contains("openai")
-        || provider.contains("codex")
-        || model.starts_with("gpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-        || model.starts_with("o5");
-    if is_openai {
-        return vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep",
-        ];
-    }
-
-    Vec::new()
+    jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
 }
 
 pub(super) fn effort_bar(index: usize, total: usize) -> String {

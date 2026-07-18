@@ -1773,7 +1773,7 @@ fn format_swarm_model_list(
             route.model, route.provider, route.api_method, availability, cost, detail
         ));
     }
-    out.push_str("\nAlso pass effort (none|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
+    out.push_str("\nAlso pass effort (none|minimal|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
     out
 }
 
@@ -1885,7 +1885,7 @@ struct CommunicateInput {
     /// spawns. Takes precedence over agents.swarm_model config.
     #[serde(default)]
     model: Option<String>,
-    /// Reasoning effort for spawned agents (none|low|medium|high|xhigh|max).
+    /// Reasoning effort for spawned agents (none|minimal|low|medium|high|xhigh|max).
     #[serde(default)]
     effort: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
@@ -2049,7 +2049,7 @@ impl Tool for CommunicateTool {
                 },
                 "effort": {
                     "type": "string",
-                    "enum": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
                     "description": "Optional reasoning effort for the spawned agent. Omit for the model's default. Only meaningful with spawn-creating actions."
                 },
                 "session_ids": {

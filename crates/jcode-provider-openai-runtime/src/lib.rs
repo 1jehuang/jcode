@@ -524,6 +524,7 @@ pub struct OpenAIProvider {
     prompt_cache_retention: Option<String>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
+    model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
@@ -656,8 +657,10 @@ impl OpenAIProvider {
             .provider
             .openai_native_compaction_threshold_tokens
             .max(1000);
+        let model_reasoning_efforts =
+            jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
 
-        Self {
+        let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             credentials: Arc::new(RwLock::new(credentials)),
             credential_mode: Arc::new(RwLock::new(credential_mode)),
@@ -666,6 +669,7 @@ impl OpenAIProvider {
             prompt_cache_retention,
             max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
+            model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
             native_compaction_mode,
             native_compaction_threshold_tokens,
@@ -675,7 +679,9 @@ impl OpenAIProvider {
             persistent_ws: Arc::new(Mutex::new(None)),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
-        }
+        };
+        provider.revalidate_reasoning_effort();
+        provider
     }
 
     fn is_browser_only(&self) -> bool {
@@ -693,6 +699,7 @@ impl OpenAIProvider {
                 Ok(mut guard) => {
                     *guard = credentials;
                     self.browser_only.store(false, AtomicOrdering::Release);
+                    self.reload_cached_reasoning_efforts();
                 }
                 Err(_) => {
                     jcode_base::logging::info(
@@ -711,6 +718,7 @@ impl OpenAIProvider {
             Ok(mut guard) => {
                 *guard = credentials;
                 self.browser_only.store(false, AtomicOrdering::Release);
+                self.reload_cached_reasoning_efforts();
             }
             Err(_) => {
                 anyhow::bail!(
@@ -741,6 +749,15 @@ impl OpenAIProvider {
         // lingering on a snapshot taken before the switch.
         jcode_base::auth::AuthStatus::invalidate_cached_status();
         Ok(())
+    }
+
+    fn reload_cached_reasoning_efforts(&self) {
+        let cached = jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+        match self.model_reasoning_efforts.write() {
+            Ok(mut efforts) => *efforts = cached,
+            Err(poisoned) => *poisoned.into_inner() = cached,
+        }
+        self.revalidate_reasoning_effort();
     }
 
     pub(crate) fn credential_mode_snapshot(&self) -> OpenAICredentialMode {
@@ -774,6 +791,18 @@ impl OpenAIProvider {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
     }
 
+    fn catalog_credential_identity(credentials: &CodexCredentials) -> String {
+        credentials
+            .account_id
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                (!credentials.refresh_token.is_empty()).then_some(&credentials.refresh_token)
+            })
+            .unwrap_or(&credentials.access_token)
+            .clone()
+    }
+
     fn should_prefer_websocket(model: &str) -> bool {
         !model.trim().is_empty()
     }
@@ -788,22 +817,59 @@ impl OpenAIProvider {
             // We keep it stored so the UI/session reflect it and the agent injects
             // the swarm directive; it is translated to a real effort at request time
             // by `api_reasoning_effort`.
-            "none" | "low" | "medium" | "high" | "xhigh" | "swarm" | "swarm-deep" => Some(value),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm"
+            | "swarm-deep" => Some(value),
             other => {
                 jcode_base::logging::info(&format!(
-                    "Warning: Unsupported OpenAI reasoning effort '{}'; expected none|low|medium|high|xhigh. Using 'xhigh'.",
+                    "Warning: Ignoring unsupported OpenAI reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max.",
                     other
                 ));
-                Some("xhigh".to_string())
+                None
             }
         }
     }
 
+    fn revalidate_reasoning_effort(&self) {
+        let current = self
+            .reasoning_effort
+            .read()
+            .map(|effort| effort.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let Some(current) = current else {
+            return;
+        };
+        if jcode_base::prompt::is_swarm_effort(&current)
+            || self.available_efforts().contains(&current.as_str())
+        {
+            return;
+        }
+        jcode_base::logging::info(&format!(
+            "Clearing OpenAI reasoning effort '{}' because model '{}' does not advertise it",
+            current,
+            self.model()
+        ));
+        match self.reasoning_effort.write() {
+            Ok(mut effort) => *effort = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
     /// Translate a stored reasoning effort into the value sent to the API.
-    /// The `swarm` sentinel maps to the strongest real effort (`xhigh`).
-    fn api_reasoning_effort(effort: Option<&str>) -> Option<String> {
+    /// The `swarm` sentinel maps to the active model's strongest advertised
+    /// effort, falling back to `max` before catalog metadata is available.
+    fn api_reasoning_effort(&self, effort: Option<&str>) -> Option<String> {
         match effort {
-            Some(e) if jcode_base::prompt::is_swarm_effort(e) => Some("xhigh".to_string()),
+            Some(e) if jcode_base::prompt::is_swarm_effort(e) => {
+                let available = self.available_efforts();
+                jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
+                    .iter()
+                    .rev()
+                    .find(|candidate| {
+                        !jcode_base::prompt::is_swarm_effort(candidate)
+                            && available.contains(candidate)
+                    })
+                    .map(|effort| (*effort).to_string())
+            }
             other => other.map(|e| e.to_string()),
         }
     }

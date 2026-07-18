@@ -251,7 +251,7 @@ pub enum Request {
         session_id: Option<String>,
     },
 
-    /// Set reasoning effort for providers that expose it (OpenAI/Anthropic: none|low|medium|high|xhigh; DeepSeek: none|low|medium|high|max)
+    /// Set reasoning effort for providers that expose it (OpenAI: none|minimal|low|medium|high|xhigh|max; Anthropic: none|low|medium|high|xhigh|max; DeepSeek: none|low|medium|high|max)
     #[serde(rename = "set_reasoning_effort")]
     SetReasoningEffort {
         id: u64,

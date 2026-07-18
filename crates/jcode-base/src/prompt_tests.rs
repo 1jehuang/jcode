@@ -403,7 +403,7 @@ fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
     use crate::prompt::{EffortKind, classify_effort, is_swarm_mode_effort};
 
     // Plain reasoning levels are not swarm modes.
-    for level in ["none", "low", "medium", "high", "xhigh", "max"] {
+    for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
         assert_eq!(classify_effort(level), EffortKind::Reasoning, "{level}");
         assert!(!is_swarm_mode_effort(level), "{level}");
     }

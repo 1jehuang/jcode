@@ -53,7 +53,7 @@ impl Provider for OpenAIProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         // Map the `swarm` sentinel (and any future aliases) to the real effort
         // value the API understands.
-        let api_reasoning_effort = Self::api_reasoning_effort(reasoning_effort.as_deref());
+        let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
         let service_tier = self
             .service_tier
             .read()
@@ -719,6 +719,7 @@ impl Provider for OpenAIProvider {
             drop(current);
             if changed {
                 self.clear_persistent_ws_try("manual OpenAI model change reset the response chain");
+                self.revalidate_reasoning_effort();
             }
             Ok(())
         } else {
@@ -760,9 +761,14 @@ impl Provider for OpenAIProvider {
         // user with only an OPENAI_API_KEY loads an API-key-shaped credential
         // while the mode stays Auto; routing by mode would send that platform
         // key to the ChatGPT/Codex endpoint and get a 401.
-        let (access_token, is_chatgpt_mode) = {
+        let account_label = jcode_base::auth::codex::active_account_label();
+        let (access_token, is_chatgpt_mode, credential_identity) = {
             let creds = self.credentials.read().await;
-            (creds.access_token.clone(), Self::is_chatgpt_mode(&creds))
+            (
+                creds.access_token.clone(),
+                Self::is_chatgpt_mode(&creds),
+                Self::catalog_credential_identity(&creds),
+            )
         };
         let catalog = if is_chatgpt_mode {
             let access_token = openai_access_token(&self.credentials).await?;
@@ -802,6 +808,23 @@ impl Provider for OpenAIProvider {
         } else {
             jcode_base::provider::fetch_openai_api_key_model_catalog(&access_token).await?
         };
+        let current_credential_identity = {
+            let credentials = self.credentials.read().await;
+            Self::catalog_credential_identity(&credentials)
+        };
+        if current_credential_identity != credential_identity
+            || jcode_base::auth::codex::active_account_label() != account_label
+        {
+            jcode_base::logging::info(
+                "Discarding OpenAI model catalog fetched for credentials that are no longer active",
+            );
+            return Ok(());
+        }
+        match self.model_reasoning_efforts.write() {
+            Ok(mut efforts) => *efforts = catalog.reasoning_efforts.clone(),
+            Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
+        }
+        self.revalidate_reasoning_effort();
         jcode_base::provider::persist_openai_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
             jcode_base::provider::populate_context_limits(catalog.context_limits);
@@ -820,7 +843,34 @@ impl Provider for OpenAIProvider {
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let requested = effort.trim().to_ascii_lowercase();
+        if !requested.is_empty()
+            && jcode_provider_core::canonical_reasoning_effort(&requested).is_none()
+            && !jcode_base::prompt::is_swarm_effort(&requested)
+        {
+            anyhow::bail!(
+                "Unsupported OpenAI reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep",
+                effort
+            );
+        }
         let normalized = Self::normalize_reasoning_effort(effort);
+        if let Some(requested) = normalized.as_deref()
+            && !jcode_base::prompt::is_swarm_effort(requested)
+        {
+            let available = self.available_efforts();
+            if !available.contains(&requested) {
+                anyhow::bail!(
+                    "OpenAI reasoning effort '{}' is not supported by model '{}' (available: {})",
+                    requested,
+                    self.model(),
+                    available
+                        .into_iter()
+                        .filter(|effort| !jcode_base::prompt::is_swarm_effort(effort))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
         match self.reasoning_effort.write() {
             Ok(mut guard) => {
                 *guard = normalized;
@@ -834,15 +884,21 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep",
-        ]
+        let model = jcode_provider_core::model_id::canonical(&self.model());
+        let advertised = self
+            .model_reasoning_efforts
+            .read()
+            .map(|efforts| efforts.get(&model).cloned())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().get(&model).cloned());
+        if let Some(advertised) = advertised {
+            let mut efforts: Vec<&'static str> = advertised
+                .iter()
+                .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
+                .collect();
+            efforts.extend(["swarm", "swarm-deep"]);
+            return efforts;
+        }
+        jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -1067,6 +1123,7 @@ impl Provider for OpenAIProvider {
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(self.reasoning_effort())),
+            model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
@@ -1085,6 +1142,8 @@ impl Provider for OpenAIProvider {
             let mut guard = self.credentials.write().await;
             *guard = credentials;
             self.browser_only.store(false, AtomicOrdering::Release);
+            drop(guard);
+            self.reload_cached_reasoning_efforts();
         }
 
         self.clear_persistent_ws("credentials invalidated").await;

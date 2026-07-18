@@ -141,7 +141,7 @@ impl Provider for OpenRouterProvider {
                 // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
                 // `reasoning_effort` field with OpenAI's effort vocabulary.
                 let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "xhigh"
+                    "max"
                 } else {
                     effort
                 };
@@ -413,6 +413,19 @@ impl Provider for OpenRouterProvider {
             self.clear_pin_if_model_changed(&model_id, true);
         }
 
+        let stored_effort = self
+            .reasoning_effort
+            .try_read()
+            .ok()
+            .and_then(|effort| effort.clone());
+        if let Some(stored_effort) = stored_effort
+            && !jcode_base::prompt::is_swarm_effort(&stored_effort)
+            && !self.available_efforts().contains(&stored_effort.as_str())
+            && let Ok(mut effort) = self.reasoning_effort.try_write()
+        {
+            *effort = None;
+        }
+
         Ok(())
     }
 
@@ -432,7 +445,22 @@ impl Provider for OpenRouterProvider {
                 "Reasoning effort is not supported by the current model/profile. It works for OpenRouter, DeepSeek-family and GPT-family reasoning models, and profiles with supports_reasoning_effort = true."
             );
         }
-        let normalized = self.normalize_reasoning_effort_for_self(effort);
+        let requested = effort.trim().to_ascii_lowercase();
+        let mut accepted = self.available_efforts().contains(&requested.as_str());
+        if !self.supports_deepseek_reasoning_effort()
+            && !self.supports_openai_reasoning_effort()
+            && requested == "max"
+        {
+            accepted = true;
+        }
+        if !requested.is_empty() && !accepted {
+            anyhow::bail!(
+                "Reasoning effort '{}' is not supported by the current model/profile (available: {})",
+                effort,
+                self.available_efforts().join(", ")
+            );
+        }
+        let normalized = self.normalize_reasoning_effort_for_self(&requested);
         let mut current = self.reasoning_effort.try_write().map_err(|_| {
             anyhow::anyhow!("Cannot change reasoning effort while a request is in progress")
         })?;
@@ -442,30 +470,14 @@ impl Provider for OpenRouterProvider {
 
     fn available_efforts(&self) -> Vec<&'static str> {
         if self.supports_deepseek_reasoning_effort() {
-            vec![
-                "none",
-                "low",
-                "medium",
-                "high",
-                "max",
-                "swarm",
-                "swarm-deep",
-            ]
-        } else if self.supports_openai_reasoning_effort()
-            || Self::profile_supports_unified_reasoning(
-                self.profile_id.as_deref(),
-                self.send_openrouter_headers,
-            )
-        {
-            vec![
-                "none",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "swarm",
-                "swarm-deep",
-            ]
+            jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
+        } else if self.supports_openai_reasoning_effort() {
+            jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
+        } else if Self::profile_supports_unified_reasoning(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
+            jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec()
         } else {
             vec![]
         }

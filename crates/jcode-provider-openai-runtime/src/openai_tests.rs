@@ -200,3 +200,93 @@ fn openai_credential_mode_runtime_provider_identity_round_trips() {
         None => jcode_base::env::remove_var("JCODE_RUNTIME_PROVIDER"),
     }
 }
+
+#[tokio::test]
+async fn openai_available_efforts_follow_active_model_catalog_metadata() {
+    let provider = OpenAIProvider::new_browser_only();
+    *provider.model.write().await = "gpt-5.6".to_string();
+    provider
+        .model_reasoning_efforts
+        .write()
+        .expect("reasoning effort catalog lock")
+        .insert(
+            "gpt-5.6".to_string(),
+            vec![
+                "minimal".to_string(),
+                "medium".to_string(),
+                "max".to_string(),
+            ],
+        );
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["minimal", "medium", "max", "swarm", "swarm-deep"]
+    );
+    *provider.model.write().await = "gpt-5.6[1m]".to_string();
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["minimal", "medium", "max", "swarm", "swarm-deep"],
+        "long-context aliases must use the canonical model's catalog metadata"
+    );
+    *provider.model.write().await = "gpt-5.6".to_string();
+    assert_eq!(
+        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        Some("max")
+    );
+
+    provider
+        .model_reasoning_efforts
+        .write()
+        .expect("reasoning effort catalog lock")
+        .insert(
+            "gpt-5.6".to_string(),
+            vec!["low".to_string(), "high".to_string(), "xhigh".to_string()],
+        );
+    assert_eq!(
+        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        Some("xhigh"),
+        "swarm must clamp to the active model's strongest advertised effort"
+    );
+    assert!(
+        provider.set_reasoning_effort("max").is_err(),
+        "explicit effort choices must respect active-model catalog capabilities"
+    );
+    provider
+        .set_reasoning_effort("xhigh")
+        .expect("advertised effort should be accepted");
+    provider
+        .model_reasoning_efforts
+        .write()
+        .expect("reasoning effort catalog lock")
+        .insert(
+            "gpt-5.5".to_string(),
+            vec!["low".to_string(), "high".to_string()],
+        );
+    *provider.model.write().await = "gpt-5.5".to_string();
+    provider.revalidate_reasoning_effort();
+    assert_eq!(
+        provider.reasoning_effort(),
+        None,
+        "an effort unsupported by the newly selected model must not remain active"
+    );
+    assert!(provider.set_reasoning_effort("typo").is_err());
+}
+
+#[test]
+fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
+    let credentials = |access: &str, refresh: &str, account: Option<&str>| CodexCredentials {
+        access_token: access.to_string(),
+        refresh_token: refresh.to_string(),
+        id_token: None,
+        account_id: account.map(str::to_string),
+        expires_at: None,
+    };
+    assert_eq!(
+        OpenAIProvider::catalog_credential_identity(&credentials("old", "refresh", Some("acct"))),
+        OpenAIProvider::catalog_credential_identity(&credentials("new", "refresh", Some("acct")))
+    );
+    assert_ne!(
+        OpenAIProvider::catalog_credential_identity(&credentials("old", "refresh-a", None)),
+        OpenAIProvider::catalog_credential_identity(&credentials("new", "refresh-b", None))
+    );
+}

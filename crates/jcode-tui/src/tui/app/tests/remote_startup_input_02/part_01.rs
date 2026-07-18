@@ -1309,6 +1309,45 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     );
 }
 
+#[test]
+fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
+    let mut app = create_test_app();
+    configure_test_remote_models_with_openai_recommendations(&mut app);
+    app.remote_model_options.push(crate::provider::ModelRoute {
+        model: "gpt-5.5".to_string(),
+        provider: "OpenRouter".to_string(),
+        api_method: "openrouter".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    });
+
+    app.open_model_picker();
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+    let has_route_effort = |api_method: &str, effort: &str| {
+        picker.entries.iter().any(|entry| {
+            entry.name.starts_with("gpt-5.5 (")
+                && entry.effort.as_deref() == Some(effort)
+                && entry
+                    .options
+                    .first()
+                    .is_some_and(|route| route.api_method == api_method)
+        })
+    };
+
+    assert!(has_route_effort("openai-oauth", "max"));
+    assert!(has_route_effort("openai-oauth", "minimal"));
+    assert!(has_route_effort("openrouter", "xhigh"));
+    assert!(has_route_effort("openrouter", "minimal"));
+    assert!(
+        !has_route_effort("openrouter", "max"),
+        "OpenRouter must not advertise max as a distinct rung because it aliases xhigh"
+    );
+}
+
 /// Plain model rows (no effort suffix) must not stage a reasoning effort.
 /// Routes whose runtime cannot apply a reasoning effort (e.g. Copilot) get
 /// plain rows even for models that have an effort ladder elsewhere.

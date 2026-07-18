@@ -73,6 +73,26 @@ fn partition_queued_messages_moves_system_messages_into_reminders() {
 #[test]
 fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
     assert_eq!(
+        inferred_reasoning_efforts(Some("openai"), Some("gpt-5.4")),
+        vec![
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "swarm",
+            "swarm-deep"
+        ],
+        "OpenAI exposes max as a real Responses API effort level"
+    );
+    assert_eq!(
+        inferred_reasoning_efforts(Some("openai-compatible:custom"), Some("o5-mini")),
+        jcode_provider_core::OPENAI_SELECTABLE_EFFORTS,
+        "direct compatible routes must preserve OpenAI max instead of aliasing it to xhigh"
+    );
+    assert_eq!(
         inferred_reasoning_efforts(Some("anthropic"), Some("claude-sonnet-4-6")),
         vec![
             "none",
@@ -101,6 +121,7 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
         inferred_reasoning_efforts(Some("openrouter"), Some("anthropic/claude-sonnet-4.6")),
         vec![
             "none",
+            "minimal",
             "low",
             "medium",
             "high",
@@ -113,6 +134,7 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
         inferred_reasoning_efforts(Some("openrouter"), Some("deepseek/deepseek-r1")),
         vec![
             "none",
+            "minimal",
             "low",
             "medium",
             "high",

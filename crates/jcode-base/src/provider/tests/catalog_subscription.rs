@@ -106,6 +106,12 @@ fn test_openai_model_catalog_hydrates_from_disk_cache() {
             context_limits: [("openai-disk-only-model".to_string(), 424_242)]
                 .into_iter()
                 .collect(),
+            reasoning_efforts: [(
+                "openai-disk-only-model".to_string(),
+                vec!["low".to_string(), "max".to_string()],
+            )]
+            .into_iter()
+            .collect(),
         });
 
         assert_eq!(
@@ -115,6 +121,11 @@ fn test_openai_model_catalog_hydrates_from_disk_cache() {
         assert_eq!(
             context_limit_for_model("openai-disk-only-model"),
             Some(424_242)
+        );
+        assert_eq!(
+            cached_openai_reasoning_efforts()
+                .and_then(|efforts| efforts.get("openai-disk-only-model").cloned()),
+            Some(vec!["low".to_string(), "max".to_string()])
         );
 
         crate::auth::codex::set_active_account_override(None);

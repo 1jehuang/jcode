@@ -536,10 +536,10 @@ impl AnthropicProvider {
             }
             other => {
                 jcode_base::logging::info(&format!(
-                    "Warning: Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max alias. Using the model maximum.",
+                    "Warning: Ignoring unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max.",
                     other
                 ));
-                Some("max".to_string())
+                None
             }
         }
     }
@@ -1156,6 +1156,29 @@ impl Provider for AnthropicProvider {
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let requested = effort.trim().to_ascii_lowercase();
+        if !requested.is_empty()
+            && !matches!(
+                requested.as_str(),
+                "default"
+                    | "auto"
+                    | "off"
+                    | "disabled"
+                    | "none"
+                    | "low"
+                    | "medium"
+                    | "high"
+                    | "xhigh"
+                    | "max"
+                    | "swarm"
+                    | "swarm-deep"
+            )
+        {
+            anyhow::bail!(
+                "Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max|swarm|swarm-deep",
+                effort
+            );
+        }
         let normalized = Self::normalize_reasoning_effort(effort);
         let model = self.model();
         if normalized.is_some() && !Self::model_supports_reasoning_effort(&model) {

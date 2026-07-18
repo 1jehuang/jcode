@@ -39,6 +39,8 @@ struct PersistedModelCatalogScope {
     models: Vec<String>,
     #[serde(default)]
     context_limits: HashMap<String, usize>,
+    #[serde(default)]
+    reasoning_efforts: HashMap<String, Vec<String>>,
     observed_at_unix_secs: u64,
 }
 
@@ -377,6 +379,7 @@ fn persist_scoped_model_catalog(
     scope: &str,
     models: &[String],
     context_limits: &HashMap<String, usize>,
+    reasoning_efforts: &HashMap<String, Vec<String>>,
     observed_at: SystemTime,
 ) {
     if models.is_empty() {
@@ -389,6 +392,7 @@ fn persist_scoped_model_catalog(
         PersistedModelCatalogScope {
             models: models.to_vec(),
             context_limits: context_limits.clone(),
+            reasoning_efforts: reasoning_efforts.clone(),
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
@@ -438,6 +442,16 @@ pub fn cached_openai_model_ids() -> Option<Vec<String>> {
         .or_else(|| load_openai_catalog_from_disk(&scope))
 }
 
+/// Return model-specific OpenAI reasoning capabilities for the active account
+/// from its scoped disk snapshot. Live refreshes update provider-local state
+/// directly; this keeps startup exact before the first refresh completes.
+pub fn cached_openai_reasoning_efforts() -> Option<HashMap<String, Vec<String>>> {
+    let scope = current_openai_account_scope();
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    let efforts = store.scopes.get(&scope)?.reasoning_efforts.clone();
+    (!efforts.is_empty()).then_some(efforts)
+}
+
 /// Test-only: clear the process-global in-memory model catalogs. The catalog
 /// services are statics shared by every test in the process; a test that
 /// hydrates a scope (directly or via `persist_*` + `cached_*`) otherwise leaks
@@ -454,6 +468,7 @@ pub fn persist_openai_model_catalog(catalog: &OpenAIModelCatalog) {
         &current_openai_account_scope(),
         &catalog.available_models,
         &catalog.context_limits,
+        &catalog.reasoning_efforts,
         SystemTime::now(),
     );
 }
@@ -464,6 +479,7 @@ pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
         &current_anthropic_catalog_scope(),
         &catalog.available_models,
         &catalog.context_limits,
+        &HashMap::new(),
         SystemTime::now(),
     );
 }

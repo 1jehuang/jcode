@@ -27,6 +27,8 @@ fn catalog_status_error(status: reqwest::StatusCode, context: String) -> anyhow:
 pub struct OpenAIModelCatalog {
     pub available_models: Vec<String>,
     pub context_limits: HashMap<String, usize>,
+    /// Ordered reasoning-effort values advertised by each Codex model.
+    pub reasoning_efforts: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +89,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
 
     let mut available: HashSet<String> = HashSet::new();
     let mut limits: HashMap<String, usize> = HashMap::new();
+    let mut reasoning_efforts: HashMap<String, Vec<String>> = HashMap::new();
 
     for model in models.into_iter().flatten() {
         let Some(slug) = model
@@ -110,7 +113,34 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
             .or_else(|| model.get("context_length"))
             .and_then(|c| c.as_u64())
         {
-            limits.insert(slug, ctx as usize);
+            limits.insert(slug.clone(), ctx as usize);
+        }
+
+        if let Some(values) = model
+            .get("supported_reasoning_levels")
+            .or_else(|| model.get("supported_reasoning_efforts"))
+            .and_then(|value| value.as_array())
+        {
+            let mut efforts = Vec::new();
+            for value in values {
+                let raw = value.as_str().or_else(|| {
+                    value
+                        .get("reasoning_effort")
+                        .or_else(|| value.get("effort"))
+                        .or_else(|| value.get("value"))
+                        .and_then(|value| value.as_str())
+                });
+                let Some(effort) = raw.and_then(jcode_provider_core::canonical_reasoning_effort)
+                else {
+                    continue;
+                };
+                if !efforts.iter().any(|existing| existing == effort) {
+                    efforts.push(effort.to_string());
+                }
+            }
+            if !efforts.is_empty() {
+                reasoning_efforts.insert(slug, efforts);
+            }
         }
     }
 
@@ -120,6 +150,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
     OpenAIModelCatalog {
         available_models,
         context_limits: limits,
+        reasoning_efforts,
     }
 }
 
@@ -298,7 +329,50 @@ pub async fn fetch_openai_api_key_model_catalog(api_key: &str) -> Result<OpenAIM
     Ok(OpenAIModelCatalog {
         available_models,
         context_limits: HashMap::new(),
+        reasoning_efforts: HashMap::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_catalog_parses_string_and_object_reasoning_efforts() {
+        let catalog = parse_openai_model_catalog(&serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-5.6",
+                    "supported_reasoning_levels": [
+                        { "reasoning_effort": "minimal" },
+                        { "reasoning_effort": "high" },
+                        { "reasoning_effort": "max" }
+                    ]
+                },
+                {
+                    "slug": "gpt-5.4",
+                    "supported_reasoning_efforts": ["none", "low", "xhigh"]
+                }
+            ]
+        }));
+
+        assert_eq!(
+            catalog.reasoning_efforts.get("gpt-5.6"),
+            Some(&vec![
+                "minimal".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
+        assert_eq!(
+            catalog.reasoning_efforts.get("gpt-5.4"),
+            Some(&vec![
+                "none".to_string(),
+                "low".to_string(),
+                "xhigh".to_string()
+            ])
+        );
+    }
 }
 
 /// Fetch context window sizes from the Codex backend API.

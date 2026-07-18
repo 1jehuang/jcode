@@ -989,7 +989,7 @@ fn schema_advertises_model_and_effort_spawn_overrides() {
     assert!(props.contains_key("effort"));
     assert_eq!(
         props["effort"]["enum"],
-        json!(["none", "low", "medium", "high", "xhigh", "max"])
+        json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
     );
     assert!(
         schema["properties"]["action"]["enum"]

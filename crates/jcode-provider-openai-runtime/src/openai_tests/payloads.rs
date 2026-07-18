@@ -206,7 +206,8 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
 }
 
 #[test]
-fn swarm_effort_maps_to_xhigh_for_api_and_is_accepted_by_normalize() {
+fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
+    let provider = OpenAIProvider::new_browser_only();
     // The swarm sentinel is a valid stored effort...
     assert_eq!(
         OpenAIProvider::normalize_reasoning_effort("swarm").as_deref(),
@@ -214,14 +215,26 @@ fn swarm_effort_maps_to_xhigh_for_api_and_is_accepted_by_normalize() {
     );
     // ...but maps to the strongest real effort when building the request.
     assert_eq!(
-        OpenAIProvider::api_reasoning_effort(Some("swarm")).as_deref(),
-        Some("xhigh")
+        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        Some("max")
     );
     assert_eq!(
-        OpenAIProvider::api_reasoning_effort(Some("high")).as_deref(),
+        OpenAIProvider::normalize_reasoning_effort("max").as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        OpenAIProvider::normalize_reasoning_effort("minimal").as_deref(),
+        Some("minimal")
+    );
+    assert_eq!(
+        provider.api_reasoning_effort(Some("max")).as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        provider.api_reasoning_effort(Some("high")).as_deref(),
         Some("high")
     );
-    assert_eq!(OpenAIProvider::api_reasoning_effort(None), None);
+    assert_eq!(provider.api_reasoning_effort(None), None);
 
     let request = OpenAIProvider::build_response_request(
         "gpt-5.4",
@@ -230,11 +243,11 @@ fn swarm_effort_maps_to_xhigh_for_api_and_is_accepted_by_normalize() {
         &[],
         false,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
-        OpenAIProvider::api_reasoning_effort(Some("swarm")).as_deref(),
+        provider.api_reasoning_effort(Some("swarm")).as_deref(),
         None,
         None,
         None,
         None,
     );
-    assert_eq!(request["reasoning"]["effort"], serde_json::json!("xhigh"));
+    assert_eq!(request["reasoning"]["effort"], serde_json::json!("max"));
 }

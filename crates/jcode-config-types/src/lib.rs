@@ -1247,7 +1247,7 @@ pub struct ProviderConfig {
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,
-    /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
+    /// Reasoning effort for OpenAI Responses API (none|minimal|low|medium|high|xhigh|max)
     pub openai_reasoning_effort: Option<String>,
     /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
     pub anthropic_reasoning_effort: Option<String>,

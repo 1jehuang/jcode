@@ -244,7 +244,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "effort" if provider.id == "openai" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: /account openai effort <none|low|medium|high|xhigh|clear>"
+                        "Usage: /account openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
                             .to_string(),
                     ));
                 }
@@ -711,10 +711,14 @@ fn save_openai_transport_setting_local(app: &mut App, value: Option<&str>) {
 
 fn save_openai_effort_setting_local(app: &mut App, value: Option<&str>) {
     if let Some(value) = value
-        && !matches!(value, "none" | "low" | "medium" | "high" | "xhigh")
+        && !matches!(
+            value,
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        )
     {
         app.push_display_message(DisplayMessage::error(
-            "OpenAI effort must be one of none, low, medium, high, or xhigh.".to_string(),
+            "OpenAI effort must be one of none, minimal, low, medium, high, xhigh, or max."
+                .to_string(),
         ));
         return;
     }
@@ -978,7 +982,10 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 }
             ));
             lines.push("  - /account openai transport <auto|https|websocket>".to_string());
-            lines.push("  - /account openai effort <none|low|medium|high|xhigh|clear>".to_string());
+            lines.push(
+                "  - /account openai effort <none|minimal|low|medium|high|xhigh|max|clear>"
+                    .to_string(),
+            );
             lines.push("  - /account openai fast <on|off>".to_string());
         }
         "copilot" => {

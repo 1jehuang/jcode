@@ -1237,6 +1237,7 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
         provider.available_efforts(),
         vec![
             "none",
+            "minimal",
             "low",
             "medium",
             "high",
@@ -1245,6 +1246,10 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
             "swarm-deep"
         ]
     );
+    provider
+        .set_reasoning_effort("minimal")
+        .expect("OpenRouter minimal effort should be accepted");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("minimal"));
     provider
         .set_reasoning_effort("max")
         .expect("OpenRouter max alias should be accepted");
@@ -1266,6 +1271,7 @@ fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
         provider.available_efforts(),
         vec![
             "none",
+            "minimal",
             "low",
             "medium",
             "high",
@@ -1506,6 +1512,53 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
     assert!(
         request.contains(r#""reasoning_effort":"max""#),
         "DeepSeek request should include max reasoning effort: {request}"
+    );
+}
+
+#[test]
+fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        model: Arc::new(RwLock::new("gpt-5.5".to_string())),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+    provider
+        .set_reasoning_effort("max")
+        .expect("direct OpenAI-compatible profile should accept max effort");
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should parse");
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.contains(r#""reasoning_effort":"max""#),
+        "direct compatible request must preserve OpenAI max: {request}"
     );
 }
 
@@ -2595,16 +2648,24 @@ fn compat_profile_serving_deepseek_model_supports_reasoning_effort() {
 fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
     let provider = make_custom_compatible_provider();
 
-    for model in ["gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.1-codex-mini"] {
+    for model in [
+        "gpt-5.3-codex-spark",
+        "gpt-5.5",
+        "gpt-5.1-codex-mini",
+        "o1",
+        "o5-mini",
+    ] {
         provider.set_model(model).unwrap();
         assert_eq!(
             provider.available_efforts(),
             vec![
                 "none",
+                "minimal",
                 "low",
                 "medium",
                 "high",
                 "xhigh",
+                "max",
                 "swarm",
                 "swarm-deep"
             ],
@@ -2614,9 +2675,9 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
             .set_reasoning_effort("high")
             .unwrap_or_else(|e| panic!("{model} on compat endpoint accepts effort: {e}"));
         assert_eq!(provider.reasoning_effort(), Some("high".to_string()));
-        // OpenAI vocabulary: max maps to xhigh.
+        // A direct compatible endpoint receives OpenAI's real max value.
         provider.set_reasoning_effort("max").unwrap();
-        assert_eq!(provider.reasoning_effort(), Some("xhigh".to_string()));
+        assert_eq!(provider.reasoning_effort(), Some("max".to_string()));
     }
 
     // Explicit config override still wins in the off direction.
@@ -2627,6 +2688,19 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
     force_off.set_model("gpt-5.3-codex-spark").unwrap();
     assert!(force_off.available_efforts().is_empty());
     assert!(force_off.set_reasoning_effort("high").is_err());
+}
+
+#[test]
+fn compatible_model_switch_clears_an_effort_invalid_for_the_new_vocabulary() {
+    let provider = make_custom_compatible_provider();
+    provider.set_model("gpt-5.5").unwrap();
+    provider.set_reasoning_effort("minimal").unwrap();
+    provider.set_model("deepseek-v4").unwrap();
+    assert_eq!(provider.reasoning_effort(), None);
+    assert!(
+        provider.set_reasoning_effort("minimal").is_err(),
+        "DeepSeek must reject rather than silently promote minimal to max"
+    );
 }
 
 /// Issue #352: named-profile config can override effort support explicitly in

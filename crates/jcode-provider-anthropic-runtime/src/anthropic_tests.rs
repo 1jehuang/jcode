@@ -104,6 +104,10 @@ fn test_anthropic_reasoning_effort_request_parts() {
     let provider = AnthropicProvider::new();
     provider.set_model("claude-sonnet-4-6").unwrap();
     provider.set_reasoning_effort("none").unwrap();
+    assert!(
+        provider.set_reasoning_effort("minimal").is_err(),
+        "Anthropic must reject rather than silently promote minimal to max"
+    );
 
     assert_eq!(
         provider.available_efforts(),

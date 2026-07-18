@@ -1189,19 +1189,30 @@ impl App {
                 }
             }
 
-            // One consistent policy across providers (issue #458): expand a
-            // model into effort rows exactly when that model's own ladder
-            // (inferred from the model id, same table the effort cycler uses)
-            // is non-empty AND the route's runtime can actually apply a
-            // reasoning effort. No provider-specific special cases.
-            let model_efforts: Vec<&'static str> = inferred_reasoning_efforts(None, Some(name));
-            let (effort_routes, plain_routes): (Vec<_>, Vec<_>) = if model_efforts.is_empty() {
-                (Vec::new(), entry_routes)
-            } else {
-                entry_routes
-                    .into_iter()
-                    .partition(|route| route_supports_reasoning_effort(&route.api_method))
-            };
+            // Expand each route only across the effort ladder its runtime can
+            // actually apply. The same model can be reachable through native
+            // OpenAI (where `max` is real) and OpenRouter (where `max` aliases
+            // `xhigh`), so model-id-only inference over-advertises values.
+            let mut effort_routes = Vec::new();
+            let mut plain_routes = Vec::new();
+            let mut model_efforts = Vec::new();
+            for route in entry_routes {
+                let efforts = if route_supports_reasoning_effort(&route.api_method) {
+                    inferred_reasoning_efforts(Some(&route.api_method), Some(name))
+                } else {
+                    Vec::new()
+                };
+                if efforts.is_empty() {
+                    plain_routes.push(route);
+                } else {
+                    for effort in &efforts {
+                        if !model_efforts.contains(effort) {
+                            model_efforts.push(*effort);
+                        }
+                    }
+                    effort_routes.push((route, efforts));
+                }
+            }
 
             if !effort_routes.is_empty() {
                 for effort in &model_efforts {
@@ -1224,7 +1235,10 @@ impl App {
                     let effort_matches_current =
                         *name == current_model && current_effort.as_deref() == Some(*effort);
                     let or_created = openrouter_created_timestamp(name);
-                    for route in &effort_routes {
+                    for (route, route_efforts) in &effort_routes {
+                        if !route_efforts.contains(effort) {
+                            continue;
+                        }
                         let is_this_current = effort_matches_current
                             && model_picker_route_is_current(
                                 name,

@@ -178,7 +178,7 @@ impl App {
                             .as_deref()
                             .unwrap_or("(provider default)"),
                         AccountPickerCommand::PromptValue {
-                            prompt: "Enter OpenAI reasoning effort: none, low, medium, high, xhigh, or clear.".to_string(),
+                            prompt: "Enter OpenAI reasoning effort: none, minimal, low, medium, high, xhigh, max, or clear.".to_string(),
                             command_prefix: "/account openai effort".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing OpenAI effort...".to_string(),

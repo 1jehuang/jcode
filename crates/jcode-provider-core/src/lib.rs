@@ -9,6 +9,7 @@ pub mod model_id;
 pub mod models;
 pub mod openai_schema;
 pub mod pricing;
+pub mod reasoning;
 pub mod retry_after;
 pub mod selection;
 pub mod transport;
@@ -43,6 +44,10 @@ pub use models::{
     is_listable_model_name, normalize_copilot_model_name,
     provider_for_model as core_provider_for_model,
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
+};
+pub use reasoning::{
+    DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
+    canonical_reasoning_effort, inferred_reasoning_efforts,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,

@@ -1018,8 +1018,10 @@ impl OpenRouterProvider {
         let model = model.trim().to_ascii_lowercase();
         model.starts_with("gpt-5")
             || model.contains("codex")
+            || model.starts_with("o1")
             || model.starts_with("o3")
             || model.starts_with("o4")
+            || model.starts_with("o5")
     }
 
     /// Does this runtime accept the OpenAI-style `reasoning_effort` field for
@@ -1055,6 +1057,8 @@ impl OpenRouterProvider {
     pub(crate) fn normalize_reasoning_effort_for_self(&self, effort: &str) -> Option<String> {
         if self.supports_deepseek_reasoning_effort() {
             Self::normalize_reasoning_effort(effort)
+        } else if self.supports_openai_reasoning_effort() {
+            Self::normalize_openai_reasoning_effort(effort)
         } else {
             Self::normalize_unified_reasoning_effort(effort)
         }
@@ -1105,10 +1109,28 @@ impl OpenRouterProvider {
             // by snapping to the strongest setting instead of rejecting the command.
             other => {
                 jcode_base::logging::info(&format!(
-                    "Warning: Unsupported DeepSeek reasoning effort '{}'; expected none|low|medium|high|max. Using 'max'.",
+                    "Warning: Ignoring unsupported DeepSeek reasoning effort '{}'; expected none|low|medium|high|max.",
                     other
                 ));
-                Some("max".to_string())
+                None
+            }
+        }
+    }
+
+    fn normalize_openai_reasoning_effort(raw: &str) -> Option<String> {
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        match value.as_str() {
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm"
+            | "swarm-deep" => Some(value),
+            other => {
+                jcode_base::logging::info(&format!(
+                    "Warning: Ignoring unsupported OpenAI-compatible reasoning effort '{}'.",
+                    other
+                ));
+                None
             }
         }
     }
@@ -1119,14 +1141,16 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "low" | "medium" | "high" | "xhigh" | "swarm" | "swarm-deep" => Some(value),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "swarm" | "swarm-deep" => {
+                Some(value)
+            }
             "max" => Some("xhigh".to_string()),
             other => {
                 jcode_base::logging::info(&format!(
-                    "Warning: Unsupported OpenRouter reasoning effort '{}'; expected none|low|medium|high|xhigh|max alias. Using 'xhigh'.",
+                    "Warning: Ignoring unsupported OpenRouter reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max alias.",
                     other
                 ));
-                Some("xhigh".to_string())
+                None
             }
         }
     }
