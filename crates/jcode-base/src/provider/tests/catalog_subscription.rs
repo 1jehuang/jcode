@@ -58,7 +58,13 @@ fn test_openai_live_catalog_replaces_static_fallback_list() {
     populate_account_models(vec!["gpt-5.4-live-only".to_string()]);
     let models = known_openai_model_ids();
 
-    assert_eq!(models, vec!["gpt-5.4-live-only".to_string()]);
+    assert_eq!(
+        models,
+        vec![
+            "gpt-5.4-live-only".to_string(),
+            jcode_provider_core::CHATGPT_WEB_MODEL.to_string()
+        ]
+    );
 
     crate::auth::codex::set_active_account_override(None);
 }

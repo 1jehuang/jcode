@@ -62,6 +62,35 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
 }
 
 #[test]
+fn test_chatgpt_web_model_bypasses_live_api_catalog() {
+    let _guard = jcode_base::storage::lock_test_env();
+    jcode_base::auth::codex::set_active_account_override(Some("web-model-test".to_string()));
+    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
+    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
+
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+
+    assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
+    assert_eq!(provider.transport().as_deref(), Some("browser"));
+    assert!(
+        provider
+            .available_models_for_switching()
+            .contains(&CHATGPT_WEB_MODEL.to_string())
+    );
+    provider.set_model("gpt-5.6-sol").unwrap();
+    provider.set_model(CHATGPT_WEB_MODEL).unwrap();
+    assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
+
+    jcode_base::auth::codex::set_active_account_override(None);
+}
+
+#[test]
 fn test_summarize_ws_input_counts_tool_outputs() {
     let items = vec![
         serde_json::json!({

@@ -31,6 +31,13 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        let selected_model = self.model();
+        if is_chatgpt_web_model(&selected_model) {
+            return Arc::clone(&self.chatgpt_web)
+                .complete(messages, tools, system, &selected_model)
+                .await;
+        }
+
         let input = build_responses_input(messages);
         let input_item_count = input.len();
         let api_tools = build_tools(tools);
@@ -668,13 +675,14 @@ impl Provider for OpenAIProvider {
     }
 
     fn supports_image_input(&self) -> bool {
-        true
+        !is_chatgpt_web_model(&self.model())
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        if !jcode_base::provider::known_openai_model_ids()
-            .iter()
-            .any(|known| known == model)
+        if !is_chatgpt_web_model(model)
+            && !jcode_base::provider::known_openai_model_ids()
+                .iter()
+                .any(|known| known == model)
         {
             anyhow::bail!(
                 "Unsupported OpenAI model '{}'. Use /model to choose from the models available to your account.",
@@ -682,7 +690,10 @@ impl Provider for OpenAIProvider {
             );
         }
         let availability = jcode_base::provider::model_availability_for_account(model);
-        if availability.state == jcode_base::provider::AccountModelAvailabilityState::Unavailable {
+        if !is_chatgpt_web_model(model)
+            && availability.state
+                == jcode_base::provider::AccountModelAvailabilityState::Unavailable
+        {
             let detail =
                 jcode_base::provider::format_account_model_availability_detail(&availability)
                     .unwrap_or_else(|| "not available for your account".to_string());
@@ -714,7 +725,12 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()])
+        let mut models =
+            jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()]);
+        if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
+            models.insert(0, CHATGPT_WEB_MODEL.to_string());
+        }
+        models
     }
 
     fn available_models_display(&self) -> Vec<String> {
@@ -843,6 +859,9 @@ impl Provider for OpenAIProvider {
     }
 
     fn transport(&self) -> Option<String> {
+        if is_chatgpt_web_model(&self.model()) {
+            return Some("browser".to_string());
+        }
         self.transport_mode
             .try_read()
             .ok()
@@ -882,11 +901,12 @@ impl Provider for OpenAIProvider {
     }
 
     fn supports_compaction(&self) -> bool {
-        true
+        !is_chatgpt_web_model(&self.model())
     }
 
     fn uses_jcode_compaction(&self) -> bool {
-        self.native_compaction_mode != OpenAINativeCompactionMode::Auto
+        is_chatgpt_web_model(&self.model())
+            || self.native_compaction_mode != OpenAINativeCompactionMode::Auto
     }
 
     async fn native_compact(
@@ -1025,6 +1045,7 @@ impl Provider for OpenAIProvider {
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
             persistent_ws: Arc::new(Mutex::new(None)),
+            chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
         })
     }
 

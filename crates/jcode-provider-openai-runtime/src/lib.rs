@@ -42,6 +42,12 @@ const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = jcode_provider_core::DEFAULT_OPENAI_MODEL;
 const ORIGINATOR: &str = "codex_cli_rs";
 
+pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
+
+pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
+    model.trim() == CHATGPT_WEB_MODEL
+}
+
 /// Whether the hosted `image_generation` tool can be attached for `model_id`.
 ///
 /// The Responses backend only exposes `image_generation` to general
@@ -525,6 +531,8 @@ pub struct OpenAIProvider {
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
     /// Persistent WebSocket connection for incremental continuation
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    /// Browser-backed ChatGPT state for web-only models such as GPT-5.6 Pro.
+    chatgpt_web: Arc<chatgpt_web::ChatGptWebState>,
 }
 
 impl OpenAIProvider {
@@ -553,9 +561,10 @@ impl OpenAIProvider {
         // Check for model override from environment
         let mut model =
             std::env::var("JCODE_OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        if !jcode_base::provider::known_openai_model_ids()
-            .iter()
-            .any(|known| known == &model)
+        if !is_chatgpt_web_model(&model)
+            && !jcode_base::provider::known_openai_model_ids()
+                .iter()
+                .any(|known| known == &model)
         {
             jcode_base::logging::info(&format!(
                 "Warning: '{}' is not supported; falling back to '{}'",
@@ -627,6 +636,7 @@ impl OpenAIProvider {
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
             persistent_ws: Arc::new(Mutex::new(None)),
+            chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
         }
     }
 
@@ -1040,6 +1050,7 @@ use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 #[cfg(test)]
 use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
 
+mod chatgpt_web;
 #[path = "openai_provider_impl.rs"]
 mod openai_provider_impl;
 #[path = "openai_stream_runtime.rs"]
