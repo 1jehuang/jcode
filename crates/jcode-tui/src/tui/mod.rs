@@ -216,6 +216,12 @@ pub trait TuiState {
     fn chat_overscroll_active(&self) -> bool {
         false
     }
+    /// Whether the overscroll status line is pinned permanently visible by
+    /// config (`display.overscroll_status = "on"`). A pinned line is part of
+    /// the stable layout, unlike the transient elastic reveal.
+    fn chat_overscroll_pinned(&self) -> bool {
+        false
+    }
     /// Seconds remaining in the overscroll dwell window, used to render the
     /// `(overscroll x.x)` countdown. `None` when not shown.
     fn chat_overscroll_remaining(&self) -> Option<f32> {
@@ -1573,8 +1579,10 @@ pub(crate) fn redraw_interval_with_policy(
     // The elastic overscroll line shows a live `(overscroll x.x)` countdown that
     // depletes over ~1.5s. Without a dedicated branch it falls through to the
     // 250ms idle cadence and ticks in coarse, steppy jumps. Drive it at the
-    // smooth animation cadence so the countdown reads as continuous.
-    if state.chat_overscroll_active() {
+    // smooth animation cadence so the countdown reads as continuous. A line
+    // pinned on by config has no countdown (`remaining` is None) and must not
+    // pin the redraw loop at animation cadence forever.
+    if state.chat_overscroll_remaining().is_some() {
         return match policy.tier {
             crate::perf::PerformanceTier::Minimal => fast_interval,
             _ => animation_interval,
@@ -1708,7 +1716,8 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         && state.streaming_text().is_empty()
         && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
-        && !state.chat_overscroll_active()
+        // Only the elastic countdown needs ticks; a config-pinned line is static.
+        && state.chat_overscroll_remaining().is_none()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
@@ -1743,7 +1752,7 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         || state.learn_hint().is_some()
         || state.has_pending_mouse_scroll_animation()
         || state.copy_selection_edge_autoscroll_active()
-        || state.chat_overscroll_active()
+        || state.chat_overscroll_remaining().is_some()
         || state.has_notification()
         || rate_limit_countdown_redraw_active(state)
         || state.remote_startup_phase_active()

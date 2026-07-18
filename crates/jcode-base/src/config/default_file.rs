@@ -182,6 +182,12 @@ prompt_entry_animation = true
 # command is always available regardless of this setting.
 # active_sessions_manager = false
 
+# Overscroll status line (model/provider/context info below the input):
+#   "overscroll" - elastic reveal when scrolling past the bottom (default)
+#   "on"         - always visible
+#   "off"        - never shown
+# overscroll_status = "overscroll"
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.

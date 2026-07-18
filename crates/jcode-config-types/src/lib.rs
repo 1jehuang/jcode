@@ -126,6 +126,30 @@ impl DiffDisplayMode {
     }
 }
 
+/// When to show the overscroll status line (model/provider/context info below
+/// the input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverscrollStatusMode {
+    /// Never show the status line.
+    Off,
+    /// Always show the status line below the input.
+    On,
+    /// Elastic reveal: show it briefly when scrolling past the bottom (default).
+    #[default]
+    Overscroll,
+}
+
+impl OverscrollStatusMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Overscroll => "overscroll",
+        }
+    }
+}
+
 /// How to display mermaid diagrams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1057,6 +1081,11 @@ pub struct DisplayConfig {
     /// command works regardless of this setting.
     #[serde(default)]
     pub active_sessions_manager: bool,
+    /// When to show the overscroll status line below the input
+    /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
+    /// reveal when scrolling past the bottom, "on" keeps it always visible.
+    #[serde(default)]
+    pub overscroll_status: OverscrollStatusMode,
 }
 
 impl Default for DisplayConfig {
@@ -1090,6 +1119,7 @@ impl Default for DisplayConfig {
             keybinding_hints: true,
             theme: String::new(),
             active_sessions_manager: false,
+            overscroll_status: OverscrollStatusMode::default(),
         }
     }
 }

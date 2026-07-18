@@ -261,6 +261,11 @@ impl crate::tui::TuiState for TestState {
     fn chat_overscroll_active(&self) -> bool {
         self.chat_overscroll_active
     }
+    fn chat_overscroll_remaining(&self) -> Option<f32> {
+        // TestState models the elastic reveal: while active, a countdown is
+        // depleting (a config-pinned line would report None here instead).
+        self.chat_overscroll_active.then_some(1.0)
+    }
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None
     }

@@ -1719,23 +1719,41 @@ impl App {
 
     /// Record an overscroll tick (downward scroll while already pinned to the
     /// bottom). Reveals the elastic status line below the input and (re)starts
-    /// the dwell window after which it rebounds away.
+    /// the dwell window after which it rebounds away. Only meaningful in the
+    /// `overscroll` mode; `off` never shows the line and `on` always does.
     pub(super) fn register_chat_overscroll(&mut self) {
-        self.chat_overscroll_last = Some(Instant::now());
+        if matches!(
+            self.overscroll_status_mode,
+            crate::config::OverscrollStatusMode::Overscroll
+        ) {
+            self.chat_overscroll_last = Some(Instant::now());
+        }
     }
 
     /// Whether the overscroll status line is currently revealed.
     pub(super) fn chat_overscroll_active(&self) -> bool {
-        self.chat_overscroll_last
-            .map(|t| t.elapsed() < Self::OVERSCROLL_DWELL)
-            .unwrap_or(false)
+        match self.overscroll_status_mode {
+            crate::config::OverscrollStatusMode::Off => false,
+            crate::config::OverscrollStatusMode::On => true,
+            crate::config::OverscrollStatusMode::Overscroll => self
+                .chat_overscroll_last
+                .map(|t| t.elapsed() < Self::OVERSCROLL_DWELL)
+                .unwrap_or(false),
+        }
     }
 
     /// Seconds remaining in the overscroll dwell window before the line
     /// rebounds away. Returns `None` when the overscroll line is not currently
     /// shown. Drives the visible `(overscroll x.x)` countdown so users can see
-    /// the line is temporary.
+    /// the line is temporary. Always `None` when the line is pinned on or off
+    /// by config (no countdown to show).
     pub(super) fn chat_overscroll_remaining(&self) -> Option<f32> {
+        if !matches!(
+            self.overscroll_status_mode,
+            crate::config::OverscrollStatusMode::Overscroll
+        ) {
+            return None;
+        }
         let last = self.chat_overscroll_last?;
         let elapsed = last.elapsed();
         if elapsed >= Self::OVERSCROLL_DWELL {

@@ -620,6 +620,13 @@ impl crate::tui::TuiState for App {
         self.chat_overscroll_active()
     }
 
+    fn chat_overscroll_pinned(&self) -> bool {
+        matches!(
+            self.overscroll_status_mode,
+            crate::config::OverscrollStatusMode::On
+        )
+    }
+
     fn chat_overscroll_remaining(&self) -> Option<f32> {
         self.chat_overscroll_remaining()
     }
