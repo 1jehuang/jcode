@@ -511,8 +511,7 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    let followup_scheduled = app.schedule_auto_poke_followup_if_needed()
-        || app.schedule_overnight_poke_followup_if_needed();
+    let followup_scheduled = app.schedule_turn_end_followups();
     if !followup_scheduled {
         app.clear_visible_turn_started();
         if !app.pending_queued_dispatch && app.queued_messages.is_empty() {

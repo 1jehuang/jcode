@@ -1259,6 +1259,54 @@ impl App {
             && (!self.input.trim().is_empty() || !self.pending_images.is_empty())
     }
 
+    /// Folds this turn's guardrail-stop flag into the consecutive counter.
+    /// Call once per finished turn, before scheduling automatic follow-ups.
+    /// Returns true when automatic continuation (auto-poke/overnight poke)
+    /// must stop because the provider keeps refusing: a guardrail refusal is
+    /// deterministic for the same request, so re-poking loops forever
+    /// (observed live as one refused API call per auto-poke, every ~7s).
+    pub(super) fn guardrail_stops_exhausted_at_turn_end(&mut self) -> bool {
+        let stopped = std::mem::take(&mut self.turn_guardrail_stopped);
+        if !stopped {
+            self.consecutive_guardrail_stops = 0;
+            return false;
+        }
+        self.consecutive_guardrail_stops = self.consecutive_guardrail_stops.saturating_add(1);
+        self.consecutive_guardrail_stops >= Self::GUARDRAIL_STOP_MAX_CONSECUTIVE
+    }
+
+    /// Disarm auto-poke and overnight poke after repeated guardrail refusals
+    /// and tell the user why, instead of silently re-sending the refused
+    /// request on every turn end.
+    pub(super) fn stop_auto_continuation_after_guardrail(&mut self) {
+        let had_overnight = self.overnight_auto_poke.take().is_some();
+        if !self.auto_poke_incomplete_todos && !had_overnight {
+            return;
+        }
+        let cleared = super::commands::disable_auto_poke(self);
+        crate::logging::warn(&format!(
+            "Stopping auto-poke after {} consecutive provider guardrail stops (cleared {} queued poke message(s), overnight={})",
+            self.consecutive_guardrail_stops, cleared, had_overnight
+        ));
+        self.push_display_message(DisplayMessage::system(format!(
+            "🛑 Auto-poke stopped: the provider guardrail refused {} turns in a row. Re-poking the same request will keep getting refused. Rephrase or narrow the task, then run /poke again to resume.",
+            self.consecutive_guardrail_stops
+        )));
+        self.set_status_notice("Poke stopped: provider guardrail");
+    }
+
+    /// Turn-end entry point for automatic continuations. Applies the
+    /// guardrail circuit breaker first, then tries auto-poke and overnight
+    /// poke scheduling. Returns true when a follow-up was queued.
+    pub(super) fn schedule_turn_end_followups(&mut self) -> bool {
+        if self.guardrail_stops_exhausted_at_turn_end() {
+            self.stop_auto_continuation_after_guardrail();
+            return false;
+        }
+        self.schedule_auto_poke_followup_if_needed()
+            || self.schedule_overnight_poke_followup_if_needed()
+    }
+
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch

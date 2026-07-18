@@ -252,3 +252,90 @@ fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
         let _ = std::fs::remove_file(&path);
     }
 }
+
+/// Repeated provider guardrail refusals must trip the circuit breaker and
+/// disarm auto-poke instead of re-sending the refused request forever
+/// (observed live: `[guardrail] ... refusal` alternating with
+/// `Auto-poking: N incomplete todos` every ~7s, one refused API call each).
+#[test]
+fn test_repeated_guardrail_refusals_stop_auto_poke_loop() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Never-finishing task".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save incomplete todo");
+
+        let run_refused_turn = |app: &mut App, remote: &mut _, id: u64| {
+            app.is_processing = true;
+            app.status = ProcessingStatus::Streaming;
+            app.current_message_id = Some(id);
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ProviderGuardrail {
+                    stop_reason: Some("refusal".to_string()),
+                    message: "Provider guardrail stopped the response (stop_reason: refusal)."
+                        .to_string(),
+                },
+                remote,
+            );
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id }, remote);
+            // Simulate the queued poke actually dispatching before the next turn.
+            app.queued_messages.clear();
+            app.hidden_queued_system_messages.clear();
+            app.pending_queued_dispatch = false;
+        };
+
+        // First refusal: still under budget, auto-poke may schedule again.
+        run_refused_turn(&mut app, &mut remote, 1);
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "one refusal alone must not disarm auto-poke"
+        );
+        assert_eq!(app.consecutive_guardrail_stops, 1);
+
+        // Second consecutive refusal: circuit breaker must trip.
+        run_refused_turn(&mut app, &mut remote, 2);
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "repeated refusals must disarm auto-poke"
+        );
+        assert!(
+            app.queued_messages.is_empty(),
+            "no poke follow-up may stay queued after the breaker trips"
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.role == "system" && m.content.contains("guardrail refused")),
+            "the user should be told why auto-poke stopped"
+        );
+
+        // A successful turn resets the streak once auto-poke is re-armed.
+        commands::activate_auto_poke(&mut app);
+        assert_eq!(app.consecutive_guardrail_stops, 0);
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(3);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 3 }, &mut remote);
+        assert_eq!(app.consecutive_guardrail_stops, 0);
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "a clean turn must keep auto-poke armed"
+        );
+    });
+}

@@ -1051,8 +1051,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.current_message_id = None;
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
-            let auto_poked = app.schedule_auto_poke_followup_if_needed()
-                || app.schedule_overnight_poke_followup_if_needed();
+            let auto_poked = app.schedule_turn_end_followups();
             if !auto_poked {
                 app.clear_visible_turn_started();
             }
@@ -1070,6 +1069,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 .as_deref()
                 .filter(|r| !r.trim().is_empty())
                 .unwrap_or("guardrail");
+            // Mark the turn so the Done handler can count consecutive
+            // guardrail stops and stop auto-poke/overnight loops that would
+            // otherwise re-send the refused request forever.
+            app.turn_guardrail_stopped = true;
             // Plain text prefix: U+1F6E1 shield renders poorly in some
             // terminals (kitty shows a narrow monochrome glyph).
             app.push_display_message(DisplayMessage::system(format!("[guardrail] {}", message)));
@@ -1165,8 +1168,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     "client_turn_completed",
                     std::time::Duration::from_secs(30),
                 );
-                auto_poked = app.schedule_auto_poke_followup_if_needed()
-                    || app.schedule_overnight_poke_followup_if_needed();
+                auto_poked = app.schedule_turn_end_followups();
                 if !auto_poked {
                     app.clear_visible_turn_started();
                     if app.queued_messages.is_empty() {
@@ -1381,8 +1383,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // that is known to work), instead of leaving the user to run
                 // /login or /model manually.
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
-                return app.schedule_auto_poke_followup_if_needed()
-                    || app.schedule_overnight_poke_followup_if_needed();
+                return app.schedule_turn_end_followups();
             }
             false
         }

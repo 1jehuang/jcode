@@ -863,6 +863,16 @@ pub struct App {
     /// has sent. Without a budget, a model that stops updating its todos gets
     /// nudged on every turn forever, silently burning an API call per tick.
     todo_completion_gate_attempts: u8,
+    /// Set when the current turn ended with a provider guardrail/refusal stop
+    /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
+    /// update `consecutive_guardrail_stops`.
+    turn_guardrail_stopped: bool,
+    /// Consecutive turns that ended in a provider guardrail/refusal stop.
+    /// Auto-poke and overnight poke must stop re-sending after a few of
+    /// these: the same request refused once is almost always refused again,
+    /// so blindly poking loops forever (observed live: one refused API call
+    /// every ~7s until manually interrupted).
+    consecutive_guardrail_stops: u8,
     // When armed by /overnight, automatically continue guarded follow-up turns until wake/wrap.
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
@@ -1551,6 +1561,12 @@ impl App {
     /// full API call per nudge. The counter resets whenever a nudge actually
     /// changes the stored todos (progress) or auto-poke is re-armed.
     const TODO_COMPLETION_GATE_MAX_ATTEMPTS: u8 = 5;
+    /// Consecutive guardrail/refusal-stopped turns tolerated before automatic
+    /// continuation paths (auto-poke, overnight poke) are stopped. Guardrail
+    /// refusals are deterministic for the same request, so re-poking the same
+    /// session just burns one refused API call per poke forever (observed
+    /// live: refusal + auto-poke alternating every ~7s until interrupted).
+    const GUARDRAIL_STOP_MAX_CONSECUTIVE: u8 = 2;
     /// Circuit breaker for credential failures: once this many consecutive
     /// turn errors classify as credential/auth failures, every automatic
     /// resend path (auto-retry, auto-poke, overnight poke, queued follow-ups)
