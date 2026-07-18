@@ -1172,7 +1172,10 @@ pub(super) fn gather_todos_and_goals_for_session(
     (Vec::new(), Vec::new())
 }
 
-pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
+pub(super) fn gather_memory_info(
+    memory_enabled: bool,
+    working_dir: Option<String>,
+) -> Option<MemoryInfo> {
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -1218,8 +1221,9 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
                 None => fallback_memory_info(memory_enabled, &activity, &sidecar_model),
             };
             *refreshing = true;
-            std::thread::spawn(|| {
-                let result = gather_memory_info_inner();
+            let working_dir = working_dir.clone();
+            std::thread::spawn(move || {
+                let result = gather_memory_info_inner(working_dir);
                 if let Ok(mut guard) = CACHE.lock() {
                     *guard = Some((Instant::now(), result, false));
                 }
@@ -1228,8 +1232,8 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         }
 
         *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-        std::thread::spawn(|| {
-            let result = gather_memory_info_inner();
+        std::thread::spawn(move || {
+            let result = gather_memory_info_inner(working_dir);
             if let Ok(mut guard) = CACHE.lock() {
                 *guard = Some((Instant::now(), result, false));
             }
@@ -1257,7 +1261,7 @@ fn fallback_memory_info(
     })
 }
 
-fn gather_memory_info_inner() -> Option<MemoryInfo> {
+fn gather_memory_info_inner(working_dir: Option<String>) -> Option<MemoryInfo> {
     let activity = crate::memory::get_activity();
     let sidecar_model = if crate::memory::memory_sidecar_enabled() {
         let sidecar = crate::sidecar::Sidecar::new();
@@ -1272,7 +1276,12 @@ fn gather_memory_info_inner() -> Option<MemoryInfo> {
 
     use crate::memory::MemoryManager;
 
-    let manager = MemoryManager::new();
+    // Scope the manager to the session working dir so the project count reads
+    // the same projects/<hash>.json store the memory tool writes (issue #491).
+    let manager = match working_dir.as_deref() {
+        Some(dir) if !dir.trim().is_empty() => MemoryManager::new().with_project_dir(dir),
+        _ => MemoryManager::new(),
+    };
     let project_graph = manager.load_project_graph().ok();
     let global_graph = manager.load_global_graph().ok();
 

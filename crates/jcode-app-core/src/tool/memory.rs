@@ -40,6 +40,19 @@ impl MemoryTool {
             )),
         }
     }
+
+    /// Scope the manager to the per-call working directory so project-scoped
+    /// memories resolve to the right `projects/<hash>.json` store. The base
+    /// manager is built once in `new()` with `project_dir: None`, which made
+    /// project writes silently no-op and reads come back empty (issue #491).
+    fn scoped_manager(&self, ctx: &ToolContext) -> MemoryManager {
+        match ctx.working_dir.as_deref() {
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                self.manager.clone().with_project_dir(dir)
+            }
+            _ => self.manager.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +134,7 @@ impl Tool for MemoryTool {
         let input: MemoryInput = serde_json::from_value(input)?;
         let action_label = input.action.clone();
         let session_id = ctx.session_id.clone();
+        let manager = self.scoped_manager(&ctx);
 
         match input.action.as_str() {
             "remember" => {
@@ -144,9 +158,9 @@ impl Tool for MemoryTool {
                     entry = entry.with_tags(tags);
                 }
                 let id = if scope == "global" {
-                    self.manager.remember_global(entry)?
+                    manager.remember_global(entry)?
                 } else {
-                    self.manager.remember_project(entry)?
+                    manager.remember_project(entry)?
                 };
                 // The agent just wrote this memory itself; the content is in
                 // the transcript (tool call + result), so auto-recall should
@@ -184,7 +198,7 @@ impl Tool for MemoryTool {
                             action: "recall".into(),
                             detail: "recent".into(),
                         });
-                        let result = match self.manager.get_prompt_memories_scoped(limit, scope) {
+                        let result = match manager.get_prompt_memories_scoped(limit, scope) {
                             Some(memories) => {
                                 let count =
                                     memories.lines().filter(|l| l.starts_with("- ")).count();
@@ -220,10 +234,10 @@ impl Tool for MemoryTool {
                         });
 
                         let results = if mode == "cascade" {
-                            self.manager
+                            manager
                                 .find_similar_with_cascade_scoped(&query, 0.5, limit, scope)?
                         } else {
-                            self.manager
+                            manager
                                 .find_similar_scoped(&query, 0.5, limit, scope)?
                         };
 
@@ -277,7 +291,7 @@ impl Tool for MemoryTool {
                     action: "search".into(),
                     detail: truncate_for_widget(&query, 40),
                 });
-                let results = self.manager.search_scoped(&query, scope)?;
+                let results = manager.search_scoped(&query, scope)?;
                 memory::add_event(MemoryEventKind::ToolRecalled {
                     query: truncate_for_widget(&query, 40),
                     count: results.len(),
@@ -302,7 +316,7 @@ impl Tool for MemoryTool {
                     action: "list".into(),
                     detail: String::new(),
                 });
-                let all = self.manager.list_all_scoped(scope)?;
+                let all = manager.list_all_scoped(scope)?;
                 memory::add_event(MemoryEventKind::ToolListed { count: all.len() });
                 memory::set_state(MemoryState::Idle);
                 if all.is_empty() {
@@ -324,7 +338,7 @@ impl Tool for MemoryTool {
                     action: "forget".into(),
                     detail: truncate_for_widget(&id, 30),
                 });
-                let found = self.manager.forget(&id)?;
+                let found = manager.forget(&id)?;
                 memory::add_event(MemoryEventKind::ToolForgot { id: id.clone() });
                 memory::set_state(MemoryState::Idle);
                 if found {
@@ -346,7 +360,7 @@ impl Tool for MemoryTool {
                     detail: format!("{} +{}", truncate_for_widget(&id, 20), tags.join(",")),
                 });
                 for tag in &tags {
-                    self.manager.tag_memory(&id, tag)?;
+                    manager.tag_memory(&id, tag)?;
                 }
                 let tags_str = tags.join(", ");
                 memory::add_event(MemoryEventKind::ToolTagged {
@@ -377,7 +391,7 @@ impl Tool for MemoryTool {
                         truncate_for_widget(&to_id, 15)
                     ),
                 });
-                self.manager.link_memories(&from_id, &to_id, weight)?;
+                manager.link_memories(&from_id, &to_id, weight)?;
                 memory::add_event(MemoryEventKind::ToolLinked {
                     from: from_id.clone(),
                     to: to_id.clone(),
@@ -396,7 +410,7 @@ impl Tool for MemoryTool {
                     action: "related".into(),
                     detail: truncate_for_widget(&id, 30),
                 });
-                let related = self.manager.get_related(&id, depth)?;
+                let related = manager.get_related(&id, depth)?;
                 memory::add_event(MemoryEventKind::ToolRecalled {
                     query: format!("related:{}", truncate_for_widget(&id, 20)),
                     count: related.len(),
@@ -469,5 +483,62 @@ mod tests {
         assert!(!props.contains_key("weight"));
         assert!(!props.contains_key("depth"));
         assert!(!props.contains_key("mode"));
+    }
+
+    fn test_ctx(working_dir: Option<std::path::PathBuf>) -> ToolContext {
+        ToolContext {
+            session_id: "test-session".to_string(),
+            message_id: "test-message".to_string(),
+            tool_call_id: "test-tool-call".to_string(),
+            working_dir,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    /// Issue #491 regression: project-scoped remember followed by list must
+    /// round-trip through the real (non-test-mode) manager when the tool
+    /// context carries a working dir.
+    #[tokio::test]
+    async fn project_scope_round_trips_with_working_dir() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        let remember = tool
+            .execute(
+                json!({
+                    "action": "remember",
+                    "content": "issue-491-probe",
+                    "scope": "project"
+                }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("remember should succeed");
+        assert!(remember.output.contains("issue-491-probe"));
+
+        let list = tool
+            .execute(
+                json!({ "action": "list", "scope": "project" }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("list should succeed");
+        assert!(
+            list.output.contains("issue-491-probe"),
+            "project-scoped memory must persist and be listed, got: {}",
+            list.output
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 }
