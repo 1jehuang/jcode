@@ -50,16 +50,28 @@ pub(crate) fn format_menubar_summary(counts: SessionCounts) -> String {
     )
 }
 
-/// Title for one session row in the dropdown menu: the session's animal emoji
-/// and short name, plus a streaming marker while a response is generating.
+/// Title for one session row in the dropdown menu. Match terminal window title
+/// semantics: the emoji identifies the session, while a custom/todo-derived
+/// display title explains the work. Do not repeat the generated animal name.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn format_session_menu_item_title(session_id: &str, streaming: bool) -> String {
+    let display_title = crate::process_title::terminal_display_title_for_id(session_id);
+    format_session_menu_item_title_with_display(session_id, display_title.as_deref(), streaming)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn format_session_menu_item_title_with_display(
+    session_id: &str,
+    display_title: Option<&str>,
+    streaming: bool,
+) -> String {
     let display = crate::id::extract_session_name(session_id).unwrap_or(session_id);
     let icon = crate::id::session_icon(display);
+    let label = crate::process_title::terminal_window_title(icon, display_title, None, false);
     if streaming {
-        format!("{icon} {display} · streaming")
+        format!("{label} · streaming")
     } else {
-        format!("{icon} {display}")
+        label
     }
 }
 
@@ -745,19 +757,36 @@ mod tests {
     }
 
     #[test]
-    fn session_menu_item_title_shows_icon_name_and_streaming() {
+    fn session_menu_item_title_uses_meaningful_title_instead_of_animal_name() {
+        let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
         assert_eq!(
-            format_session_menu_item_title("session_buffalo_1781229104969_6d487ff77287de4f", false),
-            "🐃 buffalo"
+            format_session_menu_item_title_with_display(
+                session_id,
+                Some("Improve menu labels"),
+                false
+            ),
+            "🐃 Improve menu labels"
         );
         assert_eq!(
-            format_session_menu_item_title("session_buffalo_1781229104969_6d487ff77287de4f", true),
-            "🐃 buffalo · streaming"
+            format_session_menu_item_title_with_display(
+                session_id,
+                Some("Improve menu labels"),
+                true
+            ),
+            "🐃 Improve menu labels · streaming"
         );
-        // Unparseable IDs fall back to the raw ID with the generic icon.
+    }
+
+    #[test]
+    fn session_menu_item_title_is_icon_only_without_meaningful_title() {
+        let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
         assert_eq!(
-            format_session_menu_item_title("weird-id", false),
-            "💫 weird-id"
+            format_session_menu_item_title_with_display(session_id, None, false),
+            "🐃"
+        );
+        assert_eq!(
+            format_session_menu_item_title_with_display("weird-id", None, false),
+            "💫"
         );
     }
 
