@@ -3876,7 +3876,12 @@ pub(crate) fn render_tool_message(
         }
     }
 
+    // Fallback command preview on a second line only when the row has no
+    // intent. With an intent present, the command summary is inline-only: it
+    // shows on the tool row when it fits and is dropped otherwise, never
+    // spilling onto a second line.
     if tools_ui::canonical_tool_name(&tc.name) == "bash"
+        && intent.is_none()
         && !rendered_tool_line_text.contains('$')
         && let Some(command) = tc.input.get("command").and_then(|v| v.as_str())
     {

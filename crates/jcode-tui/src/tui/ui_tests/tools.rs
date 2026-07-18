@@ -1095,6 +1095,43 @@ fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
     assert!(rendered[0].contains("tok"), "rendered={rendered:?}");
 }
 
+/// With an intent present, the bash command preview must never spill onto a
+/// second `$ ...` line. It renders inline when it fits and is dropped when it
+/// does not.
+#[test]
+fn test_render_tool_message_with_intent_never_adds_second_command_line() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "ok".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: Some(ToolCall {
+            id: "call_intent_no_wrap".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "set -euo pipefail; python -c 'import modal' && echo ready"
+            }),
+            intent: Some("Launch exactly one paid Opus canary".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 60, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+    assert!(!rendered.is_empty(), "rendered={rendered:?}");
+    assert_eq!(
+        rendered.len(),
+        1,
+        "intent rows must stay single-line: {rendered:?}"
+    );
+    assert!(
+        !rendered[0].trim_start().starts_with('$'),
+        "rendered={rendered:?}"
+    );
+}
+
 #[test]
 fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
     let msg = DisplayMessage {
