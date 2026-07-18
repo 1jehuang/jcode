@@ -791,6 +791,49 @@ mod tests {
     }
 
     #[test]
+    fn session_menu_item_title_loads_persisted_todo_title() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
+        let mut session = crate::session::Session::create_with_id(
+            session_id.to_string(),
+            None,
+            Some("Generated session title".to_string()),
+        );
+        session.save().expect("save session");
+        crate::todo::save_todos(
+            session_id,
+            &[crate::todo::TodoItem {
+                content: "Use todo context in the menu bar".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                id: "menubar-label".to_string(),
+                group: Some("Meaningful menu labels".to_string()),
+                confidence: Some(95),
+                completion_confidence: None,
+                confidence_history: Vec::new(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        assert_eq!(
+            format_session_menu_item_title(session_id, false),
+            "🐃 Meaningful menu labels"
+        );
+
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
     fn counts_report_serializes_to_json() {
         let report = CountsReport::from(SessionCounts {
             total: 4,
