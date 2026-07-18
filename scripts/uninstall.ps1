@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Uninstall jcode on Windows.
 .DESCRIPTION

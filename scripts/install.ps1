@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Install jcode on Windows.
 .DESCRIPTION
