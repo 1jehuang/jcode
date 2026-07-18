@@ -26,6 +26,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -533,6 +534,9 @@ pub struct OpenAIProvider {
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     /// Browser-backed ChatGPT state for web-only models such as GPT-5.6 Pro.
     chatgpt_web: Arc<chatgpt_web::ChatGptWebState>,
+    /// True when this runtime was created without API credentials. It can still
+    /// serve browser-backed models and upgrades in place after a successful login.
+    browser_only: Arc<AtomicBool>,
 }
 
 impl OpenAIProvider {
@@ -549,18 +553,51 @@ impl OpenAIProvider {
     }
 
     pub fn new(credentials: CodexCredentials) -> Self {
-        let credential_mode =
-            OpenAICredentialMode::from_runtime_env(jcode_provider_core::DualAuthProvider::OpenAI);
-        let credentials = match credential_mode {
-            OpenAICredentialMode::Auto => credentials,
-            OpenAICredentialMode::OAuth | OpenAICredentialMode::ApiKey => {
-                load_credentials_for_mode(credential_mode).unwrap_or(credentials)
+        Self::new_inner(credentials, false)
+    }
+
+    /// Construct the OpenAI runtime for browser-backed models when no Codex or
+    /// platform API credential exists. API models remain unavailable until a
+    /// later auth refresh successfully loads credentials.
+    pub fn new_browser_only() -> Self {
+        Self::new_inner(
+            CodexCredentials {
+                access_token: String::new(),
+                refresh_token: String::new(),
+                id_token: None,
+                account_id: None,
+                expires_at: None,
+            },
+            true,
+        )
+    }
+
+    fn new_inner(credentials: CodexCredentials, browser_only: bool) -> Self {
+        let credential_mode = if browser_only {
+            OpenAICredentialMode::Auto
+        } else {
+            OpenAICredentialMode::from_runtime_env(jcode_provider_core::DualAuthProvider::OpenAI)
+        };
+        let credentials = if browser_only {
+            credentials
+        } else {
+            match credential_mode {
+                OpenAICredentialMode::Auto => credentials,
+                OpenAICredentialMode::OAuth | OpenAICredentialMode::ApiKey => {
+                    load_credentials_for_mode(credential_mode).unwrap_or(credentials)
+                }
             }
         };
 
         // Check for model override from environment
-        let mut model =
-            std::env::var("JCODE_OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let mut model = if browser_only {
+            CHATGPT_WEB_MODEL.to_string()
+        } else {
+            std::env::var("JCODE_OPENAI_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+                .trim()
+                .to_string()
+        };
         if !is_chatgpt_web_model(&model)
             && !jcode_base::provider::known_openai_model_ids()
                 .iter()
@@ -637,7 +674,12 @@ impl OpenAIProvider {
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
             persistent_ws: Arc::new(Mutex::new(None)),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
+            browser_only: Arc::new(AtomicBool::new(browser_only)),
         }
+    }
+
+    fn is_browser_only(&self) -> bool {
+        self.browser_only.load(AtomicOrdering::Acquire)
     }
 
     pub(crate) fn reload_credentials_now(&self) {
@@ -650,6 +692,7 @@ impl OpenAIProvider {
             match self.credentials.try_write() {
                 Ok(mut guard) => {
                     *guard = credentials;
+                    self.browser_only.store(false, AtomicOrdering::Release);
                 }
                 Err(_) => {
                     jcode_base::logging::info(
@@ -667,6 +710,7 @@ impl OpenAIProvider {
         match self.credentials.try_write() {
             Ok(mut guard) => {
                 *guard = credentials;
+                self.browser_only.store(false, AtomicOrdering::Release);
             }
             Err(_) => {
                 anyhow::bail!(

@@ -16,7 +16,7 @@ const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
-const REQUIRED_STABLE_POLLS: usize = 3;
+const REQUIRED_STABLE_POLLS: usize = 8;
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -24,13 +24,13 @@ static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// ChatGPT tab and serializes turns through it. Provider forks get a fresh state
 /// and therefore a separate tab, so parallel jcode agents do not cross streams.
 pub(crate) struct ChatGptWebState {
-    tab_id: Mutex<Option<u64>>,
+    turn_lock: Mutex<()>,
 }
 
 impl ChatGptWebState {
     pub(crate) fn new() -> Self {
         Self {
-            tab_id: Mutex::new(None),
+            turn_lock: Mutex::new(()),
         }
     }
 
@@ -47,17 +47,25 @@ impl ChatGptWebState {
         let (tx, rx) = mpsc::channel(128);
 
         tokio::spawn(async move {
-            let _ = tx
+            if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "browser/chatgpt-web".to_string(),
                 }))
-                .await;
-            let _ = tx
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if tx
                 .send(Ok(StreamEvent::StatusDetail {
                     detail: "Using GPT-5.6 Pro through your logged-in ChatGPT web session"
                         .to_string(),
                 }))
-                .await;
+                .await
+                .is_err()
+            {
+                return;
+            }
 
             match self.run_turn(&prompt, &model, &tx).await {
                 Ok(response) => {
@@ -83,6 +91,9 @@ impl ChatGptWebState {
         if model != CHATGPT_WEB_MODEL {
             anyhow::bail!("Unsupported ChatGPT web model: {model}");
         }
+        if tx.is_closed() {
+            anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
+        }
 
         let status = jcode_base::browser::ensure_browser_ready_noninteractive()
             .await
@@ -95,14 +106,10 @@ impl ChatGptWebState {
             );
         }
 
-        let mut tab_guard = self.tab_id.lock().await;
-        let tab_id = ensure_chatgpt_tab(&mut tab_guard).await?;
+        let _turn_guard = self.turn_lock.lock().await;
+        let (tab_id, fork_name) = open_chatgpt_tab().await?;
         let result = async {
-            let _ = tx
-                .send(Ok(StreamEvent::ConnectionPhase {
-                    phase: jcode_message_types::ConnectionPhase::Authenticating,
-                }))
-                .await;
+            send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
 
             wait_for_editor(tab_id).await?;
             prepare_chatgpt_page(tab_id).await?;
@@ -111,11 +118,10 @@ impl ChatGptWebState {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
 
-            let _ = tx
-                .send(Ok(StreamEvent::ConnectionPhase {
-                    phase: jcode_message_types::ConnectionPhase::Connecting,
-                }))
-                .await;
+            send_phase(tx, jcode_message_types::ConnectionPhase::Connecting).await?;
+            if tx.is_closed() {
+                anyhow::bail!("ChatGPT web response consumer was closed before submission");
+            }
 
             bridge_command(
                 "click",
@@ -124,50 +130,99 @@ impl ChatGptWebState {
             .await
             .context("Failed to submit the prompt in ChatGPT")?;
 
-            let _ = tx
-                .send(Ok(StreamEvent::ConnectionPhase {
-                    phase: jcode_message_types::ConnectionPhase::WaitingForResponse,
-                }))
-                .await;
+            send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
             poll_for_response(tab_id, tx).await
         }
         .await;
-        // Temporary chats are not in history, and blanking the reusable tab also
-        // keeps the large jcode system prompt out of the visible browser after a
-        // turn or setup failure.
-        let _ = bridge_command(
-            "navigate",
-            json!({ "tabId": tab_id, "url": "about:blank", "wait": false }),
-        )
-        .await;
-        result
+        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
+        match (result, cleanup) {
+            (Ok(response), Ok(())) => Ok(response),
+            (Err(err), Ok(())) => Err(err),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(
+                "GPT-5.6 Pro answered, but jcode could not securely close its browser tab",
+            )),
+            (Err(err), Err(cleanup_err)) => {
+                Err(err.context(format!("Browser tab cleanup also failed: {cleanup_err:#}")))
+            }
+        }
     }
 }
 
-async fn ensure_chatgpt_tab(tab_guard: &mut Option<u64>) -> Result<u64> {
-    if let Some(tab_id) = *tab_guard {
-        if bridge_command(
-            "navigate",
-            json!({ "tabId": tab_id, "url": CHATGPT_WEB_URL, "wait": true }),
-        )
+async fn send_phase(
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    phase: jcode_message_types::ConnectionPhase,
+) -> Result<()> {
+    tx.send(Ok(StreamEvent::ConnectionPhase { phase }))
         .await
-        .is_ok()
-        {
-            return Ok(tab_id);
-        }
-        *tab_guard = None;
-    }
+        .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
+}
 
-    let result = bridge_command("newSession", json!({ "url": CHATGPT_WEB_URL }))
+async fn open_chatgpt_tab() -> Result<(u64, String)> {
+    let source = bridge_command("getActiveTab", json!({}))
         .await
-        .context("Failed to open a ChatGPT web tab")?;
-    let tab_id = result
+        .context("Failed to find a Firefox tab to duplicate for ChatGPT")?;
+    let source_tab_id = source
         .get("tabId")
         .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return a ChatGPT tab id"))?;
-    *tab_guard = Some(tab_id);
-    Ok(tab_id)
+        .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return an active tab id"))?;
+    let fork_name = next_owned_tab_name();
+    let fork = bridge_command(
+        "fork",
+        json!({ "tabId": source_tab_id, "paths": [{ "name": fork_name }] }),
+    )
+    .await
+    .context("Failed to create a temporary Firefox tab for ChatGPT")?;
+    let tab_id = fork
+        .get("forks")
+        .and_then(Value::as_array)
+        .and_then(|forks| forks.first())
+        .and_then(|fork| fork.get("tabId"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Browser bridge did not return the forked ChatGPT tab id")
+        })?;
+
+    if let Err(err) = bridge_command(
+        "navigate",
+        json!({ "tabId": tab_id, "url": CHATGPT_WEB_URL, "wait": true }),
+    )
+    .await
+    {
+        let _ = bridge_command("killFork", json!({ "fork": fork_name })).await;
+        return Err(err).context("Failed to open ChatGPT in the temporary Firefox tab");
+    }
+    Ok((tab_id, fork_name))
+}
+
+async fn close_chatgpt_tab(tab_id: u64, fork_name: &str) -> Result<()> {
+    match bridge_command("killFork", json!({ "fork": fork_name })).await {
+        Ok(_) => Ok(()),
+        Err(close_err) => {
+            bridge_command(
+                "navigate",
+                json!({ "tabId": tab_id, "url": "about:blank", "wait": true }),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to close the owned browser tab ({close_err:#}) and failed to clear its sensitive prompt content"
+                )
+            })?;
+            Err(close_err).context(
+                "Failed to close the owned browser tab; its sensitive content was cleared to about:blank",
+            )
+        }
+    }
+}
+
+fn next_owned_tab_name() -> String {
+    let sequence = TOOL_CALL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("jcode-chatgpt-web-{millis}-{sequence}")
 }
 
 async fn wait_for_editor(tab_id: u64) -> Result<()> {
@@ -196,9 +251,17 @@ const onboarding = document.querySelector('[role="dialog"]');
 if (onboarding && onboarding.innerText.includes('Business workspace is ready')) {
   return { onboarding: true };
 }
-const continueButton = Array.from(document.querySelectorAll('button')).find(
-  b => b.innerText.trim() === 'Continue' && !b.closest('[role="dialog"]')
-);
+const continueButton = Array.from(document.querySelectorAll('button')).find(b => {
+  if (b.innerText.trim() !== 'Continue') return false;
+  let node = b.parentElement;
+  for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+    const text = node.innerText || '';
+    if (/temporary chat/i.test(text) && /(won't appear|not appear).*(history|conversation)/i.test(text)) {
+      return true;
+    }
+  }
+  return false;
+});
 if (continueButton) continueButton.click();
 const model = Array.from(document.querySelectorAll('button.__composer-pill'))
   .map(b => b.innerText.trim()).find(Boolean) || '';
@@ -280,7 +343,8 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
                 "tabId": tab_id,
                 "selector": EDITOR_SELECTOR,
                 "text": chunk,
-                "clear": false
+                "clear": false,
+                "append": true
             }),
         )
         .await
@@ -292,7 +356,16 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
         r#"
 const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
 const submit = document.querySelector('#composer-submit-button');
-return { length: editor ? editor.innerText.length : 0, submitDisabled: !submit || submit.disabled };
+const text = editor
+  ? (editor.children.length > 0
+      ? Array.from(editor.children).map(child => child.textContent || '').join('\n')
+      : editor.innerText)
+  : '';
+let hash = 2166136261;
+for (let index = 0; index < text.length; index++) {
+  hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
+}
+return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submit.disabled };
 "#,
     )
     .await?;
@@ -300,9 +373,18 @@ return { length: editor ? editor.innerText.length : 0, submitDisabled: !submit |
         .get("length")
         .and_then(Value::as_u64)
         .unwrap_or_default();
-    if actual_len == 0 || verification.get("submitDisabled").and_then(Value::as_bool) == Some(true)
-    {
-        anyhow::bail!("ChatGPT composer did not accept the jcode prompt");
+    let actual_hash = verification
+        .get("hash")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as u32;
+    let (expected_len, expected_hash) = utf16_fingerprint(prompt);
+    if actual_len != expected_len as u64 || actual_hash != expected_hash {
+        anyhow::bail!(
+            "ChatGPT composer received an incomplete prompt (expected UTF-16 length/hash {expected_len}/{expected_hash}, got {actual_len}/{actual_hash})"
+        );
+    }
+    if verification.get("submitDisabled").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!("ChatGPT composer accepted the prompt but did not enable submission");
     }
     Ok(())
 }
@@ -318,6 +400,7 @@ async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) 
     let mut last_text = String::new();
     let mut stable_polls = 0usize;
     let mut last_status_second = 0u64;
+    let mut streaming_emitted = false;
 
     loop {
         if tx.is_closed() {
@@ -357,7 +440,10 @@ const busy = Array.from(document.querySelectorAll('button')).some(b => {
   return /stop (generating|streaming|response)/i.test(label) || b.dataset.testid === 'stop-button';
 });
 const alert = Array.from(document.querySelectorAll('[role="alert"]')).map(e => e.innerText.trim()).filter(Boolean).at(-1) || '';
-return { text, busy, alert, model: message ? message.dataset.messageModelSlug || '' : '' };
+const terminal = !!section && !busy && !!section.querySelector(
+  '[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label*="Good response"], button[aria-label*="Bad response"]'
+);
+return { text, busy, terminal, alert, model: message ? message.dataset.messageModelSlug || '' : '' };
 "#,
         )
         .await
@@ -370,6 +456,20 @@ return { text, busy, alert, model: message ? message.dataset.messageModelSlug ||
             .trim_end()
             .to_string();
         let busy = state.get("busy").and_then(Value::as_bool) == Some(true);
+        let terminal = state.get("terminal").and_then(Value::as_bool) == Some(true);
+
+        let alert = state
+            .get("alert")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !busy && !alert.is_empty() && started.elapsed() > Duration::from_secs(3) {
+            anyhow::bail!("ChatGPT web rejected the request: {alert}");
+        }
+
+        if !text.is_empty() && !streaming_emitted {
+            send_phase(tx, jcode_message_types::ConnectionPhase::Streaming).await?;
+            streaming_emitted = true;
+        }
 
         if !text.is_empty() && text == last_text && !busy {
             stable_polls += 1;
@@ -378,7 +478,10 @@ return { text, busy, alert, model: message ? message.dataset.messageModelSlug ||
             last_text = text.clone();
         }
 
-        if stable_polls >= REQUIRED_STABLE_POLLS {
+        if terminal || stable_polls >= REQUIRED_STABLE_POLLS {
+            if text.is_empty() {
+                anyhow::bail!("ChatGPT completed the turn without an assistant response");
+            }
             let upstream_model = state
                 .get("model")
                 .and_then(Value::as_str)
@@ -406,16 +509,6 @@ return { text, busy, alert, model: message ? message.dataset.messageModelSlug ||
                 .await;
         }
 
-        if !busy && text.is_empty() {
-            let alert = state
-                .get("alert")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !alert.is_empty() && started.elapsed() > Duration::from_secs(3) {
-                anyhow::bail!("ChatGPT web rejected the request: {alert}");
-            }
-        }
-
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -425,12 +518,6 @@ async fn emit_response(
     response: &str,
     advertised_tools: &[String],
 ) -> Result<()> {
-    let _ = tx
-        .send(Ok(StreamEvent::ConnectionPhase {
-            phase: jcode_message_types::ConnectionPhase::Streaming,
-        }))
-        .await;
-
     if let Some(parsed) = parse_tool_call(response)? {
         if !advertised_tools.iter().any(|name| name == &parsed.name) {
             anyhow::bail!(
@@ -485,9 +572,6 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
         );
     }
     let payload_text = &trimmed[TOOL_CALL_START.len()..trimmed.len() - TOOL_CALL_END.len()];
-    if payload_text.contains(TOOL_CALL_START) || payload_text.contains(TOOL_CALL_END) {
-        anyhow::bail!("GPT-5.6 Pro emitted multiple or nested jcode tool-call envelopes");
-    }
     let payload: Value = serde_json::from_str(payload_text.trim())
         .context("GPT-5.6 Pro emitted invalid JSON in a jcode tool-call envelope")?;
     let name = payload
@@ -627,6 +711,16 @@ fn split_utf8_chunks(value: &str, max_bytes: usize) -> Vec<&str> {
     chunks
 }
 
+fn utf16_fingerprint(value: &str) -> (usize, u32) {
+    let mut hash = 2_166_136_261u32;
+    let mut len = 0usize;
+    for code_unit in value.encode_utf16() {
+        hash = (hash ^ u32::from(code_unit)).wrapping_mul(16_777_619);
+        len += 1;
+    }
+    (len, hash)
+}
+
 async fn evaluate(tab_id: u64, script: &str) -> Result<Value> {
     let output = bridge_command("evaluate", json!({ "tabId": tab_id, "script": script })).await?;
     output
@@ -722,11 +816,28 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_parser_allows_marker_text_inside_json_string_values() {
+        let parsed = parse_tool_call(
+            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"printf '</jcode_tool_call>'\"}}</jcode_tool_call>",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.input["command"], "printf '</jcode_tool_call>'");
+    }
+
+    #[test]
     fn utf8_chunking_preserves_content_and_boundaries() {
         let value = "ab😀cdéfg";
         let chunks = split_utf8_chunks(value, 4);
         assert_eq!(chunks.concat(), value);
         assert!(chunks.iter().all(|chunk| chunk.len() <= 4));
+    }
+
+    #[test]
+    fn utf16_fingerprint_counts_surrogate_pairs_deterministically() {
+        let (len, hash) = utf16_fingerprint("a😀b");
+        assert_eq!(len, 4);
+        assert_eq!(hash, 2_412_414_209);
     }
 
     #[test]

@@ -379,6 +379,7 @@ fn cli_provider_choice_filter_uses_typed_api_methods() {
         test_route("claude-opus-4-6", "Anthropic", "claude-api"),
         test_route("gpt-5.5", "OpenAI", "openai-oauth"),
         test_route("gpt-5.5", "OpenAI", "openai-api-key"),
+        test_route("gpt-5.6-pro[web]", "OpenAI", "chatgpt-web"),
         test_route("deepseek/deepseek-v4-pro", "auto", "openrouter"),
         test_route("grok-code-fast-1", "Copilot", "copilot"),
     ];
@@ -387,11 +388,17 @@ fn cli_provider_choice_filter_uses_typed_api_methods() {
         &super::super::provider_init::ProviderChoice::Openai,
         &routes,
     );
-    assert_eq!(openai.len(), 1);
-    assert_eq!(
-        openai[0].api_method_kind(),
+    assert_eq!(openai.len(), 2);
+    assert!(openai.iter().any(|route| matches!(
+        route.api_method_kind(),
         crate::provider::ModelRouteApiMethod::OpenAIOAuth
-    );
+    )));
+    assert!(openai.iter().any(|route| {
+        matches!(
+            route.api_method_kind(),
+            crate::provider::ModelRouteApiMethod::Other(ref value) if value == "chatgpt-web"
+        )
+    }));
 
     let claude = filter_cli_model_routes_for_choice(
         &super::super::provider_init::ProviderChoice::Claude,

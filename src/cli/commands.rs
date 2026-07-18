@@ -3272,10 +3272,11 @@ fn filter_cli_model_routes_for_choice(
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
             route.api_method_kind().is_anthropic_credential_route()
         }
-        ProviderChoice::Openai => matches!(
-            route.api_method_kind(),
-            crate::provider::ModelRouteApiMethod::OpenAIOAuth
-        ),
+        ProviderChoice::Openai => {
+            let method = route.api_method_kind();
+            matches!(method, crate::provider::ModelRouteApiMethod::OpenAIOAuth)
+                || matches!(method, crate::provider::ModelRouteApiMethod::Other(ref value) if value == "chatgpt-web")
+        }
         ProviderChoice::OpenaiApi => matches!(
             route.api_method_kind(),
             crate::provider::ModelRouteApiMethod::OpenAIApiKey

@@ -173,17 +173,17 @@ pub fn register_external_provider_runtimes() {
     crate::provider::external::register_standard_openrouter_catalog_refresh(
         jcode_provider_openrouter_runtime::maybe_schedule_standard_openrouter_catalog_refresh,
     );
-    // OpenAI's constructor needs Codex credentials on hand; absence means the
-    // provider is simply unavailable.
+    // API-backed OpenAI routes use Codex/platform credentials. The runtime is
+    // still registered without them so browser-backed ChatGPT models remain
+    // usable through the logged-in Firefox session.
     crate::provider::external::register_external_provider_fallible(
         crate::provider::external::OPENAI_RUNTIME,
         || {
-            let credentials = crate::auth::codex::load_credentials().ok()?;
-            Some(
-                std::sync::Arc::new(jcode_provider_openai_runtime::OpenAIProvider::new(
-                    credentials,
-                )) as std::sync::Arc<dyn crate::provider::Provider>,
-            )
+            let provider = match crate::auth::codex::load_credentials() {
+                Ok(credentials) => jcode_provider_openai_runtime::OpenAIProvider::new(credentials),
+                Err(_) => jcode_provider_openai_runtime::OpenAIProvider::new_browser_only(),
+            };
+            Some(std::sync::Arc::new(provider) as std::sync::Arc<dyn crate::provider::Provider>)
         },
     );
     // Copilot's constructor is fallible (needs a GitHub token) and the runtime

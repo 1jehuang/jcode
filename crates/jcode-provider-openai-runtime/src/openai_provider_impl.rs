@@ -679,6 +679,14 @@ impl Provider for OpenAIProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
+        let model = model.trim();
+        if self.is_browser_only() && !is_chatgpt_web_model(model) {
+            anyhow::bail!(
+                "OpenAI API credentials are not available for '{}'. The browser-only runtime can use '{}'; run `jcode login --provider openai` before selecting API models.",
+                model,
+                CHATGPT_WEB_MODEL,
+            );
+        }
         if !is_chatgpt_web_model(model)
             && !jcode_base::provider::known_openai_model_ids()
                 .iter()
@@ -721,10 +729,16 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_models(&self) -> Vec<&'static str> {
+        if self.is_browser_only() {
+            return vec![CHATGPT_WEB_MODEL];
+        }
         jcode_provider_core::ALL_OPENAI_MODELS.to_vec()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
+        if self.is_browser_only() {
+            return vec![CHATGPT_WEB_MODEL.to_string()];
+        }
         let mut models =
             jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()]);
         if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
@@ -738,6 +752,9 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if self.is_browser_only() {
+            return Ok(());
+        }
         // The loaded credential's *shape* is authoritative for which catalog
         // endpoint to hit, not the requested credential mode. In Auto mode a
         // user with only an OPENAI_API_KEY loads an API-key-shaped credential
@@ -869,6 +886,15 @@ impl Provider for OpenAIProvider {
     }
 
     fn set_transport(&self, transport: &str) -> Result<()> {
+        if is_chatgpt_web_model(&self.model()) {
+            if transport.trim().eq_ignore_ascii_case("browser") {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "The '{}' model always uses the browser transport; available transport: browser",
+                CHATGPT_WEB_MODEL
+            );
+        }
         let mode = match transport.trim().to_ascii_lowercase().as_str() {
             "auto" => OpenAITransportMode::Auto,
             "https" | "http" | "sse" => OpenAITransportMode::HTTPS,
@@ -897,11 +923,14 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_transports(&self) -> Vec<&'static str> {
+        if is_chatgpt_web_model(&self.model()) {
+            return vec!["browser"];
+        }
         vec!["auto", "https", "websocket"]
     }
 
     fn supports_compaction(&self) -> bool {
-        !is_chatgpt_web_model(&self.model())
+        true
     }
 
     fn uses_jcode_compaction(&self) -> bool {
@@ -1046,6 +1075,7 @@ impl Provider for OpenAIProvider {
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
             persistent_ws: Arc::new(Mutex::new(None)),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
+            browser_only: Arc::clone(&self.browser_only),
         })
     }
 
@@ -1054,6 +1084,7 @@ impl Provider for OpenAIProvider {
         if let Ok(credentials) = super::load_credentials_for_mode(mode) {
             let mut guard = self.credentials.write().await;
             *guard = credentials;
+            self.browser_only.store(false, AtomicOrdering::Release);
         }
 
         self.clear_persistent_ws("credentials invalidated").await;

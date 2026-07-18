@@ -2,15 +2,16 @@ use crate::auth::{AuthState, AuthStatus};
 
 use super::pricing::cheapness_for_route;
 use super::{
-    ALL_OPENAI_MODELS, AccountModelAvailabilityState, ModelRoute, MultiProvider, Provider,
-    anthropic_api_key_route_availability, anthropic_oauth_route_availability, bedrock,
-    build_anthropic_oauth_route, build_copilot_route, build_openai_api_key_route,
-    build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
-    build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
-    copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
-    format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids, model_availability_for_account, openrouter,
-    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
+    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, ModelRoute, MultiProvider,
+    Provider, anthropic_api_key_route_availability, anthropic_oauth_route_availability, bedrock,
+    build_anthropic_oauth_route, build_chatgpt_web_route, build_copilot_route,
+    build_openai_api_key_route, build_openai_oauth_route, build_openrouter_auto_route,
+    build_openrouter_endpoint_route, build_openrouter_fallback_provider_route,
+    configured_standard_openrouter_profile_routes, copilot, dedupe_model_routes,
+    direct_openai_compatible_profile_routes, format_account_model_availability_detail,
+    is_listable_model_name, known_anthropic_model_ids, known_openai_model_ids,
+    model_availability_for_account, openrouter, openrouter_catalog_model_id, provider_for_model,
+    standard_openrouter_profile_configured,
 };
 
 /// Build the fast local route snapshot used by the TUI model picker while the
@@ -28,6 +29,10 @@ pub fn simplified_model_routes_for_picker(
     let mut routes = Vec::new();
 
     for model in display_models {
+        if model == CHATGPT_WEB_MODEL {
+            routes.push(build_chatgpt_web_route());
+            continue;
+        }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
             if auth.openai_has_oauth {
                 routes.push(ModelRoute {
@@ -355,6 +360,10 @@ fn append_openai_routes(
     };
 
     for model in openai_models {
+        if model == CHATGPT_WEB_MODEL {
+            routes.push(build_chatgpt_web_route());
+            continue;
+        }
         let availability = model_availability_for_account(&model);
         let (available, detail) = if provider.openai_provider().is_none() {
             (false, "no credentials".to_string())

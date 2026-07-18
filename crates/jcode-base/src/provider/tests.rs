@@ -425,6 +425,13 @@ fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
             methods.contains(&("openai-api-key", true)),
             "routes: {methods:?}"
         );
+        let web_routes = routes
+            .iter()
+            .filter(|route| route.model == CHATGPT_WEB_MODEL)
+            .collect::<Vec<_>>();
+        assert_eq!(web_routes.len(), 1, "routes: {web_routes:?}");
+        assert_eq!(web_routes[0].api_method, "chatgpt-web");
+        assert!(web_routes[0].available);
 
         crate::env::remove_var("OPENAI_API_KEY");
         crate::auth::AuthStatus::invalidate_cache();

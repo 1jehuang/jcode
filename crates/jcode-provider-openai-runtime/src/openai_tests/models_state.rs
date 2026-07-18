@@ -91,6 +91,42 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
 }
 
 #[test]
+fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compaction() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let provider = OpenAIProvider::new_browser_only();
+
+    assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
+    assert_eq!(provider.available_models(), vec![CHATGPT_WEB_MODEL]);
+    assert_eq!(
+        provider.available_models_for_switching(),
+        vec![CHATGPT_WEB_MODEL.to_string()]
+    );
+    assert!(provider.supports_compaction());
+    assert!(provider.uses_jcode_compaction());
+    assert_eq!(provider.available_transports(), vec!["browser"]);
+    provider.set_transport("browser").unwrap();
+    assert!(provider.set_transport("auto").is_err());
+    let err = provider
+        .set_model("gpt-5.6-sol")
+        .expect_err("browser-only runtime must not expose API models");
+    assert!(err.to_string().contains("OpenAI API credentials"));
+}
+
+#[test]
+fn test_chatgpt_web_model_environment_override_is_trimmed() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", "  gpt-5.6-pro[web]  ");
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
+}
+
+#[test]
 fn test_summarize_ws_input_counts_tool_outputs() {
     let items = vec![
         serde_json::json!({
