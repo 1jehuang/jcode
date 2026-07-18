@@ -5,10 +5,15 @@
 //! matches Linux `/proc/<pid>/stat` field 22, which lets us guard against PID
 //! reuse before presenting or signaling a process.
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(not(target_os = "linux"))]
+use anyhow::anyhow;
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +45,15 @@ pub struct LiveClaudeSession {
     pub started_at: Option<i64>,
     pub version: Option<String>,
     registry_path: PathBuf,
+}
+
+/// Result of asking the identity-verified Claude process to exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopLiveClaudeOutcome {
+    /// The stable process handle reported that Claude exited.
+    Exited,
+    /// SIGTERM was delivered, but exit was not observed before the deadline.
+    ExitUnconfirmed,
 }
 
 impl LiveClaudeSession {
@@ -170,6 +184,59 @@ fn process_identity_matches(_pid: u32, _expected_start: &str) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: u32) -> std::io::Result<OwnedFd> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) })
+}
+
+#[cfg(target_os = "linux")]
+fn send_sigterm_via_pidfd(pidfd: &OwnedFd) -> std::io::Result<bool> {
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    if matches!(err.raw_os_error(), Some(code) if code == libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(err)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_pidfd_exit(pidfd: &OwnedFd, timeout: Duration) -> std::io::Result<bool> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut pollfd = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if rc > 0 {
+            return Ok(true);
+        }
+        if rc == 0 {
+            return Ok(false);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 fn registry_still_matches(session: &LiveClaudeSession) -> bool {
     let Ok(bytes) = std::fs::read(&session.registry_path) else {
         return false;
@@ -192,31 +259,56 @@ fn remove_registry_if_same(session: &LiveClaudeSession) {
 /// The process-start token is checked again immediately before signaling. A
 /// PID that has exited or been reused is never signaled. This function sends a
 /// single SIGTERM and does not escalate to SIGKILL.
-pub fn stop_live_claude_session(session: &LiveClaudeSession, timeout: Duration) -> Result<()> {
+pub fn stop_live_claude_session(
+    session: &LiveClaudeSession,
+    timeout: Duration,
+) -> Result<StopLiveClaudeOutcome> {
     if !registry_still_matches(session) {
         bail!(
             "Claude Code session {} changed or closed before takeover",
             session.session_id
         );
     }
+
+    #[cfg(target_os = "linux")]
+    let pidfd = open_pidfd(session.pid).with_context(|| {
+        format!(
+            "failed to open a stable handle for Claude Code process {}",
+            session.pid
+        )
+    })?;
+
     if !process_identity_matches(session.pid, &session.proc_start) {
         bail!(
             "Claude Code session {} is no longer owned by the recorded process",
             session.session_id
         );
     }
+    if !registry_still_matches(session) {
+        bail!(
+            "Claude Code session {} changed or closed before takeover",
+            session.session_id
+        );
+    }
 
     #[cfg(target_os = "linux")]
     {
-        let rc = unsafe { libc::kill(session.pid as libc::pid_t, libc::SIGTERM) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if !matches!(err.raw_os_error(), Some(code) if code == libc::ESRCH) {
-                return Err(err).with_context(|| {
-                    format!("failed to stop Claude Code process {}", session.pid)
-                });
-            }
+        let signal_sent = send_sigterm_via_pidfd(&pidfd)
+            .with_context(|| format!("failed to stop Claude Code process {}", session.pid))?;
+        if !signal_sent {
+            remove_registry_if_same(session);
+            return Ok(StopLiveClaudeOutcome::Exited);
         }
+        if wait_for_pidfd_exit(&pidfd, timeout).with_context(|| {
+            format!(
+                "failed while waiting for Claude Code process {}",
+                session.pid
+            )
+        })? {
+            remove_registry_if_same(session);
+            return Ok(StopLiveClaudeOutcome::Exited);
+        }
+        return Ok(StopLiveClaudeOutcome::ExitUnconfirmed);
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -225,20 +317,6 @@ pub fn stop_live_claude_session(session: &LiveClaudeSession, timeout: Duration) 
             "live Claude Code takeover is not yet supported on this platform"
         ));
     }
-
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !process_identity_matches(session.pid, &session.proc_start) {
-            remove_registry_if_same(session);
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    Err(anyhow!(
-        "Claude Code process {} did not exit after SIGTERM; it was not force-killed",
-        session.pid
-    ))
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -304,10 +382,28 @@ mod tests {
         let path = write_record(temp.path(), &target, "takeover", &start);
         let session = live_claude_sessions_in(temp.path()).unwrap().remove(0);
 
-        stop_live_claude_session(&session, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            stop_live_claude_session(&session, Duration::from_secs(2)).unwrap(),
+            StopLiveClaudeOutcome::Exited
+        );
         target.wait().unwrap();
         assert!(unrelated.try_wait().unwrap().is_none());
         assert!(!path.exists());
+
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+
+    #[test]
+    fn pidfd_never_retargets_after_the_original_process_exits() {
+        let mut target = spawn_sleep();
+        let pidfd = open_pidfd(target.id()).unwrap();
+        target.kill().unwrap();
+        target.wait().unwrap();
+
+        let mut unrelated = spawn_sleep();
+        assert!(!send_sigterm_via_pidfd(&pidfd).unwrap());
+        assert!(unrelated.try_wait().unwrap().is_none());
 
         unrelated.kill().unwrap();
         unrelated.wait().unwrap();
