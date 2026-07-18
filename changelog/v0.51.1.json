@@ -1,0 +1,11 @@
+{
+  "version": "0.51.1",
+  "date": "2026-07-18",
+  "title": "Safer live Claude Code takeover",
+  "fixes": [
+    "Taking over a live Claude Code session now signals the exact verified process, so an unrelated process that reused the PID can never be stopped by mistake",
+    "Takeover refuses transcripts that belong to a different Claude session instead of importing the wrong conversation",
+    "If Claude Code does not exit in time during takeover, the prepared Jcode session is preserved and can still be resumed",
+    "The final transcript refresh after takeover is retried, so the last messages Claude flushes on exit are no longer silently dropped"
+  ]
+}
