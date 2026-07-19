@@ -1663,6 +1663,7 @@ fn render_tool_message_prefers_subagent_title_with_model() {
 
 #[test]
 fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
+    crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "ok".to_string(),
@@ -1689,6 +1690,75 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
         lines.len(),
         1,
         "intent should not add vertical space: {rendered}"
+    );
+    crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
+}
+
+/// Default (tool_call_details off): a row with an intent renders only the
+/// intent; the dimmed technical preview is dropped and no fallback command
+/// line is added.
+#[test]
+fn render_tool_message_hides_technical_preview_by_default() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "ok".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_intent".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "cargo test -p jcode render_background_task --lib",
+                "intent": "Verify compact progress card"
+            }),
+            intent: Some("Verify compact progress card".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let rendered = extract_line_text(&lines[0]);
+
+    assert!(
+        rendered.contains("bash · Verify compact progress card"),
+        "rendered={rendered}"
+    );
+    assert!(
+        !rendered.contains("cargo test"),
+        "technical detail should be hidden by default: {rendered}"
+    );
+    assert_eq!(lines.len(), 1, "no extra detail line expected: {rendered}");
+}
+
+/// Even with details off, a failed tool row keeps its error summary so
+/// failures stay diagnosable.
+#[test]
+fn render_tool_message_keeps_error_summary_when_details_hidden() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "Error: command not found: cargoo".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_intent_err".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "cargoo test",
+                "intent": "Run the test suite"
+            }),
+            intent: Some("Run the test suite".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let rendered = extract_line_text(&lines[0]);
+
+    assert!(
+        rendered.contains("Run the test suite ·"),
+        "error summary should still render after the intent: {rendered}"
     );
 }
 
@@ -1910,6 +1980,7 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
 
 #[test]
 fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
+    crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "--- [1] read ---\nflat output\n\n--- [2] read ---\nnested output\n\nCompleted: 2 succeeded, 0 failed".to_string(),
@@ -1956,6 +2027,7 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     );
     assert!(plain.contains("flat.rs"), "{plain}");
     assert!(plain.contains("nested.rs"), "{plain}");
+    crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
 
 fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage {

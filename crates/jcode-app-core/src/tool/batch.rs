@@ -19,7 +19,7 @@ pub(crate) fn generic_batch_schema() -> Value {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["tool"],
+                    "required": ["tool", "intent"],
                     "properties": {
                         "tool": {
                             "type": "string",

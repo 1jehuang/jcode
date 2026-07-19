@@ -9,6 +9,36 @@ pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, is_edit_tool_name, resolve_display_tool_name, tool_output_looks_failed,
 };
 
+/// Whether the dimmed technical detail (command, path, args) should render
+/// alongside a model-provided intent on tool rows. Rows without an intent
+/// always fall back to the technical detail regardless of this setting.
+#[cfg(not(test))]
+pub(crate) fn show_tool_call_details() -> bool {
+    crate::config::config().display.tool_call_details
+}
+
+#[cfg(test)]
+pub(crate) fn show_tool_call_details() -> bool {
+    tests_tool_call_details_override::get()
+}
+
+#[cfg(test)]
+pub(crate) mod tests_tool_call_details_override {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SHOW_DETAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn get() -> bool {
+        SHOW_DETAILS.with(Cell::get)
+    }
+
+    pub(crate) fn set(value: bool) {
+        SHOW_DETAILS.with(|cell| cell.set(value));
+    }
+}
+
 fn infer_bg_action_from_intent_for_display(intent: Option<&str>) -> Option<&'static str> {
     let intent = intent?.trim().to_ascii_lowercase();
     if intent.is_empty() {
@@ -819,7 +849,7 @@ pub(crate) fn get_tool_activity_detail(tool: &ToolCall) -> String {
         .map(str::trim)
         .filter(|intent| !intent.is_empty());
     match intent {
-        Some(intent) if !summary.is_empty() && summary != intent => {
+        Some(intent) if show_tool_call_details() && !summary.is_empty() && summary != intent => {
             format!("{} · {}", intent, summary)
         }
         Some(intent) => intent.to_string(),
@@ -1549,8 +1579,9 @@ pub(super) fn render_batch_subcall_line(
             UnicodeWidthStr::width(format!(" · {label}").as_str())
         });
     let summary_budget = max_width.map(|w| w.saturating_sub(reserved));
-    let summary = output_content
-        .and_then(concise_tool_error_summary)
+    let error_summary = output_content.and_then(concise_tool_error_summary);
+    let is_error = error_summary.is_some();
+    let summary = error_summary
         .unwrap_or_else(|| get_tool_summary_with_budget(tool, bash_max_chars, summary_budget));
 
     let mut spans = vec![
@@ -1563,7 +1594,10 @@ pub(super) fn render_batch_subcall_line(
             intent.clone(),
             Style::default().fg(tool_color()),
         ));
-        if !summary.is_empty() && summary != intent {
+        // Error summaries always render so failures stay diagnosable even
+        // when technical details are hidden.
+        let show_detail = show_tool_call_details() || is_error;
+        if show_detail && !summary.is_empty() && summary != intent {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
             spans.push(Span::styled(summary, Style::default().fg(dim_color())));
         }

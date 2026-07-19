@@ -3812,7 +3812,10 @@ pub(crate) fn render_tool_message(
             intent.to_string(),
             Style::default().fg(tool_color()),
         ));
-        if !summary.is_empty() && summary != intent {
+        // Error summaries always render so failures stay diagnosable even
+        // when technical details are hidden.
+        let show_detail = tools_ui::show_tool_call_details() || is_error || is_partial_batch;
+        if show_detail && !summary.is_empty() && summary != intent {
             tool_line.push(Span::styled(" · ", Style::default().fg(dim_color())));
             tool_line.push(Span::styled(summary, Style::default().fg(dim_color())));
         }

@@ -98,6 +98,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Show/toggle full agentgrep search output inline in chat",
     ),
     RegisteredCommand::public(
+        "/tool-call-details",
+        "Show/toggle dimmed technical details on tool rows with an intent",
+    ),
+    RegisteredCommand::public(
         "/reasoning",
         "Show/change reasoning display (off/full/current)",
     ),
@@ -981,6 +985,26 @@ impl App {
                     (
                         "/compact-notifications off".into(),
                         "Show full multi-line notification cards",
+                    ),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/tool-call-details ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/tool-call-details status".into(),
+                        "Show whether technical details render on intent rows",
+                    ),
+                    (
+                        "/tool-call-details on".into(),
+                        "Show the dimmed technical detail next to tool intents",
+                    ),
+                    (
+                        "/tool-call-details off".into(),
+                        "Show only the intent on tool rows that have one",
                     ),
                 ],
             );

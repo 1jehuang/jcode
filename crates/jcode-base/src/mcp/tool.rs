@@ -47,11 +47,25 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        let input = if input.is_null() {
+        let mut input = if input.is_null() {
             Value::Object(serde_json::Map::new())
         } else {
             input
         };
+        // `intent` is a jcode-injected display-only parameter (see
+        // ensure_intent_in_schema). Strip it before forwarding unless the
+        // MCP server's own schema declares an `intent` property.
+        let server_declares_intent = self
+            .tool_def
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .is_some_and(|p| p.contains_key("intent"));
+        if !server_declares_intent
+            && let Some(object) = input.as_object_mut()
+        {
+            object.remove("intent");
+        }
         let manager = self.manager.read().await;
         let result = manager
             .call_tool(&self.server_name, &self.tool_def.name, input)

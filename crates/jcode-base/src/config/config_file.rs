@@ -195,6 +195,18 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted tool-call-details preference.
+    pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.display.tool_call_details = show;
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.tool_call_details to config: {}",
+            show
+        ));
+        Ok(())
+    }
+
     /// Persist the baked global launch-hotkey mapping.
     ///
     /// Auto-import calls this once with the per-repo chord -> directory layout it

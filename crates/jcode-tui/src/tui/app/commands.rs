@@ -2776,6 +2776,52 @@ fn handle_compact_notifications_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+fn handle_tool_call_details_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/tool-call-details" && !trimmed.starts_with("/tool-call-details ") {
+        return false;
+    }
+
+    let rest = trimmed
+        .strip_prefix("/tool-call-details")
+        .unwrap_or_default()
+        .trim();
+
+    if rest.is_empty() || matches!(rest, "show" | "status") {
+        let current = crate::config::config().display.tool_call_details;
+        app.push_display_message(DisplayMessage::system(format!(
+            "Tool call details are currently {}.\n\nWhen on, tool rows show the dimmed technical detail (command, path, args) next to the model-provided intent. When off, rows with an intent show only the intent; rows without an intent still show the technical detail.\n\nUse /tool-call-details on or /tool-call-details off to change it.",
+            if current { "on" } else { "off" }
+        )));
+        return true;
+    }
+
+    let Some(enabled) = parse_on_off_value(rest) else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /tool-call-details (show), /tool-call-details on, or /tool-call-details off"
+                .to_string(),
+        ));
+        return true;
+    };
+
+    app.set_status_notice(format!(
+        "Tool call details: {}",
+        if enabled { "on" } else { "off" }
+    ));
+    match crate::config::Config::set_tool_call_details(enabled) {
+        Ok(()) => app.push_display_message(DisplayMessage::system(format!(
+            "Saved tool call details: {}. Applied to this session immediately.",
+            if enabled { "on" } else { "off" }
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+            "Applied tool call details {} for this session, but failed to save it as the default: {}",
+            if enabled { "on" } else { "off" },
+            error
+        ))),
+    }
+
+    true
+}
+
 fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed != "/show-agentgrep-output" && !trimmed.starts_with("/show-agentgrep-output ") {
         return false;
@@ -3070,6 +3116,10 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if handle_show_agentgrep_output_command(app, trimmed) {
+        return true;
+    }
+
+    if handle_tool_call_details_command(app, trimmed) {
         return true;
     }
 

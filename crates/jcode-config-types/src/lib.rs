@@ -1063,6 +1063,12 @@ pub struct DisplayConfig {
     /// just the one-line summary (default: false)
     #[serde(default)]
     pub show_agentgrep_output: bool,
+    /// Show the dimmed technical detail (command, path, args) after the
+    /// model-provided intent on tool rows (default: false). When off, rows
+    /// that have an intent show only the intent; rows without an intent
+    /// always fall back to the technical detail.
+    #[serde(default)]
+    pub tool_call_details: bool,
     /// Native terminal scrollbar configuration for scrollable panes
     pub native_scrollbars: NativeScrollbarConfig,
     /// Surface occasional "learn this keybinding" nudges when the user keeps
@@ -1115,6 +1121,7 @@ impl Default for DisplayConfig {
             compact_notifications: false,
             copy_badge_alt_label: String::new(),
             show_agentgrep_output: false,
+            tool_call_details: false,
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
             theme: String::new(),

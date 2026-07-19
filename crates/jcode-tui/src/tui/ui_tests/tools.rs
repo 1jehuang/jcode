@@ -436,6 +436,7 @@ fn test_tool_summary_gmail_actions() {
 
 #[test]
 fn test_tool_activity_detail_prefixes_intent_for_gmail_and_browser() {
+    tools_ui::tests_tool_call_details_override::set(true);
     let gmail = ToolCall {
         id: "call_gmail_intent".to_string(),
         name: "gmail".to_string(),
@@ -465,6 +466,25 @@ fn test_tool_activity_detail_prefixes_intent_for_gmail_and_browser() {
     let detail = tools_ui::get_tool_activity_detail(&browser);
     assert!(detail.starts_with("Open docs page"), "detail={detail:?}");
     assert!(detail.contains("example.com"), "detail={detail:?}");
+    tools_ui::tests_tool_call_details_override::set(false);
+}
+
+/// By default (tool_call_details off) the activity detail is the intent alone.
+#[test]
+fn test_tool_activity_detail_hides_technical_summary_by_default() {
+    let gmail = ToolCall {
+        id: "call_gmail_intent_only".to_string(),
+        name: "gmail".to_string(),
+        input: serde_json::json!({
+            "action": "search",
+            "query": "is:unread",
+            "intent": "Check unread mail"
+        }),
+        intent: Some("Check unread mail".to_string()),
+        thought_signature: None,
+    };
+    let detail = tools_ui::get_tool_activity_detail(&gmail);
+    assert_eq!(detail, "Check unread mail");
 }
 
 #[test]
@@ -702,6 +722,7 @@ fn test_render_batch_subcall_line_keeps_full_bash_summary_when_row_fits() {
 
 #[test]
 fn test_render_batch_subcall_line_shows_model_provided_intent() {
+    tools_ui::tests_tool_call_details_override::set(true);
     let tool = ToolCall {
         id: "batch-1-read".to_string(),
         name: "read".to_string(),
@@ -719,6 +740,33 @@ fn test_render_batch_subcall_line_shows_model_provided_intent() {
         "rendered={rendered:?}"
     );
     assert!(rendered.contains("ui_messages.rs"), "rendered={rendered:?}");
+    tools_ui::tests_tool_call_details_override::set(false);
+}
+
+/// By default (tool_call_details off) a subcall row with an intent shows only
+/// the intent, not the dimmed technical summary.
+#[test]
+fn test_render_batch_subcall_line_hides_technical_detail_by_default() {
+    let tool = ToolCall {
+        id: "batch-1-read".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"file_path": "src/tui/ui_messages.rs"}),
+        intent: Some("Inspect completed batch rendering".to_string()),
+        thought_signature: None,
+    };
+
+    let line =
+        tools_ui::render_batch_subcall_line(&tool, "✓", rgb(100, 180, 100), 50, Some(120), None);
+    let rendered = extract_line_text(&line);
+
+    assert!(
+        rendered.contains("read · Inspect completed batch rendering"),
+        "rendered={rendered:?}"
+    );
+    assert!(
+        !rendered.contains("ui_messages.rs"),
+        "technical detail should be hidden by default: {rendered:?}"
+    );
 }
 
 #[test]
@@ -1234,9 +1282,11 @@ fn test_action_tools_degrade_to_tool_name_when_action_absent() {
 }
 
 /// The live activity line should surface the model-provided `intent` for any
-/// tool (including swarm) ahead of the technical summary.
+/// tool (including swarm) ahead of the technical summary when tool call
+/// details are enabled.
 #[test]
 fn test_activity_detail_prefers_intent_and_appends_summary() {
+    tools_ui::tests_tool_call_details_override::set(true);
     let tool = ToolCall {
         id: "swarm-1".to_string(),
         name: "swarm".to_string(),
@@ -1258,6 +1308,7 @@ fn test_activity_detail_prefers_intent_and_appends_summary() {
         detail.contains("spawn"),
         "technical summary should still appear: {detail:?}"
     );
+    tools_ui::tests_tool_call_details_override::set(false);
 }
 
 /// When the `ToolCall.intent` field is not populated yet (e.g. streamed input
