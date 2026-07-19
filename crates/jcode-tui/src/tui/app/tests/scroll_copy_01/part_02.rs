@@ -234,6 +234,7 @@ fn test_remote_prompt_jump_ctrl_brackets() {
 #[cfg(target_os = "macos")]
 #[test]
 fn test_remote_prompt_jump_ctrl_esc_fallback_on_macos() {
+    let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();

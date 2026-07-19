@@ -33,6 +33,12 @@ fn create_scroll_test_app(
     crate::tui::mermaid::clear_streaming_preview_diagram();
 
     let mut app = create_test_app();
+    if diagrams == 0 {
+        // Process-global diagrams can be registered by sibling tests after the
+        // clear above. Keep text-only geometry deterministic at the App level.
+        app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+        app.diagram_pane_enabled = false;
+    }
     let content = App::build_scroll_test_content(diagrams, padding, None);
     app.display_messages = vec![
         DisplayMessage {
@@ -365,6 +371,7 @@ fn test_chat_native_scrollbar_hides_scroll_counters() {
 
 #[test]
 fn test_streaming_repaint_does_not_leave_bracket_artifact() {
+    let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     let backend = ratatui::backend::TestBackend::new(90, 20);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
@@ -975,6 +982,7 @@ fn test_prompt_jump_ctrl_brackets() {
 #[cfg(target_os = "macos")]
 #[test]
 fn test_prompt_jump_ctrl_esc_fallback_on_macos() {
+    let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
 
     render_and_snap(&app, &mut terminal);

@@ -560,6 +560,11 @@ fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
 fn test_mouse_click_in_input_moves_cursor_to_clicked_position() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
+    // A persisted first-run state can otherwise replace the composer with the
+    // suggestion welcome screen, leaving a zero-height input hit target.
+    app.push_display_message(DisplayMessage::assistant("seed transcript"));
+    app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+    app.diagram_pane_enabled = false;
     app.input = "hello world".to_string();
     app.cursor_pos = app.input.len();
     app.set_centered(false);
@@ -630,6 +635,10 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
 fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
+    // Keep first-run suggestions from replacing the composer under test.
+    app.push_display_message(DisplayMessage::assistant("seed transcript"));
+    app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+    app.diagram_pane_enabled = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
@@ -678,6 +687,10 @@ fn test_mouse_click_in_input_switches_focus_from_side_panel() {
 fn test_mouse_click_in_wrapped_input_moves_cursor_to_second_visual_line() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
+    // Keep first-run suggestions from replacing the composer under test.
+    app.push_display_message(DisplayMessage::assistant("seed transcript"));
+    app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+    app.diagram_pane_enabled = false;
     app.input = "abcdefghij".to_string();
     app.cursor_pos = 0;
     app.set_centered(false);
