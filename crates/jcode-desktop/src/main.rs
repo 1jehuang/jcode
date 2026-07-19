@@ -560,27 +560,10 @@ async fn run() -> Result<()> {
                 WindowEvent::CloseRequested => target.exit(),
                 WindowEvent::Resized(size) => {
                     pending_resize = Some(size);
-                    forward_app_worker_input(
-                        &mut hot_reloader,
-                        DesktopInputEvent::Window(DesktopWindowEvent::Resized {
-                            width: size.width,
-                            height: size.height,
-                            scale_factor: window.scale_factor() as f32,
-                        }),
-                    );
                     window.request_redraw();
                 }
                 WindowEvent::ScaleFactorChanged { .. } => {
                     pending_resize = Some(window.inner_size());
-                    let size = window.inner_size();
-                    forward_app_worker_input(
-                        &mut hot_reloader,
-                        DesktopInputEvent::Window(DesktopWindowEvent::Resized {
-                            width: size.width,
-                            height: size.height,
-                            scale_factor: window.scale_factor() as f32,
-                        }),
-                    );
                     window.request_redraw();
                 }
                 WindowEvent::Focused(focused) => {
@@ -1229,6 +1212,18 @@ async fn run() -> Result<()> {
                     };
                     if let Some(size) = pending_resize.take() {
                         canvas.resize(size);
+                        // Winit may deliver many resize events between presented
+                        // frames. Forward only the newest dimensions so the app
+                        // worker does not rebuild and serialize a discarded scene
+                        // for every intermediate event.
+                        forward_app_worker_input(
+                            &mut hot_reloader,
+                            DesktopInputEvent::Window(DesktopWindowEvent::Resized {
+                                width: size.width,
+                                height: size.height,
+                                scale_factor: window.scale_factor() as f32,
+                            }),
+                        );
                     }
                     let window_size = window.inner_size();
                     if !desktop_surface_size_is_renderable(window_size) {

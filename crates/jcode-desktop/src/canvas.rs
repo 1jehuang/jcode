@@ -484,7 +484,11 @@ impl Canvas {
         self.primitive_vertices_cache.clear();
         self.primitive_frame_vertices.clear();
         self.primitive_caret_vertices.clear();
-        self.workspace_text_pane_cache.clear();
+        // Keep workspace pane entries across resizes. Their identity keys include
+        // the panel dimensions, so the next render refreshes any size-sensitive
+        // text and geometry while retaining the previous buffers for compatible
+        // layout buckets. Clearing here made every intermediate resize frame a
+        // cold render and dropped all glyph/vertex allocations.
         self.app_mode_transition.clear();
         self.app_mode_transition_vertices.clear();
         self.single_session_scroll_motion.clear();
