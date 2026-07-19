@@ -47,9 +47,7 @@ impl MemoryTool {
     /// project writes silently no-op and reads come back empty (issue #491).
     fn scoped_manager(&self, ctx: &ToolContext) -> MemoryManager {
         match ctx.working_dir.as_deref() {
-            Some(dir) if !dir.as_os_str().is_empty() => {
-                self.manager.clone().with_project_dir(dir)
-            }
+            Some(dir) if !dir.as_os_str().is_empty() => self.manager.clone().with_project_dir(dir),
             _ => self.manager.clone(),
         }
     }

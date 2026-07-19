@@ -308,14 +308,14 @@ pub fn stop_live_claude_session(
             remove_registry_if_same(session);
             return Ok(StopLiveClaudeOutcome::Exited);
         }
-        return Ok(StopLiveClaudeOutcome::ExitUnconfirmed);
+        Ok(StopLiveClaudeOutcome::ExitUnconfirmed)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = timeout;
-        return Err(anyhow!(
+        Err(anyhow!(
             "live Claude Code takeover is not yet supported on this platform"
-        ));
+        ))
     }
 }
 
