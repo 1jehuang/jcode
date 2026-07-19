@@ -551,7 +551,7 @@ fn retention_readiness_scoring_is_monotonic_and_non_compensating() {
 }
 
 #[test]
-fn retention_factor_registry_has_explicit_scope_and_rationales() {
+fn retention_readiness_factor_registry_has_explicit_scope_and_rationales() {
     let factors = retention_factor_registry();
     assert_eq!(
         factors

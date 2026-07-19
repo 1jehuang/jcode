@@ -169,6 +169,13 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 900 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
 
+      - name: Run deterministic retention-readiness cohort
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 180 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-app-core retention_readiness -- --nocapture
+
       - name: Compile integration test binaries
         shell: bash
         # Build the integration-test binaries up front (not counted against the
