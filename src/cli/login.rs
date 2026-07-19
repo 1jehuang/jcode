@@ -257,7 +257,13 @@ pub async fn run_login_provider(
                 provider.display_name
             );
         }
-        start_scriptable_login(provider, account_label, &options).await
+        if provider.target == LoginProviderTarget::Google
+            && !auth::browser_suppressed(options.no_browser)
+        {
+            run_automatic_google_login(provider.id, &options).await
+        } else {
+            start_scriptable_login(provider, account_label, &options).await
+        }
     } else {
         match provider.target {
             LoginProviderTarget::AutoImport => {

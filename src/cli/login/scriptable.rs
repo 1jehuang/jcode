@@ -49,6 +49,43 @@ pub(super) async fn run_scriptable_login_provider(
     complete_scriptable_login(provider, account_label, options, input).await
 }
 
+/// Run the normal Google OAuth flow when the caller is noninteractive but a
+/// browser is available. The scriptable flow is normally used in that
+/// environment to avoid prompts, but Google needs a live localhost callback
+/// listener or the browser lands on a confusing connection error page.
+pub(super) async fn run_automatic_google_login(
+    provider_id: &str,
+    options: &LoginOptions,
+) -> Result<LoginFlowOutcome> {
+    let tier = options
+        .google_access_tier
+        .unwrap_or(auth::google::GmailAccessTier::Full);
+    let tokens = auth::google::login(tier, options.no_browser).await?;
+    let credentials_path = auth::google::credentials_path()?;
+    let tokens_path = auth::google::tokens_path()?;
+
+    emit_scriptable_auth_success(
+        options.json,
+        ScriptableAuthSuccess {
+            status: "authenticated",
+            provider: provider_id.to_string(),
+            account_label: None,
+            credentials_path: Some(credentials_path.display().to_string()),
+            email: tokens.email.clone(),
+        },
+    )?;
+    if !options.json {
+        eprintln!("\nGmail setup complete!");
+        if let Some(email) = tokens.email {
+            eprintln!("Account: {}", email);
+        }
+        eprintln!("Access tier: {}", tokens.tier.label());
+        eprintln!("Tokens saved to {}", tokens_path.display());
+    }
+    crate::telemetry::record_auth_success(provider_id, "oauth");
+    Ok(LoginFlowOutcome::Completed)
+}
+
 pub(super) async fn start_scriptable_login(
     provider: LoginProviderDescriptor,
     account_label: Option<&str>,
