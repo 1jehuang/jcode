@@ -47,6 +47,16 @@ struct MemoryIncidentMetrics {
     connected_clients: usize,
 }
 
+fn count_live_spawned_swarm_agents<'a>(
+    live_session_ids: &HashSet<String>,
+    spawned_session_ids: impl IntoIterator<Item = &'a String>,
+) -> usize {
+    spawned_session_ids
+        .into_iter()
+        .filter(|session_id| live_session_ids.contains(*session_id))
+        .count()
+}
+
 async fn connected_session_snapshot(
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
@@ -261,7 +271,18 @@ pub(super) async fn maybe_handle_server_state_command(
 
     if cmd == "info" || cmd == "server:info" {
         let uptime_secs = server_start_time.elapsed().as_secs();
-        let session_count = sessions.read().await.len();
+        let live_session_ids: HashSet<String> = sessions.read().await.keys().cloned().collect();
+        let session_count = live_session_ids.len();
+        let spawned_swarm_agent_count = {
+            let members = swarm_members.read().await;
+            count_live_spawned_swarm_agents(
+                &live_session_ids,
+                members
+                    .values()
+                    .filter(|member| member.report_back_to_session_id.is_some())
+                    .map(|member| &member.session_id),
+            )
+        };
         let member_count = swarm_members.read().await.len();
         let has_update = super::server_has_newer_binary();
         return Ok(Some(
@@ -273,6 +294,7 @@ pub(super) async fn maybe_handle_server_state_command(
                 "git_hash": server_identity.git_hash,
                 "uptime_secs": uptime_secs,
                 "session_count": session_count,
+                "spawned_swarm_agent_count": spawned_swarm_agent_count,
                 "swarm_member_count": member_count,
                 "has_update": has_update,
                 "debug_control_enabled": super::debug_control_allowed(),
@@ -656,6 +678,25 @@ mod tests {
                 .expect("debug snapshot deadlocked");
         assert!(connected_agents.is_empty());
         assert!(members.is_empty());
+    }
+
+    #[test]
+    fn spawned_swarm_agent_count_only_includes_live_owned_sessions() {
+        let live_session_ids = HashSet::from([
+            "root".to_string(),
+            "worker-running".to_string(),
+            "worker-ready".to_string(),
+        ]);
+        let spawned_session_ids = [
+            "worker-running".to_string(),
+            "worker-ready".to_string(),
+            "worker-stale".to_string(),
+        ];
+
+        assert_eq!(
+            count_live_spawned_swarm_agents(&live_session_ids, spawned_session_ids.iter()),
+            2
+        );
     }
 
     #[test]
