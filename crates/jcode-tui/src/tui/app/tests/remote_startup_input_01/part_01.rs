@@ -715,18 +715,25 @@ fn test_model_picker_includes_copilot_models_in_remote_mode() {
 
         let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
 
+        // Effort metadata (a process-global catalog) may expand a model into
+        // "name (effort)" rows, so match the bare name or an effort-suffixed row.
+        let has_model = |model: &str| {
+            model_names
+                .iter()
+                .any(|name| *name == model || name.starts_with(&format!("{model} (")))
+        };
         assert!(
-            model_names.contains(&"claude-opus-4.6"),
+            has_model("claude-opus-4.6"),
             "picker should contain copilot model claude-opus-4.6, got: {:?}",
             model_names
         );
         assert!(
-            model_names.contains(&"gemini-3-pro-preview"),
+            has_model("gemini-3-pro-preview"),
             "picker should contain copilot model gemini-3-pro-preview, got: {:?}",
             model_names
         );
         assert!(
-            model_names.contains(&"grok-code-fast-1"),
+            has_model("grok-code-fast-1"),
             "picker should contain copilot model grok-code-fast-1, got: {:?}",
             model_names
         );
