@@ -2668,6 +2668,7 @@ impl App {
         &mut self,
         provider_hint: Option<&str>,
         prefer_strongest: bool,
+        select_local_model: bool,
     ) {
         crate::logging::auth_event(
             "auth_changed_triggered",
@@ -2691,7 +2692,6 @@ impl App {
         let provider = Arc::clone(&self.provider);
         let provider_hint = provider_hint.map(str::to_string);
         let session_id = self.session.id.clone();
-        let select_local_model = true;
         let auto_selection_active = Arc::clone(&self.onboarding_auto_model_selection_active);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -2840,7 +2840,7 @@ impl App {
                     "azure-openai",
                     &[("surface", "tui"), ("reason", message.as_str())],
                 );
-                self.trigger_provider_auth_changed(Some("azure-openai"), false);
+                self.trigger_provider_auth_changed(Some("azure-openai"), false, true);
                 return;
             }
         };
@@ -3155,7 +3155,21 @@ impl App {
                     self.onboarding_auto_model_selection_active
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
-                self.trigger_provider_auth_changed(Some(&login.provider), prefer_strongest);
+                // Direct OpenAI-compatible logins already launched the
+                // profile-specific catalog refresh and model activation before
+                // publishing LoginCompleted. The generic auth refresh still
+                // needs to rebuild routes and release the picker loading state,
+                // but must not race it with a second model selection.
+                let profile_activation_owns_selection =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        &login.provider,
+                    )
+                    .is_some();
+                self.trigger_provider_auth_changed(
+                    Some(&login.provider),
+                    prefer_strongest,
+                    !profile_activation_owns_selection,
+                );
             }
             // First-run onboarding: once the user has authenticated on a fresh
             // install, walk them through model selection -> continue/suggestions.

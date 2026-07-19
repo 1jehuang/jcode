@@ -784,7 +784,11 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
     // OpenAI-compatible auth has a concrete catalog namespace. Accepting a
     // matching display label or generic `openai-compatible` route as success can
     // hide stale/mixed catalogs, especially when providers share model IDs.
-    if activation.expected_runtime.as_deref() == Some("openai-compatible")
+    // Legacy/local TUI auth notifications only carry the provider label, so
+    // derive this constraint from the normalized profile id as well as explicit
+    // protocol metadata.
+    if crate::provider_catalog::openai_compatible_profile_by_id(provider_id).is_some()
+        || activation.expected_runtime.as_deref() == Some("openai-compatible")
         || activation.expected_catalog_namespace.is_some()
     {
         return false;
