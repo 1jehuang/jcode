@@ -1481,8 +1481,17 @@ mod tests {
     fn build_header_lines_omits_placeholder_provider_label_when_unknown() {
         // Reads model/provider env-derived state: without the env lock, the
         // sibling test that sets JCODE_MODEL=gpt-5.4 mid-flight leaks into this
-        // render and the "loading session…" placeholder never appears.
+        // render and the "loading session…" placeholder never appears. The
+        // startup-phase label is also only rendered when no model hint is
+        // known, so neutralize JCODE_MODEL/JCODE_PROVIDER for the duration
+        // ("unknown" also suppresses the shared test home's config
+        // default_model fallback, which another test may have persisted).
         let _guard = crate::storage::lock_test_env();
+        let prev_model = std::env::var_os("JCODE_MODEL");
+        let prev_provider = std::env::var_os("JCODE_PROVIDER");
+        crate::env::set_var("JCODE_MODEL", "unknown");
+        crate::env::remove_var("JCODE_PROVIDER");
+
         let mut app = crate::tui::app::App::new_for_remote(None);
         app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
@@ -1494,6 +1503,17 @@ mod tests {
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect::<String>();
+
+        if let Some(prev_model) = prev_model {
+            crate::env::set_var("JCODE_MODEL", prev_model);
+        } else {
+            crate::env::remove_var("JCODE_MODEL");
+        }
+        if let Some(prev_provider) = prev_provider {
+            crate::env::set_var("JCODE_PROVIDER", prev_provider);
+        } else {
+            crate::env::remove_var("JCODE_PROVIDER");
+        }
 
         assert!(rendered.contains("loading session…"), "{rendered}");
         assert!(!rendered.contains("(unknown)"));
