@@ -334,7 +334,19 @@ impl io::Write for SyncStream {
 
 pub fn is_socket_path(path: &Path) -> bool {
     let pipe_name = path_to_pipe_name(path);
-    ClientOptions::new().open(&pipe_name).is_ok()
+    match ClientOptions::new().open(&pipe_name) {
+        Ok(_) => true,
+        Err(error)
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+        {
+            // Every published instance being occupied proves that a server is
+            // listening. Do not report the endpoint as absent and race a second
+            // daemon against it merely because another client connected first.
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn remove_socket(path: &Path) {
@@ -355,7 +367,10 @@ pub fn stream_pair() -> io::Result<(Stream, Stream)> {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    static BUSY_PIPE_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn pipe_name_is_stable_and_normalizes_case_and_separators() {
@@ -415,5 +430,21 @@ mod tests {
             .await
             .expect("split stream exchange should not stall");
         peer.await.expect("peer task");
+    }
+
+    #[tokio::test]
+    async fn busy_pipe_is_reported_as_a_live_socket_path() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-busy-pipe-probe-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _listener = Listener::bind(&path).expect("bind named pipe");
+        let _client = Stream::connect(&path).await.expect("occupy named pipe");
+
+        assert!(
+            is_socket_path(&path),
+            "a busy named pipe must still be recognized as a live server endpoint"
+        );
     }
 }

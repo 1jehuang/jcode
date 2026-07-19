@@ -70,7 +70,20 @@ pub async fn connect_socket(path: &std::path::Path) -> Result<Stream> {
 }
 
 pub(super) async fn socket_has_live_listener(path: &std::path::Path) -> bool {
-    crate::transport::is_socket_path(path) && Stream::connect(path).await.is_ok()
+    #[cfg(windows)]
+    {
+        // `is_socket_path` performs one non-blocking named-pipe open and treats
+        // ERROR_PIPE_BUSY as live. Do not follow it with a second connect: the
+        // first probe can temporarily occupy the only published pipe instance
+        // before the accept loop replaces it, making that second connect wait
+        // forever inside the Windows ERROR_PIPE_BUSY retry loop.
+        crate::transport::is_socket_path(path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        crate::transport::is_socket_path(path) && Stream::connect(path).await.is_ok()
+    }
 }
 
 /// Reap a provably-stale socket left behind by a dead daemon.
@@ -126,19 +139,11 @@ pub async fn reap_stale_socket_if_dead(path: &std::path::Path) -> bool {
 }
 
 #[cfg(not(unix))]
-pub async fn reap_stale_socket_if_dead(path: &std::path::Path) -> bool {
-    if !crate::transport::is_socket_path(path) {
-        return false;
-    }
-    if socket_has_live_listener(path).await {
-        return false;
-    }
-    crate::logging::warn(&format!(
-        "Reaping stale jcode socket with no live listener at {}",
-        path.display()
-    ));
-    cleanup_socket_pair(path);
-    true
+pub async fn reap_stale_socket_if_dead(_path: &std::path::Path) -> bool {
+    // Windows named pipes do not leave filesystem socket nodes behind after a
+    // process exits, so there is no stale artifact to reap. Probing and then
+    // "cleaning" the pipe only consumes a live server instance temporarily.
+    false
 }
 
 /// Return true if a live server process is listening on the socket path.
@@ -322,8 +327,11 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
 pub async fn wait_for_server_ready(path: &std::path::Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if crate::transport::is_socket_path(path)
-            && let Ok(mut client) = Client::connect_with_path(path.to_path_buf()).await
+        if let Ok(Ok(mut client)) = tokio::time::timeout(
+            Duration::from_millis(250),
+            Client::connect_with_path(path.to_path_buf()),
+        )
+        .await
             && let Ok(Ok(true)) =
                 tokio::time::timeout(Duration::from_millis(250), client.ping()).await
         {
@@ -338,11 +346,9 @@ pub async fn wait_for_server_ready(path: &std::path::Path, timeout: Duration) ->
 }
 
 async fn probe_server_ready(path: &std::path::Path, ping_timeout: Duration) -> bool {
-    if !crate::transport::is_socket_path(path) {
-        return false;
-    }
-
-    let Ok(mut client) = Client::connect_with_path(path.to_path_buf()).await else {
+    let Ok(Ok(mut client)) =
+        tokio::time::timeout(ping_timeout, Client::connect_with_path(path.to_path_buf())).await
+    else {
         return false;
     };
 

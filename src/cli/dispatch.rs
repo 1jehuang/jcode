@@ -981,7 +981,11 @@ pub(crate) async fn wait_for_reloading_server() -> bool {
 }
 
 async fn server_is_running_at(path: &std::path::Path) -> bool {
-    server::is_server_ready(path).await || server::has_live_listener(path).await
+    // Check liveness before performing a protocol handshake. On Windows the
+    // named pipe may be busy while another client is connecting; that already
+    // proves a daemon exists, while a handshake connect can otherwise wait in
+    // the transport's ERROR_PIPE_BUSY retry loop and block server startup.
+    server::has_live_listener(path).await || server::is_server_ready(path).await
 }
 
 #[cfg(unix)]
@@ -1197,14 +1201,9 @@ pub(crate) async fn spawn_server(
         // with its stderr.
         let timeout = std::time::Duration::from_secs(120);
         while start.elapsed() < timeout {
-            if crate::transport::is_socket_path(&server::socket_path()) {
-                if crate::transport::Stream::connect(server::socket_path())
-                    .await
-                    .is_ok()
-                {
-                    startup_profile::mark("server_ready");
-                    return Ok(());
-                }
+            if server::has_live_listener(&socket_path).await {
+                startup_profile::mark("server_ready");
+                return Ok(());
             }
 
             if let Some(status) = child.try_wait()? {
