@@ -1302,8 +1302,16 @@ fn test_model_picker_waits_for_async_post_login_catalog_activation() {
             .detail
             .contains("updating model list")
     );
+    // The single loading row labels the *current* model (which may legitimately
+    // still be the pre-import one until async activation lands), so check the
+    // route metadata: the stale pre-import catalog route must not be shown as a
+    // selectable ready entry.
     assert!(
-        !picker.entries.iter().any(|entry| entry.name == "gpt-5.4"),
+        !picker
+            .entries
+            .iter()
+            .flat_map(|entry| entry.options.iter())
+            .any(|option| option.api_method == "openai-oauth"),
         "the stale pre-import catalog must not be presented as ready"
     );
 
