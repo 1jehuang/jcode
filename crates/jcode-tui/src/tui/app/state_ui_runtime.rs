@@ -304,10 +304,13 @@ impl App {
             return Some(d);
         }
         if self.is_processing() {
-            return self
+            let elapsed = self
                 .visible_turn_started
                 .or(self.processing_started)
                 .map(|t| t.elapsed());
+            if elapsed.is_some() {
+                return elapsed;
+            }
         }
         self.split_launch_in_flight()
             .then(|| self.pending_split_started_at.map(|t| t.elapsed()))
