@@ -2530,9 +2530,7 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed.starts_with('/') {
-                    app.input = trimmed.to_string();
-                    app.cursor_pos = app.input.len();
-                    app.submit_input();
+                    submit_remote_slash_input(app, remote, prepared).await?;
                     return Ok(());
                 }
 

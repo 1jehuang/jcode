@@ -472,6 +472,47 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
 }
 
 #[test]
+fn remote_skill_invocation_with_prompt_sends_remote_turn() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    let temp = tempfile::tempdir().expect("create skill dir");
+    let skill_dir = temp.path().join(".jcode/skills/remote-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: remote-skill\ndescription: Remote prompt regression skill\n---\nUse it.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "/remote-skill explain the change".to_string(),
+            expanded: "/remote-skill explain the change".to_string(),
+            images: vec![],
+        },
+    ))
+    .expect("remote skill prompt should send");
+
+    assert_eq!(app.active_skill.as_deref(), Some("remote-skill"));
+    assert!(app.is_processing, "remote skill prompt should start a turn");
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.role == "user"
+                && message.content == "/remote-skill explain the change"),
+        "remote skill prompt should be visible as the submitted user turn"
+    );
+}
+
+#[test]
 fn process_remote_followups_auto_submits_staged_startup_prompt() {
     // Regression for issues #267/#268/#76: a headed swarm spawn stages its
     // initial prompt into `app.input` with `submit_input_on_startup = true`

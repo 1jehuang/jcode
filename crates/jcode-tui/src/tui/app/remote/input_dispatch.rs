@@ -1,5 +1,6 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
+use crate::skill::SkillRegistry;
 
 #[expect(
     clippy::too_many_arguments,
@@ -136,6 +137,73 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         .begin_remote_send(remote, prepared.expanded, prepared.images, false)
         .await;
     Ok(())
+}
+
+/// Route a slash input through the remote client instead of the local
+/// `submit_input` path. Built-in slash commands still belong to the client,
+/// but a skill invocation with a trailing prompt must become a remote turn.
+/// Calling `App::submit_input` directly for that case sets `pending_turn`,
+/// which only the local run loop consumes, leaving remote sessions stuck in
+/// the sending state.
+pub(in crate::tui::app) async fn submit_remote_slash_input(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    prepared: input::PreparedInput,
+) -> Result<()> {
+    let raw_input = prepared.raw_input.clone();
+    let Some(invocation) = SkillRegistry::parse_invocation(&raw_input) else {
+        app.input = raw_input;
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+        return Ok(());
+    };
+
+    if invocation.prompt.is_none() {
+        app.input = raw_input;
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+        return Ok(());
+    }
+    let trailing_prompt = invocation.prompt.expect("prompt checked above");
+
+    let skill_name = invocation.name.to_string();
+    let mut skill = app.current_skills_snapshot().get(&skill_name).cloned();
+    if skill.is_none() {
+        app.refresh_skills_snapshot();
+        skill = app.current_skills_snapshot().get(&skill_name).cloned();
+    }
+    if skill.is_none() {
+        // Preserve the existing unknown-skill and built-in slash-command
+        // handling, including the helpful endorsed-skill installation hint.
+        app.input = raw_input;
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+        return Ok(());
+    }
+
+    // Reuse the normal bare invocation path to update active_skill and show
+    // the activation notice, then prepare only the trailing prompt for the
+    // remote request. This avoids duplicating slash-command presentation and
+    // keeps pasted images attached to the same user turn.
+    app.input = format!("/{}", skill_name);
+    app.cursor_pos = app.input.len();
+    app.pending_images.clear();
+    app.submit_input();
+
+    let expanded_prompt = SkillRegistry::parse_invocation(&prepared.expanded)
+        .and_then(|invocation| invocation.prompt)
+        .unwrap_or(trailing_prompt)
+        .to_string();
+    submit_prepared_remote_input(
+        app,
+        remote,
+        input::PreparedInput {
+            raw_input: prepared.raw_input,
+            expanded: expanded_prompt,
+            images: prepared.images,
+        },
+    )
+    .await
 }
 
 pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
@@ -288,7 +356,8 @@ async fn submit_remote_transcript_input(
     }
 
     if trimmed.starts_with('/') {
-        app.submit_input();
+        let prepared = input::take_prepared_input(app);
+        submit_remote_slash_input(app, remote, prepared).await?;
         return Ok(());
     }
 
