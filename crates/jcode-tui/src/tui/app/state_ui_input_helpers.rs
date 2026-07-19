@@ -79,6 +79,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::hidden("/cut-release", "Alias for /fast-release"),
     RegisteredCommand::hidden("/commit-push-release", "Alias for /cut-release"),
+    RegisteredCommand::public(
+        "/triage",
+        "Triage new GitHub issues and autonomously fix the safe ones",
+    ),
     RegisteredCommand::public("/transcript", "Open the current session transcript file"),
     RegisteredCommand::public("/subagent-model", "Show/change subagent model policy"),
     RegisteredCommand::public("/autoreview", "Show/toggle automatic end-of-turn review"),

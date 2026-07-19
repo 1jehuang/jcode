@@ -70,6 +70,9 @@ impl App {
             "remote-release" => {
                 "/remote-release\nSame as /commit-push, then push the release tag without running any local build.\n\nThe agent picks the semver bump, updates Cargo.toml/Cargo.lock and the changelog, commits and pushes, then runs scripts/quick-release.sh --remote. GitHub Actions builds, signs, checksums, and publishes every platform; the release remains a draft until the remote gates pass."
             }
+            "triage" => {
+                "/triage [focus]\nTriage open GitHub issues for the current repo, then autonomously fix the safe ones.\n\nThe agent lists untriaged issues with gh, classifies each (auto-fix, needs-info, needs-human, duplicate, question), applies existing labels, fixes and verifies the clear-cut bugs, and reports back with a summary table. Every public comment is clearly signed as the Jcode agent, and issues are never closed as wontfix/invalid without your confirmation.\n\nOptional focus text narrows the triage, for example /triage only crash reports."
+            }
             "catchup" => {
                 "/catchup\nOpen the Catch Up picker for finished sessions that need attention.\n\n/catchup next\nTeleport to the next session needing attention and open a Catch Up brief in the side panel.\n\n/catchup list\nAlias for opening the picker."
             }

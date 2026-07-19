@@ -1919,14 +1919,21 @@ async fn handle_remote_key_internal(
                     || trimmed == "/remote-release"
                     || trimmed == "/cut-release"
                     || trimmed == "/commit-push-release"
+                    || trimmed == "/triage"
+                    || trimmed.starts_with("/triage ")
                 {
+                    let is_triage = trimmed == "/triage" || trimmed.starts_with("/triage ");
                     let is_fast_release = matches!(
                         trimmed,
                         "/fast-release" | "/cut-release" | "/commit-push-release"
                     );
                     let is_remote_release = trimmed == "/remote-release";
                     let is_push = trimmed != "/commit";
-                    let prompt = if is_fast_release {
+                    let prompt = if is_triage {
+                        app_mod::commands::build_triage_prompt(
+                            trimmed.strip_prefix("/triage").unwrap_or_default(),
+                        )
+                    } else if is_fast_release {
                         app_mod::commands::build_fast_release_prompt()
                     } else if is_remote_release {
                         app_mod::commands::build_remote_release_prompt()
@@ -1936,7 +1943,9 @@ async fn handle_remote_key_internal(
                         app_mod::commands::build_commit_prompt()
                     };
                     let launch_notice = |interrupted: bool| {
-                        if is_fast_release {
+                        if is_triage {
+                            app_mod::commands::triage_launch_notice(interrupted)
+                        } else if is_fast_release {
                             app_mod::commands::fast_release_launch_notice(interrupted)
                         } else if is_remote_release {
                             app_mod::commands::remote_release_launch_notice(interrupted)
@@ -1946,7 +1955,9 @@ async fn handle_remote_key_internal(
                             app_mod::commands::commit_launch_notice(interrupted)
                         }
                     };
-                    let cmd_label = if is_fast_release {
+                    let cmd_label = if is_triage {
+                        "/triage"
+                    } else if is_fast_release {
                         "/fast-release"
                     } else if is_remote_release {
                         "/remote-release"

@@ -1726,6 +1726,12 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/triage" || trimmed.starts_with("/triage ") {
+        let rest = trimmed.strip_prefix("/triage").unwrap_or_default();
+        handle_triage_command_local(app, rest);
+        return true;
+    }
+
     if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
         app.open_session_picker();
         app.record_keybinding_slow(super::shortcut_hints::LearnableAction::Resume);
@@ -2193,6 +2199,47 @@ pub(super) fn build_remote_release_prompt() -> String {
         "",
         "Then run scripts/quick-release.sh --remote v<version> to push the tag immediately without any local build. Let the release workflow build, sign, checksum, and publish every platform, and leave publication gated on those remote checks.",
     )
+}
+
+pub(super) fn build_triage_prompt(focus: &str) -> String {
+    let mut prompt = String::from(
+        "Triage the open GitHub issues for the repository in the current working directory, then autonomously fix the ones that are safe to fix. \
+        Hard rules: every public comment, issue reply, or PR description you post MUST end with a clear agent attribution line like '--- *— Jcode agent (automated triage), on behalf of @<repo-owner>*' so it can never be mistaken for the human. \
+        Never close an issue as wontfix/invalid without user confirmation (closing as completed is fine only after a verified fix). Be brief, friendly, and factual toward reporters. Prefer a branch + PR unless the repo's established norm is committing directly to the default branch. \
+        Workflow: (1) Collect: verify gh auth status, identify the repo with gh repo view, list open issues newest-first (gh issue list --state open --limit 50 --json number,title,labels,createdAt,author,comments,body), focus on untriaged ones (no labels or no maintainer/agent comment), and read each candidate fully with gh issue view <n> --comments. \
+        (2) Classify each into exactly one bucket and track them in a todo list: auto-fix (clear, reproducible, low-risk, verifiable), needs-info (comment asking for the specific missing details), needs-human (design decisions, breaking changes, security-sensitive, large refactors), duplicate (link the original, do not close without confirmation unless unambiguous), or question/support (answer directly if verifiable against the code or docs). Apply existing labels only (check gh label list first, never invent labels). \
+        (3) Fix the auto-fix bucket: locate the root cause first (demote to needs-human if you cannot pin it confidently), implement the smallest correct fix with a test when practical, verify with builds/tests before claiming anything, commit referencing the issue (fix: <summary> (fixes #<n>)), and comment on the issue describing what was done, signed. If there are more than about 3 auto-fix issues, consider spawning swarm workers, one per issue, and synthesize their reports. \
+        (4) Report back with a compact table of issue number, title, bucket, and action taken, plus links to commits/PRs and one-line recommendations for the needs-human issues.",
+    );
+    let focus = focus.trim();
+    if !focus.is_empty() {
+        prompt.push_str(" Additional focus from the user: ");
+        prompt.push_str(focus);
+    }
+    prompt
+}
+
+pub(super) fn triage_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting GitHub issue triage...".to_string()
+    } else {
+        "🚀 Starting GitHub issue triage...".to_string()
+    }
+}
+
+fn handle_triage_command_local(app: &mut App, rest: &str) {
+    let prompt = build_triage_prompt(rest);
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /triage...",
+            triage_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(triage_launch_notice(false)));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
 }
 
 pub(super) fn commit_launch_notice(interrupted: bool) -> String {

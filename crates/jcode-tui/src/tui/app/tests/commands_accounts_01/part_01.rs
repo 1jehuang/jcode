@@ -601,6 +601,29 @@ fn test_fast_release_command_starts_synthetic_user_turn() {
 }
 
 #[test]
+fn test_triage_command_starts_synthetic_user_turn() {
+    let mut app = create_test_app();
+    app.input = "/triage".to_string();
+    app.submit_input();
+
+    assert!(app.is_processing);
+    assert!(app.pending_turn);
+    let notice = app
+        .display_messages()
+        .last()
+        .expect("missing launch notice");
+    assert_eq!(notice.role, "system");
+    assert!(notice.content.contains("Starting GitHub issue triage"));
+}
+
+#[test]
+fn test_triage_command_includes_focus_in_prompt() {
+    let prompt = crate::tui::app::commands::build_triage_prompt(" only crash reports");
+    assert!(prompt.contains("Triage the open GitHub issues"));
+    assert!(prompt.contains("Additional focus from the user: only crash reports"));
+}
+
+#[test]
 fn test_cut_release_alias_starts_fast_release_turn() {
     let mut app = create_test_app();
     app.input = "/cut-release".to_string();
