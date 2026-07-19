@@ -69,6 +69,14 @@ MOBILE_ACTIONS: tuple[str, ...] = (
     "open_settings",
     "pair_server",
     "read_idle",  # the deliverable's "read/idle"
+    # Imputed-only chat-surface actions (no TUI log proxy):
+    "expand_tool_card",
+    "expand_reasoning",
+    "jump_to_latest",
+    "dismiss_notice",
+    "rename_session",
+    "new_session",
+    "remove_server",
 )
 
 # Mobile actions that leave NO trace in TUI logs and must be imputed from
@@ -78,6 +86,17 @@ IMPUTED_WEIGHTS: dict[str, float] = {
     "scroll": 0.25,
     "read_idle": 0.10,
     "pair_server": 0.005,
+    # Chat-surface interactions with no TUI analogue. Priors: tool inspection
+    # is common on mobile (small screen -> more expanding), reasoning rarely
+    # expanded, jump-to-latest follows most scroll-up excursions, notices are
+    # occasional, session admin is rare.
+    "expand_tool_card": 0.04,
+    "expand_reasoning": 0.01,
+    "jump_to_latest": 0.03,
+    "dismiss_notice": 0.02,
+    "rename_session": 0.01,
+    "new_session": 0.01,
+    "remove_server": 0.002,
 }
 
 # Observed (mineable) mobile actions, distributed over the remaining mass
@@ -105,6 +124,13 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "open_settings": 0.02,
     "cancel": 0.005,
     "pair_server": 0.005,
+    "expand_tool_card": 0.04,
+    "expand_reasoning": 0.01,
+    "jump_to_latest": 0.03,
+    "dismiss_notice": 0.02,
+    "rename_session": 0.01,
+    "new_session": 0.01,
+    "remove_server": 0.002,
 }
 
 # TUI-only verbs we explicitly acknowledge and drop (no mobile analogue).

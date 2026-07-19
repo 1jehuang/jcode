@@ -50,12 +50,7 @@ struct EntryView: View {
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
                 if !entry.reasoning.isEmpty {
-                    Text(entry.reasoning)
-                        .font(Theme.mono(12))
-                        .italic()
-                        .foregroundStyle(Theme.textTertiary)
-                        .lineLimit(4)
-                        .copyContextMenu(entry.reasoning)
+                    ReasoningDisclosure(text: entry.reasoning)
                 }
                 ForEach(entry.toolCalls) { call in
                     ToolCallCard(call: call)
@@ -85,5 +80,47 @@ extension View {
                 Label("Copy", systemImage: "doc.on.doc")
             }
         }
+    }
+}
+
+/// Reasoning stream shown as a one-line summary that expands on tap.
+///
+/// Reasoning is ambient context, not primary content; a fixed 4-line block
+/// of italic text taxed every assistant turn. Collapsed it costs one line.
+struct ReasoningDisclosure: View {
+    let text: String
+    @State private var expanded = false
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                expanded.toggle()
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 4) {
+                Image(systemName: "brain")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.top, 2)
+                    .accessibilityHidden(true)
+                Text(expanded ? text : firstLine)
+                    .font(Theme.mono(12))
+                    .italic()
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(expanded ? nil : 1)
+                    .multilineTextAlignment(.leading)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .copyContextMenu(text)
+        .accessibilityLabel("Reasoning")
+        .accessibilityValue(firstLine)
+        .accessibilityHint(expanded ? "Collapses the reasoning" : "Expands the full reasoning")
+    }
+
+    private var firstLine: String {
+        text.split(separator: "\n", omittingEmptySubsequences: true)
+            .first.map(String.init) ?? text
     }
 }

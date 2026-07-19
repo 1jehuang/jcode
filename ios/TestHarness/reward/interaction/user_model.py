@@ -37,6 +37,7 @@ _STATES = [
     UserState(id="chat", label="Chat / composer", screen="chat"),
     UserState(id="settings_sheet", label="Settings sheet", screen="settings_sheet"),
     UserState(id="pairing", label="Pairing", screen="pairing"),
+    UserState(id="qr_scanner", label="QR scanner sheet", screen="qr_scanner"),
 ]
 
 
@@ -117,6 +118,34 @@ def build_user_model(
             operators=["M", "TAP"],
             response_s=0.35,  # sheet present animation
         ),
+        Action(
+            id="expand_tool_card", label="Expand a tool call card",
+            src="chat", dst="chat", weight=wt("expand_tool_card", 0.04),
+            target_id="tool_card_header",
+            operators=["M", "TAP"],
+            response_s=0.15,  # expand animation
+        ),
+        Action(
+            id="expand_reasoning", label="Expand the reasoning line",
+            src="chat", dst="chat", weight=wt("expand_reasoning", 0.01),
+            target_id="reasoning_row",
+            operators=["M", "TAP"],
+            response_s=0.15,
+        ),
+        Action(
+            id="jump_to_latest", label="Jump back to the newest message",
+            src="chat", dst="chat", weight=wt("jump_to_latest", 0.03),
+            target_id="jump_to_latest",
+            operators=["TAP"],  # anticipated after scrolling; no fresh M
+            response_s=0.15,
+        ),
+        Action(
+            id="dismiss_notice", label="Dismiss a notice/banner",
+            src="chat", dst="chat", weight=wt("dismiss_notice", 0.02),
+            target_id="notice_dismiss",
+            operators=["M", "TAP"],
+            response_s=0.0,
+        ),
         # --- from the settings sheet ----------------------------------------
         Action(
             id="switch_session", label="Switch to another session",
@@ -130,6 +159,29 @@ def build_user_model(
             src="settings_sheet", dst="settings_sheet", weight=wt("change_model", 0.03),
             target_id="model_row_1",
             operators=["M", "TAP"],
+            response_s=0.0,
+        ),
+        Action(
+            id="rename_session", label="Rename the current session",
+            src="settings_sheet", dst="settings_sheet", weight=wt("rename_session", 0.01),
+            target_id="rename_session",
+            # tap row -> alert -> type ~10 chars -> confirm
+            operators=["M", "TAP"] + ["K"] * 10 + ["TAP"],
+            response_s=0.35,  # alert present + dismiss
+        ),
+        Action(
+            id="new_session", label="Start a new (cleared) session",
+            src="settings_sheet", dst="chat", weight=wt("new_session", 0.01),
+            target_id="new_session",
+            operators=["M", "TAP"],
+            response_s=0.30,  # dismiss + server clear
+        ),
+        Action(
+            id="remove_server", label="Remove a paired server (swipe)",
+            src="settings_sheet", dst="settings_sheet", weight=wt("remove_server", 0.002),
+            target_id="server_row_0",
+            # swipe (priced like a tap-move) + confirm tap
+            operators=["M", "TAP", "TAP"],
             response_s=0.0,
         ),
         Action(
@@ -154,6 +206,22 @@ def build_user_model(
             operators=["M"] + ["K"] * 6 + ["TAP"],
             response_s=1.0,  # network pair round-trip
         ),
+        Action(
+            id="open_qr_scanner", label="Open the QR scanner",
+            src="pairing", dst="qr_scanner", weight=max(wt("pair_server", 0.01), 0.01),
+            target_id="scan_qr",
+            operators=["M", "TAP"],
+            response_s=0.5,  # sheet + camera spin-up
+        ),
+        # --- from the QR scanner ----------------------------------------------
+        Action(
+            id="scan_pair", label="Scan the QR code (auto-pairs)",
+            src="qr_scanner", dst="chat", weight=1.0,
+            target_id=None,
+            # aim the camera (a homing act + a mental act); no typing at all
+            operators=["M", "H"],
+            response_s=1.5,  # detection + pair round-trip
+        ),
     ]
     action_map = {a.id: a for a in actions}
 
@@ -170,9 +238,24 @@ def build_user_model(
              frequency=wt("change_model", 0.03)),
         Task(id="t_interrupt", label="Interrupt a run",
              action_ids=["interrupt"], frequency=wt("interrupt", 0.05)),
-        Task(id="t_pair", label="Pair a new server",
+        Task(id="t_pair", label="Pair a new server (manual code)",
              action_ids=["open_settings", "pair_server", "confirm_pair"],
-             frequency=wt("pair_server", 0.01)),
+             frequency=wt("pair_server", 0.01) * 0.5),
+        Task(id="t_pair_qr", label="Pair a new server (QR scan)",
+             action_ids=["open_settings", "pair_server", "open_qr_scanner", "scan_pair"],
+             frequency=wt("pair_server", 0.01) * 0.5),
+        Task(id="t_inspect_tool", label="Inspect a tool call",
+             action_ids=["expand_tool_card"],
+             frequency=wt("expand_tool_card", 0.04)),
+        Task(id="t_catch_up", label="Scroll up, read, jump back to latest",
+             action_ids=["scroll", "read_idle", "jump_to_latest"],
+             frequency=wt("jump_to_latest", 0.03)),
+        Task(id="t_rename", label="Rename the session",
+             action_ids=["open_settings", "rename_session", "close_settings"],
+             frequency=wt("rename_session", 0.01)),
+        Task(id="t_new_session", label="Start a new session",
+             action_ids=["open_settings", "new_session"],
+             frequency=wt("new_session", 0.01)),
     ]
 
     graph = ActionGraph(
