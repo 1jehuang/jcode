@@ -119,22 +119,29 @@ fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call
         tool_row + 1,
         "card must directly follow tool: {all}"
     );
+    // Transcript cards are deliberately stable one-liners: no elapsed time,
+    // todos, or tool progress (those live on the dedicated swarm page), so
+    // old chat rows do not move while the user is reading them.
     assert!(
-        all.contains("API reviewer · 00:18 · GPT-5.6 · OpenAI OAuth · high"),
-        "runtime metadata missing: {all}"
+        rendered[card_row].contains("🐄 ● API reviewer · Working"),
+        "stable card line missing: {all}"
     );
     assert!(
-        all.contains("Test token refresh flow"),
-        "todo missing: {all}"
+        !all.contains("00:18"),
+        "elapsed time must not render in transcript cards: {all}"
     );
     assert!(
-        all.contains("bash · Run targeted authentication tests · 27/43"),
-        "tool intent missing: {all}"
+        !all.contains("Test token refresh flow"),
+        "todos must not render in transcript cards: {all}"
+    );
+    assert!(
+        !all.contains("Run targeted authentication tests"),
+        "tool progress must not render in transcript cards: {all}"
     );
 }
 
 #[test]
-fn test_prepare_messages_renders_nested_swarm_descendants_as_tree() {
+fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() {
     let root_id = "root-reviewer";
     let child_a = nested_chat_swarm_member(
         "child-auth-tests",
@@ -195,31 +202,25 @@ fn test_prepare_messages_renders_nested_swarm_descendants_as_tree() {
         .map(extract_line_text)
         .collect::<Vec<_>>();
     let all = rendered.join("\n");
+    // The transcript deliberately renders only the spawned member's stable
+    // one-line card. Descendant trees, todos, and current work live on the
+    // dedicated live swarm page so chat rows do not churn.
     let root = rendered
         .iter()
         .position(|line| line.contains("🐄 ● API reviewer"))
-        .expect("missing root card");
-    let auth = rendered
-        .iter()
-        .position(|line| line.contains("├─ 🦦 ● Auth tests"))
-        .expect("missing first child branch");
-    let token = rendered
-        .iter()
-        .position(|line| line.contains("└─ 🦉 ● Token audit"))
-        .expect("missing last child branch");
-    let race = rendered
-        .iter()
-        .position(|line| line.contains("└─ 🐢 ● Race-condition check"))
-        .expect("missing grandchild branch");
-
+        .unwrap_or_else(|| panic!("missing root card: {all}"));
     assert!(
-        root < auth && auth < token && token < race,
-        "rendered={all}"
+        rendered[root].contains("Working"),
+        "root card should show status: {all}"
     );
     assert!(
-        all.contains("Run authentication integration tests")
-            && all.contains("Fuzz refresh-token rotation"),
-        "nested current work missing: {all}"
+        !all.contains("Auth tests") && !all.contains("Token audit"),
+        "descendants must not render in the transcript: {all}"
+    );
+    assert!(
+        !all.contains("Run authentication integration tests")
+            && !all.contains("Fuzz refresh-token rotation"),
+        "nested current work must not render in the transcript: {all}"
     );
     assert!(!all.contains("Unrelated worker"), "rendered={all}");
     assert!(!all.contains("Must not appear here"), "rendered={all}");
