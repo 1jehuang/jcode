@@ -699,33 +699,38 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
 
 #[test]
 fn test_model_picker_includes_copilot_models_in_remote_mode() {
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
+    // Temp home: opening the picker with empty remote_model_options hydrates
+    // the persisted remote catalog cache, so a shared test home lets routes
+    // written by other tests leak into this picker.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_copilot(&mut app);
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
 
-    let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
+        let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
 
-    assert!(
-        model_names.contains(&"claude-opus-4.6"),
-        "picker should contain copilot model claude-opus-4.6, got: {:?}",
-        model_names
-    );
-    assert!(
-        model_names.contains(&"gemini-3-pro-preview"),
-        "picker should contain copilot model gemini-3-pro-preview, got: {:?}",
-        model_names
-    );
-    assert!(
-        model_names.contains(&"grok-code-fast-1"),
-        "picker should contain copilot model grok-code-fast-1, got: {:?}",
-        model_names
-    );
+        assert!(
+            model_names.contains(&"claude-opus-4.6"),
+            "picker should contain copilot model claude-opus-4.6, got: {:?}",
+            model_names
+        );
+        assert!(
+            model_names.contains(&"gemini-3-pro-preview"),
+            "picker should contain copilot model gemini-3-pro-preview, got: {:?}",
+            model_names
+        );
+        assert!(
+            model_names.contains(&"grok-code-fast-1"),
+            "picker should contain copilot model grok-code-fast-1, got: {:?}",
+            model_names
+        );
+    });
 }
 
 #[test]
@@ -1019,24 +1024,29 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
 
 #[test]
 fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("openrouter".to_string());
-    app.remote_provider_model = Some("anthropic/claude-sonnet-4".to_string());
-    app.remote_available_entries.clear();
-    app.remote_model_options.clear();
+    // Temp home: an empty remote catalog triggers hydration of the persisted
+    // remote catalog cache, so a shared test home would replace the fallback
+    // entry with whatever routes another test cached.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openrouter".to_string());
+        app.remote_provider_model = Some("anthropic/claude-sonnet-4".to_string());
+        app.remote_available_entries.clear();
+        app.remote_model_options.clear();
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should open with current-model fallback");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should open with current-model fallback");
 
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "anthropic/claude-sonnet-4");
-    assert_eq!(picker.entries[0].options.len(), 1);
-    assert_eq!(picker.entries[0].options[0].provider, "openrouter");
-    assert_eq!(picker.entries[0].options[0].api_method, "current");
-    assert!(picker.entries[0].options[0].available);
+        assert_eq!(picker.entries.len(), 1);
+        assert_eq!(picker.entries[0].name, "anthropic/claude-sonnet-4");
+        assert_eq!(picker.entries[0].options.len(), 1);
+        assert_eq!(picker.entries[0].options[0].provider, "openrouter");
+        assert_eq!(picker.entries[0].options[0].api_method, "current");
+        assert!(picker.entries[0].options[0].available);
+    });
 }

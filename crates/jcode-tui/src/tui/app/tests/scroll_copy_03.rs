@@ -598,7 +598,10 @@ fn test_overscroll_requires_gesture_starting_at_bottom() {
 
     // One continuous gesture (no pause between ticks): rides into the bottom
     // and keeps going. Momentum past the bottom must be swallowed silently.
-    for _ in 0..20 {
+    // The tick budget scales with the rendered height: process-global render
+    // state (mermaid, perf tier) can legitimately change the transcript
+    // extent between isolated and full-suite runs.
+    for _ in 0..rendered_max + 10 {
         app.scroll_down(1);
     }
     assert!(!app.auto_scroll_paused, "gesture should reach the bottom");
