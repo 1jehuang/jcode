@@ -1,0 +1,33 @@
+{
+  "version": "0.52.0",
+  "date": "2026-07-19",
+  "title": "ChatGPT web models, faster /model search, and a calmer TUI",
+  "highlights": [
+    "New browser-backed ChatGPT web route adds gpt-5.6-pro[web], letting Pro-tier web models run through your logged-in browser",
+    "/model fuzzy search is dramatically faster and no longer lags while typing",
+    "Opening the / slash-command palette no longer shifts the screen, and the menu renders as an overlay"
+  ],
+  "improvements": [
+    "Platform-API-only GPT Pro models now appear in the /model picker",
+    "All providers now expose their complete reasoning effort ladders",
+    "macOS menu bar sessions are labeled by their active work and show only your root sessions",
+    "New display.overscroll_status config (off/on/overscroll) and overscroll now requires a gesture starting at the transcript bottom",
+    "New JCODE_PERF_TIER environment variable forces a performance tier for one invocation",
+    "Auto-poke stops after consecutive provider guardrail refusals instead of retrying forever",
+    "Tool calls show a short intent line by default, with technical detail behind display.tool_call_details",
+    "Long-idle sessions periodically release retained memory back to the OS"
+  ],
+  "fixes": [
+    "Copy uses native Linux and macOS clipboards before falling back to OSC 52",
+    "Update checks authenticate to GitHub when possible, avoiding rate-limit failures on shared IPs",
+    "/fast set to off now persists instead of reverting to the default",
+    "Memory tool results are scoped to the session working directory instead of leaking across projects",
+    "PascalCase OAuth tool aliases now resolve inside batch subcalls",
+    "Windows server spawn no longer times out prematurely on slow machines",
+    "Desktop attach no longer blocks on a busy session",
+    "PowerShell install scripts no longer break from a UTF-8 BOM",
+    "Logging in no longer activates the same profile twice",
+    "Split-pane launches keep their elapsed-time display",
+    "Bash commands no longer spill onto a second line when an intent is shown"
+  ]
+}
