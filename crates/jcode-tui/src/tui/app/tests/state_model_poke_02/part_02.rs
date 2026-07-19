@@ -53,11 +53,9 @@ fn test_agents_review_picker_saves_config_override() {
             } else if route.api_method == "bedrock" {
                 format!("bedrock:{}", base)
             } else if route.api_method == "openrouter" && route.provider != "auto" {
-                if base.contains('/') {
-                    format!("{}@{}", base, route.provider)
-                } else {
-                    format!("anthropic/{}@{}", base, route.provider)
-                }
+                let catalog_model = crate::provider::openrouter_catalog_model_id(&base)
+                    .unwrap_or_else(|| base.clone());
+                format!("{}@{}", catalog_model, route.provider)
             } else {
                 base
             }
@@ -232,7 +230,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.entries[i].name == "gpt-5.2-codex")
+            .any(|&i| picker.entries[i].name.starts_with("gpt-5.2-codex ("))
     );
     assert_eq!(app.input(), "/model g52c");
 }

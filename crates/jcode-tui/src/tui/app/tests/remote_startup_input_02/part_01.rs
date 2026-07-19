@@ -218,14 +218,14 @@ fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache()
         let mut app = create_test_app();
         app.is_remote = true;
         app.remote_provider_name = Some("FPT AI Marketplace".to_string());
-        app.remote_available_entries = vec!["FPT.AI-KIE-v1.7".to_string()];
+        app.remote_available_entries = vec!["GLM-5.1".to_string()];
         app.remote_model_options.clear();
 
         let routes = app.build_remote_model_routes_fallback();
 
         assert!(
             routes.iter().any(|route| {
-                route.model == "FPT.AI-KIE-v1.7"
+                route.model == "GLM-5.1"
                     && route.provider == "FPT AI Marketplace"
                     && route.api_method == "openai-compatible:fpt"
             }),
@@ -234,7 +234,7 @@ fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache()
         assert!(
             !routes
                 .iter()
-                .any(|route| route.model == "FPT.AI-KIE-v1.7" && route.api_method == "copilot"),
+                .any(|route| route.model == "GLM-5.1" && route.api_method == "copilot"),
             "FPT current-provider live model must not be guessed as Copilot: {routes:?}"
         );
 
@@ -302,18 +302,21 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             .inline_interactive_state
             .as_ref()
             .expect("model picker should be open");
-        let entry = picker
+        let fable_entries = picker
             .entries
             .iter()
-            .find(|entry| entry.name == "claude-fable-5")
-            .expect("fable should be in the picker");
+            .filter(|entry| {
+                entry.name == "claude-fable-5"
+                    || entry.name.starts_with("claude-fable-5 (")
+            })
+            .collect::<Vec<_>>();
+        assert!(!fable_entries.is_empty(), "fable should be in the picker");
         assert!(
-            entry
-                .options
-                .iter()
-                .any(|option| option.api_method == "claude-api" && option.available),
+            fable_entries.iter().any(|entry| entry.options.iter().any(
+                |option| option.api_method == "claude-api" && option.available
+            )),
             "stale oauth-only cached route should be augmented with claude-api, got {:?}",
-            entry.options
+            fable_entries
         );
 
         crate::env::remove_var("ANTHROPIC_API_KEY");
@@ -354,7 +357,8 @@ fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
             .expect("Bedrock model should be in filtered list");
         app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
 
-        app.handle_key(KeyCode::Char('b'), KeyModifiers::CONTROL)
+        // Ctrl+O replaced Ctrl+B so the picker no longer steals tmux's prefix.
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::CONTROL)
             .unwrap();
 
         let cfg = crate::config::Config::load();
