@@ -172,9 +172,12 @@ jobs:
       - name: Run deterministic retention-readiness cohort
         shell: bash
         run: |
-          python3 .github/scripts/run_with_timeout.py 180 \
+          # A cold jcode-app-core test harness compiles heavy optional provider
+          # dependencies and can exceed three minutes on hosted runners. The
+          # cohort itself runs in under a second once the lib test is built.
+          python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
-            -p jcode-app-core retention_readiness -- --nocapture
+            -p jcode-app-core --lib retention_readiness -- --nocapture
 
       - name: Compile integration test binaries
         shell: bash
