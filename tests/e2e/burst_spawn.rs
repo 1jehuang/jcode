@@ -268,7 +268,33 @@ async fn run_burst_resume_attach_stress(burst_size: usize) -> Result<()> {
     let wall_elapsed = wall_start.elapsed();
     let cpu_elapsed = current_process_cpu_time()?.saturating_sub(cpu_start);
 
-    let client_map = debug_run_command_json(debug_socket_path.clone(), "clients:map", None).await?;
+    // A client observes its own attach as done slightly before the server
+    // finishes marking the swarm member "ready" in `clients:map`. Poll until
+    // every mapped client reports ready (with a deadline) before asserting;
+    // a one-shot snapshot intermittently caught 19/20 ready on CI.
+    let client_map = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot =
+                debug_run_command_json(debug_socket_path.clone(), "clients:map", None).await?;
+            let ready = snapshot
+                .get("clients")
+                .and_then(|value| value.as_array())
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|client| {
+                            client.get("status").and_then(|value| value.as_str()) == Some("ready")
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            if ready == burst_size || Instant::now() >= deadline {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
     let info = debug_run_command_json(debug_socket_path.clone(), "server:info", None).await?;
 
     let clients = client_map

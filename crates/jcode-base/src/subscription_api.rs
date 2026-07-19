@@ -504,7 +504,10 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    fn spawn_server(responses: Vec<(u16, Vec<(&'static str, &'static str)>, String)>) -> String {
+    /// (status, extra headers, body) for one canned HTTP response.
+    type CannedResponse = (u16, Vec<(&'static str, &'static str)>, String);
+
+    fn spawn_server(responses: Vec<CannedResponse>) -> String {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {

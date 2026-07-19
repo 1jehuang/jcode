@@ -61,9 +61,7 @@ impl Tool for McpTool {
             .get("properties")
             .and_then(|p| p.as_object())
             .is_some_and(|p| p.contains_key("intent"));
-        if !server_declares_intent
-            && let Some(object) = input.as_object_mut()
-        {
+        if !server_declares_intent && let Some(object) = input.as_object_mut() {
             object.remove("intent");
         }
         let manager = self.manager.read().await;

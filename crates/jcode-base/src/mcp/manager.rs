@@ -652,6 +652,9 @@ done
     /// tags provenance and counts the connect, real MCP tool calls through
     /// the manager are metered, non-matching servers are not.
     #[tokio::test]
+    // The test-env mutex must intentionally stay held across awaits so the
+    // JCODE_HOME/config mutation stays serialized for the whole test.
+    #[allow(clippy::await_holding_lock)]
     async fn discovery_provenance_end_to_end_with_real_mcp_server() {
         let env_guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
