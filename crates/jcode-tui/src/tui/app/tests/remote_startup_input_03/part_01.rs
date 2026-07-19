@@ -169,7 +169,10 @@ fn test_terminal_file_drop_submits_as_user_input_instead_of_a_skill() {
 
     app.submit_input();
 
-    assert!(app.is_processing, "the dropped file path should start a turn");
+    assert!(
+        app.is_processing,
+        "the dropped file path should start a turn"
+    );
     assert!(
         app.display_messages()
             .iter()
@@ -740,7 +743,9 @@ fn test_startup_update_diverged_offers_merge_without_failure_card() {
         message.content
     );
     assert!(
-        !message.content.contains("Continuing with the current version."),
+        !message
+            .content
+            .contains("Continuing with the current version."),
         "unexpected continue footer: {}",
         message.content
     );

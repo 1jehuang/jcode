@@ -623,7 +623,10 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
     );
 
     assert!(app.pending_fallback_resend.is_none());
-    assert_eq!(app.input, "hi", "prompt should be restored to the input box");
+    assert_eq!(
+        app.input, "hi",
+        "prompt should be restored to the input box"
+    );
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     assert!(!app.is_processing, "no resend should fire");
@@ -803,10 +806,7 @@ fn test_guardrail_reroute_not_offered_without_opus_route() {
     app.is_remote = true;
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_provider_model = Some("gpt-5.5".to_string());
-    app.remote_model_options = vec![
-        openai_oauth_route("gpt-5.5"),
-        openai_oauth_route("gpt-5.4"),
-    ];
+    app.remote_model_options = vec![openai_oauth_route("gpt-5.5"), openai_oauth_route("gpt-5.4")];
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ProviderGuardrail {
@@ -1075,10 +1075,7 @@ fn test_remote_header_keeps_known_model_during_brief_loading_session_phase() {
     app.session.model = Some("claude-fable-5".to_string());
     app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
-    assert_eq!(
-        crate::tui::TuiState::provider_model(&app),
-        "claude-fable-5"
-    );
+    assert_eq!(crate::tui::TuiState::provider_model(&app), "claude-fable-5");
 
     // A genuinely stuck load still surfaces the phase label after the grace
     // period so the user can tell something is wrong.
@@ -1204,7 +1201,10 @@ fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
     let data = crate::tui::TuiState::info_widget_data(&app);
 
     assert_eq!(data.context_limit, Some(1_000_000));
-    assert_eq!(data.auth_method, crate::tui::info_widget::AuthMethod::Unknown);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::Unknown
+    );
     assert!(
         data.usage_info.is_none(),
         "provider/model detection alone must not guess subscription billing"
@@ -1315,7 +1315,10 @@ fn test_info_widget_remote_openai_billing_follows_resolved_credential() {
     app.remote_resolved_credential = None;
     app.session.route_api_method = None;
     let data = crate::tui::TuiState::info_widget_data(&app);
-    assert_eq!(data.auth_method, crate::tui::info_widget::AuthMethod::Unknown);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::Unknown
+    );
     assert!(data.usage_info.is_none());
 }
 
@@ -2295,8 +2298,9 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
     assert!(app.overnight_auto_poke.is_none());
     assert_eq!(app.consecutive_credential_failures, 0);
     assert!(
-        app.display_messages().iter().any(|m| m.role == "error"
-            && m.content.contains("Stopped automatic retries")),
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "error" && m.content.contains("Stopped automatic retries")),
         "breaker must surface an actionable stop message"
     );
 }
