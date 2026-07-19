@@ -96,7 +96,16 @@ pub(super) fn estimate_prepared_messages_bytes(prepared: &PreparedMessages) -> u
 }
 
 pub(super) fn estimate_prepared_chat_frame_bytes(prepared: &PreparedChatFrame) -> usize {
-    prepared.sections.capacity() * std::mem::size_of::<PreparedSection>()
+    // Include each section's prepared content: the wrapped lines dominate a
+    // frame's real memory footprint. Without this, multi-megabyte transcripts
+    // estimate as a few hundred bytes, the oversized-entry path is dead code,
+    // and the FULL_PREP_CACHE_MAX_BYTES budget cannot bound anything.
+    prepared
+        .sections
+        .iter()
+        .map(|section| estimate_prepared_messages_bytes(&section.prepared))
+        .sum::<usize>()
+        + prepared.sections.capacity() * std::mem::size_of::<PreparedSection>()
         + estimate_usize_vec_bytes(&prepared.wrapped_user_indices)
         + estimate_usize_vec_bytes(&prepared.wrapped_user_prompt_starts)
         + estimate_usize_vec_bytes(&prepared.wrapped_user_prompt_ends)

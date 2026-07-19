@@ -677,7 +677,7 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
     };
     let prepared = make_oversized_prepared_chat_frame("full-oversized-");
 
-    assert!(estimate_prepared_chat_frame_bytes(&prepared) <= FULL_PREP_CACHE_MAX_BYTES);
+    assert!(estimate_prepared_chat_frame_bytes(&prepared) > FULL_PREP_CACHE_MAX_BYTES);
 
     let mut cache = FullPrepCacheState::default();
     cache.insert(key.clone(), prepared.clone());

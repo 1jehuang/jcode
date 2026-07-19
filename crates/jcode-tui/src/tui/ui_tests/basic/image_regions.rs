@@ -210,7 +210,10 @@ fn test_prefix_reuse_mid_edit_reoffsets_region_below_boundary() {
             DisplayMessage::user("start"),
             DisplayMessage::swarm(
                 "Plan graph · test-swarm",
-                "much longer plan\nwith extra graph rows\nand another line\nand one more",
+                // Markdown list items stay on separate rendered lines (single
+                // newlines inside a paragraph would be merged into one line by
+                // the compact plan-graph markdown renderer).
+                "much longer plan\n\n- with extra graph rows\n- and another line\n- and one more",
             ),
             DisplayMessage::tool("read below.png", read_tool_call("region-tool-below")),
             DisplayMessage::assistant("tail answer"),
