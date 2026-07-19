@@ -7,12 +7,38 @@ fn test_new_for_remote_restored_soft_interrupt_resend_triggers_dispatch_state() 
     app.pending_soft_interrupt_requests = vec![(55, "sent interrupt".to_string())];
     app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
+    let mut restored = App::new_for_remote(Some(session_id));
     assert!(restored.interleave_message.is_none());
     assert_eq!(restored.queued_messages(), &["sent interrupt"]);
-    assert!(restored.pending_queued_dispatch);
+    assert!(!restored.pending_queued_dispatch);
+    assert!(!restored.is_processing);
+    assert!(matches!(restored.status, ProcessingStatus::Idle));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(super::remote::process_remote_followups(
+        &mut restored,
+        &mut remote,
+    ));
+    assert_eq!(restored.queued_messages(), &["sent interrupt"]);
+    assert!(!restored.is_processing);
+
+    remote.mark_history_loaded();
+    rt.block_on(super::remote::process_remote_followups(
+        &mut restored,
+        &mut remote,
+    ));
+
+    assert!(restored.queued_messages().is_empty());
     assert!(restored.is_processing);
     assert!(matches!(restored.status, ProcessingStatus::Sending));
+    assert!(
+        restored
+            .display_messages()
+            .iter()
+            .any(|message| message.role == "user" && message.content == "sent interrupt")
+    );
 }
 
 #[test]
@@ -25,12 +51,53 @@ fn test_new_for_remote_does_not_requeue_acked_pending_soft_interrupts() {
     app.queued_messages.push("queued later".to_string());
     app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
+    let mut restored = App::new_for_remote(Some(session_id));
+    assert!(restored.interleave_message.is_none());
     assert_eq!(
-        restored.interleave_message.as_deref(),
-        Some("local interleave")
+        restored.queued_messages(),
+        &["local interleave", "queued later"]
     );
-    assert_eq!(restored.queued_messages(), &["queued later"]);
+    assert!(
+        !restored
+            .queued_messages()
+            .iter()
+            .any(|message| message == "already queued on server")
+    );
+    assert!(!restored.pending_queued_dispatch);
+    assert!(!restored.is_processing);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(super::remote::process_remote_followups(
+        &mut restored,
+        &mut remote,
+    ));
+    assert_eq!(
+        restored.queued_messages(),
+        &["local interleave", "queued later"]
+    );
+
+    remote.mark_history_loaded();
+    rt.block_on(super::remote::process_remote_followups(
+        &mut restored,
+        &mut remote,
+    ));
+
+    assert!(restored.queued_messages().is_empty());
+    assert!(restored.is_processing);
+    assert!(
+        restored
+            .display_messages()
+            .iter()
+            .any(|message| message.role == "user" && message.content == "local interleave")
+    );
+    assert!(
+        restored
+            .display_messages()
+            .iter()
+            .all(|message| message.content != "already queued on server")
+    );
 }
 
 #[test]

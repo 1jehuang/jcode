@@ -132,11 +132,18 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
     assert_eq!(pending.retry_attempts, 1);
     assert!(pending.retry_at.is_some());
     assert!(app.rate_limit_reset.is_some());
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "system" && m.content.contains("Auto-retrying"))
-    );
+    let retry_notice = app
+        .display_messages()
+        .iter()
+        .find(|message| message.title.as_deref() == Some("Connection"))
+        .expect("retry should surface a connection status message");
+    assert_eq!(retry_notice.role, "system");
+    assert!(retry_notice.content.contains("Connection lost - retrying"));
+    assert!(retry_notice.content.contains(&format!(
+        "attempt 1/{}",
+        App::AUTO_RETRY_MAX_ATTEMPTS
+    )));
+    assert!(retry_notice.content.contains("Remote request failed"));
 }
 
 #[test]

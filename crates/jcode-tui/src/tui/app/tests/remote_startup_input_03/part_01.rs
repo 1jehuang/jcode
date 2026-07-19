@@ -1122,10 +1122,36 @@ fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
     app.interleave_message = Some("interrupt after reload".to_string());
     app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
+    let mut restored = App::new_for_remote(Some(session_id));
     assert!(restored.interleave_message.is_none());
     assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-    assert!(restored.pending_queued_dispatch);
+    assert!(!restored.pending_queued_dispatch);
+    assert!(!restored.is_processing);
+    assert!(matches!(restored.status, ProcessingStatus::Idle));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(super::remote::process_remote_followups(
+        &mut restored,
+        &mut remote,
+    ));
+    assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
+    assert!(!restored.is_processing);
+
+    remote.mark_history_loaded();
+    rt.block_on(super::remote::process_remote_followups(
+        &mut restored,
+        &mut remote,
+    ));
+
+    assert!(restored.queued_messages().is_empty());
     assert!(restored.is_processing);
     assert!(matches!(restored.status, ProcessingStatus::Sending));
+    assert!(
+        restored
+            .display_messages()
+            .iter()
+            .any(|message| message.role == "user" && message.content == "interrupt after reload")
+    );
 }
