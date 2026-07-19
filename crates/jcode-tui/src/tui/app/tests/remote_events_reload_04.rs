@@ -938,14 +938,45 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     }
 }
 
+/// Run `f` with the shared env lock held and `JCODE_MODEL`/`JCODE_PROVIDER`
+/// neutralized. Remote header tests assert on startup-phase labels, which are
+/// only shown when no model hint is known; a sibling test that persisted a
+/// config `default_model` (shared test home) or exported `JCODE_MODEL` would
+/// otherwise leak a concrete model into the header.
+fn with_neutral_remote_model_hints<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = crate::storage::lock_test_env();
+    let prev_model = std::env::var_os("JCODE_MODEL");
+    let prev_provider = std::env::var_os("JCODE_PROVIDER");
+    // "unknown" is sanitized to no-hint and, unlike removing the var, also
+    // suppresses the config default_model fallback.
+    crate::env::set_var("JCODE_MODEL", "unknown");
+    crate::env::remove_var("JCODE_PROVIDER");
+
+    let result = f();
+
+    if let Some(prev_model) = prev_model {
+        crate::env::set_var("JCODE_MODEL", prev_model);
+    } else {
+        crate::env::remove_var("JCODE_MODEL");
+    }
+    if let Some(prev_provider) = prev_provider {
+        crate::env::set_var("JCODE_PROVIDER", prev_provider);
+    } else {
+        crate::env::remove_var("JCODE_PROVIDER");
+    }
+    result
+}
+
 #[test]
 fn test_remote_tui_state_shows_connected_after_startup_phase_clears_without_model() {
-    let mut app = App::new_for_remote(None);
-    app.remote_session_id = Some("session_connected_123".to_string());
-    app.clear_remote_startup_phase();
+    with_neutral_remote_model_hints(|| {
+        let mut app = App::new_for_remote(None);
+        app.remote_session_id = Some("session_connected_123".to_string());
+        app.clear_remote_startup_phase();
 
-    assert_eq!(crate::tui::TuiState::provider_model(&app), "connected");
-    assert_eq!(crate::tui::TuiState::provider_name(&app), "");
+        assert_eq!(crate::tui::TuiState::provider_model(&app), "connected");
+        assert_eq!(crate::tui::TuiState::provider_name(&app), "");
+    });
 }
 
 #[test]
@@ -1014,45 +1045,51 @@ fn test_remote_tui_state_shows_starting_server_phase_in_header() {
 
 #[test]
 fn test_remote_tui_state_shows_loading_session_phase_in_header() {
-    let mut app = App::new_for_remote(None);
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
+    with_neutral_remote_model_hints(|| {
+        let mut app = App::new_for_remote(None);
+        app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
-    assert_eq!(
-        crate::tui::TuiState::provider_model(&app),
-        "loading session…"
-    );
+        assert_eq!(
+            crate::tui::TuiState::provider_model(&app),
+            "loading session…"
+        );
+    });
 }
 
 #[test]
 fn test_remote_tui_state_shows_startup_elapsed_in_header() {
-    let mut app = App::new_for_remote(None);
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::Connecting);
-    app.remote_startup_phase_started =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+    with_neutral_remote_model_hints(|| {
+        let mut app = App::new_for_remote(None);
+        app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::Connecting);
+        app.remote_startup_phase_started =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
 
-    assert_eq!(
-        crate::tui::TuiState::provider_model(&app),
-        "connecting to server… 5s"
-    );
+        assert_eq!(
+            crate::tui::TuiState::provider_model(&app),
+            "connecting to server… 5s"
+        );
+    });
 }
 
 #[test]
 fn test_remote_startup_phase_does_not_require_duplicate_status_notice() {
-    let mut app = App::new_for_remote(None);
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::Connecting);
+    with_neutral_remote_model_hints(|| {
+        let mut app = App::new_for_remote(None);
+        app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::Connecting);
 
-    assert_eq!(
-        crate::tui::TuiState::provider_model(&app),
-        "connecting to server…"
-    );
-    assert_eq!(app.status_notice(), None);
+        assert_eq!(
+            crate::tui::TuiState::provider_model(&app),
+            "connecting to server…"
+        );
+        assert_eq!(app.status_notice(), None);
 
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
-    assert_eq!(
-        crate::tui::TuiState::provider_model(&app),
-        "loading session…"
-    );
-    assert_eq!(app.status_notice(), None);
+        app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
+        assert_eq!(
+            crate::tui::TuiState::provider_model(&app),
+            "loading session…"
+        );
+        assert_eq!(app.status_notice(), None);
+    });
 }
 
 #[test]
