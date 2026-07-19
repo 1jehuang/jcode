@@ -862,6 +862,14 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
         return;
     }
 
+    // Composer insertions should behave the same in local and remote modes.
+    // Unless the user explicitly enabled typing scroll lock, beginning or
+    // continuing a draft resumes tail-follow before the input height can change.
+    // Keeping this at the shared insertion boundary also covers paste and
+    // Shift+Enter, rather than relying on individual key dispatchers to remember
+    // to reconcile the transcript viewport.
+    app.follow_chat_bottom_for_typing();
+
     let at_end = app.cursor_pos == app.input.len();
 
     // A habitual space typed after an auto-inserted picker separator would

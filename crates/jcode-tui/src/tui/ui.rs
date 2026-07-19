@@ -200,6 +200,13 @@ static LAST_RESOLVED_CHAT_SCROLL: AtomicUsize = AtomicUsize::new(0);
 #[cfg(not(test))]
 static TAIL_CATCHUP_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Set by explicit user actions that resume bottom-follow (typing, End,
+/// submitting a prompt). The next renderer pass consumes this request and snaps
+/// directly to the tail instead of mistaking the large offset change for a
+/// newly-appended content block that should use catch-up animation.
+#[cfg(not(test))]
+static TAIL_FOLLOW_SNAP_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// Wrapped line indices where each user prompt starts (updated each render frame).
 /// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
 #[cfg(not(test))]
@@ -215,6 +222,7 @@ thread_local! {
     static TEST_LAST_TOTAL_WRAPPED_LINES: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -460,6 +468,34 @@ pub(crate) fn set_tail_catchup_active(active: bool) {
     #[cfg(not(test))]
     {
         TAIL_CATCHUP_ACTIVE.store(active, Ordering::Relaxed);
+    }
+}
+
+/// Request that the next tail-follow render land at the exact bottom.
+///
+/// This is reserved for explicit navigation or composer actions. Automatic
+/// transcript growth does not set it, so large committed blocks still use the
+/// bounded catch-up animation.
+pub(crate) fn request_tail_follow_snap() {
+    #[cfg(test)]
+    {
+        TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(true));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        TAIL_FOLLOW_SNAP_PENDING.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn take_tail_follow_snap_request() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.replace(false));
+    }
+    #[cfg(not(test))]
+    {
+        TAIL_FOLLOW_SNAP_PENDING.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -1365,6 +1401,7 @@ pub(crate) fn clear_test_render_state_for_tests() {
     set_last_diff_pane_max_scroll(0);
     set_last_total_wrapped_lines(0);
     set_last_resolved_chat_scroll(0);
+    TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(false));
     update_user_prompt_positions(&[]);
     // Flicker events recorded by sibling tests add a "⚠ flicker detected"
     // notification line to subsequent renders, shifting every layout-sensitive
