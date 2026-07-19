@@ -830,6 +830,10 @@ pub struct App {
     last_stream_activity: Option<Instant>,
     // Provider has emitted MessageEnd, but the turn is still finalizing bookkeeping.
     stream_message_ended: bool,
+    // A remote Done received while paced text is still buffered. The redraw
+    // tick replays it after the backlog drains and one final live frame renders,
+    // preventing Done from force-flushing a whole provider burst at once.
+    deferred_stream_done_id: Option<u64>,
     // Server-reported processing snapshot captured from resume/history before live events arrive.
     remote_resume_activity: Option<RemoteResumeActivity>,
     // Reload reconnect is waiting for server history before deciding whether to continue.

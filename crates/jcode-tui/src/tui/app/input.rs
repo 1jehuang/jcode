@@ -3207,6 +3207,7 @@ impl App {
     pub(super) fn clear_streaming_render_state(&mut self) {
         self.streaming.streaming_text.clear();
         self.stream_message_ended = false;
+        self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
         self.reasoning_pending_line.clear();
         self.reasoning_partial_len = 0;
@@ -3273,6 +3274,7 @@ impl App {
     pub(super) fn take_streaming_text(&mut self) -> String {
         let content = std::mem::take(&mut self.streaming.streaming_text);
         self.stream_message_ended = false;
+        self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
         self.reasoning_pending_line.clear();
         self.reasoning_partial_len = 0;

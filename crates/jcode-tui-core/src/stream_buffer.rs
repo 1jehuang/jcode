@@ -36,6 +36,15 @@ const BASE_REVEAL_CPS: f32 = 180.0;
 /// rate `R`, the backlog settles near `(R - BASE_REVEAL_CPS) / REVEAL_BACKLOG_GAIN`.
 const REVEAL_BACKLOG_GAIN: f32 = 3.0;
 
+/// Hard ceiling for paced output, in characters per second. The proportional
+/// controller above may ask to catch up much faster when a provider delivers a
+/// whole response in one burst. Without a ceiling, a 3k-character backlog at a
+/// 50ms redraw cadence reveals more than 500 characters in one frame, which is
+/// several terminal rows appearing at once. Capping by elapsed time (rather
+/// than by a fixed chars-per-frame value) keeps 16ms and 50ms redraw loops at
+/// the same visual rate while still draining a large burst in a few seconds.
+const MAX_REVEAL_CPS: f32 = 960.0;
+
 /// Maximum elapsed time credited to a single reveal step. Without this, a long
 /// idle gap before the first/next burst would bank a huge budget and dump the
 /// whole burst at once, reintroducing the choppiness we are trying to remove.
@@ -82,6 +91,10 @@ pub struct StreamBuffer {
     /// Fractional reveal budget carried between steps so slow rates still make
     /// progress instead of rounding down to zero forever.
     carry: f32,
+    /// Independent hard-ceiling budget. Keeping this separate from `carry`
+    /// prevents a large proportional-controller backlog from bypassing the
+    /// wall-clock cap when many provider deltas arrive between redraw ticks.
+    ceiling_carry: f32,
     /// Whether reasoning pushed through this buffer is still "open" (no close
     /// marker queued since the last reasoning chunk).
     reasoning_open: bool,
@@ -110,6 +123,7 @@ impl StreamBuffer {
             backlog_chars: 0,
             last_reveal: Instant::now(),
             carry: 0.0,
+            ceiling_carry: 0.0,
             reasoning_open: false,
             base_cps: BASE_REVEAL_CPS,
             backlog_gain: REVEAL_BACKLOG_GAIN,
@@ -160,6 +174,7 @@ impl StreamBuffer {
     /// interrupt). Returns every remaining op in order.
     pub fn flush(&mut self) -> Vec<StreamOp> {
         self.carry = 0.0;
+        self.ceiling_carry = 0.0;
         self.last_reveal = Instant::now();
         let ops = self.drain_ops(self.backlog_chars, true);
         debug_assert!(self.queue.is_empty());
@@ -186,6 +201,7 @@ impl StreamBuffer {
         self.queue.clear();
         self.backlog_chars = 0;
         self.carry = 0.0;
+        self.ceiling_carry = 0.0;
         self.reasoning_open = false;
         self.last_reveal = Instant::now();
     }
@@ -242,6 +258,7 @@ impl StreamBuffer {
         if self.backlog_chars == 0 {
             // No chunk backlog: reset so an idle gap cannot bank reveal budget.
             self.carry = 0.0;
+            self.ceiling_carry = 0.0;
             self.last_reveal = now;
             // Any queued entries are markers only; emit them immediately.
             return self.drain_ops(0, true);
@@ -255,15 +272,27 @@ impl StreamBuffer {
 
         let cps = self.base_cps + self.backlog_chars as f32 * self.backlog_gain;
         self.carry += dt * cps;
+        self.ceiling_carry += dt * MAX_REVEAL_CPS;
 
-        let mut reveal = self.carry.floor() as usize;
+        let controller_budget = self.carry.floor() as usize;
+        let ceiling_budget = self.ceiling_carry.floor() as usize;
+        let mut reveal = controller_budget.min(ceiling_budget);
         if reveal == 0 {
             // Budget hasn't reached a whole char yet; keep accumulating. Leading
             // markers (if any) still emit so region boundaries are not delayed.
             return self.drain_ops(0, false);
         }
+
+        // The backlog-scaled controller is intentionally aggressive about
+        // catching up, but it must never turn one provider burst into a visible
+        // wall of text. Bound each step by the same wall-clock rate regardless
+        // of redraw cadence: 16ms permits at most 16 chars, while the clamped
+        // 50ms step permits at most 48. The independent token bucket also means
+        // repeated push calls with near-zero elapsed time cannot mint one free
+        // character each and exceed the wall-clock ceiling.
         reveal = reveal.min(self.backlog_chars);
         self.carry -= reveal as f32;
+        self.ceiling_carry -= reveal as f32;
         self.drain_ops(reveal, false)
     }
 
@@ -595,6 +624,61 @@ mod tests {
             sizes.iter().all(|&n| n < 40),
             "no frame should reveal the entire burst, got {sizes:?}"
         );
+    }
+
+    #[test]
+    fn large_single_burst_is_bounded_by_wall_clock_reveal_rate() {
+        let start = Instant::now();
+        let mut buf = StreamBuffer::new();
+        buf.last_reveal = start;
+        buf.push_chunk(StreamKind::Text, &"a".repeat(3_356));
+
+        let sizes = drain_frames(&mut buf, start, Duration::from_millis(50));
+        assert_eq!(sizes.iter().sum::<usize>(), 3_356);
+        assert!(
+            sizes.iter().all(|&n| n <= 48),
+            "a 50ms paced frame must reveal at most 48 chars: {sizes:?}"
+        );
+        assert!(
+            sizes.len() >= 70,
+            "the burst should drain smoothly over several seconds: {} frames",
+            sizes.len()
+        );
+    }
+
+    #[test]
+    fn reveal_ceiling_is_independent_of_redraw_cadence() {
+        let start = Instant::now();
+        let mut buf = StreamBuffer::new();
+        buf.last_reveal = start;
+        buf.push_chunk(StreamKind::Text, &"b".repeat(1_000));
+
+        let sizes = drain_frames(&mut buf, start, Duration::from_millis(16));
+        assert_eq!(sizes.iter().sum::<usize>(), 1_000);
+        assert!(
+            sizes.iter().all(|&n| n <= 16),
+            "a 16ms paced frame must reveal at most 16 chars: {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn frequent_push_calls_cannot_bypass_the_wall_clock_ceiling() {
+        let start = Instant::now();
+        let mut buf = StreamBuffer::new();
+        buf.last_reveal = start;
+        buf.push_chunk(StreamKind::Text, &"c".repeat(1_000));
+
+        let first_at = start + Duration::from_millis(50);
+        let mut revealed = op_chars(&buf.reveal_now(first_at));
+        for _ in 0..100 {
+            // Simulate many provider callbacks before the clock advances to the
+            // next redraw frame. They must not each receive a free character.
+            revealed += op_chars(&buf.reveal_now(first_at));
+        }
+        assert_eq!(revealed, 48);
+
+        let second = op_chars(&buf.reveal_now(first_at + Duration::from_millis(50)));
+        assert_eq!(second, 48);
     }
 
     #[test]

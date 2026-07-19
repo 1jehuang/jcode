@@ -1223,6 +1223,49 @@ fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall
 }
 
 #[test]
+fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.current_message_id = Some(42);
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let response = "paced text";
+    let ops = app.stream_buffer.push_text(response);
+    app.apply_stream_ops(ops);
+    assert!(!app.stream_buffer.is_empty());
+
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+    assert!(app.is_processing, "Done must not force-flush the backlog");
+    assert_eq!(app.deferred_stream_done_id, Some(42));
+    assert!(app.display_messages.iter().all(|message| {
+        message.role != "assistant" || !message.content.contains(response)
+    }));
+
+    // The first tick drains the short backlog, but deliberately leaves the live
+    // streaming representation visible for one frame before committing it.
+    std::thread::sleep(Duration::from_millis(60));
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+    assert!(app.stream_buffer.is_empty());
+    assert!(app.is_processing);
+    assert_eq!(app.deferred_stream_done_id, Some(42));
+    assert_eq!(app.streaming.streaming_text, response);
+
+    // The following tick replays Done now that the preceding live frame was
+    // eligible to render, committing exactly the text that was paced out.
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+    assert!(!app.is_processing);
+    assert_eq!(app.deferred_stream_done_id, None);
+    assert!(app.display_messages.iter().any(|message| {
+        message.role == "assistant" && message.content == response
+    }));
+}
+
+#[test]
 fn test_handle_server_event_tps_connection_phase_streaming_starts_collection_only_for_streaming() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

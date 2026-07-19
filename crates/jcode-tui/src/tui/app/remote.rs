@@ -97,10 +97,18 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
     // Reveal buffered streaming text at the smooth paced rate on each tick, the
-    // same as the local turn loop. Finalization paths still call flush().
+    // same as the local turn loop. When Done arrived with a backlog, leave one
+    // rendered live frame after the final reveal before committing the turn.
+    let stream_backlog_was_empty = app.stream_buffer.is_empty();
     let ops = app.stream_buffer.flush_smooth_frame();
     if app.apply_stream_ops(ops) {
         needs_redraw = true;
+    }
+    if stream_backlog_was_empty
+        && app.stream_buffer.is_empty()
+        && let Some(id) = app.deferred_stream_done_id.take()
+    {
+        needs_redraw |= app.handle_server_event(crate::protocol::ServerEvent::Done { id }, remote);
     }
 
     needs_redraw |= app.refresh_todos_view_if_needed();

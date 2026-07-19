@@ -1104,6 +1104,15 @@ pub(in crate::tui::app) fn handle_server_event(
             let completes_resumed_turn =
                 app.current_message_id.is_none() && app.is_processing && has_resumed_turn_evidence;
             if app.current_message_id == Some(id) || completes_resumed_turn {
+                if !app.stream_buffer.is_empty() {
+                    crate::logging::info(&format!(
+                        "Deferring Done id={} until paced stream backlog drains",
+                        id
+                    ));
+                    app.deferred_stream_done_id = Some(id);
+                    return true;
+                }
+                app.deferred_stream_done_id = None;
                 let turn_duration_secs = app.display_turn_duration_secs();
                 if completes_resumed_turn {
                     crate::logging::info(&format!(
