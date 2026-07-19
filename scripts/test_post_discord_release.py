@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 import unittest
 import urllib.error
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("post_discord_release.py")
@@ -117,6 +118,78 @@ Fast startup.
             server.shutdown()
             thread.join()
             server.server_close()
+
+    def test_announce_skips_an_existing_marker(self) -> None:
+        release = {
+            "id": 52,
+            "name": "v0.52.0",
+            "body": "notes\n<!-- jcode-discord-announced:v0.52.0 -->",
+            "html_url": "https://example.test/v0.52.0",
+            "draft": False,
+        }
+        with (
+            mock.patch.object(MODULE, "fetch_release", return_value=release),
+            mock.patch.object(MODULE, "post_to_discord") as post,
+        ):
+            result = MODULE.announce_release(
+                repository="owner/repo",
+                tag="v0.52.0",
+                token="token",
+                webhook_url="https://discord.test/webhook",
+            )
+        self.assertIsNone(result)
+        post.assert_not_called()
+
+    def test_announce_rejects_draft_release(self) -> None:
+        release = {
+            "id": 53,
+            "name": "v0.53.0",
+            "body": "notes",
+            "html_url": "https://example.test/v0.53.0",
+            "draft": True,
+        }
+        with (
+            mock.patch.object(MODULE, "fetch_release", return_value=release),
+            mock.patch.object(MODULE, "post_to_discord") as post,
+            self.assertRaisesRegex(RuntimeError, "draft release"),
+        ):
+            MODULE.announce_release(
+                repository="owner/repo",
+                tag="v0.53.0",
+                token="token",
+                webhook_url="https://discord.test/webhook",
+            )
+        post.assert_not_called()
+
+    def test_announce_refetches_before_writing_marker(self) -> None:
+        initial = {
+            "id": 54,
+            "name": "v0.54.0",
+            "body": "initial notes",
+            "html_url": "https://example.test/v0.54.0",
+            "draft": False,
+        }
+        latest = {**initial, "body": "notes edited during post"}
+        with (
+            mock.patch.object(MODULE, "fetch_release", side_effect=[initial, latest]),
+            mock.patch.object(
+                MODULE, "post_to_discord", return_value={"id": "message-54"}
+            ),
+            mock.patch.object(MODULE, "mark_release_announced") as mark,
+        ):
+            result = MODULE.announce_release(
+                repository="owner/repo",
+                tag="v0.54.0",
+                token="token",
+                webhook_url="https://discord.test/webhook",
+            )
+        self.assertEqual(result, "message-54")
+        mark.assert_called_once_with(
+            repository="owner/repo",
+            release=latest,
+            tag="v0.54.0",
+            token="token",
+        )
 
 
 if __name__ == "__main__":

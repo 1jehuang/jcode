@@ -2,10 +2,9 @@
 """Post one GitHub release announcement to a Discord webhook.
 
 The release workflow publishes releases with GitHub's built-in GITHUB_TOKEN.
-GitHub deliberately does not emit a second workflow run for most events created
-by that token, so a separate ``release: published`` workflow is not reliable.
-This script is called directly by the release workflow and by a manual backfill
-workflow.
+GitHub deliberately suppresses most follow-up events created by that token, so
+the publisher explicitly dispatches the same workflow used for external release
+events and manual backfills.
 """
 
 from __future__ import annotations
@@ -129,6 +128,8 @@ def mark_release_announced(
 ) -> None:
     body = release.get("body") or ""
     marker = announcement_marker(tag)
+    if marker in body:
+        return
     updated_body = f"{body.rstrip()}\n\n{marker}\n"
     github_request(
         f"https://api.github.com/repos/{repository}/releases/{release['id']}",
@@ -151,6 +152,45 @@ def required(value: str | None, description: str) -> str:
     raise SystemExit(f"Missing {description}")
 
 
+def announce_release(
+    *, repository: str, tag: str, token: str, webhook_url: str
+) -> str | None:
+    release = fetch_release(repository=repository, tag=tag, token=token)
+    if release.get("draft"):
+        raise RuntimeError(f"Refusing to announce draft release {tag}")
+
+    body = release.get("body") or ""
+    if already_announced(body, tag):
+        print(f"Discord announcement for {tag} is already recorded; skipping")
+        return None
+
+    content = format_message(
+        tag=tag,
+        name=release.get("name") or tag,
+        body=body,
+        url=release["html_url"],
+    )
+    message = post_to_discord(webhook_url=webhook_url, content=content)
+    message_id = str(message["id"])
+    print(f"Posted {tag} to Discord as message {message_id}")
+
+    # Re-fetch immediately before patching so an edit made while the Discord
+    # request was in flight is not overwritten with the initially fetched body.
+    latest_release = fetch_release(repository=repository, tag=tag, token=token)
+    try:
+        mark_release_announced(
+            repository=repository, release=latest_release, tag=tag, token=token
+        )
+    except Exception as error:  # noqa: BLE001 - best-effort after public side effect
+        # A marker write failure must not turn a successful public post into a
+        # failed workflow that an operator is likely to rerun and duplicate.
+        print(
+            f"::warning::Discord post succeeded, but the release marker failed: {error}",
+            file=sys.stderr,
+        )
+    return message_id
+
+
 def main() -> int:
     args = parse_args()
     tag = required(args.tag, "release tag (--tag or GITHUB_REF_NAME)")
@@ -165,37 +205,19 @@ def main() -> int:
     )
 
     try:
-        release = fetch_release(repository=repository, tag=tag, token=token)
-        body = release.get("body") or ""
-        if already_announced(body, tag):
-            print(f"Discord announcement for {tag} is already recorded; skipping")
-            return 0
-
-        content = format_message(
+        announce_release(
+            repository=repository,
             tag=tag,
-            name=release.get("name") or tag,
-            body=body,
-            url=release["html_url"],
+            token=token,
+            webhook_url=webhook_url,
         )
-        message = post_to_discord(webhook_url=webhook_url, content=content)
-        print(f"Posted {tag} to Discord as message {message['id']}")
-
-        # The marker makes workflow reruns and manual backfills idempotent. A
-        # marker write failure must not turn a successful public post into a
-        # failed workflow that an operator is likely to rerun and duplicate.
-        try:
-            mark_release_announced(
-                repository=repository, release=release, tag=tag, token=token
-            )
-        except Exception as error:  # noqa: BLE001 - best-effort after public side effect
-            print(
-                f"::warning::Discord post succeeded, but the release marker failed: {error}",
-                file=sys.stderr,
-            )
         return 0
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         print(f"HTTP {error.code} while announcing {tag}: {detail}", file=sys.stderr)
+        return 1
+    except (RuntimeError, urllib.error.URLError) as error:
+        print(f"Could not announce {tag}: {error}", file=sys.stderr)
         return 1
 
 
