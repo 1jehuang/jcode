@@ -12,6 +12,10 @@ use tokio::sync::mpsc;
 const SWARM_STATE_DIR: &str = "swarm";
 /// Pre-0.36 location under the runtime dir (tmpfs on Linux, wiped on reboot).
 const LEGACY_SWARM_STATE_DIR: &str = "jcode-swarm-state";
+/// Dormant plans are durable for recovery, but not immortal. A plan with no
+/// active/assigned work that has not had *any* swarm snapshot activity for a
+/// week is stale coordination state and is removed during startup loading.
+const DEFAULT_DORMANT_PLAN_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Serialize each swarm's complete snapshot/read/write operation. Callers must
 /// acquire this before reading the independently locked in-memory maps so an
@@ -51,6 +55,38 @@ fn swarm_file_lock(swarm_id: &str) -> Arc<StdMutex<()>> {
     let lock = Arc::new(StdMutex::new(()));
     locks.insert(swarm_id.to_string(), Arc::downgrade(&lock));
     lock
+}
+
+fn dormant_plan_retention() -> Duration {
+    Duration::from_secs(
+        std::env::var("JCODE_SWARM_DORMANT_PLAN_RETENTION_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_DORMANT_PLAN_RETENTION_SECS),
+    )
+}
+
+fn persisted_plan_is_dormant(plan: &PersistedVersionedPlan) -> bool {
+    plan.items.is_empty()
+        || plan
+            .items
+            .iter()
+            .all(|item| item.assigned_to.is_none() && !jcode_plan::is_active_status(&item.status))
+}
+
+fn persisted_plan_is_expired(
+    plan: &PersistedVersionedPlan,
+    snapshot_updated_at_unix_ms: u64,
+    loaded_at_unix_ms: u64,
+    retention: Duration,
+) -> bool {
+    if plan.items.is_empty() {
+        return true;
+    }
+    persisted_plan_is_dormant(plan)
+        && loaded_at_unix_ms.saturating_sub(snapshot_updated_at_unix_ms)
+            >= retention.as_millis() as u64
 }
 
 pub(super) struct LoadedSwarmRuntimeState {
@@ -111,8 +147,26 @@ fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(not(test))]
 fn state_dir() -> PathBuf {
     storage::durable_state_dir().join(SWARM_STATE_DIR)
+}
+
+/// Unit tests that exercise high-level swarm mutation helpers do not all set
+/// `JCODE_RUNTIME_DIR`. Never let those tests fall through to the real
+/// `~/.jcode/state/swarm`: that leaked synthetic `swarm-1` plans/members into
+/// live user state during ordinary `cargo test` runs. Tests that need an
+/// isolated explicit location still set `JCODE_RUNTIME_DIR` and use the normal
+/// resolver; otherwise use a process-local temp directory.
+#[cfg(test)]
+fn state_dir() -> PathBuf {
+    if std::env::var_os("JCODE_RUNTIME_DIR").is_some() {
+        storage::durable_state_dir().join(SWARM_STATE_DIR)
+    } else {
+        std::env::temp_dir()
+            .join(format!("jcode-test-state-{}", std::process::id()))
+            .join(SWARM_STATE_DIR)
+    }
 }
 
 fn legacy_state_dir() -> PathBuf {
@@ -241,14 +295,16 @@ fn from_persisted_plan(mut plan: PersistedVersionedPlan, updated_at_unix_ms: u64
                 .get_or_insert(updated_at_unix_ms);
         }
     }
-    VersionedPlan {
+    let mut plan = VersionedPlan {
         items: plan.items,
         version: plan.version,
         participants: plan.participants.into_iter().collect(),
         task_progress: plan.task_progress,
         mode: plan.mode,
         node_meta: plan.node_meta,
-    }
+    };
+    plan.prune_side_maps();
+    plan
 }
 
 fn to_persisted_plan(plan: &VersionedPlan) -> PersistedVersionedPlan {
@@ -294,14 +350,22 @@ fn recover_member_status(
         );
     }
 
-    // An idle headless worker has no process to drive it after a server restart.
-    // Keep its completion report, but mark it stopped instead of eagerly loading
-    // its full session history and tool registry forever. Coordinators can spawn
-    // a fresh worker when more work arrives.
-    if is_headless && status == SwarmLifecycleStatus::Ready {
+    // No client or headless process survives a server restart. A connected TUI
+    // will explicitly mark its member ready again during subscribe; until that
+    // happens, restoring a persisted `ready` member as live creates a ghost
+    // that can never enter terminal-member GC. This previously resurrected
+    // hundreds of detached historical clients as ready on every reload.
+    if status == SwarmLifecycleStatus::Ready {
         return (
             SwarmLifecycleStatus::Stopped,
-            append_recovery_detail(detail, "idle worker not restored after server restart"),
+            append_recovery_detail(
+                detail,
+                if is_headless {
+                    "idle worker not restored after server restart"
+                } else {
+                    "client not attached after server restart"
+                },
+            ),
         );
     }
 
@@ -394,8 +458,11 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     let mut swarms_by_id = HashMap::new();
     let loaded_at_unix_ms = now_unix_ms();
     let terminal_retention = super::swarm::swarm_terminal_member_retention();
+    let plan_retention = dormant_plan_retention();
     let mut pruned_terminal_members = 0usize;
+    let mut pruned_dormant_plans = 0usize;
     let mut pruned_members_by_swarm: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut pruned_plan_swarms: HashSet<String> = HashSet::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -419,10 +486,20 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
         };
         let swarm_id = state.swarm_id.clone();
         if let Some(plan) = state.plan {
-            plans.insert(
-                swarm_id.clone(),
-                from_persisted_plan(plan, state.updated_at_unix_ms),
-            );
+            if persisted_plan_is_expired(
+                &plan,
+                state.updated_at_unix_ms,
+                loaded_at_unix_ms,
+                plan_retention,
+            ) {
+                pruned_dormant_plans += 1;
+                pruned_plan_swarms.insert(swarm_id.clone());
+            } else {
+                plans.insert(
+                    swarm_id.clone(),
+                    from_persisted_plan(plan, state.updated_at_unix_ms),
+                );
+            }
         }
         if let Some(coordinator_session_id) = state.coordinator_session_id {
             coordinators.insert(swarm_id, coordinator_session_id);
@@ -466,7 +543,12 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     // Rewrite every affected snapshot once so startup collection shrinks the
     // durable state too. Without this, the same expired records would be parsed
     // and discarded on every restart forever.
-    for swarm_id in pruned_members_by_swarm.keys() {
+    let rewritten_swarms: HashSet<String> = pruned_members_by_swarm
+        .keys()
+        .chain(pruned_plan_swarms.iter())
+        .cloned()
+        .collect();
+    for swarm_id in &rewritten_swarms {
         let retained_members = swarms_by_id
             .get(swarm_id)
             .into_iter()
@@ -483,6 +565,11 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     if pruned_terminal_members > 0 {
         crate::logging::info(&format!(
             "Pruned {pruned_terminal_members} expired terminal swarm member(s) while loading durable state"
+        ));
+    }
+    if pruned_dormant_plans > 0 {
+        crate::logging::info(&format!(
+            "Pruned {pruned_dormant_plans} expired dormant swarm plan(s) while loading durable state"
         ));
     }
     LoadedSwarmRuntimeState {

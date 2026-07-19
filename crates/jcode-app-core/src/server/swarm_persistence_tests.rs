@@ -188,6 +188,95 @@ fn ready_headless_member_with_report_stops_without_losing_report() {
 }
 
 #[test]
+fn ready_detached_client_stops_on_reload_until_it_reattaches() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let _env = test_env(&dir);
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let members = vec![SwarmMember {
+        session_id: "session-detached".to_string(),
+        event_tx,
+        event_txs: HashMap::new(),
+        working_dir: Some(PathBuf::from("/tmp/swarm-client")),
+        swarm_id: Some("swarm-client".to_string()),
+        swarm_enabled: true,
+        status: "ready".to_string(),
+        detail: None,
+        friendly_name: Some("finch".to_string()),
+        report_back_to_session_id: None,
+        latest_completion_report: None,
+        role: "agent".to_string(),
+        joined_at: Instant::now(),
+        last_status_change: Instant::now(),
+        is_headless: false,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+        task_label: None,
+    }];
+
+    persist_swarm_state("swarm-client", None, None, &members);
+    let loaded = load_runtime_state();
+    let recovered = loaded.members.get("session-detached").expect("member");
+    assert_eq!(recovered.status, "stopped");
+    assert_eq!(
+        recovered.detail.as_deref(),
+        Some("client not attached after server restart")
+    );
+}
+
+#[test]
+fn dormant_plan_expiry_preserves_active_work_and_prunes_old_unassigned_graphs() {
+    let item = |status: &str, assigned_to: Option<&str>| crate::plan::PlanItem {
+        content: "task".to_string(),
+        status: status.to_string(),
+        priority: "medium".to_string(),
+        id: format!("{status}-{}", assigned_to.unwrap_or("none")),
+        subsystem: None,
+        file_scope: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: assigned_to.map(str::to_string),
+    };
+    let plan = |items| PersistedVersionedPlan {
+        items,
+        version: 1,
+        participants: Vec::new(),
+        task_progress: HashMap::new(),
+        mode: "light".to_string(),
+        node_meta: HashMap::new(),
+    };
+    let now = 10_000_000u64;
+    let retention = Duration::from_secs(60);
+    let old = now - retention.as_millis() as u64;
+
+    assert!(persisted_plan_is_expired(
+        &plan(Vec::new()),
+        now,
+        now,
+        retention
+    ));
+    assert!(persisted_plan_is_expired(
+        &plan(vec![item("queued", None), item("completed", None)]),
+        old,
+        now,
+        retention
+    ));
+    assert!(!persisted_plan_is_expired(
+        &plan(vec![item("running", Some("worker"))]),
+        old,
+        now,
+        retention
+    ));
+    assert!(!persisted_plan_is_expired(
+        &plan(vec![item("queued", None)]),
+        now,
+        now,
+        retention
+    ));
+}
+
+#[test]
 fn terminal_member_retention_preserves_recent_reports_and_prunes_expired_records() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let member = SwarmMember {
