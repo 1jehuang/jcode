@@ -977,14 +977,7 @@ pub(super) async fn rename_plan_participant(
 ) {
     let mut plans = swarm_plans.write().await;
     if let Some(vp) = plans.get_mut(swarm_id) {
-        if vp.participants.remove(old_session_id) {
-            vp.participants.insert(new_session_id.to_string());
-        }
-        for item in &mut vp.items {
-            if item.assigned_to.as_deref() == Some(old_session_id) {
-                item.assigned_to = Some(new_session_id.to_string());
-            }
-        }
+        vp.rename_session(old_session_id, new_session_id);
     }
 }
 
@@ -1885,15 +1878,24 @@ mod tests {
         sub_coordinator.status = "ready".to_string();
         sub_coordinator.last_status_change = old;
 
-        let members: HashMap<String, SwarmMember> =
-            [reapable, stopped, user_owned, running, fresh, sub_coordinator]
-                .into_iter()
-                .map(|member| (member.session_id.clone(), member))
-                .collect();
+        let members: HashMap<String, SwarmMember> = [
+            reapable,
+            stopped,
+            user_owned,
+            running,
+            fresh,
+            sub_coordinator,
+        ]
+        .into_iter()
+        .map(|member| (member.session_id.clone(), member))
+        .collect();
 
         let mut candidates = idle_spawned_worker_reap_candidates(&members, idle_after);
         candidates.sort();
-        assert_eq!(candidates, vec!["reapable".to_string(), "stopped".to_string()]);
+        assert_eq!(
+            candidates,
+            vec!["reapable".to_string(), "stopped".to_string()]
+        );
     }
 
     #[test]

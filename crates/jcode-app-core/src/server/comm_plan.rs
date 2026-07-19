@@ -124,7 +124,7 @@ pub(super) async fn handle_comm_propose_plan(
                     plan.participants.insert(owner.clone());
                 }
             }
-            plan.items = items.clone();
+            plan.replace_items(items.clone());
             plan.version += 1;
             (plan.version, plan.participants.clone())
         };
@@ -389,6 +389,28 @@ pub(super) async fn handle_comm_approve_plan(
     };
 
     if let Ok(items) = serde_json::from_str::<Vec<PlanItem>>(&proposal) {
+        let existing_count = swarm_plans
+            .read()
+            .await
+            .get(&swarm_id)
+            .map(|plan| plan.items.len())
+            .unwrap_or_default();
+        let merged_count = existing_count.saturating_add(items.len());
+        if merged_count > jcode_plan::MAX_PLAN_ITEMS {
+            finish_request(
+                swarm_mutation_runtime,
+                &mutation_state,
+                PersistedSwarmMutationResponse::Error {
+                    message: format!(
+                        "Plan approval would contain {merged_count} items, exceeding the per-swarm limit of {}; finish or clear stale plan nodes first.",
+                        jcode_plan::MAX_PLAN_ITEMS
+                    ),
+                    retry_after_secs: None,
+                },
+            )
+            .await;
+            return;
+        }
         // Validate the merged graph (existing plan + proposed items) for
         // dependency cycles before committing. A cycle here permanently wedges
         // every task that depends on it, so reject the approval and keep the

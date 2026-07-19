@@ -14,6 +14,7 @@ use super::{
 };
 use crate::protocol::ServerEvent;
 use crate::protocol::TaskGraphNodeSpec;
+use jcode_plan::MAX_PLAN_ITEMS;
 use jcode_plan::bridge::{apply_task_graph, parse_kind, to_task_graph};
 use jcode_plan::dag::{self, HandoffArtifact, NodeSpec, NodeStatus, TaskGraph};
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,16 @@ fn spec_from_wire(spec: TaskGraphNodeSpec) -> NodeSpec {
         depends_on: spec.depends_on,
         priority: spec.priority,
     }
+}
+
+fn graph_size_error(graph: &TaskGraph) -> Option<String> {
+    (graph.len() > MAX_PLAN_ITEMS).then(|| {
+        format!(
+            "plan would contain {} items, exceeding the per-swarm limit of {}; finish or clear stale plan nodes before adding more",
+            graph.len(),
+            MAX_PLAN_ITEMS
+        )
+    })
 }
 
 async fn swarm_id_for(
@@ -283,14 +294,17 @@ pub(super) async fn handle_comm_seed_graph(
         let mut graph = to_task_graph(plan);
         let before = graph.clone();
         match dag::seed(&mut graph, specs) {
-            Ok(()) => {
-                if graph != before {
-                    apply_task_graph(plan, &graph);
-                    plan.version += 1;
+            Ok(()) => match graph_size_error(&graph) {
+                Some(message) => Err(message),
+                None => {
+                    if graph != before {
+                        apply_task_graph(plan, &graph);
+                        plan.version += 1;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Err(e) => Err(e),
+            },
+            Err(e) => Err(e.to_string()),
         }
     };
 
@@ -352,11 +366,14 @@ pub(super) async fn handle_comm_expand_node(
         let mut graph = to_task_graph(plan);
         claim_queued_node_for_actor(&mut graph, &node_id, &req_session_id);
         match dag::expand_node(&mut graph, &node_id, &req_session_id, specs) {
-            Ok(_) => {
-                apply_task_graph(plan, &graph);
-                plan.version += 1;
-                Ok(())
-            }
+            Ok(_) => match graph_size_error(&graph) {
+                Some(message) => Err(message),
+                None => {
+                    apply_task_graph(plan, &graph);
+                    plan.version += 1;
+                    Ok(())
+                }
+            },
             Err(e) => Err(e.to_string()),
         }
     };
@@ -492,11 +509,14 @@ pub(super) async fn handle_comm_inject_gap(
         let mut graph = to_task_graph(plan);
         claim_queued_node_for_actor(&mut graph, &gate_id, &req_session_id);
         match dag::inject_from_gate(&mut graph, &gate_id, &req_session_id, specs) {
-            Ok(_) => {
-                apply_task_graph(plan, &graph);
-                plan.version += 1;
-                Ok(())
-            }
+            Ok(_) => match graph_size_error(&graph) {
+                Some(message) => Err(message),
+                None => {
+                    apply_task_graph(plan, &graph);
+                    plan.version += 1;
+                    Ok(())
+                }
+            },
             Err(e) => Err(e.to_string()),
         }
     };

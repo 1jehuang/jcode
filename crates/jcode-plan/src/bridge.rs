@@ -165,7 +165,7 @@ pub fn apply_task_graph(plan: &mut VersionedPlan, graph: &TaskGraph) {
         );
     }
 
-    plan.items = items;
+    plan.replace_items(items);
     plan.node_meta = node_meta;
 }
 
