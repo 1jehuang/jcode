@@ -702,20 +702,73 @@ fn desktop_background_wake_only_tracks_active_frame_animation() {
 }
 
 #[test]
-fn next_animation_redraw_paces_active_animations_and_settles_when_idle() {
+fn automatic_redraw_requires_a_visible_renderable_surface_and_elapsed_timeout() {
     let now = Instant::now();
+    let timeout_deadline = now + SURFACE_TIMEOUT_BACKOFF_MIN;
 
-    // While an animation is active, the next redraw is scheduled one frame
-    // interval out rather than immediately, so the loop does not busy-spin.
+    assert!(desktop_automatic_redraw_allowed(now, true, false, None));
+    assert!(!desktop_automatic_redraw_allowed(now, false, false, None));
+    assert!(!desktop_automatic_redraw_allowed(now, true, true, None));
+    assert!(!desktop_automatic_redraw_allowed(
+        now,
+        true,
+        false,
+        Some(timeout_deadline),
+    ));
+    assert!(desktop_automatic_redraw_allowed(
+        timeout_deadline,
+        true,
+        false,
+        Some(timeout_deadline),
+    ));
+}
+
+#[test]
+fn pending_backend_redraw_survives_zero_size_until_a_renderable_frame() {
+    let requested_at = Instant::now();
+    let mut pending = Some(requested_at);
+
     assert_eq!(
-        next_animation_redraw_at(now, true),
-        Some(now + DESKTOP_ANIMATION_FRAME_INTERVAL)
+        consume_pending_backend_redraw_for_render(false, &mut pending),
+        None
+    );
+    assert_eq!(pending, Some(requested_at));
+    assert_eq!(
+        consume_pending_backend_redraw_for_render(true, &mut pending),
+        Some(requested_at)
+    );
+    assert_eq!(pending, None);
+}
+
+#[test]
+fn next_animation_redraw_paces_frame_scroll_and_space_hold_at_sixteen_ms() {
+    let now = Instant::now();
+    let expected = Some(now + DESKTOP_ANIMATION_FRAME_INTERVAL);
+
+    assert_eq!(
+        next_animation_redraw_at(now, true, false, false, true),
+        expected
+    );
+    assert_eq!(
+        next_animation_redraw_at(now, false, true, false, true),
+        expected
+    );
+    assert_eq!(
+        next_animation_redraw_at(now, false, false, true, true),
+        expected
     );
     // Once the animation settles, no further redraw is scheduled and the loop
     // can park on ControlFlow::Wait.
-    assert_eq!(next_animation_redraw_at(now, false), None);
+    assert_eq!(
+        next_animation_redraw_at(now, false, false, false, true),
+        None
+    );
+    // Occlusion and surface timeout gating suppress every automatic animation
+    // source until automatic redraws become eligible again.
+    assert_eq!(next_animation_redraw_at(now, true, true, true, false), None);
     // The pacing interval must be positive; a zero interval would reintroduce
     // the busy-spin it exists to prevent.
+    assert_eq!(DESKTOP_ANIMATION_FRAME_INTERVAL, Duration::from_millis(16));
     assert!(DESKTOP_ANIMATION_FRAME_INTERVAL > Duration::ZERO);
 }
 

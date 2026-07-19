@@ -246,12 +246,32 @@ fn desktop_surface_size_is_renderable(size: PhysicalSize<u32>) -> bool {
     size.width > 0 && size.height > 0
 }
 
-fn desktop_background_wake(
+fn desktop_automatic_redraw_allowed(
     now: Instant,
     surface_renderable: bool,
+    window_occluded: bool,
+    surface_timeout_redraw_at: Option<Instant>,
+) -> bool {
+    surface_renderable
+        && !window_occluded
+        && surface_timeout_redraw_at.is_none_or(|redraw_at| now >= redraw_at)
+}
+
+fn consume_pending_backend_redraw_for_render(
+    render_will_start: bool,
+    pending_backend_redraw_since: &mut Option<Instant>,
+) -> Option<Instant> {
+    render_will_start
+        .then(|| pending_backend_redraw_since.take())
+        .flatten()
+}
+
+fn desktop_background_wake(
+    now: Instant,
+    automatic_redraw_allowed: bool,
     frame_animation_active: bool,
 ) -> Option<Instant> {
-    if surface_renderable && frame_animation_active {
+    if automatic_redraw_allowed && frame_animation_active {
         Some(now + BACKGROUND_POLL_INTERVAL)
     } else {
         None
@@ -265,8 +285,16 @@ fn desktop_background_wake(
 /// `request_redraw()` immediately, which would render as fast as the CPU allows
 /// (the surface presents without blocking) and pin the main thread near 100%
 /// CPU, starving input handling and the compositor.
-fn next_animation_redraw_at(now: Instant, animation_active: bool) -> Option<Instant> {
-    animation_active.then(|| now + DESKTOP_ANIMATION_FRAME_INTERVAL)
+fn next_animation_redraw_at(
+    now: Instant,
+    frame_animation_active: bool,
+    scroll_animation_active: bool,
+    space_hold_animation_active: bool,
+    automatic_redraw_allowed: bool,
+) -> Option<Instant> {
+    (automatic_redraw_allowed
+        && (frame_animation_active || scroll_animation_active || space_hold_animation_active))
+        .then(|| now + DESKTOP_ANIMATION_FRAME_INTERVAL)
 }
 
 fn main() {
@@ -456,6 +484,7 @@ async fn run() -> Result<()> {
     // display refresh rate instead of busy-spinning the main thread.
     let mut animation_redraw_at: Option<Instant> = None;
     let mut pending_resize: Option<PhysicalSize<u32>> = None;
+    let mut window_occluded = false;
     let mut space_hold_started_at: Option<Instant> = None;
     let mut space_hold_consumed = false;
     let mut github_issue_sync_running = false;
@@ -477,31 +506,37 @@ async fn run() -> Result<()> {
         }
         let event_loop_now = Instant::now();
         let surface_renderable = desktop_surface_size_is_renderable(window.inner_size());
+        let automatic_redraw_allowed = desktop_automatic_redraw_allowed(
+            event_loop_now,
+            surface_renderable,
+            window_occluded,
+            surface_timeout_redraw_at,
+        );
         let renderer_ready = renderer.is_gpu_ready();
         let has_background_work = app.has_background_work();
         power_inhibitor.set_active(has_background_work);
         let default_wake = desktop_background_wake(
             event_loop_now,
-            surface_renderable,
+            automatic_redraw_allowed,
             app.has_frame_animation(),
         );
-        let backend_wake = pending_backend_redraw_since
-            .and(last_backend_redraw_request)
-            .map(|last| last + BACKEND_REDRAW_FRAME_INTERVAL);
+        let backend_wake = automatic_redraw_allowed
+            .then(|| {
+                pending_backend_redraw_since
+                    .and(last_backend_redraw_request)
+                    .map(|last| last + BACKEND_REDRAW_FRAME_INTERVAL)
+            })
+            .flatten();
         let hot_reload_wake = hot_reloader.next_wake(event_loop_now);
-        let space_hold_wake = space_hold_started_at.and_then(|started_at| match &app {
-            DesktopApp::Workspace(workspace) if !space_hold_consumed => {
-                Some(started_at + workspace.space_hold_toggle_duration())
-            }
-            _ => None,
-        });
+        let animation_wake = automatic_redraw_allowed
+            .then_some(animation_redraw_at)
+            .flatten();
         let wake = [
             default_wake,
             backend_wake,
             hot_reload_wake,
-            space_hold_wake,
             surface_timeout_redraw_at,
-            animation_redraw_at,
+            animation_wake,
         ]
             .into_iter()
             .flatten()
@@ -515,7 +550,7 @@ async fn run() -> Result<()> {
         let pending_interaction_kind = interaction_latency.pending_kind();
         let frame_animation_active = app.has_frame_animation();
         let pending_backend_redraw = pending_backend_redraw_since.is_some();
-        let no_paint_active = surface_renderable
+        let no_paint_active = automatic_redraw_allowed
             && renderer_ready
             && (!first_frame_presented
                 || has_background_work
@@ -571,6 +606,14 @@ async fn run() -> Result<()> {
                         &mut hot_reloader,
                         DesktopInputEvent::Window(DesktopWindowEvent::Focused(focused)),
                     );
+                }
+                WindowEvent::Occluded(occluded) => {
+                    window_occluded = occluded;
+                    if occluded {
+                        animation_redraw_at = None;
+                    } else {
+                        window.request_redraw();
+                    }
                 }
                 WindowEvent::ModifiersChanged(new_modifiers) => {
                     modifiers = new_modifiers.state();
@@ -1226,11 +1269,38 @@ async fn run() -> Result<()> {
                         );
                     }
                     let window_size = window.inner_size();
-                    if !desktop_surface_size_is_renderable(window_size) {
+                    let redraw_now = Instant::now();
+                    let surface_renderable = desktop_surface_size_is_renderable(window_size);
+                    let redraw_allowed = desktop_automatic_redraw_allowed(
+                        redraw_now,
+                        surface_renderable,
+                        window_occluded,
+                        surface_timeout_redraw_at,
+                    );
+                    let pending_backend_redraw_for_frame =
+                        consume_pending_backend_redraw_for_render(
+                            redraw_allowed,
+                            &mut pending_backend_redraw_since,
+                        );
+                    if !surface_renderable {
                         canvas.suspend_for_zero_size(window_size);
                         surface_timeout_backoff.reset();
                         surface_timeout_redraw_at = None;
+                        animation_redraw_at = None;
                         return;
+                    }
+                    if window_occluded {
+                        animation_redraw_at = None;
+                        return;
+                    }
+                    if let Some(redraw_at) = surface_timeout_redraw_at
+                        && redraw_now < redraw_at
+                    {
+                        target.set_control_flow(ControlFlow::WaitUntil(redraw_at));
+                        return;
+                    }
+                    if let Some(first_pending_backend_redraw) = pending_backend_redraw_for_frame {
+                        interaction_latency.mark("backend_events", first_pending_backend_redraw);
                     }
                     let smooth_scroll_lines = app.single_session_smooth_scroll_lines(
                         scroll_accumulator.pending_lines(),
@@ -1282,8 +1352,22 @@ async fn run() -> Result<()> {
                         // presents without blocking), pinning the main thread near
                         // 100% CPU and starving input/compositor scheduling. The
                         // scheduled wake is serviced in AboutToWait.
-                        animation_redraw_at =
-                            next_animation_redraw_at(Instant::now(), frame.animation_active);
+                        let now = Instant::now();
+                        let space_hold_animation_active = space_hold_started_at.is_some()
+                            && !space_hold_consumed
+                            && app.is_workspace();
+                        animation_redraw_at = next_animation_redraw_at(
+                            now,
+                            frame.animation_active,
+                            scroll_accumulator.is_active(),
+                            space_hold_animation_active,
+                            desktop_automatic_redraw_allowed(
+                                now,
+                                true,
+                                window_occluded,
+                                surface_timeout_redraw_at,
+                            ),
+                        );
                     }
                     Err(SurfaceError::Lost | SurfaceError::Outdated) => {
                         surface_timeout_backoff.reset();
@@ -1297,6 +1381,7 @@ async fn run() -> Result<()> {
                         let (delay, consecutive_timeouts) = surface_timeout_backoff.record_timeout();
                         let redraw_at = now + delay;
                         surface_timeout_redraw_at = Some(redraw_at);
+                        animation_redraw_at = None;
                         if consecutive_timeouts == 1 || delay == SURFACE_TIMEOUT_BACKOFF_MAX {
                             desktop_log::warn(format_args!(
                                 "jcode-desktop: surface acquire timed out, retrying in {}ms after {} consecutive timeout(s)",
@@ -1493,17 +1578,15 @@ async fn run() -> Result<()> {
                         }
                     }
                     window.set_title(&app.status_title());
+                    pending_backend_redraw_since.get_or_insert(now);
                     let redraw_due = last_backend_redraw_request.is_none_or(|last| {
                         now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
                     });
-                    if redraw_due {
-                        let first_pending = pending_backend_redraw_since.take().unwrap_or(now);
-                        interaction_latency.mark("backend_events", first_pending);
+                    if redraw_due && automatic_redraw_allowed {
                         last_backend_redraw_request = Some(now);
                         window.request_redraw();
                         redraw_requested = true;
                     } else {
-                        pending_backend_redraw_since.get_or_insert(now);
                         redraw_deferred = true;
                     }
                 }
@@ -1520,80 +1603,94 @@ async fn run() -> Result<()> {
             }
             Event::AboutToWait => {
                 let surface_renderable = desktop_surface_size_is_renderable(window.inner_size());
+                let now = Instant::now();
                 if let Some(redraw_at) = surface_timeout_redraw_at {
-                    let now = Instant::now();
                     if now >= redraw_at {
                         surface_timeout_redraw_at = None;
-                        if surface_renderable {
+                        if surface_renderable && !window_occluded {
                             window.request_redraw();
                         }
                     }
                 }
-                // Service the paced animation redraw scheduled by RedrawRequested.
-                // This keeps continuous animations advancing at ~display refresh
-                // without busy-spinning the loop between frames.
-                if let Some(redraw_at) = animation_redraw_at {
-                    let now = Instant::now();
-                    if now >= redraw_at {
-                        animation_redraw_at = None;
-                        if surface_renderable {
-                            window.request_redraw();
-                        }
-                    }
+                let automatic_redraw_allowed = desktop_automatic_redraw_allowed(
+                    now,
+                    surface_renderable,
+                    window_occluded,
+                    surface_timeout_redraw_at,
+                );
+                let animation_tick_due = animation_redraw_at
+                    .is_some_and(|redraw_at| now >= redraw_at);
+                if animation_tick_due {
+                    animation_redraw_at = None;
                 }
-                if surface_renderable && app.is_single_session() {
-                    let about_to_wait_started = Instant::now();
+
+                let mut paced_redraw_needed = animation_tick_due && app.has_frame_animation();
+                if animation_tick_due && automatic_redraw_allowed && app.is_single_session() {
+                    let about_to_wait_started = now;
                     let size = window.inner_size();
                     let previous_smooth_scroll = app.single_session_smooth_scroll_lines(
                         scroll_accumulator.pending_lines(),
                         size,
                         &mut scroll_metrics_cache,
                     );
-                    let frame = scroll_accumulator.frame(Instant::now());
-                    if let Some(lines) = frame.scroll_lines
-                        && !app.scroll_single_session_body(lines, size, &mut scroll_metrics_cache)
-                    {
-                        scroll_accumulator.stop();
-                    }
+                    let frame = scroll_accumulator.frame(now);
+                    let scroll_changed = frame.scroll_lines.is_some_and(|lines| {
+                        let changed = app.scroll_single_session_body(
+                            lines,
+                            size,
+                            &mut scroll_metrics_cache,
+                        );
+                        if !changed {
+                            scroll_accumulator.stop();
+                        }
+                        changed
+                    });
                     let next_smooth_scroll = app.single_session_smooth_scroll_lines(
                         scroll_accumulator.pending_lines(),
                         size,
                         &mut scroll_metrics_cache,
                     );
-                    if frame.active
+                    if scroll_changed
+                        || frame.active
                         || (next_smooth_scroll - previous_smooth_scroll).abs()
                             >= SCROLL_FRACTIONAL_EPSILON
                     {
                         interaction_latency.mark("scroll_momentum", about_to_wait_started);
-                        window.request_redraw();
+                        paced_redraw_needed = true;
                     }
                 } else if scroll_accumulator.is_active() {
-                    scroll_accumulator.reset();
-                    scroll_metrics_cache.clear();
+                    if !app.is_single_session() {
+                        scroll_accumulator.reset();
+                        scroll_metrics_cache.clear();
+                    }
                 }
-                if let (DesktopApp::Workspace(workspace), Some(started_at)) = (&mut app, space_hold_started_at)
+                let mut workspace_title_changed = false;
+                if animation_tick_due
+                    && automatic_redraw_allowed
+                    && let (DesktopApp::Workspace(workspace), Some(started_at)) =
+                        (&mut app, space_hold_started_at)
                     && !space_hold_consumed
                 {
-                    let now = Instant::now();
                     if now.saturating_duration_since(started_at) >= workspace.space_hold_toggle_duration() {
                         space_hold_consumed = true;
                         if matches!(workspace.handle_key(KeyInput::ToggleInputMode), KeyOutcome::Redraw) {
-                            window.set_title(&app.status_title());
+                            workspace_title_changed = true;
                         }
                     }
-                    if surface_renderable {
-                        window.request_redraw();
-                    }
+                    paced_redraw_needed = true;
                 }
-                if let Some(first_pending_backend_redraw) = pending_backend_redraw_since {
-                    let now = Instant::now();
-                    if surface_renderable
+                if workspace_title_changed {
+                    window.set_title(&app.status_title());
+                }
+                if animation_tick_due && automatic_redraw_allowed && paced_redraw_needed {
+                    window.request_redraw();
+                }
+                if pending_backend_redraw_since.is_some() {
+                    if automatic_redraw_allowed
                         && last_backend_redraw_request.is_none_or(|last| {
                             now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
                         })
                     {
-                        pending_backend_redraw_since = None;
-                        interaction_latency.mark("backend_events", first_pending_backend_redraw);
                         last_backend_redraw_request = Some(now);
                         window.request_redraw();
                     }
@@ -1604,20 +1701,27 @@ async fn run() -> Result<()> {
                 }
 
                 if let Some(canvas) = renderer.canvas_mut()
-                    && surface_renderable
+                    && automatic_redraw_allowed
                     && canvas.needs_initial_frame
                 {
                     canvas.needs_initial_frame = false;
                     window.request_redraw();
-                } else if surface_renderable
-                    && app.has_frame_animation()
-                    && animation_redraw_at.is_none()
-                {
+                }
+                let space_hold_animation_active = space_hold_started_at.is_some()
+                    && !space_hold_consumed
+                    && app.is_workspace();
+                if animation_redraw_at.is_none() {
                     // An animation is active but no paced redraw is scheduled yet
                     // (e.g. it just became active). Schedule one instead of
                     // requesting a redraw on every loop iteration, which would
                     // busy-spin the main thread at 100% CPU.
-                    animation_redraw_at = next_animation_redraw_at(Instant::now(), true);
+                    animation_redraw_at = next_animation_redraw_at(
+                        now,
+                        app.has_frame_animation(),
+                        scroll_accumulator.is_active(),
+                        space_hold_animation_active,
+                        automatic_redraw_allowed,
+                    );
                 }
             }
             _ => {}
