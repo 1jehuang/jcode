@@ -1234,3 +1234,5 @@ fn guardrail_notice_absent_for_normal_turns() {
     assert!(Agent::provider_guardrail_notice(Some("end_turn"), false, false).is_none());
     assert!(Agent::provider_guardrail_notice(None, false, true).is_none());
 }
+
+include!("agent_tests/retention_readiness.rs");
