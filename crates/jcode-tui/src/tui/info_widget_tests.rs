@@ -1812,3 +1812,74 @@ fn compact_page_height_matches_for_cost_based_usage() {
     let lines = super::render_page(InfoPageKind::CompactOnly, &data, inner);
     assert_eq!(lines.len() as u16, layout.pages[0].height);
 }
+
+/// The fact ledger must mirror what each widget actually renders. The
+/// Overview widget never draws the working directory, so it must not claim
+/// Fact::Dir (that bug made the dir invisible everywhere: the HUD didn't show
+/// it and the idle input hint believed it was already shown). Similarly, facts
+/// backed by empty/blank values must not be claimed.
+#[test]
+fn claim_widget_facts_mirrors_rendering() {
+    use crate::tui::session_facts::{Fact, FactLedger};
+
+    let data = InfoWidgetData {
+        model: Some("claude-fable-5".to_string()),
+        reasoning_effort: Some("high".to_string()),
+        provider_name: Some("claude".to_string()),
+        auth_method: super::AuthMethod::AnthropicOAuth,
+        working_dir: Some("/home/me/jcode".to_string()),
+        session_count: Some(1),
+        ..Default::default()
+    };
+
+    // Overview renders model/effort/provider/auth/session but NOT the dir.
+    let mut ledger = FactLedger::new();
+    super::claim_widget_facts(WidgetKind::Overview, &data, &mut ledger);
+    assert!(ledger.is_shown(Fact::Model));
+    assert!(ledger.is_shown(Fact::ReasoningEffort));
+    assert!(ledger.is_shown(Fact::Provider));
+    assert!(ledger.is_shown(Fact::Auth));
+    assert!(ledger.is_shown(Fact::Session));
+    assert!(
+        ledger.is_missing(Fact::Dir),
+        "Overview does not render the working dir; claiming it hides the dir everywhere"
+    );
+    assert!(
+        ledger.is_missing(Fact::Context),
+        "no context info in data, so Overview renders no context section"
+    );
+
+    // ModelInfo renders the dir line too.
+    let mut ledger = FactLedger::new();
+    super::claim_widget_facts(WidgetKind::ModelInfo, &data, &mut ledger);
+    assert!(ledger.is_shown(Fact::Dir));
+
+    // Blank / missing values must not be claimed even when the widget is placed.
+    let blank = InfoWidgetData {
+        model: Some("claude-fable-5".to_string()),
+        reasoning_effort: Some("  ".to_string()),
+        provider_name: Some(String::new()),
+        working_dir: Some("   ".to_string()),
+        session_name: Some(" ".to_string()),
+        ..Default::default()
+    };
+    let mut ledger = FactLedger::new();
+    super::claim_widget_facts(WidgetKind::ModelInfo, &blank, &mut ledger);
+    assert!(ledger.is_shown(Fact::Model));
+    assert!(ledger.is_missing(Fact::ReasoningEffort));
+    assert!(ledger.is_missing(Fact::Provider));
+    assert!(ledger.is_missing(Fact::Auth));
+    assert!(ledger.is_missing(Fact::Dir));
+    assert!(ledger.is_missing(Fact::Session));
+
+    // A ModelInfo placement with no model renders nothing and claims nothing.
+    let empty = InfoWidgetData::default();
+    let mut ledger = FactLedger::new();
+    super::claim_widget_facts(WidgetKind::ModelInfo, &empty, &mut ledger);
+    assert!(ledger.is_missing(Fact::Model));
+
+    // ContextUsage claims context only when there is real content.
+    let mut ledger = FactLedger::new();
+    super::claim_widget_facts(WidgetKind::ContextUsage, &empty, &mut ledger);
+    assert!(ledger.is_missing(Fact::Context));
+}

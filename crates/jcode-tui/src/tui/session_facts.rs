@@ -46,13 +46,6 @@ impl FactLedger {
         self.shown |= Self::bit(fact);
     }
 
-    /// Convenience to claim several facts at once.
-    pub(crate) fn claim_all(&mut self, facts: impl IntoIterator<Item = Fact>) {
-        for fact in facts {
-            self.claim(fact);
-        }
-    }
-
     /// Whether `fact` is already visible somewhere this frame.
     pub(crate) fn is_shown(&self, fact: Fact) -> bool {
         self.shown & Self::bit(fact) != 0
@@ -64,10 +57,17 @@ impl FactLedger {
     }
 }
 
-/// Render `claude-opus-4-8` as `Claude Opus 4.8`, etc. Single source of truth
-/// for the human-friendly model name across every surface.
+/// Render `claude-opus-4-8` as `Opus 4.8`, `gpt-5.5` as `GPT-5.5`, etc. Single
+/// source of truth for the human-friendly model name across every compact UI
+/// surface. The redundant `Claude ` family prefix is dropped: the provider
+/// fact already says Claude/Anthropic, so the model reads as `Fable 5` or
+/// `Sonnet 4.5` rather than `Claude Fable 5`.
 pub(crate) fn pretty_model(model: &str) -> String {
-    crate::tui::app::helpers::pretty_model_display_name(model)
+    let pretty = crate::tui::app::helpers::pretty_model_display_name(model);
+    match pretty.strip_prefix("Claude ") {
+        Some(rest) if !rest.trim().is_empty() => rest.to_string(),
+        _ => pretty,
+    }
 }
 
 /// Home-relative directory label, e.g. `/home/me/jcode` -> `~/jcode`. Does not
@@ -126,10 +126,21 @@ mod tests {
         ledger.claim(Fact::Model);
         assert!(ledger.is_shown(Fact::Model));
         assert!(ledger.is_missing(Fact::Dir));
-        ledger.claim_all([Fact::Dir, Fact::Context]);
+        ledger.claim(Fact::Dir);
+        ledger.claim(Fact::Context);
         assert!(ledger.is_shown(Fact::Dir));
         assert!(ledger.is_shown(Fact::Context));
         assert!(ledger.is_missing(Fact::Provider));
+    }
+
+    #[test]
+    fn pretty_model_drops_redundant_claude_prefix() {
+        assert_eq!(pretty_model("claude-opus-4-8"), "Opus 4.8");
+        assert_eq!(pretty_model("claude-sonnet-4-5"), "Sonnet 4.5");
+        assert_eq!(pretty_model("claude-fable-5"), "Fable 5");
+        // Non-Claude ids are untouched.
+        assert_eq!(pretty_model("gpt-5.5"), "GPT-5.5");
+        assert_eq!(pretty_model("gemini-2.5-pro"), "Gemini 2.5 Pro");
     }
 
     #[test]

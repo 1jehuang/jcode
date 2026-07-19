@@ -956,14 +956,41 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
 
     crate::memory::check_staleness();
 
-    let aligned_line = if app.centered_mode() {
-        line.alignment(Alignment::Center)
-    } else if right_align_facts {
-        line.alignment(Alignment::Right)
-    } else {
-        line
-    };
-    frame.render_widget(Paragraph::new(aligned_line), area);
+    if app.centered_mode() {
+        frame.render_widget(Paragraph::new(line.alignment(Alignment::Center)), area);
+        return;
+    }
+    if right_align_facts {
+        frame.render_widget(Paragraph::new(line.alignment(Alignment::Right)), area);
+        return;
+    }
+
+    // The left side is busy (spinner, tool activity, tip, warning). The right
+    // side of the status line is still usable real estate: pin the missing
+    // session facts there when they fit alongside the left content, so facts
+    // that have no other home stay visible even while a turn is running.
+    if let Some(facts) = idle_status_facts(app) {
+        use unicode_width::UnicodeWidthStr;
+        let left_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        let facts_width: usize = facts.iter().map(|s| s.content.width()).sum();
+        let gap = 3usize; // breathing room between left content and facts
+        if facts_width > 0 && left_width + gap + facts_width <= area.width as usize {
+            let facts_w = facts_width as u16;
+            let facts_area = Rect {
+                x: area.x + area.width - facts_w,
+                width: facts_w,
+                ..area
+            };
+            frame.render_widget(Paragraph::new(line), area);
+            frame.render_widget(
+                Paragraph::new(Line::from(facts).alignment(Alignment::Right)),
+                facts_area,
+            );
+            return;
+        }
+    }
+
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Append the "+N queued" suffix span (in the queued accent color) when there
@@ -2522,7 +2549,8 @@ fn idle_input_hint(app: &dyn TuiState) -> Option<String> {
     }
 
     // Consult the per-frame ledger: skip facts the HUD already shows.
-    let ledger = crate::tui::info_widget::widget_visible_facts(&app.info_widget_data());
+    let data = app.info_widget_data();
+    let ledger = crate::tui::info_widget::widget_visible_facts(&data);
 
     let dir = if ledger.is_missing(session_facts::Fact::Dir) {
         app.working_dir()
@@ -2538,7 +2566,19 @@ fn idle_input_hint(app: &dyn TuiState) -> Option<String> {
         if m.is_empty() {
             None
         } else {
-            Some(session_facts::pretty_model(m))
+            let mut label = session_facts::pretty_model(m);
+            // Reasoning effort (thinking level) rides along with the model
+            // name, e.g. "Fable 5 high", when it is not shown elsewhere.
+            if ledger.is_missing(session_facts::Fact::ReasoningEffort)
+                && let Some(effort) = data
+                    .reasoning_effort
+                    .as_deref()
+                    .and_then(overscroll_short_reasoning)
+            {
+                label.push(' ');
+                label.push_str(effort);
+            }
+            Some(label)
         }
     } else {
         None
@@ -2586,6 +2626,19 @@ fn idle_status_facts(app: &dyn TuiState) -> Option<Vec<Span<'static>>> {
                 Style::default().fg(dim_color()),
             ));
         }
+    }
+
+    // Access method (OAuth vs API key), when not already visible in the HUD.
+    if ledger.is_missing(Fact::Auth)
+        && let Some((label, _color)) = overscroll_auth_label(data.auth_method)
+    {
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default().fg(dim_color()),
+        ));
     }
 
     if ledger.is_missing(Fact::Context)

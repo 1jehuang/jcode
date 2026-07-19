@@ -1033,7 +1033,6 @@ pub(crate) fn clear_widget_placements_for_tests() {
 /// only to decide which facts an idle fallback surface should fill in; being a
 /// frame behind is visually harmless.
 pub(crate) fn widget_visible_facts(data: &InfoWidgetData) -> crate::tui::session_facts::FactLedger {
-    use crate::tui::session_facts::Fact;
     let mut ledger = crate::tui::session_facts::FactLedger::new();
     let guard = get_or_init_state();
     let Some(state) = guard.as_ref() else {
@@ -1043,40 +1042,87 @@ pub(crate) fn widget_visible_facts(data: &InfoWidgetData) -> crate::tui::session
         return ledger;
     }
     for placement in &state.placements {
-        match placement.kind {
-            WidgetKind::ModelInfo => {
+        claim_widget_facts(placement.kind, data, &mut ledger);
+    }
+    ledger
+}
+
+/// Record the facts a placed widget of `kind` *actually renders* for `data`.
+///
+/// This must mirror the render functions exactly (`render_model_widget` for
+/// ModelInfo, `render_sections`/`render_model_info` for Overview): claiming a
+/// fact the widget does not draw makes the fallback surfaces (idle input hint,
+/// status line) suppress it, and the fact ends up visible nowhere.
+fn claim_widget_facts(
+    kind: WidgetKind,
+    data: &InfoWidgetData,
+    ledger: &mut crate::tui::session_facts::FactLedger,
+) {
+    use crate::tui::session_facts::Fact;
+    let non_blank = |s: &Option<String>| s.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
+    let has_effort = data
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    let has_context = data
+        .context_info
+        .as_ref()
+        .is_some_and(|c| c.total_chars > 0);
+    match kind {
+        WidgetKind::ModelInfo => {
+            // render_model_widget returns nothing at all without a model.
+            if data.model.is_none() {
+                return;
+            }
+            ledger.claim(Fact::Model);
+            if has_effort {
+                ledger.claim(Fact::ReasoningEffort);
+            }
+            if non_blank(&data.provider_name) {
+                ledger.claim(Fact::Provider);
+            }
+            if data.auth_method != AuthMethod::Unknown {
+                ledger.claim(Fact::Auth);
+            }
+            if non_blank(&data.working_dir) {
+                ledger.claim(Fact::Dir);
+            }
+            if data.session_count.is_some() || non_blank(&data.session_name) {
+                ledger.claim(Fact::Session);
+            }
+        }
+        WidgetKind::Overview => {
+            // The overview's model section (render_model_info) shows the model
+            // line (+effort), the provider·auth line, and the session line. It
+            // never renders the working directory, so Dir must not be claimed
+            // here or the dir ends up visible nowhere.
+            if data.model.is_some() {
                 ledger.claim(Fact::Model);
-                if data.reasoning_effort.is_some() {
+                if has_effort {
                     ledger.claim(Fact::ReasoningEffort);
                 }
-                if data.provider_name.is_some() {
+                if non_blank(&data.provider_name) {
                     ledger.claim(Fact::Provider);
                 }
                 if data.auth_method != AuthMethod::Unknown {
                     ledger.claim(Fact::Auth);
                 }
-                if data.working_dir.is_some() {
-                    ledger.claim(Fact::Dir);
-                }
-                if data.session_count.is_some() {
+                if data.session_count.is_some() || non_blank(&data.session_name) {
                     ledger.claim(Fact::Session);
                 }
             }
-            WidgetKind::Overview => {
-                // The overview panel summarizes model, context, provider, dir.
-                ledger.claim_all([Fact::Model, Fact::Context, Fact::Provider, Fact::Dir]);
-                if data.reasoning_effort.is_some() {
-                    ledger.claim(Fact::ReasoningEffort);
-                }
-                if data.auth_method != AuthMethod::Unknown {
-                    ledger.claim(Fact::Auth);
-                }
+            if has_context {
+                ledger.claim(Fact::Context);
             }
-            WidgetKind::ContextUsage => ledger.claim(Fact::Context),
-            _ => {}
         }
+        WidgetKind::ContextUsage => {
+            if has_context {
+                ledger.claim(Fact::Context);
+            }
+        }
+        _ => {}
     }
-    ledger
 }
 
 /// Calculate the height needed for a specific widget type
