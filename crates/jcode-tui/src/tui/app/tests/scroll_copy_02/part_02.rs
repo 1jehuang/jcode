@@ -563,7 +563,7 @@ fn test_mouse_click_in_input_moves_cursor_to_clicked_position() {
     // A persisted first-run state can otherwise replace the composer with the
     // suggestion welcome screen, leaving a zero-height input hit target.
     app.push_display_message(DisplayMessage::assistant("seed transcript"));
-    app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
     app.input = "hello world".to_string();
     app.cursor_pos = app.input.len();
@@ -637,7 +637,7 @@ fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let mut app = create_test_app();
     // Keep first-run suggestions from replacing the composer under test.
     app.push_display_message(DisplayMessage::assistant("seed transcript"));
-    app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
@@ -689,7 +689,7 @@ fn test_mouse_click_in_wrapped_input_moves_cursor_to_second_visual_line() {
     let mut app = create_test_app();
     // Keep first-run suggestions from replacing the composer under test.
     app.push_display_message(DisplayMessage::assistant("seed transcript"));
-    app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
     app.input = "abcdefghij".to_string();
     app.cursor_pos = 0;

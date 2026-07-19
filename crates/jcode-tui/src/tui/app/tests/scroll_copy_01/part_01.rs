@@ -36,7 +36,7 @@ fn create_scroll_test_app(
     if diagrams == 0 {
         // Process-global diagrams can be registered by sibling tests after the
         // clear above. Keep text-only geometry deterministic at the App level.
-        app.diagram_mode = crate::config::DiagramDisplayMode::Off;
+        app.diagram_mode = crate::config::DiagramDisplayMode::None;
         app.diagram_pane_enabled = false;
     }
     let content = App::build_scroll_test_content(diagrams, padding, None);
