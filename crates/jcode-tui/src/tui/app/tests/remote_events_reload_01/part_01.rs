@@ -254,6 +254,10 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
     // session_changed branch (remote/server_events.rs) calls
     // clear_streaming_render_state() (app/input.rs), which clears the
     // streaming preview slot.
+    //
+    // Serialize with the other tests that mutate the process-global mermaid
+    // preview slot / ACTIVE_DIAGRAMS registry.
+    let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -340,6 +344,10 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     // registered streaming preview diagram, otherwise a preview registered
     // mid-stream keeps rendering a mermaid block from a message that was just
     // rewound away (it sits at index 0 of get_active_diagrams in Margin mode).
+    //
+    // Serialize with the other tests that mutate the process-global mermaid
+    // preview slot / ACTIVE_DIAGRAMS registry.
+    let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -454,6 +462,10 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
     // NOT be cleared (the c7612068 preview-clear only runs on the forced
     // re-apply path, which only the rewinding client arms by resetting
     // has_loaded_history in backend.rs rewind()/rewind_undo()).
+    //
+    // Serialize with the other tests that mutate the process-global mermaid
+    // preview slot / ACTIVE_DIAGRAMS registry.
+    let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
