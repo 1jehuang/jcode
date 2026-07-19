@@ -236,7 +236,7 @@ fn test_chat_drag_into_composer_clamps_to_chat_pane() {
     render_and_snap(&app, &mut terminal);
 
     // Anchor on a chat transcript cell.
-    let (chat_col, chat_row, _) = (0..24u16)
+    let (chat_col, chat_row, chat_point) = (0..24u16)
         .flat_map(|row| (0..80u16).map(move |col| (col, row)))
         .find_map(|(col, row)| {
             crate::tui::ui::copy_point_from_screen(col, row)
@@ -244,6 +244,18 @@ fn test_chat_drag_into_composer_clamps_to_chat_pane() {
                 .map(|p| (col, row, p))
         })
         .expect("a chat cell to anchor on");
+    // A second chat cell that resolves to a *different* logical point: the
+    // same-cell drag-jitter guard keeps the press armed (dragging never
+    // starts) while press and motion map to the identical point, so the
+    // in-pane motion must genuinely move the selection cursor.
+    let (chat_col2, chat_row2, _) = (0..24u16)
+        .flat_map(|row| (0..80u16).map(move |col| (col, row)))
+        .find_map(|(col, row)| {
+            crate::tui::ui::copy_point_from_screen(col, row)
+                .filter(|p| p.pane == crate::tui::CopySelectionPane::Chat && *p != chat_point)
+                .map(|p| (col, row, p))
+        })
+        .expect("a second distinct chat cell");
 
     // Composer row to drag into.
     let input_points = input_pane_screen_points(80, 24);
@@ -269,8 +281,8 @@ fn test_chat_drag_into_composer_clamps_to_chat_pane() {
     app.handle_copy_selection_mouse_with(
         MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            column: chat_col.saturating_add(5),
-            row: chat_row,
+            column: chat_col2,
+            row: chat_row2,
             modifiers: KeyModifiers::empty(),
         },
         |_| true,
