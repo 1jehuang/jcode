@@ -83,6 +83,14 @@ impl App {
     /// depleting countdown indicator is perceivable and the line reads as a
     /// temporary, pull-to-reveal panel.
     const OVERSCROLL_DWELL: std::time::Duration = std::time::Duration::from_millis(1500);
+    /// Maximum pause between downward scroll ticks for them to count as the
+    /// same continuous gesture. Overscroll only reveals when a gesture *began*
+    /// at the bottom of the transcript, so momentum from a scroll that merely
+    /// carries the view into the bottom does not pop the elastic line. Wheel
+    /// momentum drains a few lines per redraw tick, so this must comfortably
+    /// exceed the idle redraw cadence to avoid splitting one physical flick.
+    pub(super) const OVERSCROLL_GESTURE_GAP: std::time::Duration =
+        std::time::Duration::from_millis(500);
 
     fn log_mouse_scroll_trace(
         &self,
@@ -1589,8 +1597,12 @@ impl App {
     /// (e.g. the mouse-wheel queue) rely on this to avoid accumulating
     /// "phantom" scroll once the viewport is already pinned to the top.
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
-        // Scrolling up cancels any pending overscroll rebound line immediately.
+        // Scrolling up cancels any pending overscroll rebound line immediately
+        // and ends the current downward gesture, so a subsequent scroll down
+        // starts a fresh gesture evaluated from wherever the view is then.
         self.chat_overscroll_last = None;
+        self.chat_scroll_down_last = None;
+        self.chat_scroll_gesture_from_bottom = false;
         // While older compacted history is still settling on screen, the renderer
         // is anchored to a distance-from-bottom rather than `scroll_offset`. Keep
         // scrolling continuous by moving the anchor itself instead of a stale
@@ -1658,12 +1670,27 @@ impl App {
     /// `false`, so the mouse-wheel queue does not accumulate phantom scroll
     /// that would later have to be undone before scrolling up moves the view.
     pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
+        // Segment downward motion into gestures: a pause longer than
+        // `OVERSCROLL_GESTURE_GAP` starts a new gesture. Record whether this
+        // gesture began while already pinned to the bottom; only such gestures
+        // may reveal the elastic overscroll line below.
+        let now = Instant::now();
+        let new_gesture = self
+            .chat_scroll_down_last
+            .map(|last| now.saturating_duration_since(last) > Self::OVERSCROLL_GESTURE_GAP)
+            .unwrap_or(true);
+        self.chat_scroll_down_last = Some(now);
+        if new_gesture {
+            self.chat_scroll_gesture_from_bottom = self.chat_pinned_to_bottom();
+        }
         // Mirror `scroll_up`: while an older-history prepend is still settling,
         // the renderer is anchored to distance-from-bottom, so move the anchor
         // toward the bottom instead of a stale `scroll_offset`.
         if let Some(mut anchor) = self.pending_history_anchor {
             if anchor.lines_from_bottom == 0 {
-                self.register_chat_overscroll();
+                if self.chat_scroll_gesture_from_bottom {
+                    self.register_chat_overscroll();
+                }
                 return false;
             }
             anchor.lines_from_bottom = anchor.lines_from_bottom.saturating_sub(amount);
@@ -1674,8 +1701,12 @@ impl App {
         }
         if !self.auto_scroll_paused {
             // Already pinned to the bottom: a further downward scroll is an
-            // "overscroll". Reveal the elastic status line and keep it dwelling.
-            self.register_chat_overscroll();
+            // "overscroll". Only reveal the elastic status line when the whole
+            // gesture started here at the bottom; momentum left over from a
+            // scroll that just arrived at the bottom is swallowed silently.
+            if self.chat_scroll_gesture_from_bottom {
+                self.register_chat_overscroll();
+            }
             return false;
         }
         let before = self.scroll_offset;
@@ -1709,6 +1740,16 @@ impl App {
             self.request_full_repaint();
         }
         changed
+    }
+
+    /// Whether the chat viewport is currently pinned to (following) the
+    /// bottom of the transcript.
+    fn chat_pinned_to_bottom(&self) -> bool {
+        if let Some(anchor) = self.pending_history_anchor {
+            anchor.lines_from_bottom == 0
+        } else {
+            !self.auto_scroll_paused
+        }
     }
 
     pub(super) fn follow_chat_bottom(&mut self) {

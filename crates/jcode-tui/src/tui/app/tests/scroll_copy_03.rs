@@ -579,6 +579,43 @@ fn test_scroll_down_past_bottom_does_not_accumulate_phantom_offset() {
 }
 
 #[test]
+fn test_overscroll_requires_gesture_starting_at_bottom() {
+    // Overscroll must only reveal when the downward gesture *began* while the
+    // view was already pinned to the bottom. A gesture that starts mid-
+    // transcript and carries the view into the bottom (with leftover momentum
+    // continuing past it) must not pop the elastic line.
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
+    render_and_snap(&app, &mut terminal);
+    let rendered_max = crate::tui::ui::last_max_scroll();
+    assert!(rendered_max > 2, "expected scrollable chat content");
+
+    // Start a gesture partway up the transcript.
+    app.scroll_offset = 2;
+    app.auto_scroll_paused = true;
+
+    // One continuous gesture (no pause between ticks): rides into the bottom
+    // and keeps going. Momentum past the bottom must be swallowed silently.
+    for _ in 0..20 {
+        app.scroll_down(1);
+    }
+    assert!(!app.auto_scroll_paused, "gesture should reach the bottom");
+    assert!(
+        !app.chat_overscroll_active(),
+        "momentum carrying into the bottom must not reveal the overscroll line"
+    );
+
+    // A fresh gesture that starts at the bottom (after a pause) does reveal it.
+    app.chat_scroll_down_last =
+        Some(Instant::now() - App::OVERSCROLL_GESTURE_GAP - std::time::Duration::from_millis(50));
+    app.scroll_down(1);
+    assert!(
+        app.chat_overscroll_active(),
+        "a new gesture starting at the bottom should reveal the overscroll line"
+    );
+}
+
+#[test]
 fn test_scroll_acceleration_multiplier_scales_with_flick_speed() {
     use std::time::Duration;
     // A fast flick (short gap between wheel events) gets a subtle 2x boost; a
