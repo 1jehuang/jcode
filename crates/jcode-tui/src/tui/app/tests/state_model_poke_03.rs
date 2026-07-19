@@ -669,12 +669,13 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
     let mut saw_saved = false;
     let mut saw_catalog_started = false;
     let mut saw_activation = false;
+    let mut saw_catalog_ready = false;
     let mut login_success_events = 0;
     let mut login_failure_events = 0;
     let mut catalog_warning_events = 0;
     let mut activation_events = 0;
     rt.block_on(async {
-        while !(saw_saved && saw_catalog_started && saw_activation) {
+        while !(saw_saved && saw_catalog_started && saw_activation && saw_catalog_ready) {
             match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
                 Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
                     if login.success {
@@ -734,6 +735,10 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     super::local::handle_bus_event(&mut app, Ok(event));
                     saw_activation = true;
                 }
+                Ok(Ok(event @ crate::bus::BusEvent::AuthCatalogRefreshReady)) => {
+                    super::local::handle_bus_event(&mut app, Ok(event));
+                    saw_catalog_ready = true;
+                }
                 Ok(Ok(_)) => {}
                 other => panic!("expected local Cerebras auth lifecycle event, got {other:?}"),
             }
@@ -772,6 +777,9 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                 assert_eq!(model, "qwen-3-235b-a22b-instruct-2507");
                 assert_eq!(provider_key.as_deref(), Some("cerebras"));
                 assert!(message.contains("Cerebras is ready."), "{message}");
+            }
+            event @ crate::bus::BusEvent::AuthCatalogRefreshReady => {
+                super::local::handle_bus_event(&mut app, Ok(event));
             }
             _ => {}
         }
@@ -877,6 +885,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
             && route.api_method == "openai-compatible:cerebras"
             && route.available
     }));
+    let llama_cerebras_option = llama_entry
+        .options
+        .iter()
+        .position(|route| {
+            route.provider == "Cerebras"
+                && route.api_method == "openai-compatible:cerebras"
+                && route.available
+        })
+        .expect("alternate model should expose its authenticated Cerebras route");
     assert!(
         !llama_entry
             .options
@@ -890,8 +907,11 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .position(|&idx| idx == llama_idx)
         .expect("alternate Cerebras model should be selectable in filtered picker list");
 
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+    let picker = app.inline_interactive_state.as_mut().unwrap();
+    picker.selected = filtered_pos;
+    picker.entries[llama_idx].selected_option = llama_cerebras_option;
+    picker.column = picker.max_navigable_column();
+    app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::empty())
         .expect("Cerebras picker selection should switch models");
 
     assert_eq!(app.session.model.as_deref(), Some("llama3.1-8b"));
@@ -1505,6 +1525,14 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
+    // This test asserts the login-completed status notice; a brand-new-install
+    // classification would let first-run onboarding overwrite it with the
+    // StartChoice prompt. Pre-commit the onboarding guard so the flow never
+    // starts.
+    app.onboarding_startup_checked = true;
+    app.onboarding_flow = Some(crate::tui::app::onboarding_flow::OnboardingFlow {
+        phase: crate::tui::app::onboarding_flow::OnboardingPhase::Done,
+    });
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.provider_session_id = Some("stale-upstream".to_string());
@@ -1654,7 +1682,7 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
 #[test]
 fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_them() {
     let mut app = create_antigravity_picker_test_app();
-    let text = render_model_picker_text(&mut app, 90, 12);
+    let text = render_model_picker_text(&mut app, 90, 14);
 
     assert!(
         text.contains("MODEL") && text.contains("PROVIDER") && text.contains("METHOD"),
@@ -1691,22 +1719,51 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
 #[test]
 fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let mut app = create_login_smoke_model_app();
-    let text = render_model_picker_text(&mut app, 110, 18);
+    app.display_messages = vec![DisplayMessage::system("seed render state")];
+    app.bump_display_messages_version();
+    app.open_model_picker();
+    wait_for_model_picker_load(&mut app);
+
+    let render_filtered = |app: &mut App, filter: &str| {
+        let picker = app
+            .inline_interactive_state
+            .as_mut()
+            .expect("model picker should be open");
+        picker.filter = filter.to_string();
+        App::apply_inline_interactive_filter(picker);
+        let _render_lock = scroll_render_test_lock();
+        let backend = ratatui::backend::TestBackend::new(180, 48);
+        let mut terminal =
+            ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        render_and_snap(app, &mut terminal)
+    };
+
+    // Effort-capable routes now expand into multiple rows. Render focused
+    // slices so each provider remains observable without assuming the complete
+    // catalog fits in one terminal viewport.
+    let openai_text = render_filtered(&mut app, "gpt-5.4");
+    let comtegra_text = render_filtered(&mut app, "glm-51-nvfp4");
+    let copilot_text = render_filtered(&mut app, "claude-opus-4.6");
+    let deepseek_text = render_filtered(&mut app, "deepseek/deepseek-v4-pro");
+    let kimi_text = render_filtered(&mut app, "moonshotai/kimi-k2.5");
+    let openrouter_openai_text = render_filtered(&mut app, "openai/gpt-5.5");
 
     assert!(
-        text.contains("MODEL") && text.contains("PROVIDER") && text.contains("METHOD"),
+        openai_text.contains("MODEL")
+            && openai_text.contains("PROVIDER")
+            && openai_text.contains("METHOD"),
         "rendered /model view should include user-visible picker columns, got:\n{}",
-        text
+        openai_text
     );
     assert!(
-        text.contains("gpt-5.4")
-            && text.contains("OpenAI")
-            && text.contains("oauth")
-            && text.contains("api key"),
+        openai_text.contains("gpt-5.4")
+            && openai_text.contains("OpenAI")
+            && openai_text.contains("oauth")
+            && openai_text.contains("api key"),
         "OpenAI OAuth and API-key routes should be separately visible, got:\n{}",
-        text
+        openai_text
     );
-    let glm_row = text
+    let glm_row = comtegra_text
         .lines()
         .find(|line| line.contains("glm-51-nvfp4"))
         .unwrap_or("");
@@ -1716,30 +1773,31 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
             && !glm_row.contains("copilot"),
         "Comtegra GLM row should show its provider and API-key method, got row `{}` in:\n{}",
         glm_row,
-        text
+        comtegra_text
     );
     assert!(
-        text.contains("glm-51-nvfp4")
-            && text.contains("Comtegra GPU Cloud")
-            && text.contains("new"),
+        comtegra_text.contains("glm-51-nvfp4")
+            && comtegra_text.contains("Comtegra GPU Cloud")
+            && comtegra_text.contains("new"),
         "Comtegra login route should be visible and marked new, got:\n{}",
-        text
+        comtegra_text
     );
     assert!(
-        text.contains("claude-opus-4.6") && text.contains("Copilot"),
+        copilot_text.contains("claude-opus-4.6") && copilot_text.contains("Copilot"),
         "Copilot route should be visible, got:\n{}",
-        text
+        copilot_text
     );
     assert!(
-        text.contains("deepseek/deepseek-v4-pro") && text.contains("openrouter"),
+        deepseek_text.contains("deepseek/deepseek-v4-pro")
+            && deepseek_text.contains("openrouter"),
         "OpenRouter route should be visible, got:\n{}",
-        text
+        deepseek_text
     );
-    let deepseek_auto_row = text
+    let deepseek_auto_row = deepseek_text
         .lines()
         .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
         .unwrap_or("");
-    let deepseek_provider_row = text
+    let deepseek_provider_row = deepseek_text
         .lines()
         .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
         .unwrap_or("");
@@ -1747,15 +1805,15 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         !deepseek_auto_row.contains('★'),
         "OpenRouter auto route should not carry the recommended marker, got row `{}` in:\n{}",
         deepseek_auto_row,
-        text
+        deepseek_text
     );
     assert!(
         !deepseek_provider_row.contains('★'),
         "OpenRouter provider-specific routes should not carry the recommended marker, got row `{}` in:\n{}",
         deepseek_provider_row,
-        text
+        deepseek_text
     );
-    let kimi25_row = text
+    let kimi25_row = kimi_text
         .lines()
         .find(|line| line.contains("moonshotai/kimi-k2.5"))
         .unwrap_or("");
@@ -1763,18 +1821,34 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         !kimi25_row.contains('★'),
         "Kimi K2.5 should not be recommended, got row `{}` in:\n{}",
         kimi25_row,
-        text
+        kimi_text
     );
+    let openrouter_openai_row = openrouter_openai_text
+        .lines()
+        .find(|line| line.contains("openai/gpt-5.5"))
+        .unwrap_or("");
     assert!(
-        text.contains("openai/gpt-5.5") && text.contains("OpenRouter/OpenAI"),
-        "OpenRouter endpoint routes should not look like native OpenAI API-key rows, got:\n{}",
-        text
+        openrouter_openai_row.contains("OpenRou")
+            && openrouter_openai_row.contains("openrouter")
+            && !openrouter_openai_row.contains("api key"),
+        "OpenRouter endpoint routes should not look like native OpenAI API-key rows, got row `{}` in:\n{}",
+        openrouter_openai_row,
+        openrouter_openai_text
     );
-    assert!(
-        !text.contains("(2)"),
-        "provider routes should not be hidden behind stacked option counts, got:\n{}",
-        text
-    );
+    for text in [
+        &openai_text,
+        &comtegra_text,
+        &copilot_text,
+        &deepseek_text,
+        &kimi_text,
+        &openrouter_openai_text,
+    ] {
+        assert!(
+            !text.contains("(2)"),
+            "provider routes should not be hidden behind stacked option counts, got:\n{}",
+            text
+        );
+    }
 }
 
 #[test]
