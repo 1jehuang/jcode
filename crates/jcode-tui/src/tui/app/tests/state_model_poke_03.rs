@@ -1682,37 +1682,66 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
 #[test]
 fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_them() {
     let mut app = create_antigravity_picker_test_app();
-    let text = render_model_picker_text(&mut app, 90, 14);
+    app.display_messages = vec![DisplayMessage::system("seed render state")];
+    app.bump_display_messages_version();
+    app.open_model_picker();
+    wait_for_model_picker_load(&mut app);
+
+    let render_filtered = |app: &mut App, filter: &str| {
+        let picker = app
+            .inline_interactive_state
+            .as_mut()
+            .expect("model picker should be open");
+        picker.filter = filter.to_string();
+        App::apply_inline_interactive_filter(picker);
+        let _render_lock = scroll_render_test_lock();
+        let backend = ratatui::backend::TestBackend::new(90, 14);
+        let mut terminal =
+            ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        render_and_snap(app, &mut terminal)
+    };
+    let claude_text = render_filtered(&mut app, "claude-sonnet-4-6");
+    let gpt_text = render_filtered(&mut app, "gpt-oss-120b-medium");
 
     assert!(
-        text.contains("MODEL") && text.contains("PROVIDER") && text.contains("METHOD"),
+        claude_text.contains("MODEL")
+            && claude_text.contains("PROVIDER")
+            && claude_text.contains("METHOD"),
         "rendered /model view should include picker columns, got:
 {}",
-        text
+        claude_text
     );
     assert!(
-        text.contains("claude-sonnet-4-6"),
+        claude_text.contains("claude-sonnet-4-6"),
         "rendered /model view should show the Antigravity Claude row, got:
 {}",
-        text
+        claude_text
     );
     assert!(
-        text.contains("gpt-oss-120b-medium"),
+        gpt_text.contains("gpt-oss-120b-medium"),
         "rendered /model view should show the Antigravity GPT row, got:
 {}",
-        text
+        gpt_text
     );
     assert!(
-        text.contains("Antigravity"),
+        claude_text.contains("Antigravity") && gpt_text.contains("Antigravity"),
         "rendered /model view should show the Antigravity provider column, got:
+Claude:
+{}
+GPT:
 {}",
-        text
+        claude_text,
+        gpt_text
     );
     assert!(
-        text.contains("cli"),
+        claude_text.contains("cli") && gpt_text.contains("cli"),
         "rendered /model view should show the route transport column, got:
+Claude:
+{}
+GPT:
 {}",
-        text
+        claude_text,
+        gpt_text
     );
 }
 
