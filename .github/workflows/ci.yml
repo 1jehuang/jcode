@@ -82,6 +82,19 @@ jobs:
           cargo install cargo-machete --locked
           cargo machete
 
+  release-automation:
+    name: Release Automation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test Discord release announcements
+        run: python3 -m unittest -v scripts/test_post_discord_release.py
+
+      - name: Compile release automation scripts
+        run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
+
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

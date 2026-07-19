@@ -486,6 +486,9 @@ jobs:
     if: ${{ always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -658,6 +661,17 @@ jobs:
           else
             echo "Release ${GITHUB_REF_NAME} is already public; leaving it public."
           fi
+
+      # Releases created with GITHUB_TOKEN do not trigger `release: published`,
+      # but workflow_dispatch is allowed. Queue the dedicated, per-tag
+      # announcement workflow without letting Discord block package publishing.
+      - name: Queue Discord release announcement
+        id: discord_announcement
+        continue-on-error: true
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run discord-release.yml --ref "$DEFAULT_BRANCH" -f "tag=${GITHUB_REF_NAME}"
 
       - name: Update Homebrew formula
         env:
@@ -857,3 +871,9 @@ jobs:
               --reason completed
             gh issue edit "$issue" --remove-label "$label" || true
           done
+
+      - name: Report Discord announcement queue failure
+        if: always() && steps.discord_announcement.outcome == 'failure'
+        run: |
+          echo "The release was published, but its Discord announcement could not be queued." >&2
+          exit 1

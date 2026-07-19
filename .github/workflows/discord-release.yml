@@ -1,50 +1,36 @@
 name: Announce release on Discord
 
 on:
+  # Covers releases published outside the tag-driven release workflow. Events
+  # created by GITHUB_TOKEN are suppressed, so release.yml also dispatches this
+  # workflow explicitly after it publishes a release.
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing public release tag to announce
+        required: true
+        type: string
+
+concurrency:
+  group: discord-release-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   announce:
     runs-on: ubuntu-latest
     steps:
-      - name: Post release notes to Discord
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Post release notes to Discord if not already announced
         env:
-          WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
-          TAG: ${{ github.event.release.tag_name }}
-          NAME: ${{ github.event.release.name }}
-          BODY: ${{ github.event.release.body }}
-          URL: ${{ github.event.release.html_url }}
-        run: |
-          python3 - <<'EOF'
-          import json, os, re, urllib.request
-
-          tag = os.environ["TAG"]
-          name = os.environ.get("NAME") or tag
-          body = os.environ.get("BODY") or ""
-          url = os.environ["URL"]
-
-          # Strip platform-availability boilerplate and collapse blank lines
-          body = re.sub(r"<!-- jcode-platform-availability:start -->.*", "", body, flags=re.S)
-          body = re.sub(r"\n{3,}", "\n\n", body).strip()
-
-          title = f"## {tag}" + (f" \u2014 {name}" if name != tag else "")
-          msg = f"{title}\n{body}"
-          suffix = f"\n\u2026 (full notes: <{url}>)"
-          if len(msg) > 1995:
-              msg = msg[:1995 - len(suffix)] + suffix
-
-          req = urllib.request.Request(
-              os.environ["WEBHOOK_URL"],
-              data=json.dumps({"content": msg}).encode(),
-              headers={
-                  "Content-Type": "application/json",
-                  "User-Agent": "jcode-release-bot/1.0",
-              },
-          )
-          urllib.request.urlopen(req)
-          print(f"Posted {tag} to Discord")
-          EOF
+          GH_TOKEN: ${{ github.token }}
+          DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: python3 scripts/post_discord_release.py --tag "$TAG"
