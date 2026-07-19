@@ -1208,7 +1208,6 @@ fn guardrail_notice_for_refusal_stop() {
         "notice should name the stop reason: {notice}"
     );
     assert!(notice.to_lowercase().contains("guardrail"));
-
     // Guardrail stop with visible text still surfaces (partial output then refusal).
     assert!(Agent::provider_guardrail_notice(Some("refusal"), false, false).is_some());
 }
@@ -1220,7 +1219,6 @@ fn guardrail_notice_for_silent_empty_turn() {
         .expect("empty visible output must produce a notice");
     assert!(notice.contains("internal reasoning"), "{notice}");
     assert!(notice.contains("end_turn"), "{notice}");
-
     // Unknown stop reason, empty output, no reasoning.
     let notice = Agent::provider_guardrail_notice(None, true, false)
         .expect("empty visible output must produce a notice");
