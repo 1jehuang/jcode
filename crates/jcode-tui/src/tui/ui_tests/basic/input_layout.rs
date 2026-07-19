@@ -342,3 +342,20 @@ fn test_estimate_pinned_diagram_pane_width_respects_minimum() {
     let width = estimate_pinned_diagram_pane_width_with_font(&diagram, 10, 24, Some((8, 16)));
     assert_eq!(width, 24);
 }
+
+#[test]
+fn test_idle_donut_reserved_height_absorbs_composer_growth() {
+    // No donut: nothing reserved regardless of composer size.
+    assert_eq!(idle_donut_reserved_height(false, 1), 0);
+    assert_eq!(idle_donut_reserved_height(false, 9), 0);
+
+    // Resting composer (1 row input, no hints): full donut reservation.
+    assert_eq!(idle_donut_reserved_height(true, 1), 14);
+
+    // Slash menu open (1 input row + 8 suggestion rows = 9): the extra 8 rows
+    // come out of the donut so the transcript above does not shift.
+    assert_eq!(idle_donut_reserved_height(true, 9), 6);
+
+    // Pathologically tall composer: reservation bottoms out at zero.
+    assert_eq!(idle_donut_reserved_height(true, 40), 0);
+}
