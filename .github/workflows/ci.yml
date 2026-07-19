@@ -76,6 +76,9 @@ jobs:
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
 
+      - name: Test Discord release announcements
+        run: python3 -m unittest -v scripts/test_post_discord_release.py
+
       - name: Enforce no unused dependencies
         shell: bash
         run: |

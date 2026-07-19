@@ -659,6 +659,14 @@ jobs:
             echo "Release ${GITHUB_REF_NAME} is already public; leaving it public."
           fi
 
+      # Do this in the publishing workflow itself. Releases created with
+      # GITHUB_TOKEN do not trigger a separate `release: published` workflow.
+      - name: Announce release on Discord
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+        run: python3 scripts/post_discord_release.py --tag "${GITHUB_REF_NAME}"
+
       - name: Update Homebrew formula
         env:
           HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
