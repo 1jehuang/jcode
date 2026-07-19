@@ -91,6 +91,14 @@ const DEFAULT_SWARM_TASK_STALE_AFTER_SECS: u64 = 45;
 const DEFAULT_SWARM_TASK_SWEEP_INTERVAL_SECS: u64 = 5;
 const DEFAULT_SWARM_TERMINAL_MEMBER_RETENTION_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_SWARM_TERMINAL_MEMBER_GC_INTERVAL_SECS: u64 = 60;
+/// How long terminal members stay in live SwarmStatus broadcasts. Terminal
+/// members remain queryable for the full retention window above, but
+/// re-sending hundreds of long-finished members to every attached client on
+/// every status change dominates broadcast payloads (measured ~240 KB of
+/// member JSON resident per client with ~700 mostly-stopped members). Keep
+/// them in broadcasts briefly so done/failed transition notices still fire,
+/// then drop them from the live fan-out.
+const DEFAULT_SWARM_STATUS_BROADCAST_TERMINAL_SECS: u64 = 15 * 60;
 #[derive(Default, Clone, Copy)]
 struct PendingSwarmStatusBroadcast {
     scheduled: bool,
@@ -195,6 +203,22 @@ pub(super) fn swarm_terminal_member_gc_interval() -> Duration {
         "JCODE_SWARM_TERMINAL_MEMBER_GC_INTERVAL_SECS",
         DEFAULT_SWARM_TERMINAL_MEMBER_GC_INTERVAL_SECS,
     ))
+}
+
+/// How long terminal members remain included in live SwarmStatus broadcasts.
+/// See [`DEFAULT_SWARM_STATUS_BROADCAST_TERMINAL_SECS`].
+pub(super) fn swarm_status_broadcast_terminal_retention() -> Duration {
+    Duration::from_secs(configured_positive_u64(
+        "JCODE_SWARM_STATUS_BROADCAST_TERMINAL_SECS",
+        DEFAULT_SWARM_STATUS_BROADCAST_TERMINAL_SECS,
+    ))
+}
+
+/// Whether a member belongs in live SwarmStatus broadcasts: every live member,
+/// plus terminal members whose status changed recently enough that clients may
+/// still want to announce or display the transition.
+pub(super) fn member_in_status_broadcast(member: &SwarmMember, retention: Duration) -> bool {
+    !member_status_is_terminal(&member.status) || member.last_status_change.elapsed() < retention
 }
 
 /// Terminal members are historical records, not live agents. They remain
@@ -631,11 +655,13 @@ async fn broadcast_swarm_status_now(
     }
 
     let members_guard = swarm_members.read().await;
+    let broadcast_terminal_retention = swarm_status_broadcast_terminal_retention();
     let members_list: Vec<crate::protocol::SwarmMemberStatus> = session_ids
         .iter()
         .filter_map(|sid| {
             members_guard
                 .get(sid)
+                .filter(|m| member_in_status_broadcast(m, broadcast_terminal_retention))
                 .map(|m| crate::protocol::SwarmMemberStatus {
                     session_id: m.session_id.clone(),
                     friendly_name: m.friendly_name.clone(),
@@ -1672,10 +1698,11 @@ fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
 mod tests {
     use super::{
         broadcast_swarm_plan, broadcast_swarm_plan_with_previous, broadcast_swarm_status,
-        member_status_is_dead, now_unix_ms, parse_swarm_tasks, refresh_swarm_task_staleness,
-        remove_session_from_swarm, salvage_assignments_of_dead_member, swarm_ancestors,
-        swarm_is_self_or_ancestor, swarm_spawn_depth, touch_swarm_task_progress,
-        update_member_status, update_member_status_with_report,
+        member_in_status_broadcast, member_status_is_dead, now_unix_ms, parse_swarm_tasks,
+        refresh_swarm_task_staleness, remove_session_from_swarm,
+        salvage_assignments_of_dead_member, swarm_ancestors, swarm_is_self_or_ancestor,
+        swarm_spawn_depth, touch_swarm_task_progress, update_member_status,
+        update_member_status_with_report,
     };
     use crate::plan::PlanItem;
     use crate::protocol::{NotificationType, ServerEvent};
@@ -1783,6 +1810,28 @@ mod tests {
         let (mut member, _rx) = swarm_member(session_id, "agent", false);
         member.report_back_to_session_id = parent.map(str::to_string);
         member
+    }
+
+    #[test]
+    fn status_broadcast_keeps_live_and_recently_terminal_members_only() {
+        let retention = Duration::from_secs(900);
+
+        let (live, _rx) = swarm_member("live", "agent", false);
+        assert!(member_in_status_broadcast(&live, retention));
+
+        let (mut fresh_terminal, _rx) = swarm_member("fresh", "agent", false);
+        fresh_terminal.status = "completed".to_string();
+        assert!(member_in_status_broadcast(&fresh_terminal, retention));
+
+        let (mut stale_terminal, _rx) = swarm_member("stale", "agent", false);
+        stale_terminal.status = "stopped".to_string();
+        stale_terminal.last_status_change = Instant::now() - Duration::from_secs(901);
+        assert!(!member_in_status_broadcast(&stale_terminal, retention));
+
+        // A stale *live* status is never filtered, no matter how old.
+        let (mut old_live, _rx) = swarm_member("old-live", "agent", false);
+        old_live.last_status_change = Instant::now() - Duration::from_secs(100_000);
+        assert!(member_in_status_broadcast(&old_live, retention));
     }
 
     #[test]
