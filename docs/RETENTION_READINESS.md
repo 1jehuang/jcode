@@ -20,8 +20,8 @@ The evaluator drives the real `Agent`, provider interface, persisted `Session`, 
 | Boundary | Journey |
 |---|---|
 | D0 | Send one activation prompt and require useful first value plus a durable session. |
-| D1 | Create a new Agent from the persisted session. Continue without reauthentication or restating context. Verify transcript, title, working directory, and memory marker. |
-| D7 | Inject one provider outage. Require the failure to surface without losing history, then recover in one retry. The final result is only returned when both D0 and D1 context are present. |
+| D1 | Create a new Agent and provider registry from the persisted session. Continue without restating context. Verify transcript, title, working directory, and memory marker. |
+| D7 | Create another Agent and provider registry, then inject one provider outage. Require the failed D7 prompt itself to persist, then recover in one retry. The final result is only returned when both D0 and D1 context are present. |
 
 D0/D1/D7 are deterministic phase labels, not wall-clock sleeps.
 
@@ -30,7 +30,7 @@ D0/D1/D7 are deterministic phase labels, not wall-clock sleeps.
 | Dimension | Weight | Raw evidence |
 |---|---:|---|
 | Activation / first value | 25% | Useful D0 response and persisted session |
-| Return friction | 20% | Reauth steps, context-restatement steps, prompts-to-value |
+| Return friction | 20% | Context-restatement steps and prompts-to-value |
 | Continuity | 20% | Prior transcript, title, workspace, and memory marker survive disk rehydrate |
 | Durability | 15% | Session remains loadable and history survives the injected failure |
 | Failure recovery | 10% | Outage surfaces and returns to useful value in one retry |
@@ -49,7 +49,7 @@ A zero dimension therefore collapses the behavioral score instead of being hidde
 The scorer keeps an explicit factor registry:
 
 - **Scored (6)**: response first value, return friction, continuity, restart/failure durability, recovery, compounding context.
-- **Deferred (2)**: tool/file-edit-backed first value and cross-provider/OS return parity.
+- **Deferred (2)**: tool/file-edit-backed first value and persisted credential/provider reconstruction across the provider-by-OS matrix.
 - **Observed only (1)**: real D1/D7/D30 meaningful-work retention. This is excluded from the deterministic denominator.
 
 Current deterministic result:
@@ -61,6 +61,8 @@ Coverage-adjusted:      75 / 100
 ```
 
 The honest headline is **75/100 coverage-adjusted retention readiness**, not “100% retention.”
+
+The fixture rebuilds the provider registry at every phase, but it deliberately does not treat a fixture provider as proof that production credentials survive a restart. Authentication continuity remains part of the deferred provider-by-OS matrix.
 
 Installation, PATH, upgrade, and uninstall durability are separately exercised by `scripts/setup_friction_eval.sh`. They should remain separate scorecards so a broad install suite cannot drown out conversation continuity failures.
 

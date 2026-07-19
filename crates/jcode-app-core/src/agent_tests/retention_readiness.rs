@@ -56,7 +56,7 @@ fn retention_factor_registry() -> [RetentionFactor; 9] {
         RetentionFactor {
             name: "return friction",
             status: Scored,
-            rationale: "D1 counts reauth, restatement, and prompts-to-value",
+            rationale: "D1 counts context restatement and prompts-to-value",
         },
         RetentionFactor {
             name: "state continuity",
@@ -84,9 +84,9 @@ fn retention_factor_registry() -> [RetentionFactor; 9] {
             rationale: "v1 proves a useful answer, but not yet a successful real tool/file edit",
         },
         RetentionFactor {
-            name: "cross-provider/OS return parity",
+            name: "credential/provider/OS return parity",
             status: Deferred,
-            rationale: "needs a provider x OS journey matrix rather than one fixture",
+            rationale: "needs persisted credential reconstruction across a provider x OS matrix",
         },
         RetentionFactor {
             name: "observed D1/D7/D30 meaningful-work retention",
@@ -222,7 +222,6 @@ struct RetentionJourneyEvidence {
     first_value: bool,
     session_persisted: bool,
     d1_context_available: bool,
-    reauth_steps: u32,
     restatement_steps: u32,
     return_prompts_to_value: u32,
     title_preserved: bool,
@@ -239,7 +238,6 @@ fn retention_dimension_scores(e: &RetentionJourneyEvidence) -> RetentionDimensio
     let activation = 70.0 * f64::from(e.first_value) + 30.0 * f64::from(e.session_persisted);
 
     let return_friction = (100.0
-        - e.reauth_steps as f64 * 30.0
         - e.restatement_steps as f64 * 25.0
         - e.return_prompts_to_value.saturating_sub(1) as f64 * 15.0)
         .max(0.0);
@@ -310,12 +308,13 @@ async fn retention_readiness_scorecard() {
     drop(d0);
 
     let persisted_d0 = Session::load(&session_id).expect("load D0 session");
-    let d0_message_count = persisted_d0.messages.len();
 
     // D1: construct a new Agent from disk, not the old in-memory object. The
     // fixture only returns CONTINUITY_D1 when the real provider transcript still
     // contains both D0's prompt and its useful answer.
-    let mut d1 = Agent::new_with_session(provider.clone(), registry.clone(), persisted_d0, None);
+    let d1_provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider_fixture.clone());
+    let d1_registry = Registry::new(d1_provider.clone()).await;
+    let mut d1 = Agent::new_with_session(d1_provider, d1_registry, persisted_d0, None);
     let d1_answer = d1
         .run_once_capture("D1_RETURN continue without restating context")
         .await
@@ -327,6 +326,7 @@ async fn retention_readiness_scorecard() {
     // durable, the process-like rehydrate must work, and one retry must produce
     // value that depends on BOTH earlier sessions.
     let persisted_d1 = Session::load(&session_id).expect("load D1 session");
+    let d1_message_count = persisted_d1.messages.len();
     let title_preserved = persisted_d1.custom_title.as_deref() == Some("Retention cohort project");
     let working_dir_preserved =
         persisted_d1.working_dir.as_deref() == Some("/synthetic/retention-project");
@@ -334,15 +334,24 @@ async fn retention_readiness_scorecard() {
         .injected_memory_ids()
         .iter()
         .any(|id| id == "retention-memory-v1");
-    let mut d7 = Agent::new_with_session(provider.clone(), registry.clone(), persisted_d1, None);
+    let d7_provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider_fixture.clone());
+    let d7_registry = Registry::new(d7_provider.clone()).await;
+    let mut d7 = Agent::new_with_session(d7_provider, d7_registry, persisted_d1, None);
     let outage = d7
         .run_once_capture("D7_RECOVER finish the longitudinal task")
         .await;
     drop(d7);
 
     let after_failure = Session::load(&session_id).expect("session survives outage");
-    let history_preserved_after_failure = after_failure.messages.len() > d0_message_count;
-    let mut recovered = Agent::new_with_session(provider, registry, after_failure, None);
+    let history_preserved_after_failure = after_failure.messages.len() > d1_message_count
+        && after_failure.messages.iter().any(|stored| {
+            message_text(&stored.to_message()).contains("D7_RECOVER finish the longitudinal task")
+        });
+    let recovered_provider: std::sync::Arc<dyn Provider> =
+        std::sync::Arc::new(provider_fixture.clone());
+    let recovered_registry = Registry::new(recovered_provider.clone()).await;
+    let mut recovered =
+        Agent::new_with_session(recovered_provider, recovered_registry, after_failure, None);
     let d7_answer = recovered
         .run_once_capture("D7_RECOVER retry once")
         .await
@@ -363,7 +372,6 @@ async fn retention_readiness_scorecard() {
         first_value: d0_answer.contains("VALUE_D0"),
         session_persisted: Session::load(&session_id).is_ok(),
         d1_context_available: d1_context_available && d1_answer.contains("CONTINUITY_D1"),
-        reauth_steps: 0,
         restatement_steps: 0,
         return_prompts_to_value: 1,
         title_preserved,
@@ -380,7 +388,7 @@ async fn retention_readiness_scorecard() {
 
     // Coverage is reported separately and gates the headline. V1 scores six
     // deterministic factors but deliberately defers tool-backed first value and
-    // cross-provider/OS return parity. A perfect covered journey therefore
+    // credential/provider/OS return parity. A perfect covered journey therefore
     // cannot be misreported as perfect evidence about retention overall.
     let factors = retention_factor_registry();
     let scored_factors = factors
@@ -493,7 +501,6 @@ fn retention_readiness_scoring_is_monotonic_and_non_compensating() {
         first_value: true,
         session_persisted: true,
         d1_context_available: true,
-        reauth_steps: 0,
         restatement_steps: 0,
         return_prompts_to_value: 1,
         title_preserved: true,
@@ -505,7 +512,14 @@ fn retention_readiness_scoring_is_monotonic_and_non_compensating() {
         recovered_value: true,
         compounded_value: true,
     };
-    let baseline = retention_dimension_scores(&perfect).behavioral_score();
+    let perfect_scores = retention_dimension_scores(&perfect);
+    let baseline = perfect_scores.behavioral_score();
+    let total_weight: f64 = perfect_scores
+        .values()
+        .into_iter()
+        .map(|(_, _, weight)| weight)
+        .sum();
+    assert!((total_weight - 1.0).abs() < f64::EPSILON);
 
     let worse_cases = [
         RetentionJourneyEvidence {
@@ -513,7 +527,15 @@ fn retention_readiness_scoring_is_monotonic_and_non_compensating() {
             ..perfect
         },
         RetentionJourneyEvidence {
-            reauth_steps: 1,
+            session_persisted: false,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
+            restatement_steps: 1,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
+            return_prompts_to_value: 2,
             ..perfect
         },
         RetentionJourneyEvidence {
@@ -521,11 +543,31 @@ fn retention_readiness_scoring_is_monotonic_and_non_compensating() {
             ..perfect
         },
         RetentionJourneyEvidence {
+            title_preserved: false,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
+            working_dir_preserved: false,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
+            memory_marker_preserved: false,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
             history_preserved_after_failure: false,
             ..perfect
         },
         RetentionJourneyEvidence {
+            outage_surfaced: false,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
             recovery_retries: 3,
+            ..perfect
+        },
+        RetentionJourneyEvidence {
+            recovered_value: false,
             ..perfect
         },
         RetentionJourneyEvidence {
@@ -574,8 +616,14 @@ fn retention_readiness_factor_registry_has_explicit_scope_and_rationales() {
             .count(),
         1
     );
+    let mut names = std::collections::BTreeSet::new();
     for factor in factors {
         assert!(!factor.name.trim().is_empty());
+        assert!(
+            names.insert(factor.name),
+            "duplicate factor: {}",
+            factor.name
+        );
         assert!(
             !factor.rationale.trim().is_empty(),
             "retention factor '{}' has no rationale",
