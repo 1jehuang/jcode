@@ -55,11 +55,8 @@ pub fn validate_swarm_tldr(
     Ok(None)
 }
 
-/// Maximum number of live members (agents) in a single swarm. This is the sole
-/// runaway-prevention cap for the task-graph model. There is intentionally no
-/// spawn-depth limit and no per-node fan-out limit: the spawn tree may nest and
-/// fan out freely until the swarm reaches this many live members, at which point
-/// further spawns are refused.
+/// Absolute maximum number of live members in a single swarm. Servers also apply
+/// the lower configurable live-worker RAM budget before reaching this hard stop.
 pub const MAX_SWARM_MEMBERS: usize = 1000;
 
 /// Upper bound for a member's derived task label, sized for one-line UI chips.
@@ -413,8 +410,9 @@ pub fn append_deep_node_instructions(message: &str, node_id: &str) -> String {
         return out;
     }
     out.push_str(&format!(
-        "\nYou are executing node '{node_id}' of a deep task graph with a large parallel agent \
-budget (up to {MAX_SWARM_MEMBERS} live agents per swarm; using it is expected, not wasteful). \
+        "\nYou are executing node '{node_id}' of a deep task graph with a configurable parallel agent \
+budget (32 live workers by default, with a hard maximum of {MAX_SWARM_MEMBERS}; use available \
+parallelism deliberately, but do not spawn redundant agents). \
 Choose one of exactly two finishes for this node:\n\
 1. Decompose for parallelism: if this node contains more than one independently checkable \
 concern, do NOT work through it serially. Call the swarm tool with action=\"expand_node\", \

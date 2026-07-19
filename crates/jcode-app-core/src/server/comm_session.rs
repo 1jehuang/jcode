@@ -20,13 +20,32 @@ use crate::provider::Provider;
 use crate::session::Session;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
+
+/// Serialize spawn admission through member registration within one swarm.
+/// Without a reservation or lock, many recursive agents can all observe the same
+/// free slot and burst past the configured limit before any child is registered.
+/// Weak entries avoid retaining locks for swarms that are no longer active.
+fn spawn_admission_lock(swarm_id: &str) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(swarm_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(swarm_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
 
 /// Look up the most recent terminal env snapshot for the live client connection
 /// driving `session_id`, so spawn hooks target that client's terminal instead
@@ -835,6 +854,17 @@ pub(super) async fn handle_comm_spawn(
     swarm_mutation_runtime: &SwarmMutationRuntime,
     client_connections: &ClientConnections,
 ) {
+    // Hold this swarm's admission through member registration so concurrent
+    // recursive requests cannot all pass the population check against stale
+    // state. Unrelated swarms retain independent spawn throughput.
+    let admission_key = swarm_members
+        .read()
+        .await
+        .get(&req_session_id)
+        .and_then(|member| member.swarm_id.clone())
+        .unwrap_or_else(|| req_session_id.clone());
+    let admission_lock = spawn_admission_lock(&admission_key);
+    let admission_guard = admission_lock.lock().await;
     let swarm_id = match ensure_spawn_coordinator_swarm(
         id,
         &req_session_id,
@@ -843,6 +873,7 @@ pub(super) async fn handle_comm_spawn(
         swarms_by_id,
         swarm_coordinators,
         swarm_plans,
+        crate::config::config().agents.swarm_max_concurrent_agents,
     )
     .await
     {
@@ -910,6 +941,10 @@ pub(super) async fn handle_comm_spawn(
             retry_after_secs: None,
         },
     };
+
+    // The new member is registered (or spawning failed), so the next admission
+    // check can safely observe the updated population.
+    drop(admission_guard);
 
     finish_request(swarm_mutation_runtime, &mutation_state, response).await;
 }
@@ -1202,8 +1237,17 @@ async fn ensure_spawn_coordinator_swarm(
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    configured_live_agent_limit: usize,
 ) -> Option<String> {
-    let (swarm_id, from_name, is_root, coordinator_id, coordinator_is_stale, swarm_size) = {
+    let (
+        swarm_id,
+        from_name,
+        is_root,
+        coordinator_id,
+        coordinator_is_stale,
+        live_member_count,
+        live_spawned_agent_count,
+    ) = {
         let members = swarm_members.read().await;
         let swarm_id = members
             .get(req_session_id)
@@ -1216,20 +1260,24 @@ async fn ensure_spawn_coordinator_swarm(
             .get(req_session_id)
             .and_then(|member| member.report_back_to_session_id.clone())
             .is_none();
-        // Total capacity-consuming members in this swarm. Terminal members are
-        // retained briefly for reports and diagnostics, but they are historical
-        // records rather than live agents and therefore do not consume the
-        // breadth-side runaway cap (`MAX_SWARM_MEMBERS`).
-        let swarm_size = swarm_id
+        // Count both all live members for the absolute hard cap and live spawned
+        // agents for the configurable RAM-safety cap. User-created roots do not
+        // consume worker slots; every recursively spawned descendant does.
+        let (live_member_count, live_spawned_agent_count) = swarm_id
             .as_ref()
             .map(|swarm_id| {
                 members
                     .values()
                     .filter(|member| member.swarm_id.as_deref() == Some(swarm_id.as_str()))
                     .filter(|member| super::member_consumes_swarm_capacity(member))
-                    .count()
+                    .fold((0usize, 0usize), |(members, spawned), member| {
+                        (
+                            members + 1,
+                            spawned + usize::from(member.report_back_to_session_id.is_some()),
+                        )
+                    })
             })
-            .unwrap_or(0);
+            .unwrap_or_default();
         let coordinator_id = if let Some(ref swarm_id) = swarm_id {
             let coordinators = swarm_coordinators.read().await;
             coordinators.get(swarm_id).cloned()
@@ -1257,7 +1305,8 @@ async fn ensure_spawn_coordinator_swarm(
             is_root,
             coordinator_id,
             coordinator_is_stale,
-            swarm_size,
+            live_member_count,
+            live_spawned_agent_count,
         )
     };
 
@@ -1270,16 +1319,30 @@ async fn ensure_spawn_coordinator_swarm(
         return None;
     };
 
-    // Runaway prevention for the task-graph model is a single total-member cap.
-    // There is no depth or per-node breadth limit: the spawn tree may nest and
-    // fan out freely until the swarm reaches `MAX_SWARM_MEMBERS` live members, at
-    // which point further spawns are refused.
-    if swarm_size >= super::MAX_SWARM_MEMBERS {
+    // Keep an absolute hard ceiling even when the configurable limit is disabled.
+    if live_member_count >= super::MAX_SWARM_MEMBERS {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: format!(
-                "Swarm member limit reached (max {}). This swarm already has {swarm_size} agents; it cannot spawn more. Let existing agents finish and free up capacity, or narrow the task decomposition before spawning further.",
+                "Swarm member limit reached (hard max {}). This swarm already has {live_member_count} live members; it cannot spawn more. Let existing agents finish and free up capacity, or narrow the task decomposition before spawning further.",
                 super::MAX_SWARM_MEMBERS
+            ),
+            retry_after_secs: None,
+        });
+        return None;
+    }
+
+    // `swarm_max_concurrent_agents` is the machine-safety budget shared by
+    // run_plan and ad hoc recursive spawning. Previously only run_plan obeyed it,
+    // so nested agents could grow to the 1000-member hard cap and exhaust RAM.
+    let live_agent_limit = (configured_live_agent_limit > 0)
+        .then(|| configured_live_agent_limit.min(super::MAX_SWARM_MEMBERS));
+    if live_agent_limit.is_some_and(|limit| live_spawned_agent_count >= limit) {
+        let limit = live_agent_limit.unwrap_or(super::MAX_SWARM_MEMBERS);
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Swarm live-agent limit reached (max {limit}, configured by agents.swarm_max_concurrent_agents). This swarm already has {live_spawned_agent_count} active spawned agents. Let existing agents finish or stop them before spawning more."
             ),
             retry_after_secs: None,
         });

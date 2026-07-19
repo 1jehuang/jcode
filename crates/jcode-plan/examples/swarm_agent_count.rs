@@ -255,8 +255,8 @@ fn deep_explore_implement_verify() -> Scenario {
 }
 
 fn print_row(scn: &Scenario, m: &Measured) {
-    // Deep mode now fans out to the full ready set (bounded only by the member
-    // cap / the configurable swarm_max_concurrent_agents, default 32). Light mode
+    // Deep mode fans out to the full ready set within the configurable live-worker
+    // swarm_max_concurrent_agents budget (default 32). Light mode
     // keeps a small default (4). So the effective peak parallelism is the natural
     // ready-set width clamped by the mode's default ceiling.
     let mode_ceiling = match scn.mode {
@@ -294,8 +294,9 @@ fn main() {
          nodes are dispatched twice (decompose, then synthesis re-wake) so they cost 2.\n\
          peak_parallel(natural) is how many nodes are unblocked at once. run_plan clamps\n\
          that to a mode default: deep => agents.swarm_max_concurrent_agents (default 32,\n\
-         0 = unbounded up to the 1000 member cap); light => 4. The total agents spawned\n\
-         over the run is unaffected by the cap; only how many run simultaneously is.\n"
+         0 = disable the configurable guard, leaving the 1000 hard cap); light => 4.\n\
+         Completed workers free live-agent slots, so a run may still use more than 32\n\
+         workers sequentially while never retaining more than the live budget.\n"
     );
 
     let scenarios = vec![

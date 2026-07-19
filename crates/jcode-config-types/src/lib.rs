@@ -577,13 +577,11 @@ pub struct AgentsConfig {
     /// metadata / sanity checks). Unset = inferred from the model name.
     #[serde(default)]
     pub memory_embedding_dim: Option<usize>,
-    /// Maximum number of swarm worker agents `run_plan` keeps running *at once*
-    /// in a **deep**-mode task graph. This bounds parallelism, not the total
-    /// number of agents spawned over the run (that is `MAX_SWARM_MEMBERS`). Deep
-    /// mode is meant to fan out wide, so the default is high (32); the real
-    /// ceiling is still the per-swarm member cap. Light mode uses a small fixed
-    /// fan-out instead. `0` means "no extra cap": run_plan dispatches the entire
-    /// ready set every loop, bounded only by the member cap.
+    /// Maximum number of live swarm worker agents in one swarm. This is the RAM
+    /// safety budget for both recursive ad hoc spawning and deep-mode `run_plan`
+    /// parallelism. Completed/stopped workers do not consume slots. Light mode
+    /// still uses a smaller fixed fan-out. `0` disables this configurable guard,
+    /// leaving only the absolute `MAX_SWARM_MEMBERS` hard cap.
     /// Env override: `JCODE_SWARM_MAX_CONCURRENT_AGENTS`.
     #[serde(default = "default_swarm_max_concurrent_agents")]
     pub swarm_max_concurrent_agents: usize,

@@ -352,11 +352,10 @@ cross_provider_failover = "countdown"
 # Env override: JCODE_SWARM_SPAWN_MODE
 swarm_spawn_mode = "inline"
 #
-# Max swarm worker agents run_plan keeps active AT ONCE in a deep-mode task graph.
-# This bounds parallelism, not the total agents spawned over the run (that is the
-# per-swarm member cap of 1000). Deep mode is meant to fan out wide, so the default
-# is high (32). 0 = no extra cap: dispatch the whole ready set each loop, bounded
-# only by the member cap. Light mode uses a small fixed fan-out and ignores this.
+# Max live swarm worker agents in one swarm. This RAM-safety budget applies to
+# recursive ad hoc spawning and deep-mode run_plan parallelism. Completed/stopped
+# workers free their slots. 0 disables this guard and leaves only the absolute
+# per-swarm hard cap of 1000. Light mode uses a smaller fixed fan-out.
 # Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
 #

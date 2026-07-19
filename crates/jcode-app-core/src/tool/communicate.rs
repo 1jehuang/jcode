@@ -25,7 +25,8 @@ const REQUEST_ID: u64 = 1;
 
 /// Default number of workers `run_plan` keeps active at once for a **light**-mode
 /// plan. Light mode is the cheap fan-out preset, so this stays small. Deep mode
-/// instead uses `agents.swarm_max_concurrent_agents` (high, configurable).
+/// instead uses `agents.swarm_max_concurrent_agents` (configurable and shared
+/// with the server's recursive-spawn RAM safety guard).
 const LIGHT_MODE_DEFAULT_CONCURRENCY: usize = 4;
 
 mod transport;
@@ -2082,7 +2083,7 @@ impl Tool for CommunicateTool {
                 "concurrency_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max swarm worker agents active at once. For fill_slots this is required. For run_plan it is optional and overrides the mode-based default (deep fans out wide up to agents.swarm_max_concurrent_agents; light uses a small default). Total agents over the whole run is still bounded only by the swarm member cap."
+                    "description": "Max swarm worker agents active at once. For fill_slots this is required. For run_plan it is optional and overrides the mode-based default (deep uses agents.swarm_max_concurrent_agents; light uses a small default). The server also applies agents.swarm_max_concurrent_agents to recursive ad hoc spawning as a live-worker RAM safety limit, plus an absolute hard member cap."
                 },
                 "force": {
                     "type": "boolean",

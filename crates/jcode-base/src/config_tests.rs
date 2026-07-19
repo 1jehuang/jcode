@@ -44,9 +44,9 @@ fn swarm_spawn_mode_defaults_to_inline() {
 }
 
 #[test]
-fn swarm_max_concurrent_agents_defaults_high_for_deep_fanout() {
-    // Deep mode is meant to fan out wide; the default must be high (not the old
-    // hardcoded run_plan default of 3).
+fn swarm_max_concurrent_agents_defaults_to_safe_live_worker_budget() {
+    // Keep enough parallelism for deep fan-out without allowing recursive ad hoc
+    // spawns to grow until the 1000-member hard cap exhausts machine memory.
     assert_eq!(Config::default().agents.swarm_max_concurrent_agents, 32);
 }
 
@@ -109,7 +109,7 @@ fn swarm_max_concurrent_agents_parses_and_allows_zero_for_unbounded() {
     assert_eq!(cfg.agents.swarm_max_concurrent_agents, 64);
 
     let cfg: Config = toml::from_str("[agents]\nswarm_max_concurrent_agents = 0\n")
-        .expect("zero should parse (means unbounded up to the member cap)");
+        .expect("zero should parse (disables the configurable live-agent guard)");
     assert_eq!(cfg.agents.swarm_max_concurrent_agents, 0);
 }
 
