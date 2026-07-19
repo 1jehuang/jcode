@@ -1,5 +1,6 @@
 use image::GenericImageView;
-use ratatui::prelude::Line;
+use ratatui::prelude::{Line, Modifier, Span, Style};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -21,6 +22,22 @@ const DPI_QUANTUM: u16 = 12;
 
 static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
 static LAST_REPORTED_ERROR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+const COPY_SOURCE_CACHE_LIMIT: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LatexCopySource {
+    pub source: String,
+    pub display: bool,
+}
+
+#[derive(Default)]
+struct CopySourceCache {
+    entries: HashMap<u64, LatexCopySource>,
+    order: VecDeque<u64>,
+}
+
+static COPY_SOURCES: LazyLock<Mutex<CopySourceCache>> =
+    LazyLock::new(|| Mutex::new(CopySourceCache::default()));
 
 #[cfg(test)]
 thread_local! {
@@ -101,7 +118,8 @@ pub(super) fn render_latex_image(
     let artifact = render_artifact(source, display, dpi, &Toolchain::from_environment())?;
     let hash =
         super::mermaid::register_external_image(&artifact.path, artifact.width, artifact.height);
-    Ok(super::mermaid::result_to_lines(
+    register_copy_source(hash, source, display);
+    let mut lines = super::mermaid::result_to_lines(
         super::mermaid::RenderResult::Image {
             hash,
             path: artifact.path,
@@ -109,7 +127,58 @@ pub(super) fn render_latex_image(
             height: artifact.height,
         },
         max_width,
-    ))
+    );
+    // Keep a real text row above the image. It gives copy badges a stable host
+    // instead of placing them on the invisible marker row that the viewport
+    // deliberately clears before drawing terminal graphics.
+    lines.insert(
+        0,
+        Line::from(Span::styled(
+            "  math",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    );
+    Ok(lines)
+}
+
+fn register_copy_source(hash: u64, source: &str, display: bool) {
+    let Ok(mut cache) = COPY_SOURCES.lock() else {
+        return;
+    };
+    if cache.entries.contains_key(&hash) {
+        cache.order.retain(|entry| *entry != hash);
+    }
+    cache.entries.insert(
+        hash,
+        LatexCopySource {
+            source: source.trim().to_string(),
+            display,
+        },
+    );
+    cache.order.push_back(hash);
+    while cache.order.len() > COPY_SOURCE_CACHE_LIMIT {
+        if let Some(oldest) = cache.order.pop_front() {
+            cache.entries.remove(&oldest);
+        }
+    }
+}
+
+pub(super) fn copy_source_for_placeholder(line: &Line<'_>) -> Option<LatexCopySource> {
+    let hash = super::mermaid::parse_inline_image_placeholder(line)
+        .map(|(hash, _, _)| hash)
+        .or_else(|| super::mermaid::parse_image_placeholder(line))?;
+    COPY_SOURCES
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&hash).cloned())
+}
+
+pub(super) fn copy_text(source: &LatexCopySource) -> String {
+    if source.display {
+        format!("$$\n{}\n$$", source.source)
+    } else {
+        format!("${}$", source.source)
+    }
 }
 
 #[derive(Debug)]
@@ -437,6 +506,38 @@ mod tests {
         assert_ne!(cache_key("x", false, 240), cache_key("x", true, 240));
         assert_ne!(cache_key("x", false, 240), cache_key("y", false, 240));
         assert_ne!(cache_key("x", false, 240), cache_key("x", false, 312));
+    }
+
+    #[test]
+    fn image_placeholder_extracts_math_copy_target_with_source_delimiters() {
+        let hash = 0x1a7e_c0de_u64;
+        register_copy_source(hash, r"\frac{x+1}{y}", true);
+        let mut lines = vec![Line::from("  math")];
+        lines.extend(super::super::mermaid::inline_image_placeholder_lines(
+            hash, 3, 20,
+        ));
+
+        let targets =
+            super::super::render_support::extract_copy_targets_from_rendered_lines(&lines);
+        assert_eq!(targets.len(), 1);
+        let target = &targets[0];
+        assert_eq!(
+            target.kind,
+            super::super::CopyTargetKind::Math { display: true }
+        );
+        assert_eq!(target.content, "$$\n\\frac{x+1}{y}\n$$");
+        assert_eq!(target.start_raw_line, 0);
+        assert_eq!(target.end_raw_line, 4);
+        assert_eq!(target.badge_raw_line, 0);
+    }
+
+    #[test]
+    fn inline_math_copy_text_preserves_inline_delimiters() {
+        let source = LatexCopySource {
+            source: r"x^2 + \alpha".to_string(),
+            display: false,
+        };
+        assert_eq!(copy_text(&source), r"$x^2 + \alpha$");
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub enum LatexRenderingMode {
 pub enum CopyTargetKind {
     CodeBlock { language: Option<String> },
     Blockquote,
+    Math { display: bool },
     Error,
     ToolOutput,
 }
@@ -40,6 +41,7 @@ impl CopyTargetKind {
                 .unwrap_or("code")
                 .to_string(),
             Self::Blockquote => "quote".to_string(),
+            Self::Math { .. } => "math".to_string(),
             Self::Error => "error".to_string(),
             Self::ToolOutput => "output".to_string(),
         }
@@ -55,6 +57,7 @@ impl CopyTargetKind {
                 format!("Copied {}", label)
             }
             Self::Blockquote => "Copied quote".to_string(),
+            Self::Math { .. } => "Copied math".to_string(),
             Self::Error => "Copied error".to_string(),
             Self::ToolOutput => "Copied output".to_string(),
         }
