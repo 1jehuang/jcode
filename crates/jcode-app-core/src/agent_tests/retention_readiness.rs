@@ -10,7 +10,7 @@
 // paths through labeled D0/D1/D7 boundaries. The labels are deterministic phase
 // boundaries, not wall-clock sleeps. Run the scorecard with:
 //
-//   cargo test -p jcode-app-core retention_readiness_scorecard -- --nocapture
+//   cargo test -p jcode-app-core --lib retention_readiness -- --nocapture
 
 #[derive(Clone)]
 struct RetentionReadinessProvider {

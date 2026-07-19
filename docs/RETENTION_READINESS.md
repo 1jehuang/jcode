@@ -12,7 +12,7 @@ The first is a regression test. The second is a product outcome. A deterministic
 Run:
 
 ```bash
-cargo test -p jcode-app-core retention_readiness -- --nocapture
+cargo test -p jcode-app-core --lib retention_readiness -- --nocapture
 ```
 
 The evaluator drives the real `Agent`, provider interface, persisted `Session`, and disk restore path through labeled phase boundaries:
