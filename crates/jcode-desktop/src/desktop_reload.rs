@@ -275,7 +275,10 @@ pub(crate) struct DesktopWorkerDrain {
 impl DesktopHotReloader {
     const CHECK_INTERVAL: Duration = Duration::from_millis(750);
 
-    pub(crate) fn new(strategy: DesktopReloadStrategy) -> Self {
+    pub(crate) fn new(
+        strategy: DesktopReloadStrategy,
+        event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
+    ) -> Self {
         let relaunch = DesktopRelaunch::from_current_process();
         let observed_modified = relaunch.as_ref().and_then(|relaunch| {
             binary_modified_time(&desktop_reload_binary_candidate(&relaunch.binary))
@@ -292,9 +295,6 @@ impl DesktopHotReloader {
 
     pub(crate) fn next_wake(&self, now: Instant) -> Option<Instant> {
         if self.pending_handoff.is_some() {
-            return Some(now + DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL);
-        }
-        if self.app_worker.is_some() {
             return Some(now + DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL);
         }
         self.relaunch.as_ref()?;
@@ -319,6 +319,7 @@ impl DesktopHotReloader {
                     drained.latest_scene = Some(scene_update.scene);
                 }
                 Ok(DesktopWorkerToHostMessage::ReloadRequested) => {
+    pub(crate) event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
                     drained.reload_requested = true;
                 }
                 Ok(DesktopWorkerToHostMessage::Snapshot(snapshot)) => {
@@ -342,6 +343,7 @@ impl DesktopHotReloader {
                 Ok(DesktopWorkerToHostMessage::Exited(exit)) => {
                     desktop_log::warn(format_args!(
                         "jcode-desktop: app worker exited code={:?} reason={:?}",
+            event_loop_proxy,
                         exit.code, exit.reason
                     ));
                 }
@@ -502,7 +504,7 @@ impl DesktopHotReloader {
         }
 
         let worker_relaunch = relaunch.for_app(app, binary).for_app_worker();
-        match worker_relaunch.spawn_app_worker() {
+        match worker_relaunch.spawn_app_worker(self.event_loop_proxy.clone()) {
             Ok(mut worker) => {
                 if let Err(error) =
                     worker.send(DesktopHostToWorkerMessage::Initialize(DesktopWorkerInit {
@@ -702,7 +704,10 @@ impl DesktopRelaunch {
         }
     }
 
-    fn spawn_app_worker(&self) -> Result<DesktopWorkerConnection> {
+    fn spawn_app_worker(
+        &self,
+        event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
+    ) -> Result<DesktopWorkerConnection> {
         desktop_log::info(format_args!(
             "jcode-desktop: spawning app worker {} with args {:?}",
             self.binary.display(),
@@ -713,8 +718,10 @@ impl DesktopRelaunch {
         command.env_remove(DESKTOP_RELOAD_WINDOW_ENV);
         command.env_remove(DESKTOP_RELOAD_HANDOFF_READY_ENV);
         command.env_remove(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV);
-        DesktopWorkerConnection::spawn(&mut command)
-            .with_context(|| format!("failed to spawn app worker {}", self.binary.display()))
+        DesktopWorkerConnection::spawn(&mut command, move || {
+            let _ = event_loop_proxy.send_event(DesktopUserEvent::AppWorkerActivity);
+        })
+        .with_context(|| format!("failed to spawn app worker {}", self.binary.display()))
     }
 }
 

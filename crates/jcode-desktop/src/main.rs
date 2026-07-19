@@ -495,7 +495,8 @@ async fn run() -> Result<()> {
     let mut selecting_draft = false;
     let mut scroll_accumulator = ScrollLineAccumulator::default();
     let mut scroll_metrics_cache = SingleSessionScrollMetricsCache::default();
-    let mut hot_reloader = DesktopHotReloader::new(process_role.reload_strategy());
+    let mut hot_reloader =
+        DesktopHotReloader::new(process_role.reload_strategy(), event_loop_proxy.clone());
     if process_role == DesktopProcessRole::StableHost {
         hot_reloader.start_app_worker_for_current_binary(&app, &window, "stable host startup");
     }
@@ -1504,6 +1505,7 @@ async fn run() -> Result<()> {
                 loaded_in,
             }) => {
                 let card_count = cards.len();
+            Event::UserEvent(DesktopUserEvent::AppWorkerActivity) => {}
                 let mut applied = false;
                 match purpose {
                     DesktopSessionCardsPurpose::WorkspaceInitialLoad => {
@@ -1825,6 +1827,7 @@ enum DesktopUserEvent {
         purpose: DesktopSessionCardsPurpose,
         cards: Vec<workspace::SessionCard>,
         loaded_in: Duration,
+    AppWorkerActivity,
     },
     SessionCardLoaded {
         session_id: String,
