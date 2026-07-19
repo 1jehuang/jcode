@@ -77,10 +77,13 @@ impl DesktopReloadStartup {
         let raw_window_placement = std::env::var(DESKTOP_RELOAD_WINDOW_ENV).ok();
         let ready_file = std::env::var_os(DESKTOP_RELOAD_HANDOFF_READY_ENV).map(PathBuf::from);
         let release_file = std::env::var_os(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV).map(PathBuf::from);
+        let placement_file =
+            std::env::var_os(DESKTOP_RELOAD_HANDOFF_PLACEMENT_ENV).map(PathBuf::from);
         unsafe {
             std::env::remove_var(DESKTOP_RELOAD_WINDOW_ENV);
             std::env::remove_var(DESKTOP_RELOAD_HANDOFF_READY_ENV);
             std::env::remove_var(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV);
+            std::env::remove_var(DESKTOP_RELOAD_HANDOFF_PLACEMENT_ENV);
         }
 
         let window_placement = raw_window_placement.as_deref().and_then(|raw| {
@@ -96,6 +99,7 @@ impl DesktopReloadStartup {
             (Some(ready_file), Some(release_file)) => Some(DesktopReloadStartupHandoff {
                 ready_file,
                 release_file,
+                placement_file,
             }),
             (None, None) => None,
             _ => {
@@ -121,15 +125,16 @@ impl DesktopReloadStartup {
 pub(crate) struct DesktopReloadStartupHandoff {
     pub(crate) ready_file: PathBuf,
     pub(crate) release_file: PathBuf,
+    pub(crate) placement_file: Option<PathBuf>,
 }
 
 impl DesktopReloadStartupHandoff {
-    pub(crate) fn signal_ready_and_wait_for_release(&self) {
+    pub(crate) fn signal_ready_and_wait_for_release(&self) -> Option<DesktopReloadWindowPlacement> {
         if let Err(error) = write_desktop_reload_marker(&self.ready_file) {
             desktop_log::warn(format_args!(
                 "jcode-desktop: failed to signal reload readiness: {error:#}"
             ));
-            return;
+            return None;
         }
 
         desktop_log::info(format_args!(
@@ -138,8 +143,15 @@ impl DesktopReloadStartupHandoff {
         let deadline = Instant::now() + DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT;
         while Instant::now() < deadline {
             if self.release_file.exists() {
+                let placement = self
+                    .placement_file
+                    .as_deref()
+                    .and_then(read_desktop_reload_window_placement);
+                if let Some(placement_file) = self.placement_file.as_deref() {
+                    let _ = fs::remove_file(placement_file);
+                }
                 cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
-                return;
+                return placement;
             }
             std::thread::sleep(DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL);
         }
@@ -149,6 +161,10 @@ impl DesktopReloadStartupHandoff {
             DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT.as_millis()
         ));
         cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
+        if let Some(placement_file) = self.placement_file.as_deref() {
+            let _ = fs::remove_file(placement_file);
+        }
+        None
     }
 }
 
@@ -156,6 +172,7 @@ impl DesktopReloadStartupHandoff {
 pub(crate) struct DesktopReloadHandoff {
     pub(crate) ready_file: PathBuf,
     pub(crate) release_file: PathBuf,
+    pub(crate) placement_file: PathBuf,
     pub(crate) window_placement: Option<DesktopReloadWindowPlacement>,
 }
 
@@ -171,6 +188,7 @@ impl DesktopReloadHandoff {
         Ok(Self {
             ready_file: dir.join("ready"),
             release_file: dir.join("release"),
+            placement_file: dir.join("placement"),
             window_placement: DesktopReloadWindowPlacement::from_window(window),
         })
     }
@@ -181,17 +199,20 @@ impl DesktopReloadHandoff {
         }
         command.env(DESKTOP_RELOAD_HANDOFF_READY_ENV, &self.ready_file);
         command.env(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV, &self.release_file);
+        command.env(DESKTOP_RELOAD_HANDOFF_PLACEMENT_ENV, &self.placement_file);
     }
 
     pub(crate) fn watcher(&self) -> DesktopReloadHandoffWatcher {
         DesktopReloadHandoffWatcher {
             ready_file: self.ready_file.clone(),
             release_file: self.release_file.clone(),
+            placement_file: self.placement_file.clone(),
             spawned_at: Instant::now(),
         }
     }
 
     pub(crate) fn cleanup(&self) {
+        let _ = fs::remove_file(&self.placement_file);
         cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
     }
 }
@@ -200,6 +221,7 @@ impl DesktopReloadHandoff {
 pub(crate) struct DesktopReloadHandoffWatcher {
     pub(crate) ready_file: PathBuf,
     pub(crate) release_file: PathBuf,
+    pub(crate) placement_file: PathBuf,
     pub(crate) spawned_at: Instant,
 }
 
@@ -212,7 +234,23 @@ pub(crate) enum DesktopReloadHandoffPoll {
 
 impl DesktopReloadHandoffWatcher {
     pub(crate) fn poll(&self) -> Result<DesktopReloadHandoffPoll> {
+        self.poll_with_placement(None)
+    }
+
+    pub(crate) fn poll_with_placement(
+        &self,
+        placement: Option<DesktopReloadWindowPlacement>,
+    ) -> Result<DesktopReloadHandoffPoll> {
         if self.ready_file.exists() {
+            if let Some(placement) = placement {
+                if let Err(error) =
+                    write_desktop_reload_window_placement(&self.placement_file, placement)
+                {
+                    desktop_log::warn(format_args!(
+                        "jcode-desktop: failed to synchronize final reload window placement: {error:#}"
+                    ));
+                }
+            }
             write_desktop_reload_marker(&self.release_file)?;
             return Ok(DesktopReloadHandoffPoll::Ready);
         }
@@ -223,6 +261,7 @@ impl DesktopReloadHandoffWatcher {
     }
 
     pub(crate) fn cleanup(&self) {
+        let _ = fs::remove_file(&self.placement_file);
         cleanup_desktop_reload_handoff_files(&self.ready_file, &self.release_file);
     }
 }
@@ -241,6 +280,22 @@ pub(crate) fn desktop_reload_handoff_temp_dir() -> PathBuf {
 pub(crate) fn write_desktop_reload_marker(path: &Path) -> Result<()> {
     fs::write(path, format!("{}\n", std::process::id()))
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+pub(crate) fn write_desktop_reload_window_placement(
+    path: &Path,
+    placement: DesktopReloadWindowPlacement,
+) -> Result<()> {
+    fs::write(path, placement.to_env_value())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+pub(crate) fn read_desktop_reload_window_placement(
+    path: &Path,
+) -> Option<DesktopReloadWindowPlacement> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| DesktopReloadWindowPlacement::from_env_value(raw.trim()))
 }
 
 pub(crate) fn cleanup_desktop_reload_handoff_files(ready_file: &Path, release_file: &Path) {
@@ -264,6 +319,7 @@ pub(crate) struct DesktopHotReloader {
     pub(crate) last_checked: Instant,
     pub(crate) pending_handoff: Option<DesktopReloadHandoffWatcher>,
     pub(crate) app_worker: Option<DesktopWorkerConnection>,
+    pub(crate) event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
 }
 
 #[derive(Default)]
@@ -290,6 +346,7 @@ impl DesktopHotReloader {
             last_checked: Instant::now(),
             pending_handoff: None,
             app_worker: None,
+            event_loop_proxy,
         }
     }
 
@@ -319,7 +376,6 @@ impl DesktopHotReloader {
                     drained.latest_scene = Some(scene_update.scene);
                 }
                 Ok(DesktopWorkerToHostMessage::ReloadRequested) => {
-    pub(crate) event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
                     drained.reload_requested = true;
                 }
                 Ok(DesktopWorkerToHostMessage::Snapshot(snapshot)) => {
@@ -343,7 +399,6 @@ impl DesktopHotReloader {
                 Ok(DesktopWorkerToHostMessage::Exited(exit)) => {
                     desktop_log::warn(format_args!(
                         "jcode-desktop: app worker exited code={:?} reason={:?}",
-            event_loop_proxy,
                         exit.code, exit.reason
                     ));
                 }
@@ -419,7 +474,7 @@ impl DesktopHotReloader {
     }
 
     pub(crate) fn poll(&mut self, app: &DesktopApp, window: &Window) -> bool {
-        if self.poll_pending_handoff() {
+        if self.poll_pending_handoff(window) {
             return true;
         }
         if self.pending_handoff.is_some() {
@@ -446,7 +501,7 @@ impl DesktopHotReloader {
     }
 
     pub(crate) fn force_reload(&mut self, app: &DesktopApp, window: &Window) -> bool {
-        if self.poll_pending_handoff() {
+        if self.poll_pending_handoff(window) {
             return true;
         }
         if self.pending_handoff.is_some() {
@@ -559,11 +614,12 @@ impl DesktopHotReloader {
         }
     }
 
-    pub(crate) fn poll_pending_handoff(&mut self) -> bool {
+    pub(crate) fn poll_pending_handoff(&mut self, window: &Window) -> bool {
         let Some(pending_handoff) = self.pending_handoff.as_ref() else {
             return false;
         };
-        match pending_handoff.poll() {
+        match pending_handoff.poll_with_placement(DesktopReloadWindowPlacement::from_window(window))
+        {
             Ok(DesktopReloadHandoffPoll::Waiting) => false,
             Ok(DesktopReloadHandoffPoll::Ready) => {
                 desktop_log::info(format_args!(
@@ -659,6 +715,7 @@ impl DesktopRelaunch {
         command.env_remove(DESKTOP_RELOAD_WINDOW_ENV);
         command.env_remove(DESKTOP_RELOAD_HANDOFF_READY_ENV);
         command.env_remove(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV);
+        command.env_remove(DESKTOP_RELOAD_HANDOFF_PLACEMENT_ENV);
         if let Some(handoff) = handoff.as_ref() {
             handoff.apply_to_command(&mut command);
         }
@@ -718,6 +775,7 @@ impl DesktopRelaunch {
         command.env_remove(DESKTOP_RELOAD_WINDOW_ENV);
         command.env_remove(DESKTOP_RELOAD_HANDOFF_READY_ENV);
         command.env_remove(DESKTOP_RELOAD_HANDOFF_RELEASE_ENV);
+        command.env_remove(DESKTOP_RELOAD_HANDOFF_PLACEMENT_ENV);
         DesktopWorkerConnection::spawn(&mut command, move || {
             let _ = event_loop_proxy.send_event(DesktopUserEvent::AppWorkerActivity);
         })
