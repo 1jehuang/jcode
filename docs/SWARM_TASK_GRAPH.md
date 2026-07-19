@@ -75,7 +75,8 @@ the scheduler or dataflow.
   a modest quality bump, without going extreme. Goal is just to run independent
   units in parallel. Mostly flat (one level of fan-out); decomposition is optional
   (agent's choice); the critique/verify gate is off, or at most a single optional
-  final check; recursion is discouraged/disabled; the handoff artifact is
+  final check; only the root may spawn agents, so recursive growth is disabled;
+  the handoff artifact is
   lightweight and may be free-form. Small worker cap (e.g. 4-16). Low cost and
   latency. This is essentially today's spawn-and-fan-out behavior kept cheap.
   Examples: "run these 5 independent edits in parallel".
@@ -149,9 +150,10 @@ flowchart TB
   Dj --> E[Task E downstream of D]
 ```
 
-Recursion is bounded only by a single **total-member cap** (1000 agents per swarm,
-section 10). There is intentionally no depth limit and no per-node fan-out limit:
-the spawn tree may nest and fan out freely until the swarm hits the member cap.
+In **deep mode**, recursion has no fixed depth or per-node fan-out limit. Growth
+is bounded by the configurable live-worker budget and the absolute total-member
+cap (1000 agents per swarm, section 10). Light mode disables recursive spawning:
+only its root may create the flat worker fan-out.
 
 ---
 

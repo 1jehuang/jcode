@@ -1097,6 +1097,14 @@ fn description_includes_swarm_prompt_guidance() {
         description.contains("Swarm prompt"),
         "description should embed the swarm prompt section"
     );
+    assert!(
+        description.contains("only the root session may spawn agents"),
+        "description should advertise the enforced light/ad hoc spawn boundary"
+    );
+    assert!(
+        description.contains("Recursive spawning is enabled only when the root session is running in swarm-deep mode"),
+        "description should reserve recursive spawning for deep-swarm roots"
+    );
 }
 
 #[test]

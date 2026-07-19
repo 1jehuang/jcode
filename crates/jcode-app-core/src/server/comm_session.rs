@@ -1243,6 +1243,7 @@ async fn ensure_spawn_coordinator_swarm(
         swarm_id,
         from_name,
         is_root,
+        root_session_id,
         coordinator_id,
         coordinator_is_stale,
         live_member_count,
@@ -1260,6 +1261,10 @@ async fn ensure_spawn_coordinator_swarm(
             .get(req_session_id)
             .and_then(|member| member.report_back_to_session_id.clone())
             .is_none();
+        let root_session_id = super::swarm::swarm_ancestors(&members, req_session_id)
+            .last()
+            .cloned()
+            .unwrap_or_else(|| req_session_id.to_string());
         // Count both all live members for the absolute hard cap and live spawned
         // agents for the configurable RAM-safety cap. User-created roots do not
         // consume worker slots; every recursively spawned descendant does.
@@ -1303,6 +1308,7 @@ async fn ensure_spawn_coordinator_swarm(
             swarm_id,
             from_name,
             is_root,
+            root_session_id,
             coordinator_id,
             coordinator_is_stale,
             live_member_count,
@@ -1319,6 +1325,26 @@ async fn ensure_spawn_coordinator_swarm(
         return None;
     };
 
+    // Light and ad hoc swarms are deliberately one-level fan-out: only the root
+    // session may create workers. Recursive spawning is an explicit deep-swarm
+    // capability, keyed from the root's effort rather than the requesting
+    // child's effort so a worker cannot opt itself into unbounded growth.
+    if !is_root {
+        let root_is_deep = crate::session_effort::session_effort(&root_session_id)
+            .as_deref()
+            .is_some_and(crate::prompt::is_deep_swarm_effort);
+        if !root_is_deep {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!(
+                    "Recursive swarm spawning is disabled for light and ad hoc swarms. Only the root session ({root_session_id}) may spawn agents unless that root is running in swarm-deep mode."
+                ),
+                retry_after_secs: None,
+            });
+            return None;
+        }
+    }
+
     // Keep an absolute hard ceiling even when the configurable limit is disabled.
     if live_member_count >= super::MAX_SWARM_MEMBERS {
         let _ = client_event_tx.send(ServerEvent::Error {
@@ -1333,7 +1359,7 @@ async fn ensure_spawn_coordinator_swarm(
     }
 
     // `swarm_max_concurrent_agents` is the machine-safety budget shared by
-    // run_plan and ad hoc recursive spawning. Previously only run_plan obeyed it,
+    // run_plan and deep recursive spawning. Previously only run_plan obeyed it,
     // so nested agents could grow to the 1000-member hard cap and exhaust RAM.
     let live_agent_limit = (configured_live_agent_limit > 0)
         .then(|| configured_live_agent_limit.min(super::MAX_SWARM_MEMBERS));
@@ -1352,9 +1378,8 @@ async fn ensure_spawn_coordinator_swarm(
     // Coordinator-slot election is now only about the swarm-level coordinator used
     // for shared plan operations (propose/approve/assign). Only a root session
     // (depth 0, no spawner) claims it, and only when the slot is empty or stale.
-    // Non-root spawners coordinate their own subtree via report-back ownership and
-    // never disturb the swarm-level coordinator slot. Crucially, the presence of a
-    // live coordinator no longer blocks anyone from spawning.
+    // Authorized deep-swarm descendants coordinate their own subtree via
+    // report-back ownership and never disturb the swarm-level coordinator slot.
     if is_root && coordinator_id.as_deref() != Some(req_session_id) {
         let should_claim = coordinator_id.is_none() || coordinator_is_stale;
         if should_claim {

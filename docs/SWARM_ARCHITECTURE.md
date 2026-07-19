@@ -19,12 +19,17 @@ coordinate, plan, communicate, and integrate work with optional git worktrees.
 
 ## Roles
 
-### Recursive spawning (unbounded-depth tree)
+### Mode-gated spawning
 
-Spawning is recursive. Any swarm member can spawn child agents, and those
-children can spawn their own children, forming a spawn tree. There is no depth
-cap: growth is bounded only by the total swarm member cap. The root session
-that first spawns in a repo is depth 0.
+Normal ad hoc swarms and light-swarm mode are one-level fan-out: only the root
+session may spawn agents. Workers report their result to the root and cannot
+create another generation. This keeps opportunistic swarm use bounded by
+construction.
+
+Recursive spawning is reserved for roots running in `swarm-deep` mode. Their
+descendants may spawn children at arbitrary depth, subject to the configurable
+live-worker budget and the absolute swarm member cap. The root session that first
+spawns in a repo is depth 0.
 
 The spawn/parent edge is encoded by `report_back_to_session_id`: a child spawned
 by `P` reports back to `P`. Walking that chain reconstructs ancestry and depth,
@@ -42,7 +47,8 @@ report-back coherent across member churn.
 The single per-swarm "coordinator" slot still exists, but only for shared,
 swarm-level plan operations (propose/approve/assign/task-control on the one
 shared plan). Only a root session claims that slot, and only when it is empty or
-stale. A live coordinator no longer blocks anyone else from spawning.
+stale. Authorized deep descendants do not claim or disturb this slot when they
+spawn.
 
 Nested owners coordinate their own subtree through spawn prompts, direct
 messages, and stop, not through the shared plan. Plan/task operations
@@ -76,10 +82,9 @@ concurrently would make the shared plan incoherent.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
-- May spawn their own child agents (no depth cap; bounded only by the total
-  swarm member cap) and stop any
-  agent in the subtree they spawned. Stopping agents outside their own subtree
-  still requires `force=true`.
+- In a deep swarm, may spawn child agents and stop any agent in the subtree they
+  spawned. In light and ad hoc swarms, workers cannot spawn. Stopping agents
+  outside their own subtree still requires `force=true`.
 
 ## Agent Lifecycle States
 
