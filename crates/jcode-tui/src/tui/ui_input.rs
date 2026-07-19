@@ -59,18 +59,6 @@ fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
     text.replace("⚠️", "⚠")
 }
 
-fn command_suggestion_hint_line_count(suggestions: &[(String, &'static str)]) -> u16 {
-    if suggestions.is_empty() {
-        return 0;
-    }
-
-    if suggestions.len() == 1 {
-        1
-    } else {
-        suggestions.len().min(app::COMMAND_SUGGESTION_VISIBLE_LIMIT) as u16
-    }
-}
-
 fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
     if suggestion_count <= app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
         0
@@ -82,19 +70,84 @@ fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> 
     }
 }
 
-fn should_render_suggestions_below_input(
+/// Where the command-suggestion popover should render, given the input chunk.
+///
+/// Suggestions are an overlay: they never participate in the vertical layout,
+/// so opening the palette never moves the transcript, the status line, or the
+/// pinned footer. Preferred position is directly below the input (over blank
+/// rows / the pinned footer); when the input sits at the bottom of the screen
+/// the popover flips above the input, covering the last transcript rows
+/// instead of reflowing them.
+fn command_suggestions_overlay_rect(
     input_area: Rect,
-    input_line_count: usize,
-    suggestion_line_count: usize,
-    terminal_height: u16,
-) -> bool {
-    suggestion_line_count > 0
-        && input_area.y.saturating_add(input_area.height) < terminal_height
-        && input_area
-            .y
-            .saturating_add(input_line_count as u16)
-            .saturating_add(suggestion_line_count as u16)
-            <= terminal_height
+    line_count: u16,
+    frame_area: Rect,
+) -> Option<Rect> {
+    if line_count == 0 || input_area.width == 0 {
+        return None;
+    }
+    let below_start = input_area.y.saturating_add(input_area.height);
+    let space_below = frame_area.bottom().saturating_sub(below_start);
+    if space_below >= line_count {
+        return Some(Rect::new(
+            input_area.x,
+            below_start,
+            input_area.width,
+            line_count,
+        ));
+    }
+    let space_above = input_area.y.saturating_sub(frame_area.y);
+    let above_rows = line_count.min(space_above);
+    if above_rows >= line_count.min(space_below.max(1)) && above_rows > 0 {
+        return Some(Rect::new(
+            input_area.x,
+            input_area.y - above_rows,
+            input_area.width,
+            above_rows,
+        ));
+    }
+    if space_below > 0 {
+        return Some(Rect::new(
+            input_area.x,
+            below_start,
+            input_area.width,
+            space_below,
+        ));
+    }
+    None
+}
+
+/// Whether the command palette is active for the current composer state.
+fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
+    let mode = composer_mode(app.input(), app.is_remote_mode());
+    !suggestions.is_empty()
+        && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
+        && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
+}
+
+/// Draw the command-suggestion popover as a late overlay pass.
+///
+/// Called after the chunked layout (and info widgets) have rendered so the
+/// palette floats over existing rows instead of reserving layout height.
+pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    let suggestions = app.command_suggestions();
+    if !command_suggestions_active(app, &suggestions) {
+        return;
+    }
+    let mut lines = command_suggestion_lines(app, &suggestions);
+    let Some(rect) = command_suggestions_overlay_rect(area, lines.len() as u16, frame.area())
+    else {
+        return;
+    };
+    lines.truncate(rect.height as usize);
+    if app.centered_mode() {
+        lines = lines
+            .into_iter()
+            .map(|l| l.alignment(Alignment::Center))
+            .collect();
+    }
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
 }
 
 fn command_suggestion_lines(
@@ -236,15 +289,13 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
-    let suggestions = app.command_suggestions();
-    let mode = composer_mode(app.input(), app.is_remote_mode());
-    let has_suggestions = !suggestions.is_empty()
-        && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
-        && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing());
-
-    if has_suggestions {
-        return command_suggestion_hint_line_count(&suggestions);
+    // Command suggestions render as an overlay (see
+    // `draw_command_suggestions_overlay`) and intentionally reserve no layout
+    // height: opening the palette must not move the transcript or footer.
+    if command_suggestions_active(app, &app.command_suggestions()) {
+        return 0;
     }
+    let mode = composer_mode(app.input(), app.is_remote_mode());
 
     u16::from(
         shell_mode_hint(mode).is_some()
@@ -1076,31 +1127,6 @@ mod tests {
     }
 
     #[test]
-    fn command_suggestion_hint_line_count_reserves_vertical_rows() {
-        let suggestions = vec![
-            ("/help".to_string(), "Show help"),
-            ("/history".to_string(), "Show history"),
-            ("/handoff".to_string(), "Prepare handoff"),
-            ("/health".to_string(), "Show health"),
-            ("/hide".to_string(), "Hide panel"),
-            ("/hello".to_string(), "Say hello"),
-            ("/hold".to_string(), "Hold state"),
-            ("/home".to_string(), "Go home"),
-            ("/hover".to_string(), "Show hover"),
-        ];
-
-        assert_eq!(
-            command_suggestion_hint_line_count(&suggestions),
-            app::COMMAND_SUGGESTION_VISIBLE_LIMIT as u16
-        );
-        assert_eq!(
-            command_suggestion_hint_line_count(&suggestions),
-            app::COMMAND_SUGGESTION_VISIBLE_LIMIT as u16
-        );
-        assert_eq!(command_suggestion_hint_line_count(&suggestions[..1]), 1);
-    }
-
-    #[test]
     fn command_suggestion_window_start_scrolls_after_visible_limit() {
         let limit = app::COMMAND_SUGGESTION_VISIBLE_LIMIT;
         assert_eq!(command_suggestion_window_start(0, limit + 3), 0);
@@ -1110,17 +1136,36 @@ mod tests {
     }
 
     #[test]
-    fn command_suggestions_render_below_when_terminal_space_remains() {
-        let input_area = Rect::new(0, 10, 80, 4);
+    fn command_suggestions_overlay_prefers_space_below_input() {
+        let frame = Rect::new(0, 0, 80, 20);
+        let input_area = Rect::new(0, 10, 80, 1);
 
-        assert!(should_render_suggestions_below_input(input_area, 1, 3, 20));
+        assert_eq!(
+            command_suggestions_overlay_rect(input_area, 3, frame),
+            Some(Rect::new(0, 11, 80, 3))
+        );
     }
 
     #[test]
-    fn command_suggestions_render_above_at_terminal_bottom() {
-        let input_area = Rect::new(0, 16, 80, 4);
+    fn command_suggestions_overlay_flips_above_at_terminal_bottom() {
+        let frame = Rect::new(0, 0, 80, 20);
+        let input_area = Rect::new(0, 19, 80, 1);
 
-        assert!(!should_render_suggestions_below_input(input_area, 1, 3, 20));
+        assert_eq!(
+            command_suggestions_overlay_rect(input_area, 3, frame),
+            Some(Rect::new(0, 16, 80, 3))
+        );
+    }
+
+    #[test]
+    fn command_suggestions_overlay_handles_zero_lines_and_no_space() {
+        let frame = Rect::new(0, 0, 80, 20);
+        let input_area = Rect::new(0, 10, 80, 1);
+        assert_eq!(command_suggestions_overlay_rect(input_area, 0, frame), None);
+
+        // Input fills the whole frame: nowhere to float, so no popover.
+        let full = Rect::new(0, 0, 80, 20);
+        assert_eq!(command_suggestions_overlay_rect(full, 3, frame), None);
     }
 
     #[test]
@@ -1997,10 +2042,10 @@ pub(super) fn draw_input(
     let cursor_pos = app.cursor_pos();
 
     let mode = composer_mode(input_text, app.is_remote_mode());
-    let suggestions = app.command_suggestions();
-    let has_suggestions = !suggestions.is_empty()
-        && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
-        && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing());
+    // Command suggestions render later as an overlay pass
+    // (`draw_command_suggestions_overlay`), never inline: they must not shift
+    // the input rows or anything below them.
+    let has_suggestions = command_suggestions_active(app, &app.command_suggestions());
 
     let (prompt_char, caret_color) = input_prompt(app);
     let num_str = format!("{}", next_prompt);
@@ -2025,9 +2070,9 @@ pub(super) fn draw_input(
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
-    let mut suggestion_lines: Vec<Line> = Vec::new();
     if has_suggestions {
-        suggestion_lines = command_suggestion_lines(app, &suggestions);
+        // Overlay pass owns the palette rows; no inline hint line competes
+        // with it.
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
         hint_shown = true;
         hint_line = Some(shell_hint.trim().to_string());
@@ -2070,17 +2115,6 @@ pub(super) fn draw_input(
         );
     }
 
-    let render_suggestions_below = should_render_suggestions_below_input(
-        area,
-        all_lines.len().min(10),
-        suggestion_lines.len(),
-        frame.area().height,
-    );
-
-    if has_suggestions && !render_suggestions_below {
-        lines.extend(suggestion_lines.iter().cloned());
-    }
-
     let suggestions_offset = lines.len();
     let total_input_lines = all_lines.len();
     let visible_height = area.height as usize;
@@ -2103,15 +2137,6 @@ pub(super) fn draw_input(
         }
     }
     let visible_input_rows = lines.len().saturating_sub(suggestions_offset);
-
-    if has_suggestions && render_suggestions_below {
-        for line in suggestion_lines {
-            if lines.len() >= visible_height {
-                break;
-            }
-            lines.push(line);
-        }
-    }
 
     let centered = app.centered_mode();
 

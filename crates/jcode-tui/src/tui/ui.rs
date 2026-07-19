@@ -2451,6 +2451,25 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
 }
 
+/// Rows reserved below the input for the decorative idle donut.
+///
+/// The donut only shows on an (effectively) empty idle screen, which means it
+/// is pure negative space. When the composer grows past its resting one-row
+/// height (multi-line input, or the `/` command menu adding suggestion rows),
+/// take that growth out of the donut's reservation instead of shrinking the
+/// transcript above: this keeps the header/tips text and info widgets
+/// perfectly still when the slash menu opens on a fresh session. The donut
+/// simply renders shorter for as long as the composer is expanded.
+fn idle_donut_reserved_height(show_donut: bool, input_height: u16) -> u16 {
+    const IDLE_DONUT_HEIGHT: u16 = 14;
+    if show_donut {
+        let composer_growth = input_height.saturating_sub(1);
+        IDLE_DONUT_HEIGHT.saturating_sub(composer_growth)
+    } else {
+        0
+    }
+}
+
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -2849,7 +2868,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
-    let donut_height: u16 = if show_donut { 14 } else { 0 };
+    let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
     // Elastic overscroll status line revealed when the user scrolls past the
     // bottom of the transcript. Rendered directly below the input line.
@@ -3304,6 +3323,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if visual_debug::overlay_enabled() {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }
+
+    // Command-suggestion popover: a late overlay pass so the palette floats
+    // over existing rows (blank space, pinned footer, or the transcript tail)
+    // instead of reserving layout height and shoving everything around.
+    input_ui::draw_command_suggestions_overlay(frame, app, chunks[7]);
 
     // Observe the rendered messages area for the anchor-stability (smoothness)
     // report. Runs on the final buffer so it sees exactly what the user sees.

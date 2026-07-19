@@ -1753,3 +1753,75 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 #[cfg(test)]
 #[path = "../tests_input_scroll.rs"]
 mod input_scroll_tests;
+
+/// Opening the slash-command palette must not move anything already on
+/// screen: the palette renders as an overlay (over blank rows, the pinned
+/// footer, or the transcript tail), never by reserving layout height.
+/// Regression for the "/ makes the whole screen jump 8 rows" report.
+#[test]
+fn command_palette_open_does_not_move_existing_rows() {
+    let _render_lock = scroll_render_test_lock();
+
+    // Case 1: mostly-empty session (packed layout, free space below input).
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 4);
+    let before = render_and_snap(&app, &mut terminal);
+    app.input = "/".to_string();
+    app.cursor_pos = 1;
+    let after = render_and_snap(&app, &mut terminal);
+    let before_rows: Vec<&str> = before.lines().collect();
+    let after_rows: Vec<&str> = after.lines().collect();
+    // No row may relocate: any before-row content still visible after opening
+    // the palette must be at the exact same y. In-place content changes (the
+    // input row gaining "/", the idle footer hint shortening, palette rows
+    // covering blank space) are fine; vertical motion is the regression.
+    for (y, row) in before_rows.iter().enumerate() {
+        if row.trim().is_empty() {
+            continue;
+        }
+        if after_rows.get(y).copied() == Some(*row) {
+            continue;
+        }
+        if let Some(new_y) = after_rows.iter().position(|now| now == row) {
+            panic!(
+                "row moved from y={y} to y={new_y} when opening the palette:\n{row:?}\n\nbefore:\n{before}\nafter:\n{after}"
+            );
+        }
+    }
+    let palette_rows = after_rows
+        .iter()
+        .filter(|row| {
+            let t = row.trim_start();
+            t.starts_with('/') && t.contains("  ")
+        })
+        .count();
+    assert!(
+        palette_rows >= 2,
+        "palette should be visible as overlay rows:\n{after}"
+    );
+
+    // Case 2: overflowing transcript (scrolling layout). The transcript must
+    // not shift up: the messages area keeps its height and the palette covers
+    // the bottom rows instead.
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    let before = render_and_snap(&app, &mut terminal);
+    app.input = "/".to_string();
+    app.cursor_pos = 1;
+    let after = render_and_snap(&app, &mut terminal);
+    let before_rows: Vec<&str> = before.lines().collect();
+    let after_rows: Vec<&str> = after.lines().collect();
+    // Sample transcript rows near the top of the viewport: they must be at the
+    // exact same y after opening the palette.
+    let mut checked = 0;
+    for (y, row) in before_rows.iter().enumerate().take(10) {
+        if row.trim().is_empty() {
+            continue;
+        }
+        let now = after_rows.get(y).copied().unwrap_or("");
+        assert_eq!(
+            now, *row,
+            "transcript row {y} moved when opening the palette on a full screen"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 3, "expected transcript rows to sample:\n{before}");
+}
