@@ -75,8 +75,7 @@ impl App {
         // Below-threshold retention still regrows steadily on idle clients
         // (heartbeats, remote snapshots), so re-trim on a slow cadence even
         // after the once-per-idle trim already ran.
-        let periodic_retrim_due =
-            idle_retrim_due(self.idle_heap_release.last_idle_trim, now);
+        let periodic_retrim_due = idle_retrim_due(self.idle_heap_release.last_idle_trim, now);
         if self.idle_heap_release.trimmed_this_idle_period && !periodic_retrim_due {
             return;
         }
