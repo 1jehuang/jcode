@@ -129,6 +129,17 @@ pub fn profile() -> &'static SystemProfile {
     PROFILE.get_or_init(detect)
 }
 
+/// Pin the process-global system profile to the synthetic Full-tier profile.
+///
+/// Test harnesses call this so rendered output (perf badge, animation policy,
+/// idle status facts) does not depend on the host's load average or free
+/// memory at the moment the test process first touched `profile()`. First
+/// initialization wins: calling this after `profile()` has already run is a
+/// no-op, and production code paths never call it.
+pub fn pin_full_profile_for_tests() {
+    let _ = PROFILE.set(synthetic_profile(SyntheticSystemProfile::Native));
+}
+
 pub fn synthetic_profile(kind: SyntheticSystemProfile) -> SystemProfile {
     match kind {
         SyntheticSystemProfile::Native => SystemProfile {

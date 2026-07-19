@@ -1129,6 +1129,11 @@ impl App {
     }
 
     pub fn new_for_test_harness(provider: Arc<dyn Provider>, registry: Registry) -> Self {
+        // Pin the perf tier before anything touches `perf::profile()`: on a
+        // loaded host the auto-detected Reduced/Minimal tier changes rendered
+        // output (perf badge in the header, animation gating), which makes
+        // frame-snapshot tests flake under parallel cargo builds.
+        crate::perf::pin_full_profile_for_tests();
         let mut app = Self::new(provider, registry);
         app.runtime_mode = AppRuntimeMode::TestHarness;
         app.is_remote = false;

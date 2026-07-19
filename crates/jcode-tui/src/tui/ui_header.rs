@@ -1479,6 +1479,10 @@ mod tests {
 
     #[test]
     fn build_header_lines_omits_placeholder_provider_label_when_unknown() {
+        // Reads model/provider env-derived state: without the env lock, the
+        // sibling test that sets JCODE_MODEL=gpt-5.4 mid-flight leaks into this
+        // render and the "loading session…" placeholder never appears.
+        let _guard = crate::storage::lock_test_env();
         let mut app = crate::tui::app::App::new_for_remote(None);
         app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
@@ -1498,6 +1502,9 @@ mod tests {
 
     #[test]
     fn build_header_lines_hides_secondary_placeholder_during_brief_connecting_phase() {
+        // Same env sensitivity as the placeholder test above: JCODE_MODEL /
+        // JCODE_PROVIDER mutations from sibling tests change what renders.
+        let _guard = crate::storage::lock_test_env();
         let app = crate::tui::app::App::new_for_remote(None);
 
         let lines = build_header_lines(&app, 80);
