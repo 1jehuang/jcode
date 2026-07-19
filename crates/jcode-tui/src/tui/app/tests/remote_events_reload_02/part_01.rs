@@ -839,9 +839,10 @@ fn test_swarm_completion_notification_inserts_agent_snapshot_without_report_pros
             })
             .collect::<Vec<_>>()
             .join("\n");
-    assert!(
-        rendered.contains("🐄 ✓ card demo · 00:35 · GPT-5.6 · OpenAI OAuth · high"),
-        "rendered={rendered}"
+    assert_eq!(
+        rendered.trim(),
+        "🐄 ✓ card demo · Completed",
+        "completed transcript snapshots should stay stable and one-line"
     );
     assert!(!rendered.contains("README first heading"));
 }

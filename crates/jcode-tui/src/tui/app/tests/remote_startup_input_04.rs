@@ -67,7 +67,8 @@ fn test_local_bus_dictation_completion_applies_transcript() {
 
 /// SwarmStatus snapshots must surface member lifecycle transitions (an agent
 /// finishing) as a status notice, scoped to this session's spawn subtree so a
-/// shared swarm's unrelated agents stay silent.
+/// shared swarm's unrelated agents stay silent. Live member details render from
+/// their own snapshot and must not churn the global transcript cache version.
 #[test]
 fn test_handle_server_event_swarm_status_announces_member_completion() {
     let member = |id: &str, status: &str, parent: Option<&str>| crate::protocol::SwarmMemberStatus {
@@ -107,10 +108,11 @@ fn test_handle_server_event_swarm_status_announces_member_completion() {
         &mut remote,
     );
     assert!(redraw, "swarm cards should redraw as soon as members arrive");
-    assert!(
-        app.display_messages_version > version_before,
-        "swarm card data must invalidate transcript caches"
+    assert_eq!(
+        app.display_messages_version, version_before,
+        "live swarm snapshots must not invalidate global transcript caches"
     );
+    assert_eq!(app.remote_swarm_members.len(), 3);
     assert_eq!(
         app.status_notice(),
         None,
