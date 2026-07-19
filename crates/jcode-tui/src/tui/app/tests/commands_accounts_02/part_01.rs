@@ -41,6 +41,10 @@ fn test_usage_card_does_not_capture_typing() {
 fn test_usage_report_updates_display_only_card_without_system_message() {
     let mut app = create_test_app();
     app.usage_report_refreshing = true;
+    // App::new seeds the provider transcript with the immutable session-context
+    // reminder, so assert the usage report adds nothing on top of it rather
+    // than expecting an empty transcript.
+    let provider_messages_before = app.materialized_provider_messages().len();
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
         provider_name: "OpenAI (ChatGPT)".to_string(),
         limits: vec![crate::usage::UsageLimit {
@@ -63,7 +67,12 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
     assert!(msg.content.contains("5h"));
     assert!(msg.content.contains("82%"));
     assert!(msg.content.contains("plan: pro"));
-    assert!(app.materialized_provider_messages().is_empty());
+    let leaked = app.materialized_provider_messages();
+    assert_eq!(
+        leaked.len(),
+        provider_messages_before,
+        "usage report must not add provider-visible messages: {leaked:#?}"
+    );
 }
 
 #[test]
