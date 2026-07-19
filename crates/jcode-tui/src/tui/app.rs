@@ -95,6 +95,7 @@ mod state_ui_runtime;
 mod state_ui_storage;
 mod support;
 mod swarm_hint;
+mod terminal_liveness;
 mod todos_view;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;

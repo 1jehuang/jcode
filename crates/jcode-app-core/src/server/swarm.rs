@@ -254,6 +254,42 @@ pub(super) fn member_status_is_dead(status: &str) -> bool {
     matches!(status, "failed" | "stopped" | "crashed")
 }
 
+/// How long a finished spawned worker may sit idle before the server reaps it
+/// (closes its client and removes the member). `0` disables reaping.
+///
+/// Spawned workers (visible windows and headless sessions) rely on their
+/// coordinator calling `cleanup`, but ad hoc spawns and interrupted plans
+/// leave them behind, where each idle client holds ~80-150 MB indefinitely.
+/// The reaper is the backstop that keeps them from stacking up.
+const DEFAULT_SWARM_IDLE_WORKER_REAP_SECS: u64 = 30 * 60;
+
+pub(super) fn swarm_idle_worker_reap_after() -> Option<Duration> {
+    let secs = std::env::var("JCODE_SWARM_IDLE_WORKER_REAP_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SWARM_IDLE_WORKER_REAP_SECS);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Spawned workers whose work is finished (`ready` report-back or a terminal
+/// status) and whose status has not changed for at least `idle_after`.
+/// Only sessions spawned by another agent (`report_back_to_session_id` set)
+/// and not holding the coordinator role are eligible; user-created sessions
+/// are never reaped.
+pub(super) fn idle_spawned_worker_reap_candidates(
+    members: &HashMap<String, SwarmMember>,
+    idle_after: Duration,
+) -> Vec<String> {
+    members
+        .values()
+        .filter(|member| member.report_back_to_session_id.is_some())
+        .filter(|member| member.role != "coordinator")
+        .filter(|member| member.status == "ready" || member_status_is_terminal(&member.status))
+        .filter(|member| member.last_status_change.elapsed() >= idle_after)
+        .map(|member| member.session_id.clone())
+        .collect()
+}
+
 /// Outcome of salvaging one dead member's plan assignments.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct DeadMemberSalvage {
@@ -1810,6 +1846,76 @@ mod tests {
         let (mut member, _rx) = swarm_member(session_id, "agent", false);
         member.report_back_to_session_id = parent.map(str::to_string);
         member
+    }
+
+    #[test]
+    fn idle_spawned_worker_reap_selects_only_finished_idle_spawned_agents() {
+        use super::idle_spawned_worker_reap_candidates;
+
+        let idle_after = Duration::from_secs(60);
+        let old = Instant::now() - Duration::from_secs(120);
+
+        // Finished spawned worker, idle past the window: reapable.
+        let mut reapable = member_with_parent("reapable", Some("coord"));
+        reapable.status = "ready".to_string();
+        reapable.last_status_change = old;
+
+        // Terminal-status spawned worker: reapable.
+        let mut stopped = member_with_parent("stopped", Some("coord"));
+        stopped.status = "completed".to_string();
+        stopped.last_status_change = old;
+
+        // Same shape but user-created (no spawner): never reaped.
+        let mut user_owned = member_with_parent("user-owned", None);
+        user_owned.status = "ready".to_string();
+        user_owned.last_status_change = old;
+
+        // Spawned but still running: not reaped.
+        let mut running = member_with_parent("running", Some("coord"));
+        running.status = "running".to_string();
+        running.last_status_change = old;
+
+        // Spawned and finished, but recently: not reaped yet.
+        let mut fresh = member_with_parent("fresh", Some("coord"));
+        fresh.status = "ready".to_string();
+
+        // Spawned coordinator (sub-swarm manager): never reaped by role.
+        let mut sub_coordinator = member_with_parent("sub-coord", Some("coord"));
+        sub_coordinator.role = "coordinator".to_string();
+        sub_coordinator.status = "ready".to_string();
+        sub_coordinator.last_status_change = old;
+
+        let members: HashMap<String, SwarmMember> =
+            [reapable, stopped, user_owned, running, fresh, sub_coordinator]
+                .into_iter()
+                .map(|member| (member.session_id.clone(), member))
+                .collect();
+
+        let mut candidates = idle_spawned_worker_reap_candidates(&members, idle_after);
+        candidates.sort();
+        assert_eq!(candidates, vec!["reapable".to_string(), "stopped".to_string()]);
+    }
+
+    #[test]
+    fn idle_worker_reap_window_env_zero_disables() {
+        // Note: mutating the process env in tests is racy in general, but this
+        // env var is read on every call (not cached), and no other test touches
+        // it.
+        unsafe {
+            std::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "0");
+        }
+        assert_eq!(super::swarm_idle_worker_reap_after(), None);
+        unsafe {
+            std::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "90");
+        }
+        assert_eq!(
+            super::swarm_idle_worker_reap_after(),
+            Some(Duration::from_secs(90))
+        );
+        unsafe {
+            std::env::remove_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS");
+        }
+        assert!(super::swarm_idle_worker_reap_after().is_some());
     }
 
     #[test]

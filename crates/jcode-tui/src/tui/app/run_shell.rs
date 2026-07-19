@@ -332,6 +332,7 @@ impl App {
     /// Run the TUI application
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
+        super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = redraw_timer(redraw_period);
@@ -394,6 +395,16 @@ impl App {
                     event = event_stream.next() => {
                         if event.is_some() {
                             needs_redraw |= local::handle_terminal_event(&mut self, &mut terminal, event)?;
+                        } else if super::terminal_liveness::terminal_abandoned() {
+                            // Input EOF and the controlling terminal is gone:
+                            // this client is an orphan (window died without a
+                            // deliverable SIGHUP). Exit instead of looping
+                            // forever holding ~100 MB. The session persists
+                            // and can be resumed.
+                            crate::logging::warn(
+                                "Terminal input closed and controlling terminal is gone; exiting orphaned client",
+                            );
+                            self.should_quit = true;
                         } else {
                             tokio::time::sleep(redraw_period).await;
                         }
@@ -438,6 +449,7 @@ impl App {
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
+        super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = redraw_timer(redraw_period);
@@ -597,6 +609,15 @@ impl App {
                     event = event_stream.next() => {
                         if event.is_some() {
                             needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                        } else if super::terminal_liveness::terminal_abandoned() {
+                            // Input EOF with the controlling terminal gone:
+                            // orphaned client (see local loop). Exit; the
+                            // server-side session keeps running and can be
+                            // reattached with --resume.
+                            crate::logging::warn(
+                                "Terminal input closed and controlling terminal is gone; exiting orphaned client",
+                            );
+                            self.should_quit = true;
                         } else {
                             tokio::time::sleep(redraw_period).await;
                         }

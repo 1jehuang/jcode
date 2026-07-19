@@ -735,6 +735,17 @@ fn handle_terminal_event_while_disconnected(
         Some(Ok(Event::Resize(_, _))) => {
             needs_redraw = app.should_redraw_after_resize();
         }
+        None => {
+            // Input EOF: if the controlling terminal is gone this client is an
+            // orphan (window died without a deliverable SIGHUP). Quit instead
+            // of reconnect-looping forever with no way to ever receive input.
+            if super::terminal_liveness::terminal_abandoned() {
+                crate::logging::warn(
+                    "Terminal input closed and controlling terminal is gone while disconnected; exiting orphaned client",
+                );
+                app.should_quit = true;
+            }
+        }
         _ => {}
     }
 
