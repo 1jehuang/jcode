@@ -155,8 +155,10 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
         "expected two-line preview truncation, got:\n{}",
         text
     );
+    let visible_history = text.lines().skip(2).collect::<Vec<_>>().join(" ");
+    let normalized_history = visible_history.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        text.contains("Intro line 20"),
+        normalized_history.contains("Intro line 20 - quick brown fox jumps over the lazy dog."),
         "latest visible content should remain visible below preview, got:\n{}",
         text
     );

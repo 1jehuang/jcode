@@ -455,7 +455,8 @@ fn test_chat_mouse_scroll_down_reaches_bottom_without_dead_zone() {
     let _lock = scroll_render_test_lock();
 
     let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 36);
-    let bottom = render_and_snap(&app, &mut terminal);
+    render_and_snap(&app, &mut terminal);
+    let bottom_scroll = crate::tui::ui::last_resolved_chat_scroll();
 
     assert!(
         crate::tui::ui::last_max_scroll() > 2,
@@ -468,8 +469,12 @@ fn test_chat_mouse_scroll_down_reaches_bottom_without_dead_zone() {
         row: 5,
         modifiers: KeyModifiers::empty(),
     });
-    let scrolled_up = render_and_snap(&app, &mut terminal);
-    assert_ne!(scrolled_up, bottom, "first wheel-up should visibly move");
+    render_and_snap(&app, &mut terminal);
+    let scrolled_up_scroll = crate::tui::ui::last_resolved_chat_scroll();
+    assert!(
+        scrolled_up_scroll < bottom_scroll,
+        "first wheel-up should move the resolved transcript viewport"
+    );
     assert!(app.auto_scroll_paused);
 
     app.handle_mouse_event(MouseEvent {
@@ -478,10 +483,11 @@ fn test_chat_mouse_scroll_down_reaches_bottom_without_dead_zone() {
         row: 5,
         modifiers: KeyModifiers::empty(),
     });
-    let back_at_bottom = render_and_snap(&app, &mut terminal);
+    render_and_snap(&app, &mut terminal);
+    let back_at_bottom_scroll = crate::tui::ui::last_resolved_chat_scroll();
 
     assert_eq!(
-        back_at_bottom, bottom,
+        back_at_bottom_scroll, bottom_scroll,
         "one opposite wheel detent should return to bottom"
     );
     assert!(
