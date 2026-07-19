@@ -9,7 +9,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::session::{self, SessionCounts};
+use crate::session::{self, SessionCounts, SessionPresence};
 
 #[derive(Debug, Serialize)]
 struct CountsReport {
@@ -23,6 +23,32 @@ impl From<SessionCounts> for CountsReport {
             total: counts.total,
             streaming: counts.streaming,
         }
+    }
+}
+
+/// Return whether a persisted session represents a top-level session opened by
+/// the user. The shared server also tracks internal debug/swarm runtimes in the
+/// active-PID registry, but those are implementation details rather than menu
+/// entries.
+fn load_user_root_session(session_id: &str) -> Option<bool> {
+    session::Session::load_startup_stub(session_id)
+        .ok()
+        .map(|session| session.parent_id.is_none() && !session.is_debug)
+}
+
+fn user_root_session_presence() -> Vec<SessionPresence> {
+    session::user_session_presence()
+        .into_iter()
+        // A marker can briefly precede its first persisted snapshot. Keep an
+        // unknown session visible for this read rather than hiding a new window.
+        .filter(|presence| load_user_root_session(&presence.session_id).unwrap_or(true))
+        .collect()
+}
+
+fn counts_for_presence(sessions: &[SessionPresence]) -> SessionCounts {
+    SessionCounts {
+        total: sessions.len(),
+        streaming: sessions.iter().filter(|session| session.streaming).count(),
     }
 }
 
@@ -77,13 +103,16 @@ fn format_session_menu_item_title_with_display(
 
 pub fn run_menubar_command(once: bool, json: bool) -> Result<()> {
     if json {
-        let report = CountsReport::from(session::user_session_counts());
+        let report = CountsReport::from(counts_for_presence(&user_root_session_presence()));
         println!("{}", serde_json::to_string(&report)?);
         return Ok(());
     }
 
     if once {
-        println!("{}", format_menubar_summary(session::user_session_counts()));
+        println!(
+            "{}",
+            format_menubar_summary(counts_for_presence(&user_root_session_presence()))
+        );
         return Ok(());
     }
 
@@ -251,11 +280,15 @@ fn is_menubar_sandbox(
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{format_menubar_summary, format_menubar_title, format_session_menu_item_title};
-    use crate::session::{self, SessionCounts, SessionPresence};
+    use super::{
+        counts_for_presence, format_menubar_summary, format_menubar_title,
+        format_session_menu_item_title, load_user_root_session,
+    };
+    use crate::session::{self, SessionPresence};
 
     use std::cell::RefCell;
     use std::cmp::Reverse;
+    use std::collections::{HashMap, HashSet};
 
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
@@ -524,6 +557,10 @@ mod macos {
         status_item.setMenu(Some(&menu));
 
         let last_sessions: RefCell<Vec<SessionPresence>> = RefCell::new(Vec::new());
+        // Classification does not change for a session ID. Cache it so a large
+        // population of internal workers costs one metadata read each rather
+        // than one read per worker every second.
+        let root_visibility: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
         let app_for_refresh = app.clone();
         let refresh = move || {
             // Re-sync the Light/Dark appearance each tick so toggling the
@@ -532,12 +569,29 @@ mod macos {
             sync_app_appearance(&app_for_refresh);
 
             let mut sessions = session::user_session_presence();
+            let active_ids: HashSet<String> = sessions
+                .iter()
+                .map(|presence| presence.session_id.clone())
+                .collect();
+            root_visibility
+                .borrow_mut()
+                .retain(|session_id, _| active_ids.contains(session_id));
+            sessions.retain(|presence| {
+                if let Some(visible) = root_visibility.borrow().get(&presence.session_id).copied() {
+                    return visible;
+                }
+                let Some(visible) = load_user_root_session(&presence.session_id) else {
+                    // The marker may race the first session save. Retry next tick.
+                    return true;
+                };
+                root_visibility
+                    .borrow_mut()
+                    .insert(presence.session_id.clone(), visible);
+                visible
+            });
             sessions.sort_by_key(|s| (Reverse(s.streaming), s.session_id.clone()));
 
-            let counts = SessionCounts {
-                total: sessions.len(),
-                streaming: sessions.iter().filter(|s| s.streaming).count(),
-            };
+            let counts = counts_for_presence(&sessions);
             if let Some(button) = status_item.button(mtm) {
                 let title = format_menubar_title(counts);
                 let attributed = attributed_title(&title, &title_font, counts.streaming > 0);
@@ -826,6 +880,58 @@ mod tests {
             "🐃 Meaningful menu labels"
         );
 
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn menu_presence_includes_only_user_root_sessions() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let mut root = crate::session::Session::create_with_id(
+            "session_fox_root".to_string(),
+            None,
+            Some("Root work".to_string()),
+        );
+        root.mark_active();
+        root.save().expect("save root session");
+
+        let mut debug = crate::session::Session::create_with_id(
+            "session_owl_debug".to_string(),
+            None,
+            Some("Internal worker".to_string()),
+        );
+        debug.set_debug(true);
+        debug.mark_active();
+        debug.save().expect("save debug session");
+
+        let mut child = crate::session::Session::create_with_id(
+            "session_bear_child".to_string(),
+            Some(root.id.clone()),
+            Some("Child work".to_string()),
+        );
+        child.mark_active();
+        child.save().expect("save child session");
+
+        let visible = user_root_session_presence();
+        assert_eq!(
+            visible
+                .iter()
+                .map(|presence| presence.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session_fox_root"]
+        );
+        assert_eq!(counts_for_presence(&visible).total, 1);
+
+        root.mark_closed();
+        debug.mark_closed();
+        child.mark_closed();
         if let Some(previous_home) = previous_home {
             crate::env::set_var("JCODE_HOME", previous_home);
         } else {

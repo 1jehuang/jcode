@@ -141,6 +141,7 @@ pub(super) fn infer_protocol_from_env(
         || term_program.contains("kitty")
         || term_program.contains("wezterm")
         || term_program.contains("ghostty")
+        || term_program.contains("handterm")
     {
         return Some(ProtocolType::Kitty);
     }
@@ -477,6 +478,10 @@ mod tests {
         );
         assert_eq!(
             infer_protocol_from_env(None, Some("ghostty"), None, None),
+            Some(ProtocolType::Kitty)
+        );
+        assert_eq!(
+            infer_protocol_from_env(None, Some("HandTerm"), None, None),
             Some(ProtocolType::Kitty)
         );
         assert_eq!(

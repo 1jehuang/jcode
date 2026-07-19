@@ -1,6 +1,6 @@
 //! Terminal image display support
 //!
-//! Supports Kitty graphics protocol (Kitty, Ghostty), iTerm2 inline images,
+//! Supports Kitty graphics protocol (Kitty, Ghostty, Handterm), iTerm2 inline images,
 //! and Sixel graphics (xterm, foot, mlterm, WezTerm).
 //! Falls back to a simple placeholder if no image protocol is available.
 
@@ -40,16 +40,16 @@ impl ImageProtocol {
             return Self::Kitty;
         }
 
-        // Check TERM for kitty or ghostty
+        // Check TERM for Kitty-compatible terminals.
         if let Ok(term) = std::env::var("TERM")
-            && (term.contains("kitty") || term.contains("ghostty"))
+            && is_kitty_terminal_name(&term)
         {
             return Self::Kitty;
         }
 
-        // Check TERM_PROGRAM for Ghostty
+        // Check TERM_PROGRAM for Kitty-compatible terminals.
         if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
-            if term_program == "ghostty" {
+            if is_kitty_terminal_name(&term_program) {
                 return Self::Kitty;
             }
             if term_program == "iTerm.app" {
@@ -111,6 +111,11 @@ impl ImageProtocol {
     pub fn is_supported(&self) -> bool {
         *self != Self::None
     }
+}
+
+fn is_kitty_terminal_name(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("kitty") || value.contains("ghostty") || value.contains("handterm")
 }
 
 /// Display parameters for terminal images
@@ -450,6 +455,12 @@ mod tests {
         assert!(can_display_to_stdout(ImageProtocol::ITerm2, true));
         assert!(can_display_to_stdout(ImageProtocol::Sixel, true));
         assert!(!can_display_to_stdout(ImageProtocol::None, true));
+    }
+
+    #[test]
+    fn handterm_uses_kitty_graphics_protocol() {
+        assert!(is_kitty_terminal_name("handterm"));
+        assert!(is_kitty_terminal_name("HandTerm"));
     }
 
     #[test]
