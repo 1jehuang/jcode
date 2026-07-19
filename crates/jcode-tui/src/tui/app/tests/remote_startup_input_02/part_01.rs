@@ -276,11 +276,26 @@ fn test_remote_fallback_claude_model_gets_api_key_route_without_oauth() {
 
 #[test]
 fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
+    struct AnthropicApiKeyGuard(Option<String>);
+
+    impl Drop for AnthropicApiKeyGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                crate::env::set_var("ANTHROPIC_API_KEY", value);
+            } else {
+                crate::env::remove_var("ANTHROPIC_API_KEY");
+            }
+            crate::auth::AuthStatus::invalidate_cache();
+        }
+    }
+
     // A stale persisted catalog can carry an OAuth-only route for a newly
     // released Claude model. When an Anthropic API key is configured, opening
     // the picker must add the claude-api route instead of trusting the stale
     // single-route cache forever.
     with_temp_jcode_home(|| {
+        let _api_key_guard =
+            AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
         crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
         crate::auth::AuthStatus::invalidate_cache();
 
@@ -319,8 +334,6 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             fable_entries
         );
 
-        crate::env::remove_var("ANTHROPIC_API_KEY");
-        crate::auth::AuthStatus::invalidate_cache();
     });
 }
 
