@@ -129,28 +129,32 @@ pub(super) fn infer_protocol_from_env(
     lc_terminal: Option<&str>,
     kitty_window_id: Option<&str>,
 ) -> Option<ProtocolType> {
-    if kitty_window_id.is_some() {
-        return Some(ProtocolType::Kitty);
-    }
-
     let term = term.unwrap_or("").to_ascii_lowercase();
     let term_program = term_program.unwrap_or("").to_ascii_lowercase();
     let lc_terminal = lc_terminal.unwrap_or("").to_ascii_lowercase();
 
+    // WezTerm advertises several image protocols, but ratatui-image's Kitty
+    // path relies on Unicode placeholders that WezTerm does not implement
+    // correctly. Its iTerm2 path is the upstream-tested, glitch-free choice.
+    // Prefer this explicit terminal identity over TERM/KITTY_WINDOW_ID, which
+    // may be inherited or deliberately overridden.
+    if term_program.contains("wezterm") || lc_terminal.contains("wezterm") {
+        return Some(ProtocolType::Iterm2);
+    }
+
+    if kitty_window_id.is_some() {
+        return Some(ProtocolType::Kitty);
+    }
+
     if term.contains("kitty")
         || term_program.contains("kitty")
-        || term_program.contains("wezterm")
         || term_program.contains("ghostty")
         || term_program.contains("handterm")
     {
         return Some(ProtocolType::Kitty);
     }
 
-    if term_program.contains("iterm")
-        || term.contains("iterm")
-        || lc_terminal.contains("iterm")
-        || lc_terminal.contains("wezterm")
-    {
+    if term_program.contains("iterm") || term.contains("iterm") || lc_terminal.contains("iterm") {
         return Some(ProtocolType::Iterm2);
     }
 
@@ -484,10 +488,6 @@ mod tests {
             infer_protocol_from_env(None, Some("HandTerm"), None, None),
             Some(ProtocolType::Kitty)
         );
-        assert_eq!(
-            infer_protocol_from_env(None, Some("WezTerm"), None, None),
-            Some(ProtocolType::Kitty)
-        );
         // KITTY_WINDOW_ID present is sufficient.
         assert_eq!(
             infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3")),
@@ -502,8 +502,33 @@ mod tests {
             Some(ProtocolType::Iterm2)
         );
         assert_eq!(
+            infer_protocol_from_env(None, Some("WezTerm"), None, None),
+            Some(ProtocolType::Iterm2)
+        );
+        assert_eq!(
             infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
             Some(ProtocolType::Sixel)
+        );
+    }
+
+    #[test]
+    fn explicit_wezterm_identity_avoids_incomplete_kitty_placeholders() {
+        assert_eq!(
+            infer_protocol_from_env(
+                Some("xterm-kitty"),
+                Some("WezTerm"),
+                None,
+                Some("stale-kitty-window")
+            ),
+            Some(ProtocolType::Iterm2)
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
+            None
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
+            None
         );
     }
 
