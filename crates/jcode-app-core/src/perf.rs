@@ -320,23 +320,24 @@ fn detect() -> SystemProfile {
     // Highest priority: explicit env override (used by tests/CI to keep the
     // tier deterministic regardless of host load, and by users to force a
     // tier for one invocation without editing config).
-    let env_tier = std::env::var("JCODE_PERF_TIER")
-        .ok()
-        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+    let env_tier = std::env::var("JCODE_PERF_TIER").ok().and_then(|raw| {
+        match raw.trim().to_ascii_lowercase().as_str() {
             "full" => Some(PerformanceTier::Full),
             "reduced" => Some(PerformanceTier::Reduced),
             "minimal" => Some(PerformanceTier::Minimal),
             _ => None,
-        });
+        }
+    });
 
-    let tier = env_tier.unwrap_or_else(
-        || match crate::config::config().display.performance.as_str() {
-            "full" => PerformanceTier::Full,
-            "reduced" => PerformanceTier::Reduced,
-            "minimal" => PerformanceTier::Minimal,
-            _ => auto_tier,
-        },
-    );
+    let tier =
+        env_tier.unwrap_or_else(
+            || match crate::config::config().display.performance.as_str() {
+                "full" => PerformanceTier::Full,
+                "reduced" => PerformanceTier::Reduced,
+                "minimal" => PerformanceTier::Minimal,
+                _ => auto_tier,
+            },
+        );
 
     SystemProfile {
         load_avg_1m,
