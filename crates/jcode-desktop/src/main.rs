@@ -257,6 +257,50 @@ fn desktop_automatic_redraw_allowed(
         && surface_timeout_redraw_at.is_none_or(|redraw_at| now >= redraw_at)
 }
 
+fn desktop_surface_timeout_wake(
+    surface_renderable: bool,
+    window_occluded: bool,
+    surface_timeout_redraw_at: Option<Instant>,
+) -> Option<Instant> {
+    (surface_renderable && !window_occluded)
+        .then_some(surface_timeout_redraw_at)
+        .flatten()
+}
+
+#[derive(Clone, Debug, Default)]
+struct AutomaticRedrawState {
+    pending: bool,
+    request_outstanding: bool,
+}
+
+impl AutomaticRedrawState {
+    fn schedule(&mut self, automatic_redraw_allowed: bool) -> bool {
+        self.pending = true;
+        self.request_pending(automatic_redraw_allowed)
+    }
+
+    fn request_pending(&mut self, automatic_redraw_allowed: bool) -> bool {
+        if self.pending && automatic_redraw_allowed && !self.request_outstanding {
+            self.request_outstanding = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn begin_redraw(&mut self, render_will_start: bool) {
+        self.request_outstanding = false;
+        if render_will_start {
+            self.pending = false;
+        }
+    }
+
+    fn park(&mut self) {
+        self.pending = true;
+        self.request_outstanding = false;
+    }
+}
+
 fn consume_pending_backend_redraw_for_render(
     render_will_start: bool,
     pending_backend_redraw_since: &mut Option<Instant>,
@@ -479,6 +523,7 @@ async fn run() -> Result<()> {
     let mut pending_backend_redraw_since: Option<Instant> = None;
     let mut surface_timeout_backoff = SurfaceTimeoutBackoff::default();
     let mut surface_timeout_redraw_at: Option<Instant> = None;
+    let mut automatic_redraw = AutomaticRedrawState::default();
     // Scheduled time for the next animation-driven redraw. Continuous animations
     // re-arm this each presented frame so the loop paces itself to roughly the
     // display refresh rate instead of busy-spinning the main thread.
@@ -531,11 +576,16 @@ async fn run() -> Result<()> {
         let animation_wake = automatic_redraw_allowed
             .then_some(animation_redraw_at)
             .flatten();
+        let surface_timeout_wake = desktop_surface_timeout_wake(
+            surface_renderable,
+            window_occluded,
+            surface_timeout_redraw_at,
+        );
         let wake = [
             default_wake,
             backend_wake,
             hot_reload_wake,
-            surface_timeout_redraw_at,
+            surface_timeout_wake,
             animation_wake,
         ]
             .into_iter()
@@ -567,7 +617,8 @@ async fn run() -> Result<()> {
                 pending_backend_redraw,
                 pending_interaction_kind,
             },
-        ) {
+        ) && automatic_redraw.schedule(automatic_redraw_allowed)
+        {
             window.request_redraw();
         }
         let worker_drain = hot_reloader.drain_app_worker_messages();
@@ -578,12 +629,16 @@ async fn run() -> Result<()> {
             // the complete desktop UI. Rendering the worker scene here regresses
             // normal launches to a blank/gray window.
             drop(scene);
-            window.request_redraw();
+            if automatic_redraw.schedule(automatic_redraw_allowed) {
+                window.request_redraw();
+            }
         }
         if worker_drain.reload_requested {
             show_desktop_reload_notice(&mut app);
             window.set_title(&app.status_title());
-            window.request_redraw();
+            if automatic_redraw.schedule(automatic_redraw_allowed) {
+                window.request_redraw();
+            }
             if hot_reloader.force_reload(&app, &window) {
                 target.exit();
                 return;
@@ -611,7 +666,13 @@ async fn run() -> Result<()> {
                     window_occluded = occluded;
                     if occluded {
                         animation_redraw_at = None;
-                    } else {
+                        automatic_redraw.park();
+                    } else if automatic_redraw.schedule(desktop_automatic_redraw_allowed(
+                        Instant::now(),
+                        desktop_surface_size_is_renderable(window.inner_size()),
+                        false,
+                        surface_timeout_redraw_at,
+                    )) {
                         window.request_redraw();
                     }
                 }
@@ -1250,6 +1311,22 @@ async fn run() -> Result<()> {
                     );
                 }
                 WindowEvent::RedrawRequested => {
+                    let window_size = window.inner_size();
+                    let redraw_now = Instant::now();
+                    let surface_renderable = desktop_surface_size_is_renderable(window_size);
+                    let redraw_allowed = desktop_automatic_redraw_allowed(
+                        redraw_now,
+                        surface_renderable,
+                        window_occluded,
+                        surface_timeout_redraw_at,
+                    );
+                    let render_will_start = redraw_allowed && renderer.is_gpu_ready();
+                    automatic_redraw.begin_redraw(render_will_start);
+                    let pending_backend_redraw_for_frame =
+                        consume_pending_backend_redraw_for_render(
+                            render_will_start,
+                            &mut pending_backend_redraw_since,
+                        );
                     let Some(canvas) = renderer.canvas_mut() else {
                         return;
                     };
@@ -1268,24 +1345,8 @@ async fn run() -> Result<()> {
                             }),
                         );
                     }
-                    let window_size = window.inner_size();
-                    let redraw_now = Instant::now();
-                    let surface_renderable = desktop_surface_size_is_renderable(window_size);
-                    let redraw_allowed = desktop_automatic_redraw_allowed(
-                        redraw_now,
-                        surface_renderable,
-                        window_occluded,
-                        surface_timeout_redraw_at,
-                    );
-                    let pending_backend_redraw_for_frame =
-                        consume_pending_backend_redraw_for_render(
-                            redraw_allowed,
-                            &mut pending_backend_redraw_since,
-                        );
                     if !surface_renderable {
                         canvas.suspend_for_zero_size(window_size);
-                        surface_timeout_backoff.reset();
-                        surface_timeout_redraw_at = None;
                         animation_redraw_at = None;
                         return;
                     }
@@ -1373,7 +1434,9 @@ async fn run() -> Result<()> {
                         surface_timeout_backoff.reset();
                         surface_timeout_redraw_at = None;
                         canvas.resize(window.inner_size());
-                        window.request_redraw();
+                        if automatic_redraw.schedule(true) {
+                            window.request_redraw();
+                        }
                     }
                     Err(SurfaceError::OutOfMemory) => target.exit(),
                     Err(SurfaceError::Timeout) => {
@@ -1382,6 +1445,7 @@ async fn run() -> Result<()> {
                         let redraw_at = now + delay;
                         surface_timeout_redraw_at = Some(redraw_at);
                         animation_redraw_at = None;
+                        automatic_redraw.schedule(false);
                         if consecutive_timeouts == 1 || delay == SURFACE_TIMEOUT_BACKOFF_MAX {
                             desktop_log::warn(format_args!(
                                 "jcode-desktop: surface acquire timed out, retrying in {}ms after {} consecutive timeout(s)",
@@ -1400,7 +1464,9 @@ async fn run() -> Result<()> {
                     single_session.set_recovery_session_count(recovery_count);
                     window.set_title(&app.status_title());
                     interaction_latency.mark("recovery_count", Instant::now());
-                    window.request_redraw();
+                    if automatic_redraw.schedule(automatic_redraw_allowed) {
+                        window.request_redraw();
+                    }
                 }
             }
             Event::UserEvent(DesktopUserEvent::CanvasReady(result)) => {
@@ -1419,7 +1485,9 @@ async fn run() -> Result<()> {
                             startup_trace.mark("reload handoff released");
                         }
                         reload_startup_handoff = None;
-                        window.request_redraw();
+                        if automatic_redraw.schedule(automatic_redraw_allowed) {
+                            window.request_redraw();
+                        }
                     }
                     Err(message) => {
                         desktop_log::error(format_args!(
@@ -1465,7 +1533,9 @@ async fn run() -> Result<()> {
                 if applied {
                     window.set_title(&app.status_title());
                     interaction_latency.mark("session_cards_load", Instant::now());
-                    window.request_redraw();
+                    if automatic_redraw.schedule(automatic_redraw_allowed) {
+                        window.request_redraw();
+                    }
                 }
             }
             Event::UserEvent(DesktopUserEvent::SessionCardLoaded {
@@ -1491,7 +1561,9 @@ async fn run() -> Result<()> {
                 if applied {
                     window.set_title(&app.status_title());
                     interaction_latency.mark("session_card_refresh", Instant::now());
-                    window.request_redraw();
+                    if automatic_redraw.schedule(automatic_redraw_allowed) {
+                        window.request_redraw();
+                    }
                 }
             }
             Event::UserEvent(DesktopUserEvent::CrashedSessionsRestoreFinished {
@@ -1513,14 +1585,18 @@ async fn run() -> Result<()> {
                 }
                 window.set_title(&app.status_title());
                 interaction_latency.mark("restore_crashed_sessions", Instant::now());
-                window.request_redraw();
+                if automatic_redraw.schedule(automatic_redraw_allowed) {
+                    window.request_redraw();
+                }
             }
             Event::UserEvent(DesktopUserEvent::GitHubIssuesSyncFinished(result)) => {
                 github_issue_sync_running = false;
                 app.apply_github_issue_sync_result(result);
                 window.set_title(&app.status_title());
                 interaction_latency.mark("github_issue_sync", Instant::now());
-                window.request_redraw();
+                if automatic_redraw.schedule(automatic_redraw_allowed) {
+                    window.request_redraw();
+                }
             }
             Event::UserEvent(DesktopUserEvent::TranscriptHydrated {
                 session_id,
@@ -1534,7 +1610,9 @@ async fn run() -> Result<()> {
                     ));
                     window.set_title(&app.status_title());
                     interaction_latency.mark("transcript_hydration", Instant::now());
-                    window.request_redraw();
+                    if automatic_redraw.schedule(automatic_redraw_allowed) {
+                        window.request_redraw();
+                    }
                 }
             }
             Event::UserEvent(DesktopUserEvent::SessionEvents(batch)) => {
@@ -1584,7 +1662,9 @@ async fn run() -> Result<()> {
                     });
                     if redraw_due && automatic_redraw_allowed {
                         last_backend_redraw_request = Some(now);
-                        window.request_redraw();
+                        if automatic_redraw.schedule(true) {
+                            window.request_redraw();
+                        }
                         redraw_requested = true;
                     } else {
                         redraw_deferred = true;
@@ -1605,11 +1685,8 @@ async fn run() -> Result<()> {
                 let surface_renderable = desktop_surface_size_is_renderable(window.inner_size());
                 let now = Instant::now();
                 if let Some(redraw_at) = surface_timeout_redraw_at {
-                    if now >= redraw_at {
+                    if now >= redraw_at && surface_renderable && !window_occluded {
                         surface_timeout_redraw_at = None;
-                        if surface_renderable && !window_occluded {
-                            window.request_redraw();
-                        }
                     }
                 }
                 let automatic_redraw_allowed = desktop_automatic_redraw_allowed(
@@ -1682,7 +1759,10 @@ async fn run() -> Result<()> {
                 if workspace_title_changed {
                     window.set_title(&app.status_title());
                 }
-                if animation_tick_due && automatic_redraw_allowed && paced_redraw_needed {
+                if animation_tick_due
+                    && paced_redraw_needed
+                    && automatic_redraw.schedule(automatic_redraw_allowed)
+                {
                     window.request_redraw();
                 }
                 if pending_backend_redraw_since.is_some() {
@@ -1692,7 +1772,9 @@ async fn run() -> Result<()> {
                         })
                     {
                         last_backend_redraw_request = Some(now);
-                        window.request_redraw();
+                        if automatic_redraw.schedule(true) {
+                            window.request_redraw();
+                        }
                     }
                 }
                 if hot_reloader.poll(&app, &window) {
@@ -1705,6 +1787,11 @@ async fn run() -> Result<()> {
                     && canvas.needs_initial_frame
                 {
                     canvas.needs_initial_frame = false;
+                    if automatic_redraw.schedule(true) {
+                        window.request_redraw();
+                    }
+                }
+                if automatic_redraw.request_pending(automatic_redraw_allowed) {
                     window.request_redraw();
                 }
                 let space_hold_animation_active = space_hold_started_at.is_some()

@@ -724,6 +724,76 @@ fn automatic_redraw_requires_a_visible_renderable_surface_and_elapsed_timeout() 
 }
 
 #[test]
+fn surface_timeout_wake_parks_while_unrenderable_or_occluded() {
+    let redraw_at = Instant::now() + SURFACE_TIMEOUT_BACKOFF_MIN;
+
+    assert_eq!(
+        desktop_surface_timeout_wake(true, false, Some(redraw_at)),
+        Some(redraw_at)
+    );
+    assert_eq!(
+        desktop_surface_timeout_wake(false, false, Some(redraw_at)),
+        None
+    );
+    assert_eq!(
+        desktop_surface_timeout_wake(true, true, Some(redraw_at)),
+        None
+    );
+    assert_eq!(desktop_surface_timeout_wake(true, false, None), None);
+}
+
+#[test]
+fn automatic_redraw_state_defers_and_coalesces_until_rendering_is_allowed() {
+    let mut redraw = AutomaticRedrawState::default();
+
+    assert!(!redraw.schedule(false));
+    assert!(redraw.pending);
+    assert!(!redraw.request_outstanding);
+    assert!(!redraw.request_pending(false));
+
+    assert!(redraw.request_pending(true));
+    assert!(redraw.request_outstanding);
+    assert!(
+        !redraw.schedule(true),
+        "an outstanding redraw must coalesce"
+    );
+
+    redraw.park();
+    assert!(redraw.pending, "parking must preserve pending work");
+    assert!(
+        !redraw.request_outstanding,
+        "parking must forget a request the platform may drop"
+    );
+    assert!(redraw.request_pending(true));
+
+    redraw.begin_redraw(false);
+    assert!(redraw.pending, "a gated redraw must preserve pending work");
+    assert!(!redraw.request_outstanding);
+    assert!(redraw.request_pending(true));
+
+    redraw.begin_redraw(true);
+    assert!(!redraw.pending, "a renderable frame consumes pending work");
+    assert!(!redraw.request_outstanding);
+    assert!(!redraw.request_pending(true));
+}
+
+#[test]
+fn surface_timeout_gate_defers_every_automatic_request_until_deadline() {
+    let now = Instant::now();
+    let redraw_at = now + SURFACE_TIMEOUT_BACKOFF_MIN;
+    let mut redraw = AutomaticRedrawState::default();
+
+    let allowed_before_deadline =
+        desktop_automatic_redraw_allowed(now, true, false, Some(redraw_at));
+    assert!(!redraw.schedule(allowed_before_deadline));
+    assert!(redraw.pending);
+
+    let allowed_at_deadline =
+        desktop_automatic_redraw_allowed(redraw_at, true, false, Some(redraw_at));
+    assert!(redraw.request_pending(allowed_at_deadline));
+}
+
+#[test]
 fn pending_backend_redraw_survives_zero_size_until_a_renderable_frame() {
     let requested_at = Instant::now();
     let mut pending = Some(requested_at);
