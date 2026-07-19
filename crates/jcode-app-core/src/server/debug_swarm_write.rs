@@ -84,6 +84,37 @@ pub(super) async fn maybe_handle_swarm_write_command(
             coordinators: Arc::clone(ctx.swarm_coordinators),
         };
         persist_swarm_state_for(swarm_id, &swarm_state).await;
+        // Push the cleared state to attached clients. Without this, every
+        // connected TUI keeps rendering (and holding resident) the old item
+        // graph until its next reconnect; a 1.5k-item stale plan is ~650 KB
+        // of JSON pinned per client. Version advances past the removed plan
+        // so the client-side stale-regression guard accepts the update.
+        let clear_event = ServerEvent::SwarmPlan {
+            swarm_id: swarm_id.to_string(),
+            version: removed.version.saturating_add(1),
+            items: Vec::new(),
+            participants: Vec::new(),
+            reason: Some("plan_cleared".to_string()),
+            summary: None,
+        };
+        let session_ids: Vec<String> = {
+            let swarms = ctx.swarms_by_id.read().await;
+            swarms
+                .get(swarm_id)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default()
+        };
+        {
+            let members = ctx.swarm_members.read().await;
+            for sid in session_ids {
+                if let Some(member) = members.get(&sid) {
+                    let _ = member.event_tx.send(clear_event.clone());
+                    for tx in member.event_txs.values() {
+                        let _ = tx.send(clear_event.clone());
+                    }
+                }
+            }
+        }
         return Ok(Some(
             serde_json::json!({
                 "swarm_id": swarm_id,
