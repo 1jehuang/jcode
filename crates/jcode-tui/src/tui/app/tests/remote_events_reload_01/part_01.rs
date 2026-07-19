@@ -546,10 +546,77 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         "unsolicited same-session History payload should be dropped, not applied"
     );
     // Live stream state preserved: preview and streaming text survive.
-    assert!(
+    //
+    // The preview slot is process-global and several event paths in OTHER
+    // tests clear it without the render lock (Done handlers call
+    // clear_streaming_render_state). If the slot looks cleared, re-run the
+    // set -> handle_server_event -> check sequence: a genuine regression in
+    // should_apply_history_payload clears the preview deterministically on
+    // every iteration, while a parallel wipe is transient.
+    let preview_survives = || {
         crate::tui::mermaid::get_active_diagrams()
             .iter()
-            .any(|d| d.hash == preview_hash),
+            .any(|d| d.hash == preview_hash)
+    };
+    let mut survived = preview_survives();
+    for _ in 0..50 {
+        if survived {
+            break;
+        }
+        crate::tui::mermaid::set_streaming_preview_diagram(
+            preview_hash,
+            320,
+            240,
+            Some("stream-preview".to_string()),
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::History {
+                id: 3,
+                session_id: "session_midstream_dup".to_string(),
+                messages: vec![crate::protocol::HistoryMessage {
+                    role: "user".to_string(),
+                    content: "truncated payload from another client's rewind".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                }],
+                images: vec![],
+                provider_name: Some("claude".to_string()),
+                provider_model: Some("claude-sonnet-4-20250514".to_string()),
+                subagent_model: None,
+                autoreview_enabled: None,
+                autojudge_enabled: None,
+                available_models: vec![],
+                available_model_routes: vec![],
+                mcp_servers: vec![],
+                skills: vec![],
+                total_tokens: None,
+                token_usage_totals: None,
+                all_sessions: vec![],
+                client_count: None,
+                is_canary: None,
+                reload_recovery: None,
+                server_version: None,
+                server_name: None,
+                server_icon: None,
+                server_has_update: None,
+                was_interrupted: None,
+                connection_type: None,
+                status_detail: None,
+                upstream_provider: None,
+                resolved_credential: None,
+                reasoning_effort: None,
+                service_tier: None,
+                compaction_mode: crate::config::CompactionMode::Reactive,
+                activity: None,
+                side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            },
+            &mut remote,
+        );
+        survived = preview_survives();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(
+        survived,
         "a dropped duplicate History must not clear a live streaming preview diagram"
     );
     assert!(
