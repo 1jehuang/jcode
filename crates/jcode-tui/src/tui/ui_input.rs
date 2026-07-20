@@ -1070,8 +1070,102 @@ mod tests {
             .iter()
             .map(|placement| placement.area.y)
             .collect::<Vec<_>>();
-        assert_eq!(rows, vec![3, 2, 1, 0]);
+        assert_eq!(rows, vec![0, 1, 2, 3]);
         assert!(placements.iter().all(|placement| placement.area.y != 4));
+    }
+
+    #[test]
+    fn right_fact_stack_never_leaves_an_occupied_row_between_facts() {
+        let area = Rect::new(0, 0, 40, 7);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        buffer[(39, 4)].set_symbol("x");
+        let lines = ["oauth", "model", "dir", "context"]
+            .into_iter()
+            .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
+            .collect();
+
+        let placements = right_fact_placements(
+            &buffer,
+            lines,
+            0,
+            7,
+            0,
+            40,
+            Rect::new(0, 0, 40, 5),
+            false,
+            None,
+        );
+        let rows = placements
+            .iter()
+            .map(|placement| placement.area.y)
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![0, 1, 2, 3]);
+        assert_eq!(
+            placements
+                .iter()
+                .map(|placement| placement.line.spans[0].content.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["oauth", "model", "dir", "context"]
+        );
+    }
+
+    #[test]
+    fn right_fact_stack_collision_state_space_is_contiguous_or_hidden() {
+        const HEIGHT: u16 = 8;
+        const STACK_HEIGHT: u16 = 4;
+
+        for occupied_mask in 0_u16..(1 << HEIGHT) {
+            let area = Rect::new(0, 0, 40, HEIGHT);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            for row in 0..HEIGHT {
+                if occupied_mask & (1 << row) != 0 {
+                    buffer[(39, row)].set_symbol("x");
+                }
+            }
+            let lines = ["oauth", "model", "dir", "context"]
+                .into_iter()
+                .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
+                .collect();
+
+            let placements = right_fact_placements(
+                &buffer,
+                lines,
+                0,
+                HEIGHT,
+                0,
+                40,
+                Rect::new(0, 0, 40, HEIGHT),
+                false,
+                None,
+            );
+            let expected_top = (0..=HEIGHT - STACK_HEIGHT).rev().find(|&start| {
+                (start..start + STACK_HEIGHT)
+                    .all(|row| occupied_mask & (1 << row) == 0)
+            });
+
+            match expected_top {
+                Some(start) => {
+                    assert_eq!(placements.len(), STACK_HEIGHT as usize, "mask {occupied_mask:08b}");
+                    assert_eq!(
+                        placements
+                            .iter()
+                            .map(|placement| placement.area.y)
+                            .collect::<Vec<_>>(),
+                        (start..start + STACK_HEIGHT).collect::<Vec<_>>(),
+                        "mask {occupied_mask:08b}"
+                    );
+                    assert_eq!(
+                        placements
+                            .iter()
+                            .map(|placement| placement.line.spans[0].content.as_ref())
+                            .collect::<Vec<_>>(),
+                        vec!["oauth", "model", "dir", "context"],
+                        "mask {occupied_mask:08b}"
+                    );
+                }
+                None => assert!(placements.is_empty(), "mask {occupied_mask:08b}"),
+            }
+        }
     }
 
     #[test]
@@ -2200,10 +2294,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
     if let Some(dir) = app
         .working_dir()
         .and_then(|path| overscroll_dir_label(&path))
-        && let Some(line) = RightFactLine::new(vec![Span::styled(
-            dir,
-            right_fact_neutral_style(),
-        )])
+        && let Some(line) = RightFactLine::new(vec![Span::styled(dir, right_fact_neutral_style())])
     {
         lines.push(line);
     }
@@ -2241,64 +2332,101 @@ fn right_fact_placements(
     transcript_scrollbar_visible: bool,
     protected_position: Option<Position>,
 ) -> Vec<RightFactPlacement> {
-    if top >= bottom || left >= right {
+    if top >= bottom || left >= right || lines.is_empty() {
         return Vec::new();
     }
 
-    let mut placements = Vec::with_capacity(lines.len());
-    let mut next_row = bottom.checked_sub(1);
-
-    for line in lines.into_iter().rev() {
-        let Some(mut row) = next_row else {
-            break;
-        };
-        let mut placed = None;
-
-        loop {
-            if row < top {
-                break;
-            }
-            let row_right = if transcript_scrollbar_visible
-                && row >= messages_area.y
-                && row < messages_area.bottom()
-            {
-                right.saturating_sub(1)
-            } else {
-                right
-            };
-
-            let required = line
-                .width
-                .saturating_add(RIGHT_FACT_GAP)
-                .saturating_add(RIGHT_FACT_PAD);
-            if row_right.saturating_sub(left) >= required {
-                let fact_right = row_right.saturating_sub(RIGHT_FACT_PAD);
-                let fact_left = fact_right.saturating_sub(line.width);
-                let probe_left = fact_left.saturating_sub(RIGHT_FACT_GAP);
-                if probe_left >= left
-                    && (probe_left..row_right).all(|x| {
-                        protected_position != Some(Position::new(x, row))
-                            && right_fact_cell_is_blank(&buffer[(x, row)])
-                    })
-                {
-                    placed = Some(Rect::new(fact_left, row, line.width, 1));
-                    break;
-                }
-            }
-
-            let Some(previous) = row.checked_sub(1) else {
-                break;
-            };
-            row = previous;
-        }
-
-        if let Some(area) = placed {
-            next_row = area.y.checked_sub(1);
-            placements.push(RightFactPlacement { line, area });
-        }
+    let Ok(block_height) = u16::try_from(lines.len()) else {
+        return Vec::new();
+    };
+    if bottom.saturating_sub(top) < block_height {
+        return Vec::new();
     }
 
-    placements
+    // Facts are one visual object. Probe complete consecutive blocks from the
+    // bottom upward; if any row collides, move the entire stack rather than
+    // skipping that row and letting unrelated content split the facts apart.
+    let mut block_bottom = bottom;
+    loop {
+        let Some(block_top) = block_bottom.checked_sub(block_height) else {
+            return Vec::new();
+        };
+        if block_top < top {
+            return Vec::new();
+        }
+
+        let areas = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let row = block_top + index as u16;
+                right_fact_area_on_row(
+                    buffer,
+                    line,
+                    row,
+                    left,
+                    right,
+                    messages_area,
+                    transcript_scrollbar_visible,
+                    protected_position,
+                )
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(areas) = areas {
+            return lines
+                .into_iter()
+                .zip(areas)
+                .map(|(line, area)| RightFactPlacement { line, area })
+                .collect();
+        }
+
+        if block_top == top {
+            return Vec::new();
+        }
+        block_bottom = block_bottom.saturating_sub(1);
+    }
+}
+
+fn right_fact_area_on_row(
+    buffer: &ratatui::buffer::Buffer,
+    line: &RightFactLine,
+    row: u16,
+    left: u16,
+    right: u16,
+    messages_area: Rect,
+    transcript_scrollbar_visible: bool,
+    protected_position: Option<Position>,
+) -> Option<Rect> {
+    let row_right = if transcript_scrollbar_visible
+        && row >= messages_area.y
+        && row < messages_area.bottom()
+    {
+        right.saturating_sub(1)
+    } else {
+        right
+    };
+
+    let required = line
+        .width
+        .saturating_add(RIGHT_FACT_GAP)
+        .saturating_add(RIGHT_FACT_PAD);
+    if row_right.saturating_sub(left) < required {
+        return None;
+    }
+
+    let fact_right = row_right.saturating_sub(RIGHT_FACT_PAD);
+    let fact_left = fact_right.saturating_sub(line.width);
+    let probe_left = fact_left.saturating_sub(RIGHT_FACT_GAP);
+    if probe_left < left
+        || !(probe_left..row_right).all(|x| {
+            protected_position != Some(Position::new(x, row))
+                && right_fact_cell_is_blank(&buffer[(x, row)])
+        })
+    {
+        return None;
+    }
+
+    Some(Rect::new(fact_left, row, line.width, 1))
 }
 
 fn right_fact_cell_is_blank(cell: &ratatui::buffer::Cell) -> bool {

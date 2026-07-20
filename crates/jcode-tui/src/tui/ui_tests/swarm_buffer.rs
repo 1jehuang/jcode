@@ -92,6 +92,25 @@ fn row_containing(rows: &[String], needle: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {needle:?} in frame:\n{}", rows.join("\n")))
 }
 
+fn fact_stack_rows(rows: &[String]) -> [usize; 4] {
+    [
+        row_containing(rows, "OpenAI · OAuth"),
+        row_containing(rows, "GPT-5.6-sol high"),
+        row_containing(rows, "~/jcode"),
+        row_containing(rows, "74k/256k"),
+    ]
+}
+
+fn assert_fact_stack_is_contiguous(rows: &[String]) -> [usize; 4] {
+    let positions = fact_stack_rows(rows);
+    assert!(
+        positions.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "facts must be one uninterrupted OAuth/model/directory/context block:\n{}",
+        rows.join("\n")
+    );
+    positions
+}
+
 #[test]
 fn right_fact_stack_uses_transcript_status_notification_and_input_rows_in_order() {
     let _lock = viewport_snapshot_test_lock();
@@ -104,10 +123,7 @@ fn right_fact_stack_uses_transcript_status_notification_and_input_rows_in_order(
         .expect("fact stack frame");
 
     let rows = buffer_rows(&terminal);
-    let oauth_y = row_containing(&rows, "OpenAI · OAuth");
-    let model_y = row_containing(&rows, "GPT-5.6-sol high");
-    let dir_y = row_containing(&rows, "~/jcode");
-    let context_y = row_containing(&rows, "74k/256k");
+    let [oauth_y, model_y, dir_y, context_y] = assert_fact_stack_is_contiguous(&rows);
     assert!(oauth_y < model_y && model_y < dir_y && dir_y < context_y);
     assert!(rows[context_y].contains("▰▰▱▱▱▱ 29%"));
     assert!(rows[dir_y].contains("next scheduled task in 4m"));
@@ -170,10 +186,7 @@ fn right_fact_stack_shifts_up_when_scheduled_notification_row_is_absent() {
         .expect("fact stack frame without notification");
 
     let rows = buffer_rows(&terminal);
-    let oauth_y = row_containing(&rows, "OpenAI · OAuth");
-    let model_y = row_containing(&rows, "GPT-5.6-sol high");
-    let dir_y = row_containing(&rows, "~/jcode");
-    let context_y = row_containing(&rows, "74k/256k");
+    let [oauth_y, model_y, dir_y, context_y] = assert_fact_stack_is_contiguous(&rows);
     let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
     let input = layout.input_area.expect("input area");
     let status = crate::tui::ui::last_status_area().expect("status area");
@@ -212,6 +225,7 @@ fn right_fact_stack_leaves_fully_used_input_rows_untouched_and_moves_up() {
             >= 110
     );
     assert!(row_containing(&rows, "74k/256k") < input_area.y as usize);
+    assert_fact_stack_is_contiguous(&rows);
 }
 
 #[test]
@@ -231,7 +245,7 @@ fn right_fact_stack_survives_narrow_widths_without_overwriting_content() {
 }
 
 #[test]
-fn right_fact_stack_does_not_spill_into_a_live_streaming_transcript() {
+fn right_fact_stack_hides_as_a_unit_when_streaming_chrome_cannot_fit_it() {
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     let mut state = fact_test_state(String::new(), true);
@@ -244,22 +258,15 @@ fn right_fact_stack_does_not_spill_into_a_live_streaming_transcript() {
         .expect("streaming fact stack frame");
 
     let rows = buffer_rows(&terminal);
-    let messages_bottom = crate::tui::ui::last_layout_snapshot()
-        .expect("layout snapshot")
-        .messages_area
-        .bottom() as usize;
-    let dir_y = row_containing(&rows, "~/jcode");
-    let context_y = row_containing(&rows, "74k/256k");
     assert!(
-        dir_y >= messages_bottom && context_y >= messages_bottom,
-        "streaming facts must not composite into live transcript rows:\n{}",
+        rows.iter().all(|row| {
+            !row.contains("OpenAI · OAuth")
+                && !row.contains("GPT-5.6-sol high")
+                && !row.contains("74k/256k")
+        }),
+        "the stack must hide completely rather than render a partial block:\n{}",
         rows.join("\n")
     );
-    assert!(rows[..messages_bottom].iter().all(|row| {
-        !row.contains("OpenAI · OAuth")
-            && !row.contains("GPT-5.6-sol high")
-            && !row.contains("74k/256k")
-    }));
 }
 
 #[test]
