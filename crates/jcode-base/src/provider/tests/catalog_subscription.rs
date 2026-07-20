@@ -326,6 +326,32 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
 }
 
 #[test]
+fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
+    let models = vec![
+        "claude-opus-4-8".to_string(),
+        "gpt-5.5".to_string(),
+        "gpt-5.6-sol".to_string(),
+    ];
+    let routes = remote_model_routes_fallback(
+        Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
+        &models,
+    );
+
+    assert_eq!(
+        routes
+            .iter()
+            .map(|route| route.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol"]
+    );
+    assert!(routes.iter().all(|route| {
+        route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+            && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            && route.available
+    }));
+}
+
+#[test]
 fn test_subscription_filters_do_not_activate_from_saved_credentials_alone() {
     let _guard = crate::storage::lock_test_env();
     crate::subscription_catalog::clear_runtime_env();

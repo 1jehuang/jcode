@@ -11,6 +11,8 @@ pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://api.jcode.sh/v1";
 pub const JCODE_PRICING_URL: &str = "https://jcode.sh/pricing";
 pub const JCODE_ACCOUNT_URL: &str = "https://jcode.sh/account";
+pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Subscription";
+pub const JCODE_ROUTE_API_METHOD: &str = "jcode-subscription";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum JcodeTier {

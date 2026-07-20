@@ -16,7 +16,7 @@ pub use catalog::{
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities, ModelRoute,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities,
     OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
     core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
     shared_http_client,
@@ -45,25 +45,13 @@ struct PersistedModelCatalogScope {
     observed_at_unix_secs: u64,
 }
 
+#[cfg(test)]
 pub(crate) fn filtered_display_models(models: impl IntoIterator<Item = String>) -> Vec<String> {
     models
         .into_iter()
         .filter(|model| {
             !crate::subscription_catalog::is_runtime_mode_enabled()
                 || crate::subscription_catalog::is_model_allowed_for_current_tier(model)
-        })
-        .collect()
-}
-
-pub(crate) fn filtered_model_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
-    if !crate::subscription_catalog::is_runtime_mode_enabled() {
-        return routes;
-    }
-
-    routes
-        .into_iter()
-        .filter(|route| {
-            crate::subscription_catalog::is_model_allowed_for_current_tier(&route.model)
         })
         .collect()
 }

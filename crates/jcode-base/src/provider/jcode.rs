@@ -1,8 +1,6 @@
 use super::{EventStream, ModelRoute, MultiProvider, NativeToolResultSender, Provider, copilot};
 use crate::message::{Message, ToolDefinition};
-use crate::provider::models::{
-    ensure_model_allowed_for_subscription, filtered_display_models, filtered_model_routes,
-};
+use crate::provider::models::ensure_model_allowed_for_subscription;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
@@ -37,6 +35,32 @@ impl JcodeProvider {
             crate::subscription_catalog::apply_runtime_env();
         }
         Self::apply_runtime_profile();
+    }
+
+    fn entitled_models_for(
+        tier: crate::subscription_catalog::JcodeTier,
+    ) -> impl Iterator<Item = &'static crate::subscription_catalog::CuratedModel> {
+        crate::subscription_catalog::curated_models()
+            .iter()
+            .filter(move |model| tier.allows(model.min_tier))
+    }
+
+    fn entitled_models() -> impl Iterator<Item = &'static crate::subscription_catalog::CuratedModel>
+    {
+        Self::entitled_models_for(crate::subscription_catalog::effective_tier())
+    }
+
+    fn model_routes_for(tier: crate::subscription_catalog::JcodeTier) -> Vec<ModelRoute> {
+        Self::entitled_models_for(tier)
+            .map(|model| ModelRoute {
+                model: model.id.to_string(),
+                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                available: true,
+                detail: crate::subscription_catalog::routing_policy_detail(model),
+                cheapness: None,
+            })
+            .collect()
     }
 }
 
@@ -82,7 +106,7 @@ impl Provider for JcodeProvider {
     }
 
     fn name(&self) -> &str {
-        "Jcode Subscription"
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
     }
 
     fn model(&self) -> String {
@@ -105,17 +129,22 @@ impl Provider for JcodeProvider {
     }
 
     fn available_models(&self) -> Vec<&'static str> {
-        self.inner.available_models()
+        self.ensure_runtime_mode();
+        Self::entitled_models().map(|model| model.id).collect()
     }
 
     fn available_models_display(&self) -> Vec<String> {
         self.ensure_runtime_mode();
-        filtered_display_models(self.inner.available_models_display())
+        Self::entitled_models()
+            .map(|model| model.id.to_string())
+            .collect()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
         self.ensure_runtime_mode();
-        filtered_display_models(self.inner.available_models_for_switching())
+        Self::entitled_models()
+            .map(|model| model.id.to_string())
+            .collect()
     }
 
     fn available_providers_for_model(&self, model: &str) -> Vec<String> {
@@ -132,7 +161,7 @@ impl Provider for JcodeProvider {
 
     fn model_routes(&self) -> Vec<ModelRoute> {
         self.ensure_runtime_mode();
-        filtered_model_routes(self.inner.model_routes())
+        Self::model_routes_for(crate::subscription_catalog::effective_tier())
     }
 
     async fn prefetch_models(&self) -> Result<()> {
@@ -289,5 +318,54 @@ mod tests {
         });
 
         crate::subscription_catalog::clear_runtime_env();
+    }
+
+    #[test]
+    fn jcode_provider_exposes_only_explicit_subscription_routes() {
+        use crate::subscription_catalog::JcodeTier;
+
+        let plus_routes = JcodeProvider::model_routes_for(JcodeTier::Plus);
+        let gpt_route = plus_routes
+            .iter()
+            .find(|route| route.model == "gpt-5.5")
+            .expect("Plus tier includes GPT-5.5");
+        let route_selection = jcode_provider_core::RouteSelection::from_model_route(gpt_route);
+        let flagship_routes = JcodeProvider::model_routes_for(JcodeTier::Flagship);
+        let expected_models = vec!["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol"];
+
+        assert_eq!(
+            plus_routes
+                .iter()
+                .map(|route| route.model.as_str())
+                .collect::<Vec<_>>(),
+            expected_models
+        );
+        assert!(plus_routes.iter().all(|route| {
+            route.provider == "Jcode Subscription"
+                && route.api_method == "jcode-subscription"
+                && route.available
+        }));
+        assert_eq!(
+            JcodeProvider::entitled_models_for(JcodeTier::Plus)
+                .map(|model| model.id.to_string())
+                .collect::<Vec<_>>(),
+            expected_models
+                .iter()
+                .map(|model| (*model).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(route_selection.routed_model_spec(), "gpt-5.5");
+        assert_eq!(
+            route_selection.runtime_key,
+            jcode_provider_core::RuntimeKey::JcodeSubscription
+        );
+        assert_eq!(route_selection.api_method, "jcode-subscription");
+        assert_eq!(route_selection.provider_label, "Jcode Subscription");
+        assert_eq!(flagship_routes.len(), 4);
+        assert!(
+            flagship_routes
+                .iter()
+                .any(|route| route.model == "claude-fable-5")
+        );
     }
 }

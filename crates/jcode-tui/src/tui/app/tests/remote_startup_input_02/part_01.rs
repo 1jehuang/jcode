@@ -338,6 +338,48 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
 }
 
 #[test]
+fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_routes() {
+    with_temp_jcode_home(|| {
+        let previous_anthropic_key = std::env::var_os("ANTHROPIC_API_KEY");
+        crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name =
+            Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string());
+        app.remote_available_entries = vec![
+            "claude-opus-4-8".to_string(),
+            "gpt-5.5".to_string(),
+            "gpt-5.6-sol".to_string(),
+        ];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "claude-opus-4-8".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "claude-api".to_string(),
+            available: true,
+            detail: "stale cached route".to_string(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+
+        match previous_anthropic_key {
+            Some(value) => crate::env::set_var("ANTHROPIC_API_KEY", value),
+            None => crate::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+
+        assert_eq!(app.remote_model_options.len(), 3);
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+                && route.available
+        }));
+    });
+}
+
+#[test]
 fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

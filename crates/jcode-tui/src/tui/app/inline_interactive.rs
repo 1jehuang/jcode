@@ -80,7 +80,8 @@ fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::OpenAIOAuth
         | Method::OpenAIApiKey
         | Method::OpenRouter => true,
-        Method::OpenAiCompatible { .. }
+        Method::JcodeSubscription
+        | Method::OpenAiCompatible { .. }
         | Method::Copilot
         | Method::Cursor
         | Method::Bedrock
@@ -481,6 +482,23 @@ impl App {
         routes: &mut Vec<crate::provider::ModelRoute>,
     ) {
         if !self.is_remote || self.remote_available_entries.is_empty() {
+            return;
+        }
+        // Jcode subscription routes are a complete, server-managed catalog.
+        // Do not mix in locally configured Anthropic/OpenAI credentials merely
+        // because a curated model also belongs to one of those upstreams.
+        let is_jcode_subscription = self.remote_provider_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
+        }) || routes.iter().any(|route| {
+            route
+                .api_method
+                .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
+        });
+        if is_jcode_subscription {
+            *routes = crate::provider::remote_model_routes_fallback(
+                Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
+                &self.remote_available_entries,
+            );
             return;
         }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =

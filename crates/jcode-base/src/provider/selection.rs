@@ -161,6 +161,7 @@ impl MultiProvider {
         };
 
         let provider_key = match &api_method_kind {
+            ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -415,6 +416,7 @@ impl MultiProvider {
             .filter(|api_method| !api_method.is_empty())
         {
             match ModelRouteApiMethod::parse(api_method) {
+                ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),
                 ModelRouteApiMethod::OpenAIOAuth => return format!("openai-oauth:{model}"),
