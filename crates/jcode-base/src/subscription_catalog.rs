@@ -203,28 +203,6 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         note: "Recent efficient multimodal model; routed server-side to Amazon Bedrock by the jcode router.",
     },
     CuratedModel {
-        id: "llama-4-maverick",
-        display_name: "Llama 4 Maverick",
-        aliases: &[
-            "llama-4-maverick",
-            "llama 4 maverick",
-            "meta llama 4 maverick",
-        ],
-        default_enabled: false,
-        routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Plus,
-        note: "Open-weight general model; routed server-side to Amazon Bedrock by the jcode router.",
-    },
-    CuratedModel {
-        id: "llama-4-scout",
-        display_name: "Llama 4 Scout",
-        aliases: &["llama-4-scout", "llama 4 scout", "meta llama 4 scout"],
-        default_enabled: false,
-        routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Plus,
-        note: "Open-weight efficient model; routed server-side to Amazon Bedrock by the jcode router.",
-    },
-    CuratedModel {
         id: "minimax-m2.5",
         display_name: "MiniMax M2.5",
         aliases: &["minimax-m2.5", "minimax m2.5", "minimax m2 5"],
@@ -553,8 +531,6 @@ mod tests {
         "devstral-2-123b",
         "deepseek-v3.2",
         "nova-2-lite",
-        "llama-4-maverick",
-        "llama-4-scout",
         "minimax-m2.5",
         "mistral-large-3",
         "kimi-k2.5",
@@ -597,8 +573,6 @@ mod tests {
         assert_eq!(canonical_model_id("DeepSeek 3.2"), Some("deepseek-v3.2"));
         for (alias, expected) in [
             ("Amazon Nova 2 Lite", "nova-2-lite"),
-            ("Meta Llama 4 Maverick", "llama-4-maverick"),
-            ("Meta Llama 4 Scout", "llama-4-scout"),
             ("MiniMax M2.5", "minimax-m2.5"),
             ("Mistral Large 3", "mistral-large-3"),
             ("Kimi K2.5", "kimi-k2.5"),
@@ -648,9 +622,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude-fable-5"]
         );
-        assert_eq!(CURATED_MODELS.len(), 22);
+        assert_eq!(CURATED_MODELS.len(), 20);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
+        assert!(find_curated_model("llama-4-maverick").is_none());
+        assert!(find_curated_model("llama-4-scout").is_none());
     }
 
     #[test]

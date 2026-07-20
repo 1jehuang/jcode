@@ -340,8 +340,6 @@ mod tests {
             "devstral-2-123b",
             "deepseek-v3.2",
             "nova-2-lite",
-            "llama-4-maverick",
-            "llama-4-scout",
             "minimax-m2.5",
             "mistral-large-3",
             "kimi-k2.5",
@@ -383,7 +381,7 @@ mod tests {
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
-        assert_eq!(flagship_routes.len(), 22);
+        assert_eq!(flagship_routes.len(), 20);
         assert!(
             flagship_routes
                 .iter()
