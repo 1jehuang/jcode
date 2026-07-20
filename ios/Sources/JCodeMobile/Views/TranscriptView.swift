@@ -31,10 +31,9 @@ struct TranscriptView: View {
     private func scroller(viewportHeight: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // A flexible top spacer pushes short content to the bottom of
-                // the viewport; it collapses to zero once content overflows.
+                // Content reads top-down like a document; autoscroll keeps
+                // the latest entry visible once content overflows.
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    Spacer(minLength: 0)
                     ForEach(entries) { entry in
                         EntryView(entry: entry)
                             .id(entry.id)
@@ -44,7 +43,7 @@ struct TranscriptView: View {
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
-                .frame(minHeight: max(0, viewportHeight - 16), alignment: .bottom)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(

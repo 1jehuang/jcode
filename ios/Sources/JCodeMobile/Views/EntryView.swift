@@ -101,7 +101,7 @@ struct ReasoningDisclosure: View {
                 Image(systemName: "brain")
                     .font(.caption2)
                     .foregroundStyle(Theme.textTertiary)
-                    .padding(.top, 2)
+                    .padding(.top, 4)
                     .accessibilityHidden(true)
                 Text(expanded ? text : firstLine)
                     .font(Theme.mono(12))
