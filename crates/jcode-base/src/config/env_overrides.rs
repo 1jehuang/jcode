@@ -192,6 +192,11 @@ impl Config {
                 self.display.debug_socket = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_NO_EMOJI")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.display.emoji = !parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_SHOW_THINKING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.show_thinking = parsed;

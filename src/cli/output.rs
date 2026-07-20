@@ -16,8 +16,12 @@ pub fn quiet_enabled() -> bool {
 
 pub fn stderr_info(message: impl AsRef<str>) {
     if !quiet_enabled() {
-        eprintln!("{}", message.as_ref());
+        eprintln!("{}", crate::output_style::terminal_text(message.as_ref()));
     }
+}
+
+pub fn terminal_title(title: impl AsRef<str>) -> String {
+    crate::output_style::terminal_text(title.as_ref()).into_owned()
 }
 
 pub fn stderr_blank_line() {

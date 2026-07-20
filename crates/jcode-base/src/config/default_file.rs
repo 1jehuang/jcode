@@ -137,6 +137,10 @@ mouse_capture = true
 # Enable debug socket for external control/testing (default: false)
 debug_socket = false
 
+# Render emoji in terminal-facing TUI and CLI output (default: true).
+# Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
+emoji = true
+
 # Show thinking/reasoning content (default: true)
 show_thinking = true
 

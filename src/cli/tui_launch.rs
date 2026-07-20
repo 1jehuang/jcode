@@ -51,7 +51,7 @@ pub async fn run_client() -> Result<()> {
                         use crate::protocol::ServerEvent;
                         match event {
                             ServerEvent::TextDelta { text } => {
-                                print!("{}", text);
+                                print!("{}", crate::output_style::terminal_text(&text));
                                 std::io::stdout().flush()?;
                             }
                             ServerEvent::Done { id } if id == msg_id => {
@@ -261,9 +261,12 @@ pub async fn run_replay_command(
                 })
                 .collect();
             eprintln!(
-                "🐝 Exporting swarm replay from seed {} ({} panes)",
-                session_id_or_path,
-                panes.len()
+                "{}",
+                crate::output_style::terminal_text(&format!(
+                    "🐝 Exporting swarm replay from seed {} ({} panes)",
+                    session_id_or_path,
+                    panes.len()
+                ))
             );
             video_export::export_swarm_video(
                 &panes,
@@ -304,15 +307,24 @@ pub async fn run_replay_command(
 
         let pane_count = replayable_panes.len();
         eprintln!(
-            "🐝 Replaying swarm: {} ({} panes, {:.1}x speed)",
-            session_id_or_path, pane_count, speed
+            "{}",
+            crate::output_style::terminal_text(&format!(
+                "🐝 Replaying swarm: {} ({} panes, {:.1}x speed)",
+                session_id_or_path, pane_count, speed
+            ))
         );
         eprintln!("  Controls: Space=pause  +/-=speed  q=quit\n");
 
         let (terminal, tui_runtime) = init_tui_runtime()?;
         let _ = crossterm::execute!(
             std::io::stdout(),
-            crossterm::terminal::SetTitle(format!("🐝 swarm replay: {}", session_id_or_path))
+            crossterm::terminal::SetTitle(
+                crate::output_style::terminal_text(&format!(
+                    "🐝 swarm replay: {}",
+                    session_id_or_path
+                ))
+                .into_owned()
+            )
         );
 
         let result =
@@ -512,6 +524,7 @@ pub fn list_sessions() -> Result<()> {
                 format!("▮ Cursor {}", &session_id[..session_id.len().min(8)])
             }
         };
+        let title = crate::output_style::terminal_text(&title).into_owned();
         let command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
         crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
     }

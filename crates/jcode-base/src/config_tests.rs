@@ -665,6 +665,13 @@ fn test_display_alignment_defaults_to_left() {
 }
 
 #[test]
+fn display_emoji_defaults_on_and_deserializes_off() {
+    assert!(DisplayConfig::default().emoji);
+    let cfg: Config = toml::from_str("[display]\nemoji = false\n").expect("config parses");
+    assert!(!cfg.display.emoji);
+}
+
+#[test]
 fn test_provider_failover_defaults_match_new_behavior() {
     let provider = Config::default().provider;
     assert_eq!(
@@ -740,6 +747,23 @@ fn test_env_override_auto_server_reload() {
     } else {
         crate::env::remove_var("JCODE_AUTO_SERVER_RELOAD");
     }
+}
+
+#[test]
+fn no_emoji_environment_override_disables_emoji() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_NO_EMOJI");
+    crate::env::set_var("JCODE_NO_EMOJI", "1");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert!(!cfg.display.emoji);
+
+    crate::env::set_var("JCODE_NO_EMOJI", "false");
+    cfg.display.emoji = false;
+    cfg.apply_env_overrides();
+    assert!(cfg.display.emoji);
+
+    restore_env_var("JCODE_NO_EMOJI", prev);
 }
 
 #[test]

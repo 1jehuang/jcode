@@ -1,4 +1,5 @@
 use super::*;
+use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
 impl Agent {
     /// Run turns until no more tool calls
@@ -43,7 +44,11 @@ impl Agent {
                         .pre_tokens
                         .map(|t| format!(" ({} tokens)", t))
                         .unwrap_or_default();
-                    println!("📦 Context compacted ({}){}", event.trigger, tokens_str);
+                    crate::terminal_println!(
+                        "📦 Context compacted ({}){}",
+                        event.trigger,
+                        tokens_str
+                    );
                 }
             }
 
@@ -236,7 +241,7 @@ impl Agent {
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Display reasoning content only if enabled
                         if print_output && crate::config::config().display.show_thinking {
-                            println!("💭 {}", thinking_text);
+                            crate::terminal_println!("💭 {}", thinking_text);
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.
@@ -259,7 +264,7 @@ impl Agent {
                     }
                     StreamEvent::TextDelta(text) => {
                         if print_output {
-                            print!("{}", text);
+                            crate::terminal_print!("{}", text);
                             io::stdout().flush()?;
                         }
                         text_content.push_str(&text);
@@ -527,7 +532,11 @@ impl Agent {
                             let tokens_str = pre_tokens
                                 .map(|t| format!(" ({} tokens)", t))
                                 .unwrap_or_default();
-                            println!("📦 Context compacted ({}){}", trigger, tokens_str);
+                            crate::terminal_println!(
+                                "📦 Context compacted ({}){}",
+                                trigger,
+                                tokens_str
+                            );
                         }
                     }
                     StreamEvent::NativeToolCall {

@@ -2,6 +2,7 @@ use super::{SetupHintsState, StartupHints, read_choice};
 use crate::windows_hotkeys::{self, WindowsHotkey};
 use anyhow::{Context, Result};
 use jcode_config_types::{LaunchHotkeyEntry, LaunchHotkeysConfig};
+use jcode_core::{terminal_eprint as eprint, terminal_eprintln as eprintln};
 use jcode_storage as storage;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

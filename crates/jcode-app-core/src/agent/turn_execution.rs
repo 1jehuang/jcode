@@ -1,4 +1,5 @@
 use super::*;
+use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
 impl Agent {
     /// Run a single turn with the given user message

@@ -81,13 +81,14 @@ pub fn terminal_window_title(
         .and_then(normalized_display_title)
         .map(|title| truncate_chars(&title, 48));
     let suffix = if is_selfdev { " [self-dev]" } else { "" };
-    match display_title {
+    let title = match display_title {
         Some(title) => format!("{icon} {title}{suffix}"),
         None => match fallback_label.and_then(normalized_display_title) {
             Some(label) => format!("{icon} {label}{suffix}"),
             None => format!("{icon}{suffix}"),
         },
-    }
+    };
+    crate::output_style::terminal_text(&title).into_owned()
 }
 
 pub fn terminal_session_label_for_id(session_id: &str) -> String {

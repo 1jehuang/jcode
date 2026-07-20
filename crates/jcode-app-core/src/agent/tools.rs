@@ -1,4 +1,5 @@
 use crate::message::{ContentBlock, ToolCall};
+use crate::terminal_println as println;
 use crate::tool::ToolOutput;
 
 pub(super) const MAX_TOOL_OUTPUT_CHARS_FOR_HISTORY: usize = 512 * 1024;

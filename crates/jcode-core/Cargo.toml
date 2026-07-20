@@ -8,6 +8,8 @@ publish = false
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9.3"
 libc = "0.2"
+unicode-segmentation = "1"
+unicode-properties = { version = "0.1", features = ["emoji"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

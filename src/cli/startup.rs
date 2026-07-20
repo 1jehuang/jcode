@@ -11,6 +11,10 @@ use super::{
     dispatch, hot_exec, output, terminal,
 };
 
+fn sync_output_style_from_config() {
+    crate::output_style::set_emoji_enabled(crate::config::config().display.emoji);
+}
+
 pub async fn run() -> Result<()> {
     startup_profile::init();
 
@@ -37,6 +41,8 @@ pub async fn run() -> Result<()> {
     // Wire config-reload reactions without making config depend on auth/bus:
     // when the config cache reloads, invalidate the auth-status cache and
     // broadcast a models-updated event.
+    sync_output_style_from_config();
+    crate::config::on_config_reloaded(sync_output_style_from_config);
     crate::config::on_config_reloaded(crate::auth::AuthStatus::invalidate_cache);
     crate::config::on_config_reloaded(|| crate::bus::Bus::global().publish_models_updated());
 

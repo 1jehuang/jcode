@@ -980,8 +980,6 @@ impl Default for KeybindingsConfig {
         }
     }
 }
-
-/// How to display file diffs from edit/write tools
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -991,7 +989,6 @@ pub struct NativeScrollbarConfig {
     /// Show a native terminal scrollbar in the side panel (default: true)
     pub side_panel: bool,
 }
-
 impl Default for NativeScrollbarConfig {
     fn default() -> Self {
         Self {
@@ -1000,11 +997,9 @@ impl Default for NativeScrollbarConfig {
         }
     }
 }
-
 fn default_true() -> bool {
     true
 }
-
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1022,6 +1017,8 @@ pub struct DisplayConfig {
     pub mouse_capture: bool,
     /// Enable debug socket for external control (default: false)
     pub debug_socket: bool,
+    /// Render emoji in terminal-facing TUI and CLI output (default: true)
+    pub emoji: bool,
     /// Center all content (default: false)
     pub centered: bool,
     /// Show thinking/reasoning content by default (default: true)
@@ -1095,7 +1092,6 @@ pub struct DisplayConfig {
     #[serde(default)]
     pub overscroll_status: OverscrollStatusMode,
 }
-
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
@@ -1106,6 +1102,7 @@ impl Default for DisplayConfig {
             auto_server_reload: true,
             mouse_capture: true,
             debug_socket: false,
+            emoji: true,
             centered: false,
             show_thinking: true,
             reasoning_display: Some(ReasoningDisplayMode::Current),
@@ -1132,7 +1129,6 @@ impl Default for DisplayConfig {
         }
     }
 }
-
 impl DisplayConfig {
     pub fn apply_legacy_compat(&mut self) {
         if let Some(show) = self.show_diffs.take() {

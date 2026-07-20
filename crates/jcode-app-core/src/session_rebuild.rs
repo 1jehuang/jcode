@@ -51,7 +51,7 @@ fn run_release_tests(repo_dir: &Path) -> Result<()> {
     let status =
         run_cargo_release_step(repo_dir, &["test", "--release", "--", "--test-threads=1"])?;
     if !status.success() {
-        eprintln!("\n⚠️  Tests failed! Aborting reload to protect your session.");
+        crate::terminal_eprintln!("\n⚠️  Tests failed! Aborting reload to protect your session.");
         eprintln!("Fix the failing tests and try /rebuild again.");
         anyhow::bail!("Tests failed - staying on current version");
     }

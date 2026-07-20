@@ -10,7 +10,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::{browser, gateway, memory, session, storage, tui};
 
-use super::terminal::init_tui_runtime;
+use super::{output::terminal_title, terminal::init_tui_runtime};
 
 mod menubar;
 mod provider_setup;
@@ -1537,7 +1537,7 @@ async fn run_ambient_visible() -> Result<()> {
 
     let _ = crossterm::execute!(
         std::io::stdout(),
-        crossterm::terminal::SetTitle("🤖 jcode ambient cycle")
+        crossterm::terminal::SetTitle(terminal_title("🤖 jcode ambient cycle"))
     );
 
     let result = app.run(terminal).await;

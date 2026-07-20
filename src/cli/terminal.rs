@@ -234,16 +234,18 @@ pub fn show_crash_resume_hint() {
     };
 
     if crashed.len() == 1 {
-        eprintln!(
+        let message = format!(
             "{yellow}💥 Session {bold}{}{reset}{yellow} crashed. Resume with:{reset}  jcode --resume {}",
             session_label, id
         );
+        eprintln!("{}", crate::output_style::terminal_text(&message));
     } else {
-        eprintln!(
+        let message = format!(
             "{yellow}💥 {} sessions crashed recently. Most recent: {bold}{}{reset}",
             crashed.len(),
             session_label
         );
+        eprintln!("{}", crate::output_style::terminal_text(&message));
         eprintln!("{yellow}   Resume with:{reset}  jcode --resume {}", id);
         eprintln!("{yellow}   List all:{reset}     jcode --resume");
     }

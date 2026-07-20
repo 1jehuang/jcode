@@ -38,8 +38,8 @@ const DOWNLOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// connection eventually fails.
 const DOWNLOAD_MAX_ATTEMPTS: usize = 10;
 const DOWNLOAD_PROGRESS_UPDATE_STEP: u64 = 1_048_576;
-
 pub fn print_centered(msg: &str) {
+    let msg = crate::output_style::terminal_text(msg);
     let width = crossterm::terminal::size()
         .map(|(w, _)| w as usize)
         .unwrap_or(80);

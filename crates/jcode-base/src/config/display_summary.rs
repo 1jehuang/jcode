@@ -49,6 +49,7 @@ impl Config {
 - Auto server reload: {}
 - Mouse capture: {}
 - Debug socket: {}
+- Emoji: {}
 - Idle animation: {}
 - Prompt entry animation: {}
 - Compact notifications: {}
@@ -165,6 +166,7 @@ impl Config {
             self.display.auto_server_reload,
             self.display.mouse_capture,
             self.display.debug_socket,
+            self.display.emoji,
             self.display.idle_animation,
             self.display.prompt_entry_animation,
             self.display.compact_notifications,

@@ -3542,6 +3542,8 @@ dependencies = [
  "chrono",
  "libc",
  "rand 0.9.3",
+ "unicode-properties",
+ "unicode-segmentation",
  "windows-sys 0.59.0",
 ]
 
@@ -4068,6 +4070,7 @@ dependencies = [
  "global-hotkey",
  "jcode-build-meta",
  "jcode-config-types",
+ "jcode-core",
  "jcode-logging",
  "jcode-storage",
  "jcode-terminal-launch",

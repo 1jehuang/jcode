@@ -34,7 +34,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 #[cfg(test)]
 use unicode_width::UnicodeWidthStr;
-
 #[path = "ui_animations.rs"]
 mod animations;
 #[path = "ui_box.rs"]
@@ -67,6 +66,7 @@ mod memory_ui;
 mod messages;
 #[path = "ui_onboarding.rs"]
 mod onboarding;
+mod output_style;
 #[path = "ui_overlays.rs"]
 mod overlays;
 #[path = "ui_pinned.rs"]
@@ -83,7 +83,6 @@ pub(crate) mod tools_ui;
 mod transitions;
 #[path = "ui_viewport.rs"]
 mod viewport;
-
 use crate::tui::mermaid;
 #[cfg(test)]
 pub(crate) use box_utils::truncate_line_to_width;
@@ -134,6 +133,7 @@ pub(crate) use messages::{
     render_assistant_message, render_background_task_message, render_reasoning_message,
     render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
+pub(crate) use output_style::adapt_buffer_for_emoji_preference;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -2486,12 +2486,12 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Doing this at the buffer level covers every widget and overlay without
     // touching individual color call sites.
     jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
+    adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Cache eviction/clearing can outlive the last visible image. Carry Kitty
     // deletion commands on any completed frame so terminal-side pixel storage
     // is reclaimed even when no image widget renders again.
     crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
 }
-
 /// Rows reserved below the input for the decorative idle donut.
 ///
 /// The donut only shows on an (effectively) empty idle screen, which means it
