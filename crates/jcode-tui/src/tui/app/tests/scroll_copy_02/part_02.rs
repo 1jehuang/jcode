@@ -743,6 +743,7 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         width: 600,
         height: 400,
         label: "shot.png".to_string(),
+        uses_text_fallback: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
 
@@ -844,6 +845,7 @@ fn test_kitty_jitter_click_on_image_label_still_cycles_level() {
         width: 600,
         height: 400,
         label: "shot.png".to_string(),
+        uses_text_fallback: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let label_line = section
@@ -1182,6 +1184,7 @@ fn test_click_on_inline_image_body_cycles_level() {
         width: 320,
         height: 200,
         label: "shot.png".to_string(),
+        uses_text_fallback: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let region = *section

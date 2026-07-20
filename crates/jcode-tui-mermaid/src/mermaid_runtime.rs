@@ -361,6 +361,19 @@ pub fn image_protocol_available() -> bool {
     PICKER.get().and_then(|p| p.as_ref()).is_some() || VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
 }
 
+fn protocol_uses_text_image_fallback(
+    protocol: Option<ProtocolType>,
+    video_export_mode: bool,
+) -> bool {
+    !video_export_mode && matches!(protocol, Some(ProtocolType::Halfblocks))
+}
+
+/// Whether images are currently rendered through ratatui-image's Unicode
+/// half-block fallback instead of a native terminal image protocol.
+pub fn uses_text_image_fallback() -> bool {
+    protocol_uses_text_image_fallback(protocol_type(), VIDEO_EXPORT_MODE.load(Ordering::Relaxed))
+}
+
 /// Enable video-export mode: mermaid images produce hash-placeholder lines
 /// even without a real terminal image protocol.
 pub fn set_video_export_mode(enabled: bool) {
@@ -647,5 +660,30 @@ mod tests {
             picker_init_mode_from_probe_env(Some("1")),
             PickerInitMode::Probe
         );
+    }
+
+    #[test]
+    fn only_halfblocks_uses_the_user_facing_text_image_fallback() {
+        assert!(protocol_uses_text_image_fallback(
+            Some(ProtocolType::Halfblocks),
+            false
+        ));
+        assert!(!protocol_uses_text_image_fallback(
+            Some(ProtocolType::Kitty),
+            false
+        ));
+        assert!(!protocol_uses_text_image_fallback(
+            Some(ProtocolType::Iterm2),
+            false
+        ));
+        assert!(!protocol_uses_text_image_fallback(
+            Some(ProtocolType::Sixel),
+            false
+        ));
+        assert!(!protocol_uses_text_image_fallback(None, false));
+        assert!(!protocol_uses_text_image_fallback(
+            Some(ProtocolType::Halfblocks),
+            true
+        ));
     }
 }

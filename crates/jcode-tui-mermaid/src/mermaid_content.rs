@@ -68,6 +68,22 @@ pub const INLINE_FIT_MIN_ROWS: u16 = 3;
 /// keeps working.
 pub const INLINE_DIAGRAM_MAX_ROWS: u16 = 200;
 
+/// Explanation shown immediately next to images rendered through the Unicode
+/// half-block fallback. Keep this centralized so raster images, Mermaid, and
+/// LaTeX use the same wording.
+pub const TERMINAL_IMAGE_FALLBACK_NOTE: &str =
+    "Your terminal cannot render inline images; showing a text fallback.";
+
+pub fn text_image_fallback_note_line() -> Line<'static> {
+    let style = Style::default()
+        .fg(rgb(140, 170, 200))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    Line::from(vec![
+        Span::styled("  ⓘ ", Style::default().fg(rgb(100, 100, 100))),
+        Span::styled(TERMINAL_IMAGE_FALLBACK_NOTE, style),
+    ])
+}
+
 /// Rows assumed consumed by non-transcript chrome (status line, input box,
 /// hint line, spacing) when converting the chat column height into a
 /// readable-height budget for the inline aspect goal.
@@ -205,6 +221,22 @@ pub fn inline_fit_geometry(width: u32, height: u32, chat_width: u16, cap_rows: u
 /// draw pipeline. Video export keeps the legacy crop marker, whose draw path
 /// writes the printable region markers the SVG exporter scans for.
 pub fn result_to_lines(result: RenderResult, max_width: Option<usize>) -> Vec<Line<'static>> {
+    result_to_lines_with_capabilities(
+        result,
+        max_width,
+        VIDEO_EXPORT_MODE.load(Ordering::Relaxed),
+        PICKER.get().and_then(|p| p.as_ref()).is_some(),
+        uses_text_image_fallback(),
+    )
+}
+
+fn result_to_lines_with_capabilities(
+    result: RenderResult,
+    max_width: Option<usize>,
+    video_export_mode: bool,
+    image_renderer_available: bool,
+    uses_text_fallback: bool,
+) -> Vec<Line<'static>> {
     match result {
         RenderResult::Image {
             hash,
@@ -212,20 +244,73 @@ pub fn result_to_lines(result: RenderResult, max_width: Option<usize>) -> Vec<Li
             height,
             ..
         } => {
-            if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+            if video_export_mode {
                 let max_w = max_width.map(|w| w as u16).unwrap_or(80);
                 let estimated_height = estimate_image_height(width, height, max_w);
                 return image_widget_placeholder(hash, estimated_height);
             }
-            if PICKER.get().and_then(|p| p.as_ref()).is_none() {
+            if !image_renderer_available {
                 return image_placeholder_lines(width, height);
             }
             let chat_width = max_width.map(|w| w as u16).unwrap_or(80);
             let (rows, cols) =
                 inline_fit_geometry(width, height, chat_width, INLINE_DIAGRAM_MAX_ROWS);
-            inline_image_placeholder_lines(hash, rows, cols)
+            let mut lines = inline_image_placeholder_lines(hash, rows, cols);
+            if uses_text_fallback {
+                lines.insert(0, text_image_fallback_note_line());
+            }
+            lines
         }
         RenderResult::Error(msg) => error_to_lines(&msg),
+    }
+}
+
+#[cfg(test)]
+mod fallback_note_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_note_explains_why_the_image_is_text() {
+        let text = text_image_fallback_note_line()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("terminal cannot render inline images"));
+        assert!(text.contains("text fallback"));
+    }
+
+    fn image_result() -> RenderResult {
+        RenderResult::Image {
+            hash: 0x1234,
+            path: PathBuf::from("test.png"),
+            width: 640,
+            height: 480,
+        }
+    }
+
+    #[test]
+    fn halfblock_result_attaches_note_before_image_placeholder() {
+        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, true);
+        let note = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(note.contains(TERMINAL_IMAGE_FALLBACK_NOTE));
+        assert!(parse_inline_image_placeholder(&lines[1]).is_some());
+    }
+
+    #[test]
+    fn native_protocol_result_starts_with_image_placeholder_without_note() {
+        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, false);
+        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
+        assert!(lines.iter().all(|line| {
+            !line
+                .spans
+                .iter()
+                .any(|span| span.content.contains(TERMINAL_IMAGE_FALLBACK_NOTE))
+        }));
     }
 }
 
