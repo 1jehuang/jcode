@@ -313,9 +313,7 @@ impl App {
             manager.restore_persisted_state_with(&state, &provider_messages);
         }
 
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.context_warning_shown = false;
+        self.invalidate_kv_cache_after_compaction();
         self.session.save()?;
         Ok(())
     }
@@ -378,6 +376,24 @@ impl App {
     }
 
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
+        self.invalidate_kv_cache_after_compaction();
+        if let Err(err) = self.session.save() {
+            crate::logging::warn(&format!(
+                "Failed to persist provider session reset after compaction for session {}: {}",
+                self.session.id, err
+            ));
+        }
+        let message = if event.messages_dropped.is_some() {
+            self.set_status_notice("Emergency compaction");
+            Self::format_emergency_compaction_message(&event, self.context_limit)
+        } else {
+            self.set_status_notice("Context compacted");
+            Self::format_compaction_complete_message(&event, self.context_limit)
+        };
+        self.push_display_message(DisplayMessage::system(message));
+    }
+
+    fn invalidate_kv_cache_after_compaction(&mut self) {
         // Compaction intentionally replaces the provider-facing transcript
         // (typically hundreds of messages become summary + recent tail). The
         // previous request is therefore not a valid append-only cache baseline.
@@ -398,20 +414,6 @@ impl App {
         self.streaming.streaming_context_stale = true;
         self.streaming.streaming_usage_call_reset_pending = true;
         self.bump_context_revision();
-        if let Err(err) = self.session.save() {
-            crate::logging::warn(&format!(
-                "Failed to persist provider session reset after compaction for session {}: {}",
-                self.session.id, err
-            ));
-        }
-        let message = if event.messages_dropped.is_some() {
-            self.set_status_notice("Emergency compaction");
-            Self::format_emergency_compaction_message(&event, self.context_limit)
-        } else {
-            self.set_status_notice("Context compacted");
-            Self::format_compaction_complete_message(&event, self.context_limit)
-        };
-        self.push_display_message(DisplayMessage::system(message));
     }
 
     pub fn set_status_notice(&mut self, text: impl Into<String>) {

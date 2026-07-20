@@ -292,6 +292,7 @@ fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
 
 #[test]
 fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
+    let _invalidation_guard = crate::storage::lock_test_env();
     // A warm session whose system prompt hash silently changes between turns is
     // the exact failure mode of the skill-ordering bug: the conversation only
     // grew, yet the cached prefix is invalidated. We must surface that loudly.
@@ -349,6 +350,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
 
 #[test]
 fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
+    let _invalidation_guard = crate::storage::lock_test_env();
     // Config/skill reloads legitimately change the system prompt mid-session.
     // Those sites document the invalidation; a harness-attributed miss that
     // follows must be surfaced as an informational "refresh" with the cause,
@@ -649,6 +651,46 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
             .any(|message| message.content.contains("KV cache miss")),
         "compaction must not surface as a harness-caused cache miss"
     );
+}
+
+#[test]
+fn native_compaction_application_invalidates_kv_cache_baseline_before_continuation() {
+    let mut app = create_test_app();
+    let old_history: Vec<Message> = (0..264)
+        .map(|i| Message::user(format!("old message {i}").as_str()))
+        .collect();
+    let old_signature = App::kv_cache_request_signature(&old_history, &[], "system", "");
+    app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        session_id: app.kv_cache_session_id(),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 262_419,
+        completed_at: Instant::now(),
+        provider: app.kv_cache_provider_name(),
+        model: app.kv_cache_provider_model(),
+        upstream_provider: None,
+        signature: Some(old_signature),
+    });
+    let old_generation = app.kv_cache.cache_generation;
+
+    app.apply_openai_native_compaction("enc_native_test".to_string(), old_history.len())
+        .expect("native compaction should persist");
+
+    assert_ne!(app.kv_cache.cache_generation, old_generation);
+    assert!(app.kv_cache.kv_cache_baseline.is_none());
+
+    let compacted = vec![
+        Message::user("native summary"),
+        Message::assistant_text("recent answer"),
+        Message::user("next callback"),
+    ];
+    app.begin_kv_cache_request(&compacted, &[], "system", "");
+    let request = app
+        .kv_cache
+        .pending_kv_cache_request
+        .as_ref()
+        .expect("compacted request should be pending");
+    assert!(request.baseline.is_none());
+    assert_eq!(request.baseline_messages_prefix_matches, None);
 }
 
 #[test]

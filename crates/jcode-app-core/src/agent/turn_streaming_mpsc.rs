@@ -1087,6 +1087,23 @@ impl Agent {
 
             if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
                 self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                // Native OpenAI compaction is applied after the provider stream,
+                // so `messages_for_provider()` did not have an event to emit at
+                // the top of this iteration. Notify clients now, before any
+                // tool-driven continuation can enqueue its next KvCacheRequest.
+                // The FIFO event ordering lets the TUI invalidate its old
+                // append-only baseline before seeing the compacted signature.
+                let _ = event_tx.send(ServerEvent::Compaction {
+                    trigger: "openai_native".to_string(),
+                    pre_tokens: usage_input,
+                    post_tokens: None,
+                    tokens_saved: None,
+                    duration_ms: None,
+                    messages_dropped: None,
+                    messages_compacted: Some(compacted_count),
+                    summary_chars: None,
+                    active_messages: None,
+                });
             }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
