@@ -260,6 +260,10 @@ pub struct RemoteConnection {
 
 const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_STRAY_REMOTE_PROTOCOL_LINES: usize = 32;
+/// Hard cap for one newline-delimited server event. History events can be large
+/// because they may contain images, but an authenticated or compromised peer
+/// must not be able to grow the client process without bound.
+const MAX_REMOTE_PROTOCOL_FRAME_BYTES: usize = 256 * 1024 * 1024;
 /// Capacity above which the persistent `read_buffer` is considered oversized
 /// once its backlog drains. A single multi-megabyte protocol line (e.g. a
 /// `History` event with embedded images) would otherwise pin that capacity
@@ -269,6 +273,12 @@ const READ_BUFFER_SHRINK_THRESHOLD: usize = 256 * 1024;
 /// above typical streaming line sizes so steady-state traffic never causes
 /// grow/shrink thrash.
 const READ_BUFFER_RETAIN_CAPACITY: usize = 64 * 1024;
+
+fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool {
+    buffered
+        .checked_add(incoming)
+        .is_none_or(|total| total > MAX_REMOTE_PROTOCOL_FRAME_BYTES)
+}
 
 pub(crate) trait RemoteEventState {
     fn handle_tool_start(&mut self, id: &str, name: &str);
@@ -1064,6 +1074,15 @@ impl RemoteConnection {
                 return RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed);
             }
             let len = chunk.len();
+            if remote_protocol_frame_exceeds_limit(self.read_buffer.len(), len) {
+                self.reader.consume(len);
+                self.read_buffer.clear();
+                self.read_buffer_scan_start = 0;
+                return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(format!(
+                    "remote protocol frame exceeded {} bytes",
+                    MAX_REMOTE_PROTOCOL_FRAME_BYTES
+                )));
+            }
             self.read_buffer.extend_from_slice(chunk);
             self.reader.consume(len);
         }
@@ -1763,5 +1782,18 @@ mod tests {
             "read_buffer should shrink once the backlog drains, capacity={}",
             remote.read_buffer.capacity()
         );
+    }
+
+    #[test]
+    fn remote_protocol_frame_limit_rejects_oversize_and_overflow() {
+        assert!(!remote_protocol_frame_exceeds_limit(
+            MAX_REMOTE_PROTOCOL_FRAME_BYTES - 1,
+            1,
+        ));
+        assert!(remote_protocol_frame_exceeds_limit(
+            MAX_REMOTE_PROTOCOL_FRAME_BYTES,
+            1,
+        ));
+        assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
     }
 }

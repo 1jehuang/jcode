@@ -24,7 +24,13 @@ use helpers::{
 };
 
 const REMOTE_MODEL_CATALOG_CACHE_FILE: &str = "remote_model_catalog_cache.json";
-const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 2;
+const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 3;
+const REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+const REMOTE_MODEL_CATALOG_CACHE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const REMOTE_MODEL_CATALOG_MAX_ROUTES: usize = 10_000;
+const REMOTE_MODEL_CATALOG_MAX_MODEL_BYTES: usize = 4 * 1024;
+const REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES: usize = 512;
+const REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES: usize = 16 * 1024;
 const MODEL_PICKER_USAGE_FILE: &str = "model_picker_usage.json";
 const MODEL_PICKER_USAGE_VERSION: u8 = 1;
 const MODEL_PICKER_FAVORITES_FILE: &str = "model_picker_favorites.json";
@@ -33,6 +39,8 @@ const MODEL_PICKER_FAVORITES_VERSION: u8 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RemoteModelCatalogCache {
     version: u8,
+    #[serde(default)]
+    origin: String,
     #[serde(flatten)]
     snapshot: jcode_provider_core::ModelCatalogSnapshot,
     observed_at_unix_secs: u64,
@@ -272,6 +280,79 @@ fn remote_model_catalog_cache_path() -> Option<std::path::PathBuf> {
         .map(|dir| dir.join(REMOTE_MODEL_CATALOG_CACHE_FILE))
 }
 
+fn remote_model_catalog_cache_origin() -> String {
+    crate::server::socket_path().to_string_lossy().into_owned()
+}
+
+fn remote_catalog_text_is_safe(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    value.len() <= max_bytes
+        && (allow_empty || !value.trim().is_empty())
+        && !value.chars().any(char::is_control)
+}
+
+fn remote_catalog_api_method_is_safe(api_method: &str) -> bool {
+    use crate::provider::ModelRouteApiMethod as Method;
+    match Method::parse(api_method) {
+        Method::Other(_) | Method::Current => false,
+        Method::OpenAiCompatible {
+            profile_id: Some(profile_id),
+        } => {
+            profile_id.len() <= 128
+                && profile_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        }
+        _ => true,
+    }
+}
+
+fn remote_model_catalog_snapshot_is_safe(
+    snapshot: &jcode_provider_core::ModelCatalogSnapshot,
+) -> bool {
+    if snapshot.available_models.len() > REMOTE_MODEL_CATALOG_MAX_ROUTES
+        || snapshot.model_routes.len() > REMOTE_MODEL_CATALOG_MAX_ROUTES
+    {
+        return false;
+    }
+    if snapshot.provider_name.as_deref().is_some_and(|value| {
+        !remote_catalog_text_is_safe(value, REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES, false)
+    }) || snapshot.provider_model.as_deref().is_some_and(|value| {
+        !remote_catalog_text_is_safe(value, REMOTE_MODEL_CATALOG_MAX_MODEL_BYTES, false)
+    }) {
+        return false;
+    }
+    if snapshot.available_models.iter().any(|model| {
+        !remote_catalog_text_is_safe(model, REMOTE_MODEL_CATALOG_MAX_MODEL_BYTES, false)
+    }) {
+        return false;
+    }
+    snapshot.model_routes.iter().all(|route| {
+        remote_catalog_text_is_safe(&route.model, REMOTE_MODEL_CATALOG_MAX_MODEL_BYTES, false)
+            && remote_catalog_text_is_safe(
+                &route.provider,
+                REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES,
+                false,
+            )
+            && remote_catalog_text_is_safe(
+                &route.api_method,
+                REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES,
+                false,
+            )
+            && remote_catalog_text_is_safe(
+                &route.detail,
+                REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES,
+                true,
+            )
+            && remote_catalog_api_method_is_safe(&route.api_method)
+    })
+}
+
+fn remote_model_catalog_cache_is_fresh(cache: &RemoteModelCatalogCache, now: u64) -> bool {
+    cache.observed_at_unix_secs <= now.saturating_add(5 * 60)
+        && now.saturating_sub(cache.observed_at_unix_secs)
+            <= REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS
+}
+
 fn remote_model_catalog_observed_at_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -502,8 +583,7 @@ impl App {
                 tier.allows(model.min_tier)
                     && !existing.contains(model.id)
                     && self.remote_available_entries.iter().any(|available| {
-                        crate::subscription_catalog::canonical_model_id(available)
-                            == Some(model.id)
+                        crate::subscription_catalog::canonical_model_id(available) == Some(model.id)
                     })
             })
         {
@@ -644,12 +724,19 @@ impl App {
             return;
         }
 
+        let snapshot = self.remote_model_catalog_snapshot();
+        if !remote_model_catalog_snapshot_is_safe(&snapshot) {
+            crate::logging::warn("Refusing to persist an invalid remote model catalog");
+            return;
+        }
+
         let Some(path) = remote_model_catalog_cache_path() else {
             return;
         };
         let cache = RemoteModelCatalogCache {
             version: REMOTE_MODEL_CATALOG_CACHE_VERSION,
-            snapshot: self.remote_model_catalog_snapshot(),
+            origin: remote_model_catalog_cache_origin(),
+            snapshot,
             observed_at_unix_secs: remote_model_catalog_observed_at_unix_secs(),
         };
         if let Err(error) = crate::storage::write_json(&path, &cache) {
@@ -669,10 +756,27 @@ impl App {
         let Some(path) = remote_model_catalog_cache_path() else {
             return false;
         };
+        if std::fs::metadata(&path)
+            .ok()
+            .is_some_and(|metadata| metadata.len() > REMOTE_MODEL_CATALOG_CACHE_MAX_BYTES)
+        {
+            crate::logging::warn(&format!(
+                "Ignoring oversized remote model catalog cache {}",
+                path.display()
+            ));
+            return false;
+        }
         let Ok(cache) = crate::storage::read_json::<RemoteModelCatalogCache>(&path) else {
             return false;
         };
-        if cache.version != REMOTE_MODEL_CATALOG_CACHE_VERSION {
+        if cache.version != REMOTE_MODEL_CATALOG_CACHE_VERSION
+            || cache.origin != remote_model_catalog_cache_origin()
+            || !remote_model_catalog_cache_is_fresh(
+                &cache,
+                remote_model_catalog_observed_at_unix_secs(),
+            )
+            || !remote_model_catalog_snapshot_is_safe(&cache.snapshot)
+        {
             return false;
         }
 
@@ -3305,10 +3409,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        RemoteModelCatalogCache, filter_routes_by_provider_allowlist,
-        key_char_eq_ignore_ascii_case, model_picker_route_is_current,
-        model_picker_route_is_default, model_picker_route_is_recommended,
-        picker_is_runtime_model_picker, route_supports_reasoning_effort,
+        REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
+        REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
+        filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
+        model_picker_route_is_current, model_picker_route_is_default,
+        model_picker_route_is_recommended, picker_is_runtime_model_picker,
+        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
+        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -3672,6 +3779,7 @@ mod tests {
         assert_eq!(cache.snapshot.provider_model.as_deref(), Some("gpt-5.5"));
         assert_eq!(cache.snapshot.available_models, ["gpt-5.5"]);
         assert_eq!(cache.snapshot.model_routes.len(), 1);
+        assert!(cache.origin.is_empty());
         assert_eq!(
             cache.snapshot.model_routes[0].api_method_kind(),
             crate::provider::ModelRouteApiMethod::OpenAIOAuth
@@ -3680,6 +3788,56 @@ mod tests {
         let serialized = serde_json::to_value(&cache).expect("cache should serialize");
         assert_eq!(serialized["provider_name"], "OpenAI");
         assert!(serialized.get("snapshot").is_none());
+    }
+
+    #[test]
+    fn remote_model_catalog_cache_rejects_stale_and_future_timestamps() {
+        let snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+            Some("OpenAI".to_string()),
+            Some("gpt-5.5".to_string()),
+            vec!["gpt-5.5".to_string()],
+            vec![model_route("gpt-5.5", "OpenAI", "openai-oauth")],
+        );
+        let now = REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS + 10_000;
+        let mut cache = RemoteModelCatalogCache {
+            version: REMOTE_MODEL_CATALOG_CACHE_VERSION,
+            origin: remote_model_catalog_cache_origin(),
+            snapshot,
+            observed_at_unix_secs: now,
+        };
+
+        assert!(remote_model_catalog_cache_is_fresh(&cache, now));
+        cache.observed_at_unix_secs = now - REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS - 1;
+        assert!(!remote_model_catalog_cache_is_fresh(&cache, now));
+        cache.observed_at_unix_secs = now + 5 * 60 + 1;
+        assert!(!remote_model_catalog_cache_is_fresh(&cache, now));
+    }
+
+    #[test]
+    fn remote_model_catalog_cache_rejects_forged_or_oversized_routes() {
+        let safe_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+            Some("AWS Bedrock".to_string()),
+            Some("us.anthropic.claude-sonnet-4-6".to_string()),
+            vec!["us.anthropic.claude-sonnet-4-6".to_string()],
+            vec![model_route(
+                "us.anthropic.claude-sonnet-4-6",
+                "AWS Bedrock",
+                "bedrock",
+            )],
+        );
+        assert!(remote_model_catalog_snapshot_is_safe(&safe_snapshot));
+
+        let mut forged = safe_snapshot.clone();
+        forged.model_routes[0].api_method = "shell:steal-credentials".to_string();
+        assert!(!remote_model_catalog_snapshot_is_safe(&forged));
+
+        let mut control = safe_snapshot.clone();
+        control.model_routes[0].provider = "AWS Bedrock\nOpenAI".to_string();
+        assert!(!remote_model_catalog_snapshot_is_safe(&control));
+
+        let mut oversized = safe_snapshot;
+        oversized.model_routes[0].detail = "x".repeat(REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES + 1);
+        assert!(!remote_model_catalog_snapshot_is_safe(&oversized));
     }
 
     fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider::ModelRoute {

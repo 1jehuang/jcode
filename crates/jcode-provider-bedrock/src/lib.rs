@@ -5,7 +5,7 @@ use async_trait::async_trait;
 #[cfg(feature = "aws-sdk")]
 use aws_config::BehaviorVersion;
 #[cfg(feature = "aws-sdk")]
-use aws_credential_types::Credentials;
+use aws_credential_types::{Credentials, Token};
 #[cfg(feature = "aws-sdk")]
 use aws_sdk_bedrock::Client as BedrockControlClient;
 #[cfg(feature = "aws-sdk")]
@@ -128,21 +128,21 @@ impl BedrockProvider {
     async fn sdk_config() -> aws_types::SdkConfig {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
         let profile = Self::configured_profile();
-        if profile.is_some() {
-            // An explicitly configured AWS profile must win over an old Bedrock
-            // API key. The AWS SDK otherwise discovers AWS_BEARER_TOKEN_BEDROCK
-            // first and rejects calls when that cached token has expired, even
-            // though the profile's SigV4 credentials are still valid.
-            jcode_core::env::remove_var(API_KEY_ENV);
-        } else if let Some(token) = Self::configured_bearer_token_for_runtime() {
-            jcode_core::env::set_var(API_KEY_ENV, token);
-        }
         if let Some(region) = Self::configured_region() {
             loader = loader.region(aws_types::region::Region::new(region));
         }
         if let Some(profile) = profile {
+            // Pin the credential provider itself, not just the profile name.
+            // The default AWS chain checks process-wide AWS_ACCESS_KEY_ID first,
+            // which could otherwise override an explicit Jcode Bedrock profile.
             if let Some(credentials) = Self::credentials_from_aws_login_profile(&profile).await {
                 loader = loader.credentials_provider(credentials);
+            } else {
+                loader = loader.credentials_provider(
+                    aws_config::profile::ProfileFileCredentialsProvider::builder()
+                        .profile_name(profile.clone())
+                        .build(),
+                );
             }
             loader = loader.profile_name(profile);
         }
@@ -151,12 +151,6 @@ impl BedrockProvider {
 
     #[cfg(feature = "aws-sdk")]
     async fn credentials_from_aws_login_profile(profile: &str) -> Option<Credentials> {
-        if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
-            || std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
-        {
-            return None;
-        }
-
         let output = tokio::process::Command::new("aws")
             .args([
                 "configure",
@@ -200,14 +194,25 @@ impl BedrockProvider {
 
     #[cfg(feature = "aws-sdk")]
     async fn runtime_client() -> BedrockRuntimeClient {
-        let config = Self::sdk_config().await;
-        BedrockRuntimeClient::new(&config)
+        let sdk_config = Self::sdk_config().await;
+        let mut config = aws_sdk_bedrockruntime::config::Builder::from(&sdk_config);
+        if let Some(token) = Self::configured_bearer_token_for_runtime() {
+            // Configure bearer authentication on this client only. Mutating the
+            // process environment races with concurrent provider construction
+            // and can leak one account's credential choice into another route.
+            config = config.bearer_token(Token::new(token, None));
+        }
+        BedrockRuntimeClient::from_conf(config.build())
     }
 
     #[cfg(feature = "aws-sdk")]
     async fn control_client() -> BedrockControlClient {
-        let config = Self::sdk_config().await;
-        BedrockControlClient::new(&config)
+        let sdk_config = Self::sdk_config().await;
+        let mut config = aws_sdk_bedrock::config::Builder::from(&sdk_config);
+        if let Some(token) = Self::configured_bearer_token_for_runtime() {
+            config = config.bearer_token(Token::new(token, None));
+        }
+        BedrockControlClient::from_conf(config.build())
     }
 
     #[cfg(feature = "aws-sdk")]
