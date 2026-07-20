@@ -211,6 +211,49 @@ fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
 }
 
 #[test]
+fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
+    with_temp_jcode_home(|| {
+        let previous_enable = std::env::var_os("JCODE_BEDROCK_ENABLE");
+        crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let model = "amazon.nova-pro-v1:0";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "remote-catalog".to_string(),
+            available: true,
+            detail: "compacted route snapshot".to_string(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+
+        match previous_enable {
+            Some(value) => crate::env::set_var("JCODE_BEDROCK_ENABLE", value),
+            None => crate::env::remove_var("JCODE_BEDROCK_ENABLE"),
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == model
+                && route.provider == "AWS Bedrock"
+                && route.api_method == "bedrock"
+                && route.available
+        }));
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == model
+                && route.provider == "OpenAI"
+                && route.api_method == "remote-catalog"
+        }));
+    });
+}
+
+#[test]
 fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache() {
     with_temp_jcode_home(|| {
         crate::env::set_var("FPT_API_KEY", "test-fpt-key");

@@ -566,16 +566,23 @@ impl App {
                 .insert(route.api_method.as_str());
         }
         let auth = crate::auth::AuthStatus::check_fast();
+        let bedrock_available = auth.bedrock != crate::auth::AuthState::NotConfigured
+            || crate::provider::bedrock::BedrockProvider::has_credentials();
         let missing: Vec<String> = self
             .remote_available_entries
             .iter()
             .filter(|model| match methods_by_model.get(model.as_str()) {
                 None => true,
                 Some(methods) => {
-                    crate::provider::provider_for_model(model) == Some("claude")
+                    let missing_anthropic_method = crate::provider::provider_for_model(model)
+                        == Some("claude")
                         && !model.contains('/')
                         && ((auth.anthropic.has_api_key && !methods.contains("claude-api"))
-                            || (auth.anthropic.has_oauth && !methods.contains("claude-oauth")))
+                            || (auth.anthropic.has_oauth && !methods.contains("claude-oauth")));
+                    let missing_bedrock_method = bedrock_available
+                        && crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model)
+                        && !methods.contains("bedrock");
+                    missing_anthropic_method || missing_bedrock_method
                 }
             })
             .cloned()
