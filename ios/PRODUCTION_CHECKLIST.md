@@ -44,13 +44,26 @@ connects to any host the user did not explicitly pair with. This is why
 |---|------|----------------|--------|
 | 17 | swift test job | `.github/workflows/ios-testflight.yml` test job green | PASS |
 | 18 | Simulator compile check | compile-check job green | PASS |
-| 19 | TestFlight upload | build-and-upload job green | **BLOCKED: account holder must accept the Apple Developer Program License Agreement at developer.apple.com, then re-run the workflow** |
+| 19 | TestFlight upload | build-and-upload job green | **BLOCKED: cloud signing permission error (see below)** |
 
 ## Account-holder-only items (exact instructions)
 
+The workflow now archives unsigned and signs at export. The remaining
+failure is `exportArchive Cloud signing permission error` + `No profiles
+for 'com.jcode.mobile' were found`, which means the App Store Connect
+API key cannot create the distribution certificate/profile. Fix once:
+
 1. Sign in at <https://developer.apple.com/account> as the Account Holder
-   (Jeremy Huang) and accept the pending Program License Agreement.
-2. Re-run the `iOS TestFlight` workflow
-   (`gh workflow run ios-testflight.yml --ref master`).
-3. In App Store Connect, complete the app privacy questionnaire
-   ("Data Not Collected") and add TestFlight beta testers.
+   (Jeremy Huang). If a Program License Agreement banner is pending,
+   accept it first; nothing below works until it is accepted.
+2. In App Store Connect > Users and Access > Integrations > App Store
+   Connect API: make sure the key used by CI (`APPSTORE_API_KEY_ID`)
+   has the **Admin** role. Cloud-managed signing does not work with
+   Developer/App Manager keys.
+3. In Certificates, Identifiers & Profiles, register the App ID
+   `com.jcode.mobile` (Identifiers > + > App IDs) if it does not exist.
+4. In App Store Connect > Apps, create the app record for
+   `com.jcode.mobile` (name: jcode, platform: iOS) if it does not exist.
+5. Re-run the workflow: `gh workflow run "iOS TestFlight" --ref master`.
+6. After the first successful upload, complete the app privacy
+   questionnaire ("Data Not Collected") and add TestFlight testers.
