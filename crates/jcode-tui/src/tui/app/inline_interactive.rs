@@ -489,11 +489,12 @@ impl App {
         // because a curated model also belongs to one of those upstreams.
         let is_jcode_subscription = self.remote_provider_name.as_deref().is_some_and(|name| {
             name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-        }) || routes.iter().any(|route| {
-            route
-                .api_method
-                .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
-        });
+        }) || (!routes.is_empty()
+            && routes.iter().all(|route| {
+                route
+                    .api_method
+                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
+            }));
         if is_jcode_subscription {
             *routes = crate::provider::remote_model_routes_fallback(
                 Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
