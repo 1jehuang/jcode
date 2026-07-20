@@ -20,7 +20,7 @@ pub const LOW_ALIGNMENT_SCORE: u8 = QUALITY_GATE_THRESHOLD;
 
 /// Model-facing continuation for the private alignment check. It explains the
 /// two representation links without disclosing the score or threshold.
-pub const TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. First, revise the objective so it faithfully represents the user's intended outcome. Then revise the feedback loop so it can detect success or failure across every material requirement, constraint, integration path, edge case, and necessary follow-through. Reassess the alignment score before continuing the task.";
+pub const TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. Build a requirement inventory from the user's request, including outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Revise the objective to represent every material item. Then map each item to an explicit observation or check in the feedback loop. Generic instructions to run tests, verify, or review count only for requirements those checks actually enforce; add separate checks for non-testable requirements. Reassess the weaker link before continuing the task.";
 
 /// Model-facing continuation for the private hill-climbability check. Names the
 /// assessment category without disclosing the score or threshold.
@@ -311,9 +311,12 @@ mod tests {
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("First, improve"));
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("call the todo tool again"));
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("before continuing the task"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("user's intended outcome"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("every material requirement"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("success or failure"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("requirement inventory"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("every material item"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("explicit observation or check"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("Generic instructions to run tests"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("non-testable requirements"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("weaker link"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("full user outcome"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("complete workflow"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("necessary follow-through"));

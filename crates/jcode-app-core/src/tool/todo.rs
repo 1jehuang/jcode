@@ -424,7 +424,7 @@ impl Tool for TodoTool {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessment, 0-100, of how faithfully the objective and feedback loop together represent the user's stated request and underlying intention. Score the weaker link rather than averaging: (1) whether the objective captures the intended outcome, and (2) whether the feedback loop can detect achievement or failure across every material requirement, constraint, integration path, edge case, and necessary follow-through. This measures representation coverage, not implementation progress or completion confidence."
+                                "description": "Self-assessment, 0-100, of how faithfully the objective and feedback loop together represent the user's stated request and underlying intention. Before scoring, form a requirement inventory covering outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Score the weaker link rather than averaging: (1) whether the objective captures the intended outcome plus every material constraint and deliverable, and (2) whether the feedback loop names an explicit observation or check that can detect achievement or failure for each inventory item. A generic instruction to run tests, verify, or review does not establish coverage: tests count only for behaviors they actually enforce, while non-testable requirements such as edit scope, dependency limits, required reporting, branches or commits, and prohibited modifications need separate explicit checks. Reserve a near-perfect score for complete requirement-to-check coverage; any material omission must reduce the score substantially. This measures representation coverage, not implementation progress or completion confidence."
                             },
                             "hill_climbability": {
                                 "type": "integer",
@@ -434,11 +434,11 @@ impl Tool for TodoTool {
                             },
                             "objective": {
                                 "type": "string",
-                                "description": "Optional concise measurable outcome that faithfully represents the user's intention, including material constraints and necessary follow-through."
+                                "description": "Optional concise measurable outcome that faithfully represents the user's intention, including every material deliverable, constraint, prohibited action, and necessary follow-through. Concision must not omit requirements that determine whether the user would consider the result correct."
                             },
                             "feedback_loop": {
                                 "type": "string",
-                                "description": "Concrete process, observation, or check used to compare progress across iterations and detect whether the objective and user intention are satisfied or violated. It should cover material requirements, constraints, integration paths, edge cases, and necessary follow-through."
+                                "description": "Concrete requirement-to-check process used to compare progress across iterations and detect whether the objective and user intention are satisfied or violated. Name an explicit observation or check for every material behavior, deliverable, constraint, prohibited action, integration path, edge case, and necessary follow-through. Generic phrases such as run tests, verify, or review count only for requirements those named checks demonstrably enforce; add separate checks for non-testable prompt requirements."
                             },
                             "end_to_end_ownership": {
                                 "type": "integer",
@@ -588,10 +588,15 @@ mod tests {
             .and_then(Value::as_str)
             .expect("alignment score should describe representation coverage");
         for required_concept in [
+            "requirement inventory",
             "weaker link",
             "objective captures the intended outcome",
-            "feedback loop can detect achievement or failure",
-            "every material requirement",
+            "explicit observation or check",
+            "generic instruction to run tests",
+            "tests count only for behaviors they actually enforce",
+            "non-testable requirements",
+            "prohibited modifications",
+            "near-perfect score",
             "integration path",
             "edge case",
             "necessary follow-through",
@@ -600,6 +605,21 @@ mod tests {
             assert!(
                 alignment_description.contains(required_concept),
                 "alignment description omitted {required_concept}: {alignment_description}"
+            );
+        }
+        let feedback_description = goal_props["feedback_loop"]
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("feedback loop should describe requirement-to-check coverage");
+        for required_concept in [
+            "requirement-to-check",
+            "explicit observation or check",
+            "prohibited action",
+            "non-testable prompt requirements",
+        ] {
+            assert!(
+                feedback_description.contains(required_concept),
+                "feedback description omitted {required_concept}: {feedback_description}"
             );
         }
         assert!(
@@ -904,7 +924,9 @@ mod tests {
         assert_eq!(nudges, vec![TODO_ALIGNMENT_CONTINUATION_MESSAGE]);
         assert!(nudges[0].contains("objective"));
         assert!(nudges[0].contains("feedback loop"));
-        assert!(nudges[0].contains("every material requirement"));
+        assert!(nudges[0].contains("requirement inventory"));
+        assert!(nudges[0].contains("explicit observation or check"));
+        assert!(nudges[0].contains("non-testable requirements"));
         assert!(!nudges[0].contains("95"));
         assert!(!nudges[0].to_ascii_lowercase().contains("threshold"));
     }
