@@ -4,6 +4,27 @@ use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::sync::{LazyLock, Mutex};
+#[cfg(windows)]
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+const SECRET_HARDEN_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[cfg(windows)]
+#[derive(Default)]
+struct SecretHardenCache {
+    directories: HashMap<PathBuf, Instant>,
+    files: HashMap<PathBuf, Instant>,
+}
+
+#[cfg(windows)]
+static SECRET_HARDEN_CACHE: LazyLock<Mutex<SecretHardenCache>> =
+    LazyLock::new(|| Mutex::new(SecretHardenCache::default()));
+
 mod active_pids;
 pub use active_pids::{
     SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
@@ -168,11 +189,69 @@ pub fn harden_user_config_permissions() {
 /// This is used before reading credential files so legacy permissive modes can
 /// be tightened opportunistically.
 pub fn harden_secret_file_permissions(path: &Path) {
+    #[cfg(windows)]
+    {
+        harden_secret_file_permissions_windows(path);
+        return;
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(parent) = path.parent() {
+            let _ = jcode_core::fs::set_directory_permissions_owner_only(parent);
+        }
+        if path.exists() {
+            let _ = jcode_core::fs::set_permissions_owner_only(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn harden_secret_file_permissions_windows(path: &Path) {
+    // Windows ACL replacement is substantially more expensive than chmod and
+    // security products can amplify it into seconds. Credential readers call
+    // this helper frequently, including from TUI render getters, so repeating
+    // the same SetNamedSecurityInfoW calls can freeze an otherwise empty frame.
+    // Jcode's own secret writes always harden the new file directly. This cache
+    // only coalesces opportunistic read-time rechecks, and the short TTL still
+    // repairs permissions changed externally while the process remains alive.
     if let Some(parent) = path.parent() {
-        let _ = jcode_core::fs::set_directory_permissions_owner_only(parent);
+        harden_windows_path_cached(parent, true);
     }
     if path.exists() {
-        let _ = jcode_core::fs::set_permissions_owner_only(path);
+        harden_windows_path_cached(path, false);
+    }
+}
+
+#[cfg(windows)]
+fn harden_windows_path_cached(path: &Path, directory: bool) {
+    let Ok(mut cache) = SECRET_HARDEN_CACHE.lock() else {
+        return;
+    };
+    let entries = if directory {
+        &mut cache.directories
+    } else {
+        &mut cache.files
+    };
+    if entries
+        .get(path)
+        .is_some_and(|hardened_at| hardened_at.elapsed() < SECRET_HARDEN_CACHE_TTL)
+    {
+        return;
+    }
+
+    // Keep the cache lock through the ACL call. Credential probes can race on
+    // startup, and allowing every waiter to perform the same expensive syscall
+    // defeats the purpose of coalescing it.
+    let result = if directory {
+        jcode_core::fs::set_directory_permissions_owner_only(path)
+    } else {
+        jcode_core::fs::set_permissions_owner_only(path)
+    };
+    if result.is_ok() {
+        entries.insert(path.to_path_buf(), Instant::now());
+    } else {
+        entries.remove(path);
     }
 }
 
