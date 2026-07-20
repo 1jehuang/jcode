@@ -1,0 +1,15 @@
+{
+  "version": "0.54.1",
+  "date": "2026-07-20",
+  "title": "Portable builds and native terminal math",
+  "highlights": [
+    "LaTeX expressions render natively in Handterm-capable terminals"
+  ],
+  "improvements": [
+    "Header rendering reuses authentication state to reduce repeated provider work"
+  ],
+  "fixes": [
+    "Portable Linux downloads build with a current bundled OpenSSL while retaining compatibility with older glibc systems",
+    "FreeBSD release builds compile setup guidance correctly"
+  ]
+}
