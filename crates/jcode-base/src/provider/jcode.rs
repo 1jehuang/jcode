@@ -336,6 +336,9 @@ mod tests {
             "claude-sonnet-4-6",
             "gpt-5.5",
             "gpt-5.6-sol",
+            "qwen3-coder-next",
+            "devstral-2-123b",
+            "deepseek-v3.2",
         ];
 
         assert_eq!(
@@ -366,7 +369,7 @@ mod tests {
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
-        assert_eq!(flagship_routes.len(), 5);
+        assert_eq!(flagship_routes.len(), 8);
         assert!(
             flagship_routes
                 .iter()

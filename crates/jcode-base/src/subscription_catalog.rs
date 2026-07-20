@@ -162,6 +162,37 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         min_tier: JcodeTier::Plus,
         note: "Frontier model; routed server-side to OpenAI by the jcode router.",
     },
+    CuratedModel {
+        id: "qwen3-coder-next",
+        display_name: "Qwen3 Coder Next",
+        aliases: &["qwen3-coder-next", "qwen 3 coder next", "qwen3 coder next"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "devstral-2-123b",
+        display_name: "Devstral 2 123B",
+        aliases: &[
+            "devstral-2-123b",
+            "devstral 2 123b",
+            "mistral devstral 2 123b",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "deepseek-v3.2",
+        display_name: "DeepSeek V3.2",
+        aliases: &["deepseek-v3.2", "deepseek v3.2", "deepseek 3.2"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight reasoning and coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
 ];
 
 pub fn curated_models() -> &'static [CuratedModel] {
@@ -393,6 +424,15 @@ mod tests {
         assert_eq!(canonical_model_id("Claude Fable 5"), Some("claude-fable-5"));
         assert_eq!(canonical_model_id("sol"), Some("gpt-5.6-sol"));
         assert_eq!(canonical_model_id("GPT 5.6 Sol"), Some("gpt-5.6-sol"));
+        assert_eq!(
+            canonical_model_id("Qwen 3 Coder Next"),
+            Some("qwen3-coder-next")
+        );
+        assert_eq!(
+            canonical_model_id("Mistral Devstral 2 123B"),
+            Some("devstral-2-123b")
+        );
+        assert_eq!(canonical_model_id("DeepSeek 3.2"), Some("deepseek-v3.2"));
         assert_eq!(canonical_model_id("unknown-model"), None);
     }
 
@@ -471,6 +511,9 @@ mod tests {
             assert!(tier.allows(find_curated_model("claude-sonnet-4-6").unwrap().min_tier));
             assert!(tier.allows(find_curated_model("gpt-5.5").unwrap().min_tier));
             assert!(tier.allows(find_curated_model("gpt-5.6-sol").unwrap().min_tier));
+            assert!(tier.allows(find_curated_model("qwen3-coder-next").unwrap().min_tier));
+            assert!(tier.allows(find_curated_model("devstral-2-123b").unwrap().min_tier));
+            assert!(tier.allows(find_curated_model("deepseek-v3.2").unwrap().min_tier));
             assert_eq!(
                 tier.allows(find_curated_model("claude-fable-5").unwrap().min_tier),
                 *tier == JcodeTier::Flagship
@@ -491,6 +534,9 @@ mod tests {
         assert!(is_model_allowed_for_current_tier("claude-sonnet-4-6"));
         assert!(is_model_allowed_for_current_tier("gpt-5.5"));
         assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
+        assert!(is_model_allowed_for_current_tier("qwen3-coder-next"));
+        assert!(is_model_allowed_for_current_tier("devstral-2-123b"));
+        assert!(is_model_allowed_for_current_tier("deepseek-v3.2"));
         assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
 
         crate::env::set_var(JCODE_TIER_ENV, "mystery");
@@ -504,6 +550,9 @@ mod tests {
             assert!(is_model_allowed_for_current_tier("claude-sonnet-4-6"));
             assert!(is_model_allowed_for_current_tier("gpt-5.5"));
             assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
+            assert!(is_model_allowed_for_current_tier("qwen3-coder-next"));
+            assert!(is_model_allowed_for_current_tier("devstral-2-123b"));
+            assert!(is_model_allowed_for_current_tier("deepseek-v3.2"));
             assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
         }
 
