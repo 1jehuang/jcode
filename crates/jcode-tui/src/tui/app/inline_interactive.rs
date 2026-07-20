@@ -562,6 +562,7 @@ impl App {
         &self,
         routes: &mut Vec<crate::provider::ModelRoute>,
         require_credentials: bool,
+        require_remote_advertisement: bool,
     ) {
         if require_credentials && !crate::subscription_catalog::has_credentials() {
             return;
@@ -582,9 +583,11 @@ impl App {
             .filter(|model| {
                 tier.allows(model.min_tier)
                     && !existing.contains(model.id)
-                    && self.remote_available_entries.iter().any(|available| {
-                        crate::subscription_catalog::canonical_model_id(available) == Some(model.id)
-                    })
+                    && (!require_remote_advertisement
+                        || self.remote_available_entries.iter().any(|available| {
+                            crate::subscription_catalog::canonical_model_id(available)
+                                == Some(model.id)
+                        }))
             })
         {
             routes.push(crate::provider::ModelRoute {
@@ -613,10 +616,8 @@ impl App {
                 name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
             });
         if provider_is_jcode_subscription {
-            *routes = crate::provider::remote_model_routes_fallback(
-                Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
-                &self.remote_available_entries,
-            );
+            routes.clear();
+            self.append_jcode_subscription_routes(routes, false, false);
             return;
         }
         let poisoned_by_jcode_subscription = !routes.is_empty()
@@ -634,7 +635,7 @@ impl App {
                 self.remote_provider_name.as_deref(),
                 &self.remote_available_entries,
             );
-            self.append_jcode_subscription_routes(routes, false);
+            self.append_jcode_subscription_routes(routes, false, true);
             return;
         }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =
@@ -694,7 +695,10 @@ impl App {
         // Detailed provider hydration describes ordinary configured routes. A
         // signed-in Jcode subscriber still needs the managed route for each
         // entitled curated model alongside those Anthropic/OpenAI/etc. rows.
-        self.append_jcode_subscription_routes(routes, true);
+        // The curated client catalog is versioned with the backend and is the
+        // authority for managed subscription entitlements. Do not hide newly
+        // launched subscription models behind a stale remote names snapshot.
+        self.append_jcode_subscription_routes(routes, true, false);
     }
 
     fn hydrate_remote_model_catalog_snapshot(
