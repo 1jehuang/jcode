@@ -1,0 +1,23 @@
+{
+  "version": "0.54.3",
+  "date": "2026-07-20",
+  "title": "Subscription models, native terminal math, and portable builds",
+  "highlights": [
+    "Jcode subscription routes include curated Bedrock coding models and appear reliably in model selection and provider diagnostics",
+    "LaTeX expressions render natively in Handterm-capable terminals",
+    "The Windows hotkey listener prewarms the background server for faster first launches"
+  ],
+  "improvements": [
+    "Session facts use available space beside the conversation while remaining grouped and readable",
+    "Terminals without inline image support explain the fallback, preserve image interactions, and show Mermaid source when rendering is unavailable",
+    "Long sessions use less memory by releasing transcript copies, trimming inactive clients, and unloading the embedding model sooner"
+  ],
+  "fixes": [
+    "Portable Linux downloads use a current bundled OpenSSL while retaining compatibility with older glibc systems",
+    "FreeBSD release builds compile setup guidance correctly",
+    "Remote skill prompts route without relying on a checked panic path",
+    "The input view follows new content to the bottom consistently",
+    "Swarm recursion stays limited to deep-swarm roots, live agent counts remain bounded, and resumed sessions avoid a lock inversion",
+    "Mixed provider and subscription routes survive catalog hydration while Bedrock authentication and catalog inputs remain within their intended security scope"
+  ]
+}
