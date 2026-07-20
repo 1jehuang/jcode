@@ -250,7 +250,7 @@ fn test_subscription_command_shows_jcode_status_scaffold() {
     assert!(msg.content.contains("$500.00 usable"));
     assert!(msg.content.contains("$3000.00 usable"));
     assert!(!msg.content.contains("GPT-5.6 Sol - gpt-5.6-sol [Flagship]"));
-    assert!(msg.content.contains("Claude Fable 5 - claude-fable-5 [Flagship]"));
+    assert!(msg.content.contains("Claude Fable 5 - claude-fable-5 [Ultra]"));
 }
 
 #[test]
