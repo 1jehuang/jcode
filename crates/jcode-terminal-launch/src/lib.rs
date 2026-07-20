@@ -338,7 +338,9 @@ fn resume_terminal_candidates_with_client_env(
     // A tmux client already owns the user's terminal layout. Prefer a pane in
     // that exact client over opening another emulator window. Explicit
     // JCODE_TERMINAL and configured spawn hooks still take precedence.
-    if terminal_env_value(client_terminal_env, "TMUX").is_some() {
+    if terminal_env_value(client_terminal_env, "TMUX").is_some()
+        && terminal_env_value(client_terminal_env, "TMUX_PANE").is_some()
+    {
         push_unique_terminal(&mut candidates, "tmux");
     }
     if let Some(term) = detected_resume_terminal_with_client_env(client_terminal_env) {
@@ -886,10 +888,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn explicit_terminal_override_stays_ahead_of_tmux() {
-        let client_env = vec![(
-            "TMUX".to_string(),
-            "/tmp/tmux-1000/default,123,0".to_string(),
-        )];
+        let client_env = vec![
+            (
+                "TMUX".to_string(),
+                "/tmp/tmux-1000/default,123,0".to_string(),
+            ),
+            ("TMUX_PANE".to_string(), "%42".to_string()),
+        ];
 
         let candidates = resume_terminal_candidates_with_client_env(&client_env, Some("wezterm"));
         assert_eq!(candidates.first().map(String::as_str), Some("wezterm"));
@@ -903,6 +908,60 @@ mod tests {
 
         let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
         assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tmux_context_without_current_pane_uses_emulator_fallbacks() {
+        let client_env = vec![
+            (
+                "TMUX".to_string(),
+                "/tmp/tmux-1000/default,123,0".to_string(),
+            ),
+            ("KITTY_PID".to_string(), "1234".to_string()),
+        ];
+
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert_eq!(candidates.first().map(String::as_str), Some("kitty"));
+        assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn missing_tmux_binary_falls_back_to_detected_emulator() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_terminal = std::env::var_os("JCODE_TERMINAL");
+        unsafe {
+            std::env::remove_var("JCODE_TERMINAL");
+        }
+        let command =
+            TerminalCommand::new("/usr/local/bin/jcode", vec![]).client_terminal_env(vec![
+                (
+                    "TMUX".to_string(),
+                    "/tmp/tmux-1000/default,123,0".to_string(),
+                ),
+                ("TMUX_PANE".to_string(), "%42".to_string()),
+                ("KITTY_PID".to_string(), "1234".to_string()),
+            ]);
+        let mut attempts = Vec::new();
+
+        let result =
+            spawn_command_in_new_terminal_with(&command, Path::new("/work/dir"), |candidate| {
+                let program = candidate.get_program().to_string_lossy().into_owned();
+                attempts.push(program.clone());
+                if program == "tmux" {
+                    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+                } else {
+                    Ok(())
+                }
+            });
+
+        match previous_terminal {
+            Some(value) => unsafe { std::env::set_var("JCODE_TERMINAL", value) },
+            None => unsafe { std::env::remove_var("JCODE_TERMINAL") },
+        }
+        assert!(matches!(result, Ok(true)));
+        assert_eq!(attempts, vec!["tmux", "kitty"]);
     }
 
     #[test]
