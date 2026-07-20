@@ -113,9 +113,8 @@ impl BedrockProvider {
 
         let has_region = Self::configured_region().is_some();
         let has_credential_hint = Self::configured_bearer_token().is_some()
+            || Self::configured_profile().is_some()
             || std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
-            || std::env::var_os("AWS_PROFILE").is_some()
-            || std::env::var_os("JCODE_BEDROCK_PROFILE").is_some()
             || std::env::var_os("AWS_WEB_IDENTITY_TOKEN_FILE").is_some()
             || std::env::var_os("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_some()
             || std::env::var_os("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
@@ -128,15 +127,20 @@ impl BedrockProvider {
     #[cfg(feature = "aws-sdk")]
     async fn sdk_config() -> aws_types::SdkConfig {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
-        if let Some(token) = Self::configured_bearer_token() {
+        let profile = Self::configured_profile();
+        if profile.is_some() {
+            // An explicitly configured AWS profile must win over an old Bedrock
+            // API key. The AWS SDK otherwise discovers AWS_BEARER_TOKEN_BEDROCK
+            // first and rejects calls when that cached token has expired, even
+            // though the profile's SigV4 credentials are still valid.
+            jcode_core::env::remove_var(API_KEY_ENV);
+        } else if let Some(token) = Self::configured_bearer_token_for_runtime() {
             jcode_core::env::set_var(API_KEY_ENV, token);
         }
         if let Some(region) = Self::configured_region() {
             loader = loader.region(aws_types::region::Region::new(region));
         }
-        if let Ok(profile) =
-            std::env::var("JCODE_BEDROCK_PROFILE").or_else(|_| std::env::var("AWS_PROFILE"))
-        {
+        if let Some(profile) = profile {
             if let Some(credentials) = Self::credentials_from_aws_login_profile(&profile).await {
                 loader = loader.credentials_provider(credentials);
             }
@@ -149,7 +153,6 @@ impl BedrockProvider {
     async fn credentials_from_aws_login_profile(profile: &str) -> Option<Credentials> {
         if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
             || std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
-            || std::env::var_os("AWS_BEARER_TOKEN_BEDROCK").is_some()
         {
             return None;
         }
@@ -234,8 +237,19 @@ impl BedrockProvider {
             .or_else(|| Self::env_or_config("AWS_DEFAULT_REGION"))
     }
 
+    fn configured_profile() -> Option<String> {
+        Self::env_or_config("JCODE_BEDROCK_PROFILE").or_else(|| Self::env_or_config("AWS_PROFILE"))
+    }
+
     pub fn configured_bearer_token() -> Option<String> {
         jcode_provider_env::load_api_key_from_env_or_config(API_KEY_ENV, ENV_FILE)
+    }
+
+    fn configured_bearer_token_for_runtime() -> Option<String> {
+        Self::configured_profile()
+            .is_none()
+            .then(Self::configured_bearer_token)
+            .flatten()
     }
 
     fn env_or_config(name: &str) -> Option<String> {
@@ -1606,6 +1620,53 @@ mod tests {
             BedrockProvider::configured_region().as_deref(),
             Some("us-east-2")
         );
+        assert!(BedrockProvider::has_credentials());
+    }
+
+    #[test]
+    fn configured_profile_from_bedrock_env_overrides_stale_bearer_token() {
+        let _guard = lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _removed = [
+            "JCODE_BEDROCK_ENABLE",
+            API_KEY_ENV,
+            REGION_ENV,
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_PROFILE",
+            "JCODE_BEDROCK_PROFILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+        ]
+        .map(EnvVarGuard::remove);
+
+        jcode_provider_env::save_env_value_to_env_file(
+            API_KEY_ENV,
+            ENV_FILE,
+            Some("expired-bearer-token"),
+        )
+        .unwrap();
+        jcode_provider_env::save_env_value_to_env_file(REGION_ENV, ENV_FILE, Some("us-east-2"))
+            .unwrap();
+        jcode_provider_env::save_env_value_to_env_file(
+            "JCODE_BEDROCK_PROFILE",
+            ENV_FILE,
+            Some("jcode-operator"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            BedrockProvider::configured_profile().as_deref(),
+            Some("jcode-operator")
+        );
+        assert_eq!(
+            BedrockProvider::configured_bearer_token().as_deref(),
+            Some("expired-bearer-token")
+        );
+        assert_eq!(BedrockProvider::configured_bearer_token_for_runtime(), None);
         assert!(BedrockProvider::has_credentials());
     }
 
