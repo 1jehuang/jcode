@@ -345,7 +345,6 @@ mod tests {
             "kimi-k2.5",
             "kimi-k2-thinking",
             "nemotron-nano-3-30b",
-            "nemotron-super-3-120b",
             "gpt-oss-120b",
             "gpt-oss-20b",
             "qwen3-next-80b",
@@ -381,7 +380,7 @@ mod tests {
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
-        assert_eq!(flagship_routes.len(), 20);
+        assert_eq!(flagship_routes.len(), 19);
         assert!(
             flagship_routes
                 .iter()

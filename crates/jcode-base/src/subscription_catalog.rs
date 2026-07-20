@@ -252,19 +252,6 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         note: "Efficient open-weight reasoning model; routed server-side to Amazon Bedrock by the jcode router.",
     },
     CuratedModel {
-        id: "nemotron-super-3-120b",
-        display_name: "Nemotron Super 3 120B",
-        aliases: &[
-            "nemotron-super-3-120b",
-            "nemotron super 3 120b",
-            "nvidia nemotron super 3 120b",
-        ],
-        default_enabled: false,
-        routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Plus,
-        note: "Large open-weight reasoning model; routed server-side to Amazon Bedrock by the jcode router.",
-    },
-    CuratedModel {
         id: "gpt-oss-120b",
         display_name: "GPT-OSS 120B",
         aliases: &["gpt-oss-120b", "gpt oss 120b", "openai gpt oss 120b"],
@@ -536,7 +523,6 @@ mod tests {
         "kimi-k2.5",
         "kimi-k2-thinking",
         "nemotron-nano-3-30b",
-        "nemotron-super-3-120b",
         "gpt-oss-120b",
         "gpt-oss-20b",
         "qwen3-next-80b",
@@ -578,7 +564,6 @@ mod tests {
             ("Kimi K2.5", "kimi-k2.5"),
             ("Kimi K2 Thinking", "kimi-k2-thinking"),
             ("NVIDIA Nemotron Nano 3 30B", "nemotron-nano-3-30b"),
-            ("NVIDIA Nemotron Super 3 120B", "nemotron-super-3-120b"),
             ("OpenAI GPT OSS 120B", "gpt-oss-120b"),
             ("OpenAI GPT OSS 20B", "gpt-oss-20b"),
             ("Qwen 3 Next 80B A3B", "qwen3-next-80b"),
@@ -587,6 +572,7 @@ mod tests {
         ] {
             assert_eq!(canonical_model_id(alias), Some(expected), "alias {alias}");
         }
+        assert_eq!(canonical_model_id("NVIDIA Nemotron Super 3 120B"), None);
         assert_eq!(canonical_model_id("unknown-model"), None);
     }
 
@@ -622,11 +608,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude-fable-5"]
         );
-        assert_eq!(CURATED_MODELS.len(), 20);
+        assert_eq!(CURATED_MODELS.len(), 19);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
         assert!(find_curated_model("llama-4-maverick").is_none());
         assert!(find_curated_model("llama-4-scout").is_none());
+        assert!(find_curated_model("nemotron-super-3-120b").is_none());
     }
 
     #[test]
