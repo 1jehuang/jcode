@@ -257,7 +257,7 @@ fn result_to_lines_with_capabilities(
                 inline_fit_geometry(width, height, chat_width, INLINE_DIAGRAM_MAX_ROWS);
             let mut lines = inline_image_placeholder_lines(hash, rows, cols);
             if uses_text_fallback {
-                lines.insert(0, text_image_fallback_note_line());
+                lines.push(text_image_fallback_note_line());
             }
             lines
         }
@@ -290,15 +290,17 @@ mod fallback_note_tests {
     }
 
     #[test]
-    fn halfblock_result_attaches_note_before_image_placeholder() {
+    fn halfblock_result_attaches_note_after_image_placeholder() {
         let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, true);
-        let note = lines[0]
+        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
+        let note = lines
+            .last()
+            .expect("fallback result should end with a note")
             .spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(note.contains(TERMINAL_IMAGE_FALLBACK_NOTE));
-        assert!(parse_inline_image_placeholder(&lines[1]).is_some());
     }
 
     #[test]

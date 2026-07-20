@@ -916,11 +916,11 @@ pub(crate) fn anchored_image_lines(
         lines.push(Line::from(""));
         lines.push(image_label_line(item, width, images_visible, level));
         if images_visible {
+            let (rows, cols) = fit_geometry_anchored(item.width, item.height, width, level);
+            lines.extend(mermaid::inline_image_placeholder_lines(item.id, rows, cols));
             if item.uses_text_fallback {
                 lines.push(image_fallback_note_line(width));
             }
-            let (rows, cols) = fit_geometry_anchored(item.width, item.height, width, level);
-            lines.extend(mermaid::inline_image_placeholder_lines(item.id, rows, cols));
         }
         lines.push(Line::from(""));
     }
@@ -957,9 +957,6 @@ pub(crate) fn build_section(
         lines.push(image_label_line(item, width, images_visible, level));
 
         if images_visible {
-            if item.uses_text_fallback {
-                lines.push(image_fallback_note_line(width));
-            }
             // The bottom (unanchored) section is rebuilt every frame, not body
             // cached, so a viewport-relative default fit is fine here. Expanded
             // levels use the discrete fixed caps so they grow predictably.
@@ -983,6 +980,9 @@ pub(crate) fn build_section(
                 width: cols,
                 render: ImageRegionRender::Fit,
             });
+            if item.uses_text_fallback {
+                lines.push(image_fallback_note_line(width));
+            }
         }
         // Trailing spacer between images.
         lines.push(Line::from(""));
@@ -1233,7 +1233,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains(mermaid::TERMINAL_IMAGE_FALLBACK_NOTE));
-        assert_eq!(section.image_regions[0].abs_line_idx, 2);
+        let region = section.image_regions[0];
+        assert_eq!(region.abs_line_idx, 1);
+        assert!(
+            section.wrapped_lines[region.end_line..]
+                .iter()
+                .map(jcode_tui_render::line_plain_text)
+                .any(|line| line.contains(mermaid::TERMINAL_IMAGE_FALLBACK_NOTE)),
+            "fallback note should be attached immediately after the image body"
+        );
     }
 
     #[test]

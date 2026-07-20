@@ -516,6 +516,7 @@ mod tests {
         lines.extend(super::super::mermaid::inline_image_placeholder_lines(
             hash, 3, 20,
         ));
+        lines.push(super::super::mermaid::text_image_fallback_note_line());
 
         let targets =
             super::super::render_support::extract_copy_targets_from_rendered_lines(&lines);
@@ -529,6 +530,11 @@ mod tests {
         assert_eq!(target.start_raw_line, 0);
         assert_eq!(target.end_raw_line, 4);
         assert_eq!(target.badge_raw_line, 0);
+        assert!(
+            super::super::render_support::line_plain_text(&lines[4])
+                .contains(super::super::mermaid::TERMINAL_IMAGE_FALLBACK_NOTE),
+            "the fallback note should remain outside the math copy target"
+        );
     }
 
     #[test]
