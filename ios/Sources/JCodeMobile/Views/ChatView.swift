@@ -91,16 +91,20 @@ struct ChatView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+            // Single-line header: title + model on one baseline keeps chrome
+            // lean so the transcript gets the vertical space.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(model.session.sessionTitle ?? model.activeServer?.serverName ?? "jcode")
                     .font(Theme.mono(16, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
+                    .layoutPriority(1)
                 if let modelName = model.session.modelName {
-                    Text(modelName)
+                    Text(shortModelName(modelName))
                         .font(Theme.mono(11))
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
+                        .truncationMode(.head)
                 }
             }
             Spacer()
@@ -122,5 +126,14 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .padding(.top, edgePads.top)
+    }
+
+    /// Strips the auth-route prefix ("claude-api:claude-fable-5" -> "claude-fable-5")
+    /// so the header shows the model, not plumbing.
+    private func shortModelName(_ name: String) -> String {
+        if let idx = name.firstIndex(of: ":"), idx != name.startIndex {
+            return String(name[name.index(after: idx)...])
+        }
+        return name
     }
 }
