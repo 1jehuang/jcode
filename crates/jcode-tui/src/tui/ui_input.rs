@@ -2324,6 +2324,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn right_fact_placements(
     buffer: &ratatui::buffer::Buffer,
     lines: Vec<RightFactLine>,
@@ -2390,6 +2391,7 @@ fn right_fact_placements(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn right_fact_area_on_row(
     buffer: &ratatui::buffer::Buffer,
     line: &RightFactLine,
@@ -2979,7 +2981,6 @@ fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let line = Line::from(Span::styled(icon, Style::default().fg(color)));
         let paragraph = Paragraph::new(line).alignment(Alignment::Right);
         frame.render_widget(paragraph, indicator_area);
-        return;
     }
 }
 
