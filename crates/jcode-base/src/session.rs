@@ -531,6 +531,23 @@ impl Session {
         self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
     }
 
+    /// Drop the derived provider-facing transcript once the current request has
+    /// copied the messages it needs. The canonical [`StoredMessage`] history is
+    /// still retained, so this cache can be rebuilt on the next provider call.
+    ///
+    /// Long-running server sessions otherwise keep two fully owned transcript
+    /// copies while waiting on the network. Tool results and reasoning payloads
+    /// can make that duplicate tens of MiB per active session.
+    pub fn release_provider_messages_cache(&mut self) {
+        self.provider_messages_cache = Vec::new();
+        self.provider_message_prefix_hashes_cache = Vec::new();
+        self.provider_messages_cache_len = 0;
+        self.provider_messages_cache_mode = PersistVectorMode::Full;
+        self.memory_profile_cache.provider_cache_count = 0;
+        self.memory_profile_cache.provider_cache_json_bytes = 0;
+        self.memory_profile_cache.provider_cache_stats = ContentBlockMemoryStats::default();
+    }
+
     fn push_provider_message_cache_entry(&mut self, message: Message) {
         let message_hash = crate::message::stable_message_hash(&message);
         let prefix_hash = self

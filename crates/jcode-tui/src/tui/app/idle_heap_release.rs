@@ -1,12 +1,11 @@
-//! Idle-time retained-heap release.
+//! Retained-heap release for active and idle clients.
 //!
-//! The turn-completion trim hook rarely fires for clients that sit idle for
-//! long stretches (or that only observe another session's work), so glibc
-//! arena retention accumulates: measured ~105 MB per long-lived client, of
-//! which malloc_trim(0) recovers ~90-100 MB. This module trims once per idle
-//! period from the tick loop: when the app has been quiet past the deep-idle
-//! threshold, release retained heap, then arm again only after activity
-//! resumes.
+//! Long-lived clients accumulate glibc arena retention while rendering remote
+//! turns, and a workspace often has many client processes. The periodic growth
+//! watchdog therefore runs during active work with a conservative per-client
+//! threshold. Idle clients additionally get edge-triggered and periodic trims
+//! because heartbeats and remote snapshots can regrow retention without a turn
+//! completion event.
 
 use super::*;
 
@@ -19,6 +18,13 @@ const IDLE_TRIM_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// "active" again, so the original edge-triggered trim alone can miss later
 /// allocator growth for the rest of a long idle period.
 const RETENTION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A server is one process, while every open TUI has its own allocator. Letting
+/// each client use the shared 64 MiB default can retain hundreds of MiB in
+/// aggregate across a normal multi-session workspace. Keep the per-client
+/// growth budget smaller while still honoring an explicitly lower global
+/// threshold or the global disable switch.
+const CLIENT_RETENTION_TRIM_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Re-trim cadence while a client stays idle. Heartbeats and remote snapshots
 /// keep churning small allocations on idle clients, so retention regrows
@@ -48,17 +54,12 @@ impl App {
             && crate::tui::TuiState::time_since_activity(self)
                 .is_none_or(|since| since >= IDLE_TRIM_AFTER);
 
-        if !idle {
-            self.idle_heap_release.trimmed_this_idle_period = false;
-            self.idle_heap_release.last_retention_check = None;
-            self.idle_heap_release.last_idle_trim = None;
-            return;
-        }
-
         let now = std::time::Instant::now();
         if retention_check_due(self.idle_heap_release.last_retention_check, now) {
             self.idle_heap_release.last_retention_check = Some(now);
-            let threshold = crate::process_memory::retention_trim_threshold_bytes();
+            let threshold = client_retention_trim_threshold_bytes(
+                crate::process_memory::retention_trim_threshold_bytes(),
+            );
             if threshold != u64::MAX
                 && crate::process_memory::release_retained_heap_if_excessive(
                     "client_retention_watchdog",
@@ -66,10 +67,18 @@ impl App {
                     RETENTION_CHECK_INTERVAL,
                 )
             {
-                self.idle_heap_release.trimmed_this_idle_period = true;
-                self.idle_heap_release.last_idle_trim = Some(now);
+                if idle {
+                    self.idle_heap_release.trimmed_this_idle_period = true;
+                    self.idle_heap_release.last_idle_trim = Some(now);
+                }
                 return;
             }
+        }
+
+        if !idle {
+            self.idle_heap_release.trimmed_this_idle_period = false;
+            self.idle_heap_release.last_idle_trim = None;
+            return;
         }
 
         // Below-threshold retention still regrows steadily on idle clients
@@ -96,6 +105,14 @@ fn retention_check_due(last_check: Option<std::time::Instant>, now: std::time::I
     last_check.is_none_or(|last| now.saturating_duration_since(last) >= RETENTION_CHECK_INTERVAL)
 }
 
+fn client_retention_trim_threshold_bytes(global_threshold: u64) -> u64 {
+    if global_threshold == u64::MAX {
+        u64::MAX
+    } else {
+        global_threshold.min(CLIENT_RETENTION_TRIM_THRESHOLD_BYTES)
+    }
+}
+
 /// True when the periodic idle re-trim should fire: a trim already ran this
 /// idle period and at least [`IDLE_RETRIM_INTERVAL`] has elapsed since it.
 fn idle_retrim_due(last_trim: Option<std::time::Instant>, now: std::time::Instant) -> bool {
@@ -115,6 +132,19 @@ mod tests {
             Some(now - RETENTION_CHECK_INTERVAL),
             now
         ));
+    }
+
+    #[test]
+    fn client_retention_threshold_caps_default_but_honors_lower_and_disabled() {
+        assert_eq!(
+            client_retention_trim_threshold_bytes(64 * 1024 * 1024),
+            CLIENT_RETENTION_TRIM_THRESHOLD_BYTES
+        );
+        assert_eq!(
+            client_retention_trim_threshold_bytes(8 * 1024 * 1024),
+            8 * 1024 * 1024
+        );
+        assert_eq!(client_retention_trim_threshold_bytes(u64::MAX), u64::MAX);
     }
 
     #[test]

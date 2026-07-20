@@ -170,6 +170,41 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
 }
 
 #[test]
+fn released_provider_message_cache_rebuilds_from_canonical_history() {
+    let mut session = Session::create_with_id(
+        "session_provider_cache_release_test".to_string(),
+        None,
+        Some("Provider cache release".to_string()),
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "large derived payload".repeat(1024),
+            cache_control: None,
+        }],
+    );
+
+    let before = session.provider_messages().to_vec();
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        session.debug_memory_profile()["provider_messages_cache"]["count"],
+        1
+    );
+
+    session.release_provider_messages_cache();
+    let released = session.debug_memory_profile();
+    assert_eq!(released["provider_messages_cache"]["count"], 0);
+    assert_eq!(released["provider_messages_cache"]["json_bytes"], 0);
+
+    let rebuilt = session.provider_messages();
+    assert_eq!(rebuilt.len(), 1);
+    assert_eq!(
+        serde_json::to_value(rebuilt).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+}
+
+#[test]
 fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist() {
     let mut session = Session::create_with_id(
         "session_token_usage_totals_test".to_string(),
