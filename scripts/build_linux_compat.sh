@@ -100,6 +100,7 @@ docker run --rm \
         curl \
         git \
         libssl-dev \
+        perl \
         pkg-config
     elif command -v yum >/dev/null 2>&1; then
       yum install -y \
@@ -110,6 +111,7 @@ docker run --rm \
         git \
         make \
         openssl-devel \
+        perl-IPC-Cmd \
         pkgconfig \
         tar \
         gzip
@@ -118,6 +120,11 @@ docker run --rm \
       echo "Unsupported build image: expected apt-get or yum" >&2
       exit 1
     fi
+
+    # The OpenSSL 3 Configure script imports IPC::Cmd. Minimal manylinux2014
+    # images include the Perl interpreter but not this core module unless its
+    # split package is installed explicitly.
+    perl -MIPC::Cmd -e 1
 
     if [[ ! -x /root/.cargo/bin/cargo ]]; then
       curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
