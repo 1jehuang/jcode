@@ -2054,6 +2054,10 @@ const RIGHT_FACT_GAP: u16 = 2;
 const RIGHT_FACT_PAD: u16 = 1;
 const RIGHT_FACT_TRANSCRIPT_ROWS: u16 = 4;
 
+fn right_fact_neutral_style() -> Style {
+    Style::default().fg(rgb(140, 140, 150))
+}
+
 #[derive(Clone)]
 struct RightFactLine {
     spans: Vec<Span<'static>>,
@@ -2143,7 +2147,7 @@ pub(super) fn draw_right_fact_stack(
 /// context row is anchored nearest the input whenever space permits.
 fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
     let data = app.info_widget_data();
-    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
+    let sep = || Span::styled(" · ", right_fact_neutral_style());
     let mut lines = Vec::with_capacity(4);
 
     let mut access = Vec::new();
@@ -2155,14 +2159,14 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
     if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
         access.push(Span::styled(
             overscroll_provider_display(&provider),
-            Style::default().fg(rgb(140, 180, 255)),
+            right_fact_neutral_style(),
         ));
     }
-    if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
+    if let Some((label, _)) = overscroll_auth_label(data.auth_method) {
         if !access.is_empty() {
             access.push(sep());
         }
-        access.push(Span::styled(label.to_string(), Style::default().fg(color)));
+        access.push(Span::styled(label.to_string(), right_fact_neutral_style()));
     }
     if let Some(line) = RightFactLine::new(access) {
         lines.push(line);
@@ -2176,7 +2180,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
     if !model.is_empty() && !overscroll_is_placeholder(&model) {
         let mut spans = vec![Span::styled(
             session_facts::pretty_model(&model),
-            Style::default().fg(rgb(255, 150, 200)).bold(),
+            right_fact_neutral_style(),
         )];
         if let Some(effort) = data
             .reasoning_effort
@@ -2185,7 +2189,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
         {
             spans.push(Span::styled(
                 format!(" {effort}"),
-                Style::default().fg(rgb(140, 140, 150)),
+                right_fact_neutral_style(),
             ));
         }
         if let Some(line) = RightFactLine::new(spans) {
@@ -2198,7 +2202,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
         .and_then(|path| overscroll_dir_label(&path))
         && let Some(line) = RightFactLine::new(vec![Span::styled(
             dir,
-            Style::default().fg(rgb(140, 140, 150)),
+            right_fact_neutral_style(),
         )])
     {
         lines.push(line);
@@ -2211,7 +2215,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
                 overscroll_format_tokens(used),
                 overscroll_format_tokens(limit)
             ),
-            Style::default().fg(rgb(140, 140, 150)),
+            right_fact_neutral_style(),
         )];
         spans.extend(overscroll_context_bar(
             used,

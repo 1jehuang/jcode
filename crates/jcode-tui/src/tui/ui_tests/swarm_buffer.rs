@@ -122,6 +122,42 @@ fn right_fact_stack_uses_transcript_status_notification_and_input_rows_in_order(
 }
 
 #[test]
+fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
+    use ratatui::style::Color;
+    use unicode_width::UnicodeWidthStr;
+
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    let state = fact_test_state(String::new(), true);
+    let backend = TestBackend::new(120, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("neutral fact colors frame");
+
+    let rows = buffer_rows(&terminal);
+    let buffer = terminal.backend().buffer();
+    let neutral = Color::Rgb(140, 140, 150);
+    for needle in ["OpenAI · OAuth", "GPT-5.6-sol high", "~/jcode"] {
+        let y = row_containing(&rows, needle);
+        let byte_x = rows[y].find(needle).expect("fact text start");
+        let x = UnicodeWidthStr::width(&rows[y][..byte_x]) as u16;
+        let width = UnicodeWidthStr::width(needle) as u16;
+        assert!(
+            (x..x + width)
+                .filter(|&cell_x| buffer[(cell_x, y as u16)].symbol() != " ")
+                .all(|cell_x| buffer[(cell_x, y as u16)].fg == neutral),
+            "{needle:?} should use only neutral gray"
+        );
+    }
+
+    let context_y = row_containing(&rows, "74k/256k");
+    let filled_x = rows[context_y].find('▰').expect("filled context cell");
+    let filled_x = UnicodeWidthStr::width(&rows[context_y][..filled_x]) as u16;
+    assert_ne!(buffer[(filled_x, context_y as u16)].fg, neutral);
+}
+
+#[test]
 fn right_fact_stack_shifts_up_when_scheduled_notification_row_is_absent() {
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
