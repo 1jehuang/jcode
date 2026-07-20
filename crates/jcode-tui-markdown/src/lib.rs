@@ -79,6 +79,10 @@ pub fn set_latex_log_hook(hook: fn(&str)) {
     latex_image::set_log_hook(hook);
 }
 
+pub use latex_image::{
+    HandtermNativeLatex, encode_handterm_latex_apc, handterm_native_latex_for_hash,
+};
+
 pub(crate) fn config_snapshot() -> MarkdownConfigSnapshot {
     CONFIG_SNAPSHOT_HOOK
         .lock()
@@ -995,6 +999,9 @@ fn latex_image_lines(
     display: bool,
     max_width: Option<usize>,
 ) -> Option<Vec<Line<'static>>> {
+    if let Some(lines) = latex_image::render_handterm_native_latex(math, display, max_width) {
+        return Some(lines);
+    }
     match latex_image::render_latex_image(math, display, max_width) {
         Ok(lines) => Some(lines),
         Err(error) => {

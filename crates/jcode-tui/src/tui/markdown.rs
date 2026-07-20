@@ -1,12 +1,12 @@
 pub use jcode_tui_markdown::{
     CopyTargetKind, IncrementalMarkdownRenderer, MERMAID_PENDING_PLACEHOLDER_TEXT,
     MarkdownDebugStats, MarkdownMemoryProfile, RawCopyTarget, center_code_blocks,
-    debug_memory_profile, debug_stats, debug_stats_json, extract_copy_targets_from_rendered_lines,
-    highlight_file_lines, highlight_line, line_is_mermaid_pending_placeholder,
-    mermaid_rendering_enabled, progress_bar, progress_line, recenter_structured_blocks_for_display,
-    render_markdown, render_markdown_lazy, render_markdown_with_width, render_table_with_width,
-    reset_debug_stats, set_center_code_blocks, thread_render_count,
-    with_mermaid_rendering_override, wrap_line, wrap_lines,
+    debug_memory_profile, debug_stats, debug_stats_json, encode_handterm_latex_apc,
+    extract_copy_targets_from_rendered_lines, handterm_native_latex_for_hash, highlight_file_lines,
+    highlight_line, line_is_mermaid_pending_placeholder, mermaid_rendering_enabled, progress_bar,
+    progress_line, recenter_structured_blocks_for_display, render_markdown, render_markdown_lazy,
+    render_markdown_with_width, render_table_with_width, reset_debug_stats, set_center_code_blocks,
+    thread_render_count, with_mermaid_rendering_override, wrap_line, wrap_lines,
 };
 
 fn to_markdown_diagram_mode(

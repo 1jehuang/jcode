@@ -39,6 +39,28 @@ struct CopySourceCache {
 static COPY_SOURCES: LazyLock<Mutex<CopySourceCache>> =
     LazyLock::new(|| Mutex::new(CopySourceCache::default()));
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandtermNativeLatex {
+    pub source: String,
+    pub display: bool,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Default)]
+struct HandtermNativeLatexCache {
+    entries: HashMap<u64, HandtermNativeLatex>,
+    order: VecDeque<u64>,
+}
+
+static HANDTERM_NATIVE_LATEX: LazyLock<Mutex<HandtermNativeLatexCache>> =
+    LazyLock::new(|| Mutex::new(HandtermNativeLatexCache::default()));
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HANDTERM_NATIVE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_RENDER_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -75,6 +97,121 @@ pub(crate) fn report_error(error: &str) {
     if should_report && let Ok(hook) = LOG_HOOK.lock() {
         hook(error);
     }
+}
+
+fn handterm_terminal_name(term_program: Option<&str>) -> bool {
+    term_program.is_some_and(|value| value.eq_ignore_ascii_case("handterm"))
+}
+
+fn handterm_native_latex_available() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TEST_HANDTERM_NATIVE_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+
+    handterm_terminal_name(std::env::var("TERM_PROGRAM").ok().as_deref())
+}
+
+#[cfg(test)]
+pub(super) fn with_handterm_native_latex_override<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    TEST_HANDTERM_NATIVE_OVERRIDE.with(|override_value| {
+        let previous = override_value.replace(Some(enabled));
+        struct ResetOverride<'a> {
+            value: &'a std::cell::Cell<Option<bool>>,
+            previous: Option<bool>,
+        }
+
+        impl Drop for ResetOverride<'_> {
+            fn drop(&mut self) {
+                self.value.set(self.previous);
+            }
+        }
+
+        let _reset = ResetOverride {
+            value: override_value,
+            previous,
+        };
+        f()
+    })
+}
+
+pub fn encode_handterm_latex_apc(source: &str) -> Option<String> {
+    if source.bytes().any(|byte| matches!(byte, 0x07 | 0x1b)) {
+        return None;
+    }
+    Some(format!("\x1b_L;{source}\x1b\\"))
+}
+
+pub fn handterm_native_latex_for_hash(hash: u64) -> Option<HandtermNativeLatex> {
+    HANDTERM_NATIVE_LATEX
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&hash).cloned())
+}
+
+pub(super) fn render_handterm_native_latex(
+    source: &str,
+    display: bool,
+    max_width: Option<usize>,
+) -> Option<Vec<Line<'static>>> {
+    if !handterm_native_latex_available() || validate_source(source).is_err() {
+        return None;
+    }
+    encode_handterm_latex_apc(source)?;
+
+    // Use the same library and version as Handterm so the placeholder geometry
+    // exactly matches the native APC result. Unsupported expressions retain the
+    // existing image/Unicode fallback instead of risking a mismatched region.
+    let rendered = mdwright_latex::render_unicode_math(source).ok()?;
+    let rows = rendered.lines().len().max(1);
+    let cols = rendered.width().max(1);
+    let width_limit = max_width
+        .unwrap_or(u16::MAX as usize)
+        .min(u16::MAX as usize);
+    if rows > u16::MAX as usize || cols > width_limit {
+        return None;
+    }
+    let rows = rows as u16;
+    let cols = cols as u16;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "handterm-native-latex-v1".hash(&mut hasher);
+    source.hash(&mut hasher);
+    display.hash(&mut hasher);
+    rows.hash(&mut hasher);
+    cols.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    register_copy_source(hash, source, display);
+    if let Ok(mut cache) = HANDTERM_NATIVE_LATEX.lock() {
+        if cache.entries.contains_key(&hash) {
+            cache.order.retain(|entry| *entry != hash);
+        }
+        cache.entries.insert(
+            hash,
+            HandtermNativeLatex {
+                source: source.to_string(),
+                display,
+                rows,
+                cols,
+            },
+        );
+        cache.order.push_back(hash);
+        while cache.order.len() > COPY_SOURCE_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.entries.remove(&oldest);
+            }
+        }
+    }
+
+    let mut lines = vec![Line::from(Span::styled(
+        "  math",
+        Style::default().add_modifier(Modifier::DIM),
+    ))];
+    lines.extend(super::mermaid::inline_image_placeholder_lines(
+        hash, rows, cols,
+    ));
+    Some(lines)
 }
 
 #[derive(Debug, Clone)]
@@ -561,6 +698,82 @@ mod tests {
         assert!(validate_source(r"\\input{/etc/passwd}").is_err());
         assert!(validate_source(&"x".repeat(MAX_SOURCE_BYTES + 1)).is_err());
         assert!(validate_source(r"\\frac{x}{y}").is_ok());
+    }
+
+    #[test]
+    fn handterm_terminal_detection_is_explicit_and_case_insensitive() {
+        assert!(handterm_terminal_name(Some("handterm")));
+        assert!(handterm_terminal_name(Some("HandTerm")));
+        assert!(!handterm_terminal_name(Some("kitty")));
+        assert!(!handterm_terminal_name(None));
+    }
+
+    #[test]
+    fn handterm_apc_encoding_is_byte_exact_and_rejects_terminators() {
+        assert_eq!(
+            encode_handterm_latex_apc(r"\sqrt{x^2+y^2}").as_deref(),
+            Some("\x1b_L;\\sqrt{x^2+y^2}\x1b\\")
+        );
+        assert!(encode_handterm_latex_apc("x\x1by").is_none());
+        assert!(encode_handterm_latex_apc("x\x07y").is_none());
+    }
+
+    #[test]
+    fn handterm_native_render_registers_exact_layout_without_external_toolchain() {
+        reset_test_render_attempts();
+        let lines = with_handterm_native_latex_override(true, || {
+            render_handterm_native_latex(r"\frac{a}{b}", true, Some(80))
+                .expect("supported math should use Handterm native rendering")
+        });
+
+        assert_eq!(test_render_attempts(), 0);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "  math");
+        let (hash, rows, cols) = super::super::mermaid::parse_inline_image_placeholder(&lines[1])
+            .expect("native math should use a reserved inline placeholder");
+        assert_eq!((rows, cols), (3, 1));
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            handterm_native_latex_for_hash(hash),
+            Some(HandtermNativeLatex {
+                source: r"\frac{a}{b}".to_string(),
+                display: true,
+                rows: 3,
+                cols: 1,
+            })
+        );
+        let copy = copy_source_for_placeholder(&lines[1]).expect("copy source should be retained");
+        assert_eq!(copy_text(&copy), "$$\n\\frac{a}{b}\n$$");
+    }
+
+    #[test]
+    fn latex_image_dispatch_prefers_handterm_native_rendering() {
+        reset_test_render_attempts();
+        let lines = with_handterm_native_latex_override(true, || {
+            super::super::latex_image_lines(r"\sqrt{x}", false, Some(80))
+                .expect("native Handterm rendering should produce reserved lines")
+        });
+
+        assert_eq!(test_render_attempts(), 0);
+        let (hash, rows, cols) = super::super::mermaid::parse_inline_image_placeholder(&lines[1])
+            .expect("dispatch should return a native placeholder");
+        assert_eq!((rows, cols), (1, 2));
+        assert_eq!(
+            handterm_native_latex_for_hash(hash).map(|native| native.source),
+            Some(r"\sqrt{x}".to_string())
+        );
+    }
+
+    #[test]
+    fn non_handterm_and_unsupported_math_keep_existing_fallback_path() {
+        assert!(with_handterm_native_latex_override(false, || {
+            render_handterm_native_latex("x^2", false, Some(80)).is_none()
+        }));
+        assert!(with_handterm_native_latex_override(true, || {
+            render_handterm_native_latex(r"\color{red}{x}", false, Some(80)).is_none()
+        }));
+        assert!(with_handterm_native_latex_override(true, || {
+            render_handterm_native_latex(r"\frac{a}{b}", true, Some(0)).is_none()
+        }));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 #[cfg(target_os = "macos")]
@@ -9,6 +10,26 @@ pub(crate) const COPY_BADGE_ALT_LABEL: &str = "Alt";
 pub(crate) fn copy_badge_alt_label() -> String {
     let config = crate::config::config();
     copy_badge_alt_label_from_config(&config.display.copy_badge_alt_label)
+}
+
+/// Build one Ratatui cell symbol that starts at the bottom-right of a reserved
+/// math region, moves to its top-left, invokes Handterm's native LaTeX APC, and
+/// restores the cursor where Ratatui expects it after printing one cell.
+fn handterm_native_latex_cell_symbol(source: &str, rows: u16, cols: u16) -> Option<String> {
+    let apc = crate::tui::markdown::encode_handterm_latex_apc(source)?;
+    let mut symbol = String::with_capacity(apc.len() + 32);
+    symbol.push_str("\x1b[s");
+    if rows > 1 {
+        write!(symbol, "\x1b[{}A", rows - 1).ok()?;
+    }
+    if cols > 1 {
+        write!(symbol, "\x1b[{}D", cols - 1).ok()?;
+    }
+    symbol.push_str(&apc);
+    // Crossterm's backend records this as one printed cell. Restore the actual
+    // terminal cursor and advance once so its state matches that accounting.
+    symbol.push_str("\x1b[u\x1b[1C");
+    Some(symbol)
 }
 
 fn copy_badge_alt_label_from_config(configured: &str) -> String {
@@ -896,6 +917,34 @@ pub(super) fn draw_messages(
             let total_height = region.height;
             let image_end = region.end_line;
             let is_fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+
+            if let Some(native_latex) = crate::tui::markdown::handterm_native_latex_for_hash(hash) {
+                // Native math writes real terminal cells rather than an overlay,
+                // so draw it only when the complete reserved region is visible.
+                // The ordinary paragraph pass has already cleared every cell in
+                // the region; placing the APC in the bottom-right cell guarantees
+                // it executes after those clears in Ratatui's row-major diff.
+                if abs_idx >= scroll
+                    && image_end <= visible_end
+                    && region.height == native_latex.rows
+                    && region.width == native_latex.cols
+                    && native_latex.cols <= content_area.width
+                {
+                    let top = content_area.y + (abs_idx - scroll) as u16;
+                    let x = content_area.x + native_latex.cols.saturating_sub(1);
+                    let y = top + native_latex.rows.saturating_sub(1);
+                    if let Some(symbol) = handterm_native_latex_cell_symbol(
+                        &native_latex.source,
+                        native_latex.rows,
+                        native_latex.cols,
+                    ) && let Some(cell) = frame.buffer_mut().cell_mut((x, y))
+                    {
+                        cell.set_symbol(&symbol)
+                            .set_fg(ratatui::style::Color::Rgb(100, 160, 255));
+                    }
+                }
+                continue;
+            }
             // Pinned mode only redirects mermaid diagrams (Crop) to the side
             // pane; inline raster images (Fit) always render in the flow.
             if pinned_diagrams && !is_fit {
@@ -1292,6 +1341,19 @@ fn compute_max_scroll_with_prompt_preview(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn handterm_native_latex_cell_symbol_moves_invokes_and_restores_cursor() {
+        assert_eq!(
+            super::handterm_native_latex_cell_symbol(r"\frac{a}{b}", 3, 2).as_deref(),
+            Some("\x1b[s\x1b[2A\x1b[1D\x1b_L;\\frac{a}{b}\x1b\\\x1b[u\x1b[1C")
+        );
+        assert_eq!(
+            super::handterm_native_latex_cell_symbol("x", 1, 1).as_deref(),
+            Some("\x1b[s\x1b_L;x\x1b\\\x1b[u\x1b[1C")
+        );
+        assert!(super::handterm_native_latex_cell_symbol("x\x1by", 1, 1).is_none());
+    }
+
     #[test]
     fn tail_follow_small_appends_snap_to_bottom() {
         // Streaming-sized appends (<= min jump) snap directly; no animation.
