@@ -3269,7 +3269,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
-    input_ui::draw_input(
+    let input_cursor = input_ui::draw_input(
         frame,
         app,
         chunks[7],
@@ -3293,7 +3293,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
-    if !widget_data.is_empty() && !show_donut && !swarm_page_active {
+    if app.info_widget_overlays_enabled()
+        && !widget_data.is_empty()
+        && !show_donut
+        && !swarm_page_active
+    {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
         }
@@ -3368,6 +3372,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if visual_debug::overlay_enabled() {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }
+
+    // Session facts use actual final-frame cells for collision detection. They
+    // prefer the composer chrome and may climb into a few transcript-tail rows
+    // only when the right suffix is genuinely unused.
+    input_ui::draw_right_fact_stack(
+        frame,
+        app,
+        messages_area,
+        chunks[7],
+        chat_scrollbar_visible,
+        input_cursor,
+    );
 
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)

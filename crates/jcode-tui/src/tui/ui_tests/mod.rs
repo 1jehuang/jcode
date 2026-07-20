@@ -114,6 +114,11 @@ fn native_scrollbar_visibility_requires_overflow() {
 struct TestState {
     input: String,
     cursor_pos: usize,
+    provider_name: Option<String>,
+    provider_model: Option<String>,
+    working_dir: Option<String>,
+    info_widget_data: info_widget::InfoWidgetData,
+    suppress_info_widgets: bool,
     display_messages: Vec<DisplayMessage>,
     messages_version: u64,
     streaming_text: String,
@@ -205,10 +210,14 @@ impl crate::tui::TuiState for TestState {
         false
     }
     fn provider_name(&self) -> String {
-        "mock".to_string()
+        self.provider_name
+            .clone()
+            .unwrap_or_else(|| "mock".to_string())
     }
     fn provider_model(&self) -> String {
-        "mock-model".to_string()
+        self.provider_model
+            .clone()
+            .unwrap_or_else(|| "mock-model".to_string())
     }
     fn upstream_provider(&self) -> Option<String> {
         None
@@ -349,6 +358,9 @@ impl crate::tui::TuiState for TestState {
     fn context_limit(&self) -> Option<usize> {
         None
     }
+    fn info_widget_overlays_enabled(&self) -> bool {
+        !self.suppress_info_widgets
+    }
     fn client_update_available(&self) -> bool {
         false
     }
@@ -356,7 +368,7 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn info_widget_data(&self) -> info_widget::InfoWidgetData {
-        Default::default()
+        self.info_widget_data.clone()
     }
     fn render_streaming_markdown(&self, _width: usize) -> Vec<Line<'static>> {
         markdown::render_markdown_with_width(&self.streaming_text, Some(_width))
@@ -458,7 +470,7 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn working_dir(&self) -> Option<String> {
-        None
+        self.working_dir.clone()
     }
     fn now_millis(&self) -> u64 {
         0

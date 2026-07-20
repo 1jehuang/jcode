@@ -1,61 +1,13 @@
-//! Centralized session "facts" formatting and a small ledger that tracks which
-//! facts are already visible on screen this frame.
+//! Centralized session "facts" formatting.
 //!
-//! Several surfaces (info widgets, the overscroll status line, the idle input
-//! hint, and the status line) all want to show the same handful of facts: the
-//! model, reasoning effort, context usage, the working directory, the provider,
-//! and so on. Historically each surface formatted these independently, which
-//! led to duplication (the model shown in three places) and inconsistency (raw
-//! vs pretty model ids).
+//! Several surfaces (info widgets, the overscroll status line, and the compact
+//! right-side fact stack) all want to show the same handful of facts: the model,
+//! reasoning effort, context usage, the working directory, the provider, and so
+//! on. Historically each surface formatted these independently, which led to
+//! duplication and inconsistency (raw vs pretty model ids).
 //!
-//! This module is the single source of truth for:
-//! 1. How each fact is formatted (`pretty_model`, `dir_label`, ...).
-//! 2. Which facts are currently visible (`FactLedger`), so idle fallback
-//!    surfaces can show only what is *not* already on screen.
-
-/// A distinct piece of session information that can be surfaced in the UI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Fact {
-    Model,
-    ReasoningEffort,
-    Context,
-    Provider,
-    Auth,
-    Dir,
-    Session,
-}
-
-/// Tracks which facts have already been claimed (rendered) this frame so that
-/// lower-priority fallback surfaces can fill in only the gaps.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FactLedger {
-    shown: u32,
-}
-
-impl FactLedger {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    fn bit(fact: Fact) -> u32 {
-        1u32 << (fact as u32)
-    }
-
-    /// Record that `fact` is being rendered by some surface this frame.
-    pub(crate) fn claim(&mut self, fact: Fact) {
-        self.shown |= Self::bit(fact);
-    }
-
-    /// Whether `fact` is already visible somewhere this frame.
-    pub(crate) fn is_shown(&self, fact: Fact) -> bool {
-        self.shown & Self::bit(fact) != 0
-    }
-
-    /// Whether `fact` still needs a home (not yet shown anywhere).
-    pub(crate) fn is_missing(&self, fact: Fact) -> bool {
-        !self.is_shown(fact)
-    }
-}
+//! This module is the single source of truth for compact fact formatting
+//! (`pretty_model`, `dir_label`, and related helpers).
 
 /// Render `claude-opus-4-8` as `Opus 4.8`, `gpt-5.5` as `GPT-5.5`, etc. Single
 /// source of truth for the human-friendly model name across every compact UI
@@ -93,7 +45,7 @@ pub(crate) fn dir_label(path: &str) -> String {
 
 /// Compact home-relative directory label that elides intermediate segments,
 /// e.g. `/home/me/a/b/c` -> `…/b/c` and `~/a/b/c` -> `~/…/c`. Used where space
-/// is tight (status line, overscroll, idle input hint).
+/// is tight (status line, overscroll, compact fact stack).
 pub(crate) fn dir_label_short(path: &str) -> Option<String> {
     let trimmed = path.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -118,20 +70,6 @@ pub(crate) fn dir_label_short(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ledger_tracks_claimed_facts() {
-        let mut ledger = FactLedger::new();
-        assert!(ledger.is_missing(Fact::Model));
-        ledger.claim(Fact::Model);
-        assert!(ledger.is_shown(Fact::Model));
-        assert!(ledger.is_missing(Fact::Dir));
-        ledger.claim(Fact::Dir);
-        ledger.claim(Fact::Context);
-        assert!(ledger.is_shown(Fact::Dir));
-        assert!(ledger.is_shown(Fact::Context));
-        assert!(ledger.is_missing(Fact::Provider));
-    }
 
     #[test]
     fn pretty_model_drops_redundant_claude_prefix() {

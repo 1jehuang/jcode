@@ -692,9 +692,6 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         String::new()
     };
 
-    // Idle session facts (context bar + provider) are pinned to the right edge
-    // so they read like a status readout rather than left-flush body text.
-    let mut right_align_facts = false;
     let line = if let Some(build_progress) = crate::build::read_build_progress() {
         let spinner = super::activity_indicator(elapsed, 12.5);
         Line::from(vec![
@@ -986,9 +983,6 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
             occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
         {
             Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
-        } else if let Some(facts) = idle_status_facts(app) {
-            right_align_facts = true;
-            Line::from(facts)
         } else {
             Line::from("")
         }
@@ -997,9 +991,6 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
             occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
         {
             Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
-        } else if let Some(facts) = idle_status_facts(app) {
-            right_align_facts = true;
-            Line::from(facts)
         } else {
             Line::from("")
         }
@@ -1011,36 +1002,6 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         frame.render_widget(Paragraph::new(line.alignment(Alignment::Center)), area);
         return;
     }
-    if right_align_facts {
-        frame.render_widget(Paragraph::new(line.alignment(Alignment::Right)), area);
-        return;
-    }
-
-    // The left side is busy (spinner, tool activity, tip, warning). The right
-    // side of the status line is still usable real estate: pin the missing
-    // session facts there when they fit alongside the left content, so facts
-    // that have no other home stay visible even while a turn is running.
-    if let Some(facts) = idle_status_facts(app) {
-        use unicode_width::UnicodeWidthStr;
-        let left_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
-        let facts_width: usize = facts.iter().map(|s| s.content.width()).sum();
-        let gap = 3usize; // breathing room between left content and facts
-        if facts_width > 0 && left_width + gap + facts_width <= area.width as usize {
-            let facts_w = facts_width as u16;
-            let facts_area = Rect {
-                x: area.x + area.width - facts_w,
-                width: facts_w,
-                ..area
-            };
-            frame.render_widget(Paragraph::new(line), area);
-            frame.render_widget(
-                Paragraph::new(Line::from(facts).alignment(Alignment::Right)),
-                facts_area,
-            );
-            return;
-        }
-    }
-
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -1083,20 +1044,77 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
-    fn idle_input_hint_combines_dir_and_model() {
-        assert_eq!(
-            format_idle_input_hint(Some("opus-4.5".to_string()), Some("jcode".to_string())),
-            Some("opus-4.5 · jcode".to_string())
+    fn right_fact_stack_shifts_up_as_a_unit_when_bottom_row_is_occupied() {
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        for x in 12..40 {
+            buffer[(x, 4)].set_symbol("x");
+        }
+        let lines = ["oauth", "model", "dir", "context"]
+            .into_iter()
+            .map(|text| RightFactLine::new(vec![Span::raw(text)]).expect("fact line"))
+            .collect();
+
+        let placements = right_fact_placements(
+            &buffer,
+            lines,
+            0,
+            5,
+            0,
+            40,
+            Rect::new(0, 0, 40, 3),
+            false,
+            None,
         );
-        assert_eq!(
-            format_idle_input_hint(Some("opus-4.5".to_string()), None),
-            Some("opus-4.5".to_string())
+        let rows = placements
+            .iter()
+            .map(|placement| placement.area.y)
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![3, 2, 1, 0]);
+        assert!(placements.iter().all(|placement| placement.area.y != 4));
+    }
+
+    #[test]
+    fn right_fact_stack_treats_styled_blank_cells_as_occupied() {
+        let area = Rect::new(0, 0, 32, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        for x in 12..32 {
+            buffer[(x, 1)].set_bg(Color::Blue);
+        }
+        let line = RightFactLine::new(vec![Span::raw("context")]).expect("fact line");
+        let placements = right_fact_placements(
+            &buffer,
+            vec![line],
+            0,
+            2,
+            0,
+            32,
+            Rect::new(0, 0, 32, 1),
+            false,
+            None,
         );
-        assert_eq!(
-            format_idle_input_hint(None, Some("jcode".to_string())),
-            Some("jcode".to_string())
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].area.y, 0);
+    }
+
+    #[test]
+    fn right_fact_stack_never_draws_over_the_input_cursor() {
+        let area = Rect::new(0, 0, 32, 2);
+        let buffer = ratatui::buffer::Buffer::empty(area);
+        let line = RightFactLine::new(vec![Span::raw("context")]).expect("fact line");
+        let placements = right_fact_placements(
+            &buffer,
+            vec![line],
+            0,
+            2,
+            0,
+            32,
+            Rect::new(0, 0, 32, 1),
+            false,
+            Some(Position::new(28, 1)),
         );
-        assert_eq!(format_idle_input_hint(None, None), None);
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].area.y, 0);
     }
 
     #[test]
@@ -2031,13 +2049,268 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
     spans
 }
 
+const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
+const RIGHT_FACT_GAP: u16 = 2;
+const RIGHT_FACT_PAD: u16 = 1;
+const RIGHT_FACT_TRANSCRIPT_ROWS: u16 = 4;
+
+#[derive(Clone)]
+struct RightFactLine {
+    spans: Vec<Span<'static>>,
+    width: u16,
+}
+
+impl RightFactLine {
+    fn new(spans: Vec<Span<'static>>) -> Option<Self> {
+        use unicode_width::UnicodeWidthStr;
+        let width: usize = spans.iter().map(|span| span.content.width()).sum();
+        let width = u16::try_from(width).ok()?;
+        (width > 0).then_some(Self { spans, width })
+    }
+}
+
+#[derive(Clone)]
+struct RightFactPlacement {
+    line: RightFactLine,
+    area: Rect,
+}
+
+/// Draw session facts as a bottom-anchored stack in otherwise unused cells on
+/// the right side of the composer chrome. When chrome rows are occupied, the
+/// stack may climb into at most the last few transcript rows, but only where
+/// the final rendered buffer has a genuinely blank suffix. It never reflows or
+/// overwrites transcript, status, notification, inline UI, or input content.
+pub(super) fn draw_right_fact_stack(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    messages_area: Rect,
+    input_area: Rect,
+    transcript_scrollbar_visible: bool,
+    input_cursor: Option<Position>,
+) {
+    // The legacy overscroll row owns these same facts while it is visible.
+    // Standing down here avoids duplicates and keeps its elastic reveal from
+    // changing transcript-tail overlays mid-gesture. Users with overscroll off
+    // get the compact stack continuously.
+    if app.chat_overscroll_active() || input_area.width == 0 || input_area.height == 0 {
+        return;
+    }
+
+    let lines = right_fact_lines(app);
+    if lines.is_empty() {
+        return;
+    }
+
+    // Never composite into a live transcript while a turn is processing. Its
+    // tail changes every frame, so even collision-safe facts could appear to
+    // jump as streaming rows arrive. Chrome rows remain available.
+    let transcript_rows = if app.auto_scroll_paused() || app.is_processing() {
+        0
+    } else {
+        RIGHT_FACT_TRANSCRIPT_ROWS.min(messages_area.height)
+    };
+    let top = messages_area.bottom().saturating_sub(transcript_rows);
+    let bottom = input_area.bottom();
+    if top >= bottom {
+        return;
+    }
+
+    let placements = {
+        let buffer = frame.buffer_mut();
+        right_fact_placements(
+            buffer,
+            lines,
+            top,
+            bottom,
+            input_area.x,
+            input_area.right(),
+            messages_area,
+            transcript_scrollbar_visible,
+            input_cursor,
+        )
+    };
+
+    for placement in placements {
+        frame.render_widget(
+            Paragraph::new(Line::from(placement.line.spans)),
+            placement.area,
+        );
+    }
+}
+
+/// Build fact rows in their visual top-to-bottom order: provider/auth, model,
+/// directory, then context usage. Placement walks this list in reverse so the
+/// context row is anchored nearest the input whenever space permits.
+fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
+    let data = app.info_widget_data();
+    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
+    let mut lines = Vec::with_capacity(4);
+
+    let mut access = Vec::new();
+    let provider = data
+        .provider_name
+        .clone()
+        .filter(|provider| !provider.trim().is_empty())
+        .unwrap_or_else(|| app.provider_name());
+    if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
+        access.push(Span::styled(
+            overscroll_provider_display(&provider),
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+    if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
+        if !access.is_empty() {
+            access.push(sep());
+        }
+        access.push(Span::styled(label.to_string(), Style::default().fg(color)));
+    }
+    if let Some(line) = RightFactLine::new(access) {
+        lines.push(line);
+    }
+
+    let model = data
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| app.provider_model());
+    if !model.is_empty() && !overscroll_is_placeholder(&model) {
+        let mut spans = vec![Span::styled(
+            session_facts::pretty_model(&model),
+            Style::default().fg(rgb(255, 150, 200)).bold(),
+        )];
+        if let Some(effort) = data
+            .reasoning_effort
+            .as_deref()
+            .and_then(overscroll_short_reasoning)
+        {
+            spans.push(Span::styled(
+                format!(" {effort}"),
+                Style::default().fg(rgb(140, 140, 150)),
+            ));
+        }
+        if let Some(line) = RightFactLine::new(spans) {
+            lines.push(line);
+        }
+    }
+
+    if let Some(dir) = app
+        .working_dir()
+        .and_then(|path| overscroll_dir_label(&path))
+        && let Some(line) = RightFactLine::new(vec![Span::styled(
+            dir,
+            Style::default().fg(rgb(140, 140, 150)),
+        )])
+    {
+        lines.push(line);
+    }
+
+    if let Some((used, limit)) = overscroll_context_usage(&data) {
+        let mut spans = vec![Span::styled(
+            format!(
+                "{}/{} ",
+                overscroll_format_tokens(used),
+                overscroll_format_tokens(limit)
+            ),
+            Style::default().fg(rgb(140, 140, 150)),
+        )];
+        spans.extend(overscroll_context_bar(
+            used,
+            limit,
+            RIGHT_FACT_CONTEXT_CELLS,
+        ));
+        if let Some(line) = RightFactLine::new(spans) {
+            lines.push(line);
+        }
+    }
+
+    lines
+}
+
+fn right_fact_placements(
+    buffer: &ratatui::buffer::Buffer,
+    lines: Vec<RightFactLine>,
+    top: u16,
+    bottom: u16,
+    left: u16,
+    right: u16,
+    messages_area: Rect,
+    transcript_scrollbar_visible: bool,
+    protected_position: Option<Position>,
+) -> Vec<RightFactPlacement> {
+    if top >= bottom || left >= right {
+        return Vec::new();
+    }
+
+    let mut placements = Vec::with_capacity(lines.len());
+    let mut next_row = bottom.checked_sub(1);
+
+    for line in lines.into_iter().rev() {
+        let Some(mut row) = next_row else {
+            break;
+        };
+        let mut placed = None;
+
+        loop {
+            if row < top {
+                break;
+            }
+            let row_right = if transcript_scrollbar_visible
+                && row >= messages_area.y
+                && row < messages_area.bottom()
+            {
+                right.saturating_sub(1)
+            } else {
+                right
+            };
+
+            let required = line
+                .width
+                .saturating_add(RIGHT_FACT_GAP)
+                .saturating_add(RIGHT_FACT_PAD);
+            if row_right.saturating_sub(left) >= required {
+                let fact_right = row_right.saturating_sub(RIGHT_FACT_PAD);
+                let fact_left = fact_right.saturating_sub(line.width);
+                let probe_left = fact_left.saturating_sub(RIGHT_FACT_GAP);
+                if probe_left >= left
+                    && (probe_left..row_right).all(|x| {
+                        protected_position != Some(Position::new(x, row))
+                            && right_fact_cell_is_blank(&buffer[(x, row)])
+                    })
+                {
+                    placed = Some(Rect::new(fact_left, row, line.width, 1));
+                    break;
+                }
+            }
+
+            let Some(previous) = row.checked_sub(1) else {
+                break;
+            };
+            row = previous;
+        }
+
+        if let Some(area) = placed {
+            next_row = area.y.checked_sub(1);
+            placements.push(RightFactPlacement { line, area });
+        }
+    }
+
+    placements
+}
+
+fn right_fact_cell_is_blank(cell: &ratatui::buffer::Cell) -> bool {
+    cell.symbol().trim().is_empty()
+        && cell.bg == Color::Reset
+        && cell.modifier.is_empty()
+        && !cell.skip
+}
+
 pub(super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,
     area: Rect,
     next_prompt: usize,
     debug_capture: &mut Option<FrameCaptureBuilder>,
-) {
+) -> Option<Position> {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
@@ -2054,7 +2327,7 @@ pub(super) fn draw_input(
     let line_width = (area.width as usize).saturating_sub(prompt_len + reserved_width);
 
     if line_width == 0 {
-        return;
+        return None;
     }
 
     let (all_lines, cursor_line, cursor_col) = wrap_input_text(
@@ -2241,8 +2514,10 @@ pub(super) fn draw_input(
         area.x + prompt_len as u16 + cursor_col as u16
     };
 
-    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    let cursor = Position::new(cursor_x, cursor_y);
+    frame.set_cursor_position(cursor);
     draw_send_mode_indicator(frame, app, area);
+    Some(cursor)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2551,141 +2826,8 @@ fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {
             ("󰖟", rgb(140, 180, 255))
         }
     } else {
-        // Idle: no glyph. The faint dir · model hint is drawn instead.
         ("", asap_color())
     }
-}
-
-/// Faint right-aligned hint shown in the input line while it is empty and idle:
-/// the model name and working directory, but only the facts that are not
-/// already visible in the info-widget HUD (so we never duplicate them).
-fn idle_input_hint(app: &dyn TuiState) -> Option<String> {
-    // Only show when nothing meaningful is happening in the composer.
-    if !app.input().is_empty() {
-        return None;
-    }
-    let mode = composer_mode(app.input(), app.is_remote_mode());
-    if mode.is_shell()
-        || app.next_prompt_new_session_armed()
-        || app.queue_mode()
-        || app.connection_type().is_some()
-    {
-        return None;
-    }
-
-    // Consult the per-frame ledger: skip facts the HUD already shows.
-    let data = app.info_widget_data();
-    let ledger = crate::tui::info_widget::widget_visible_facts(&data);
-
-    let dir = if ledger.is_missing(session_facts::Fact::Dir) {
-        app.working_dir()
-            .as_deref()
-            .and_then(session_facts::dir_label_short)
-    } else {
-        None
-    };
-
-    let model = if ledger.is_missing(session_facts::Fact::Model) {
-        let m = app.provider_model();
-        let m = m.trim();
-        if m.is_empty() {
-            None
-        } else {
-            let mut label = session_facts::pretty_model(m);
-            // Reasoning effort (thinking level) rides along with the model
-            // name, e.g. "Fable 5 high", when it is not shown elsewhere.
-            if ledger.is_missing(session_facts::Fact::ReasoningEffort)
-                && let Some(effort) = data
-                    .reasoning_effort
-                    .as_deref()
-                    .and_then(overscroll_short_reasoning)
-            {
-                label.push(' ');
-                label.push_str(effort);
-            }
-            Some(label)
-        }
-    } else {
-        None
-    };
-
-    format_idle_input_hint(model, dir)
-}
-
-/// Compose the faint idle hint text: pretty model name first, then the
-/// directory path, joined by a dot.
-fn format_idle_input_hint(model: Option<String>, dir: Option<String>) -> Option<String> {
-    match (model, dir) {
-        (Some(m), Some(d)) => Some(format!("{m} · {d}")),
-        (Some(m), None) => Some(m),
-        (None, Some(d)) => Some(d),
-        (None, None) => None,
-    }
-}
-
-/// Idle status-line facts: surface the session facts that are *not* already
-/// shown by the info-widget HUD nor by the idle input hint (which owns model
-/// and dir). The status line therefore fills in context usage and provider.
-///
-/// Returns styled spans (right-aligned by the caller) including a short glyph
-/// context bar that mirrors the overscroll bar but at a much shorter length.
-/// Returns `None` when everything important is already visible elsewhere, so
-/// the caller can fall back to the occasional tip / blank line.
-fn idle_status_facts(app: &dyn TuiState) -> Option<Vec<Span<'static>>> {
-    use session_facts::Fact;
-    let data = app.info_widget_data();
-    let ledger = crate::tui::info_widget::widget_visible_facts(&data);
-    // The idle input hint owns model + dir, so treat them as already shown.
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
-
-    if ledger.is_missing(Fact::Provider) {
-        let provider = data
-            .provider_name
-            .clone()
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| app.provider_name());
-        if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
-            spans.push(Span::styled(
-                overscroll_provider_display(&provider),
-                Style::default().fg(dim_color()),
-            ));
-        }
-    }
-
-    // Access method (OAuth vs API key), when not already visible in the HUD.
-    if ledger.is_missing(Fact::Auth)
-        && let Some((label, _color)) = overscroll_auth_label(data.auth_method)
-    {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(
-            label.to_string(),
-            Style::default().fg(dim_color()),
-        ));
-    }
-
-    if ledger.is_missing(Fact::Context)
-        && let Some((used, limit)) = overscroll_context_usage(&data)
-    {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(
-            format!(
-                "{}/{} ",
-                overscroll_format_tokens(used),
-                overscroll_format_tokens(limit)
-            ),
-            Style::default().fg(dim_color()),
-        ));
-        // Short glyph bar: same style as the overscroll context bar but a much
-        // shorter total length so it reads as a compact right-aligned hint.
-        spans.extend(overscroll_context_bar(used, limit, 5));
-    }
-
-    if spans.is_empty() { None } else { Some(spans) }
 }
 
 fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
@@ -2705,27 +2847,6 @@ fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let paragraph = Paragraph::new(line).alignment(Alignment::Right);
         frame.render_widget(paragraph, indicator_area);
         return;
-    }
-
-    if let Some(hint) = idle_input_hint(app) {
-        // Leave one character of breathing room at the far right edge.
-        let right_pad = 1u16;
-        let avail = indicator_area.width.saturating_sub(right_pad);
-        if avail == 0 {
-            return;
-        }
-        let hint_area = Rect {
-            width: avail,
-            ..indicator_area
-        };
-        // Truncate to the available width so we never overrun the line.
-        let hint = crate::util::truncate_str(&hint, avail as usize).to_string();
-        let line = Line::from(Span::styled(
-            hint,
-            Style::default().fg(dim_color()).add_modifier(Modifier::DIM),
-        ));
-        let paragraph = Paragraph::new(line).alignment(Alignment::Right);
-        frame.render_widget(paragraph, hint_area);
     }
 }
 
