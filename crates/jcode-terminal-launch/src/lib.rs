@@ -182,6 +182,66 @@ fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
     }
 }
 
+#[cfg(unix)]
+fn terminal_env_value(client_terminal_env: &[(String, String)], key: &str) -> Option<String> {
+    if client_terminal_env.is_empty() {
+        return std::env::var(key).ok().filter(|value| !value.is_empty());
+    }
+
+    client_terminal_env
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(unix)]
+fn detected_resume_terminal_with_client_env(
+    client_terminal_env: &[(String, String)],
+) -> Option<String> {
+    let is_set = |key| terminal_env_value(client_terminal_env, key).is_some();
+    if is_set("HANDTERM_SESSION") || is_set("HANDTERM_PID") {
+        return Some("handterm".to_string());
+    }
+    if terminal_env_value(client_terminal_env, "TERM_PROGRAM")
+        .is_some_and(|value| value.eq_ignore_ascii_case("handterm"))
+    {
+        return Some("handterm".to_string());
+    }
+    if is_set("KITTY_PID") {
+        return Some("kitty".to_string());
+    }
+    if is_set("WEZTERM_EXECUTABLE") || is_set("WEZTERM_PANE") {
+        return Some("wezterm".to_string());
+    }
+    if is_set("ALACRITTY_WINDOW_ID") {
+        return Some("alacritty".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if is_set("GHOSTTY_RESOURCES_DIR") || is_set("GHOSTTY_BIN_DIR") {
+            return Some("ghostty".to_string());
+        }
+        let term_program = terminal_env_value(client_terminal_env, "TERM_PROGRAM")
+            .map(|value| value.to_ascii_lowercase());
+        return match term_program.as_deref() {
+            Some("ghostty") => Some("ghostty".to_string()),
+            Some("kitty") => Some("kitty".to_string()),
+            Some("wezterm") => Some("wezterm".to_string()),
+            Some("alacritty") => Some("alacritty".to_string()),
+            Some("iterm.app") | Some("iterm2") => Some("iterm2".to_string()),
+            Some("apple_terminal") | Some("terminal") => Some("terminal".to_string()),
+            _ => None,
+        };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_app_installed(app_name: &str) -> bool {
     let system_app = Path::new("/Applications").join(app_name);
@@ -248,51 +308,7 @@ const MACOS_TERMINAL_PREFERENCE: &[&str] = &[
 
 #[cfg(unix)]
 pub fn detected_resume_terminal() -> Option<String> {
-    if std::env::var("HANDTERM_SESSION").is_ok() || std::env::var("HANDTERM_PID").is_ok() {
-        return Some("handterm".to_string());
-    }
-    if std::env::var("TERM_PROGRAM")
-        .ok()
-        .map(|value| value.eq_ignore_ascii_case("handterm"))
-        .unwrap_or(false)
-    {
-        return Some("handterm".to_string());
-    }
-    if std::env::var("KITTY_PID").is_ok() {
-        return Some("kitty".to_string());
-    }
-    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
-        return Some("wezterm".to_string());
-    }
-    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
-        return Some("alacritty".to_string());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
-            || std::env::var("GHOSTTY_BIN_DIR").is_ok()
-        {
-            return Some("ghostty".to_string());
-        }
-        let term_program = std::env::var("TERM_PROGRAM")
-            .ok()
-            .map(|value| value.to_ascii_lowercase());
-        return match term_program.as_deref() {
-            Some("ghostty") => Some("ghostty".to_string()),
-            Some("kitty") => Some("kitty".to_string()),
-            Some("wezterm") => Some("wezterm".to_string()),
-            Some("alacritty") => Some("alacritty".to_string()),
-            Some("iterm.app") | Some("iterm2") => Some("iterm2".to_string()),
-            Some("apple_terminal") | Some("terminal") => Some("terminal".to_string()),
-            _ => None,
-        };
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+    detected_resume_terminal_with_client_env(&[])
 }
 
 #[cfg(not(unix))]
@@ -310,12 +326,22 @@ pub fn detected_resume_terminal() -> Option<String> {
 }
 
 #[cfg(unix)]
-pub fn resume_terminal_candidates() -> Vec<String> {
+fn resume_terminal_candidates_with_client_env(
+    client_terminal_env: &[(String, String)],
+    configured_terminal: Option<&str>,
+) -> Vec<String> {
     let mut candidates = Vec::new();
-    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+    if let Some(term) = configured_terminal {
         push_unique_terminal(&mut candidates, term);
     }
-    if let Some(term) = detected_resume_terminal() {
+
+    // A tmux client already owns the user's terminal layout. Prefer a pane in
+    // that exact client over opening another emulator window. Explicit
+    // JCODE_TERMINAL and configured spawn hooks still take precedence.
+    if terminal_env_value(client_terminal_env, "TMUX").is_some() {
+        push_unique_terminal(&mut candidates, "tmux");
+    }
+    if let Some(term) = detected_resume_terminal_with_client_env(client_terminal_env) {
         push_unique_terminal(&mut candidates, term);
     }
 
@@ -347,6 +373,12 @@ pub fn resume_terminal_candidates() -> Vec<String> {
     candidates
 }
 
+#[cfg(unix)]
+pub fn resume_terminal_candidates() -> Vec<String> {
+    let configured_terminal = std::env::var("JCODE_TERMINAL").ok();
+    resume_terminal_candidates_with_client_env(&[], configured_terminal.as_deref())
+}
+
 #[cfg(not(unix))]
 pub fn resume_terminal_candidates() -> Vec<String> {
     let mut candidates = Vec::new();
@@ -369,7 +401,18 @@ pub fn spawn_command_in_new_terminal_with(
 ) -> Result<bool> {
     let mut last_spawn_error: Option<std::io::Error> = None;
 
-    for term in resume_terminal_candidates() {
+    #[cfg(unix)]
+    let candidates = {
+        let configured_terminal = std::env::var("JCODE_TERMINAL").ok();
+        resume_terminal_candidates_with_client_env(
+            &command.client_terminal_env,
+            configured_terminal.as_deref(),
+        )
+    };
+    #[cfg(not(unix))]
+    let candidates = resume_terminal_candidates();
+
+    for term in candidates {
         let Some(mut cmd) = build_spawn_command(&term, command, cwd) else {
             continue;
         };
@@ -569,6 +612,17 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
     }
 
     match term {
+        #[cfg(unix)]
+        "tmux" => {
+            cmd.args(["split-window", "-h"]);
+            if let Some(pane) = terminal_env_value(&command.client_terminal_env, "TMUX_PANE") {
+                cmd.args(["-t", &pane]);
+            }
+            cmd.arg("-c")
+                .arg(cwd)
+                .arg(&command.program)
+                .args(&command.args);
+        }
         #[cfg(unix)]
         "handterm" => {
             let shell = shell_command(&command_parts(command));
@@ -810,6 +864,84 @@ mod tests {
         unsafe {
             std::env::remove_var("GHOSTTY_RESOURCES_DIR");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tmux_client_context_is_preferred_over_terminal_emulator() {
+        let client_env = vec![
+            (
+                "TMUX".to_string(),
+                "/tmp/tmux-1000/default,123,0".to_string(),
+            ),
+            ("TMUX_PANE".to_string(), "%42".to_string()),
+            ("KITTY_PID".to_string(), "1234".to_string()),
+        ];
+
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert_eq!(candidates.first().map(String::as_str), Some("tmux"));
+        assert_eq!(candidates.get(1).map(String::as_str), Some("kitty"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn explicit_terminal_override_stays_ahead_of_tmux() {
+        let client_env = vec![(
+            "TMUX".to_string(),
+            "/tmp/tmux-1000/default,123,0".to_string(),
+        )];
+
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, Some("wezterm"));
+        assert_eq!(candidates.first().map(String::as_str), Some("wezterm"));
+        assert_eq!(candidates.get(1).map(String::as_str), Some("tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn authoritative_non_tmux_client_context_ignores_server_tmux() {
+        let client_env = vec![("TERM".to_string(), "xterm-256color".to_string())];
+
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tmux_spawn_opens_right_split_in_requesting_pane() {
+        let command = TerminalCommand::new(
+            "/usr/local/bin/jcode",
+            vec!["--resume".to_string(), "ses_tmux".to_string()],
+        )
+        .client_terminal_env(vec![
+            (
+                "TMUX".to_string(),
+                "/tmp/tmux-1000/default,123,0".to_string(),
+            ),
+            ("TMUX_PANE".to_string(), "%42".to_string()),
+        ]);
+
+        let cmd = build_spawn_command("tmux", &command, Path::new("/work/dir"))
+            .expect("tmux spawn command should build");
+        assert_eq!(cmd.get_program().to_string_lossy(), "tmux");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "split-window",
+                "-h",
+                "-t",
+                "%42",
+                "-c",
+                "/work/dir",
+                "/usr/local/bin/jcode",
+                "--resume",
+                "ses_tmux",
+            ]
+        );
+        assert_eq!(env_value(&cmd, "TMUX_PANE").as_deref(), Some("%42"));
     }
 
     #[test]

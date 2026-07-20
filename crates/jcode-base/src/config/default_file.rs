@@ -409,6 +409,8 @@ swarm_max_concurrent_agents = 32
 # memory_embedding_dim = 1536
 
 [terminal]
+# Without a hook, clients inside tmux automatically use a right-side pane.
+# Set JCODE_TERMINAL to force a supported terminal emulator instead.
 # External command that takes over headed session spawns (swarm agents,
 # resume-in-new-terminal, self-dev windows, restart restores).
 #

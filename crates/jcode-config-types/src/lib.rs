@@ -701,6 +701,10 @@ impl SwarmStripLayout {
 }
 
 /// Terminal window/pane spawning configuration.
+///
+/// Without a `spawn_hook`, Unix clients inside tmux are opened in a right-side
+/// pane by the built-in launcher. `JCODE_TERMINAL` explicitly selects a terminal
+/// emulator instead.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TerminalConfig {

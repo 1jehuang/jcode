@@ -2725,7 +2725,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         app.set_status_notice(format!("{} launched", label));
                     } else {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "✂ Split → {} (opened in new window)",
+                            "✂ Split → {} (opened in new pane/window)",
                             new_session_name,
                         )));
                         app.set_status_notice(format!("Split → {}", new_session_name));
