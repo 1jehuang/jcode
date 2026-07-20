@@ -80,10 +80,70 @@ async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHand
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
+            last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
         },
         server,
+    )
+}
+
+async fn test_persistent_ws_state_with_ping_notify() -> (
+    PersistentWsState,
+    tokio::task::JoinHandle<()>,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test websocket listener");
+    let addr = listener.local_addr().expect("listener local addr");
+    let ping_notify = Arc::new(tokio::sync::Notify::new());
+    let server_ping_notify = Arc::clone(&ping_notify);
+    let pong_notify = Arc::new(tokio::sync::Notify::new());
+    let server_pong_notify = Arc::clone(&pong_notify);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("accept websocket handshake");
+        while let Some(message) = ws.next().await {
+            match message {
+                Ok(WsMessage::Ping(payload)) => {
+                    server_ping_notify.notify_one();
+                    let _ = ws
+                        .send(WsMessage::Pong(b"stale-pong".to_vec().into()))
+                        .await;
+                    let _ = ws
+                        .send(WsMessage::Ping(b"server-keepalive".to_vec().into()))
+                        .await;
+                    let _ = ws.send(WsMessage::Pong(payload)).await;
+                }
+                Ok(WsMessage::Pong(payload)) if payload.as_slice() == b"server-keepalive" => {
+                    server_pong_notify.notify_one();
+                }
+                Ok(WsMessage::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let (client_ws, _) = connect_async(format!("ws://{}", addr))
+        .await
+        .expect("connect websocket client");
+    (
+        PersistentWsState {
+            ws_stream: client_ws,
+            last_response_id: "resp_test".to_string(),
+            connected_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_response_completed_at: Instant::now(),
+            message_count: 1,
+            last_input_item_count: 1,
+        },
+        server,
+        ping_notify,
+        pong_notify,
     )
 }
 

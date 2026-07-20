@@ -439,17 +439,25 @@ pub(super) async fn try_persistent_ws_continuation(
         emit_status_detail(tx, "checking websocket").await;
     }
 
-    match ensure_persistent_ws_is_healthy(state).await {
-        Ok(true) => {}
-        Ok(false) => {
-            jcode_base::logging::info("Persistent WS healthcheck requested reconnect before reuse");
+    match ensure_persistent_ws_is_healthy(state, true).await {
+        Ok(PersistentWsHealth::Healthy) => {}
+        Ok(PersistentWsHealth::Reconnect {
+            reset_reason,
+            detail,
+        }) => {
+            jcode_base::logging::info(&format!(
+                "Persistent WS healthcheck requested reconnect before reuse: {}",
+                detail
+            ));
             *guard = None;
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Info,
                 "persistent_state_reset",
                 vec![
                     ("model", request_model.clone()),
-                    ("reason", "healthcheck_reconnect".to_string()),
+                    ("reason", reset_reason.to_string()),
+                    ("source", "request_reuse".to_string()),
+                    ("detail", detail),
                 ],
             );
             return PersistentWsResult::NotAvailable;
@@ -466,6 +474,7 @@ pub(super) async fn try_persistent_ws_continuation(
                 vec![
                     ("model", request_model.clone()),
                     ("reason", "healthcheck_failed".to_string()),
+                    ("source", "request_reuse".to_string()),
                     ("error", err.to_string()),
                 ],
             );
@@ -957,6 +966,7 @@ pub(super) async fn try_persistent_ws_continuation(
         state.last_input_item_count = input_item_count;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
+        state.last_response_completed_at = Instant::now();
         jcode_base::logging::info(&format!(
             "Persistent WS continuation success after {}ms (chain length: {}, {})",
             stream_started.elapsed().as_millis(),
@@ -1424,9 +1434,16 @@ pub(super) async fn stream_response_websocket_persistent(
             last_response_id: resp_id,
             connected_at,
             last_activity_at: Instant::now(),
+            last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
         });
+        drop(guard);
+        spawn_persistent_ws_keepalive(
+            Arc::downgrade(&persistent_ws),
+            connected_at,
+            request_model_label.clone(),
+        );
     } else {
         jcode_base::logging::info(
             "No response_id captured from WS stream; connection not saved for reuse",
