@@ -18,6 +18,15 @@ fn only_file_controlled_debug_clients_need_parent_lifetime_binding() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn init_and_systemd_are_recognized_as_orphan_adopters() {
+    assert!(is_orphan_adopter_name("init\n"));
+    assert!(is_orphan_adopter_name("systemd\n"));
+    assert!(!is_orphan_adopter_name("bash\n"));
+    assert!(!is_orphan_adopter_name("jcode\n"));
+}
+
 #[test]
 fn auth_doctor_provider_focus_uses_global_provider_when_positional_is_absent() {
     assert_eq!(

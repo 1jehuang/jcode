@@ -25,6 +25,20 @@ fn is_file_controlled_debug_client() -> bool {
     std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
 }
 
+#[cfg(target_os = "linux")]
+fn is_orphan_adopter_name(name: &str) -> bool {
+    matches!(name.trim(), "init" | "systemd")
+}
+
+#[cfg(target_os = "linux")]
+fn parent_is_orphan_adopter(parent_pid: libc::pid_t) -> bool {
+    if parent_pid <= 1 {
+        return true;
+    }
+    std::fs::read_to_string(format!("/proc/{parent_pid}/comm"))
+        .is_ok_and(|name| is_orphan_adopter_name(&name))
+}
+
 /// Tie file-controlled debug clients to the process that launched them.
 ///
 /// These clients are automation helpers, not user-owned terminals. Without a
@@ -44,7 +58,11 @@ fn arm_debug_client_parent_death_signal() {
     let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } == 0;
     // Safety: getppid has no preconditions and does not dereference pointers.
     let current_parent_pid = unsafe { libc::getppid() };
-    if armed && (parent_pid <= 1 || current_parent_pid != parent_pid) {
+    if armed
+        && (parent_is_orphan_adopter(parent_pid)
+            || current_parent_pid != parent_pid
+            || parent_is_orphan_adopter(current_parent_pid))
+    {
         std::process::exit(0);
     }
 }
