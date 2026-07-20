@@ -407,6 +407,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release upload "${env:GITHUB_REF_NAME}" dist/jcode-windows-x86_64.exe dist/jcode-windows-x86_64.tar.gz dist/jcode-windows-aarch64.exe dist/jcode-windows-aarch64.tar.gz --clobber
 
@@ -500,15 +501,31 @@ jobs:
           path: artifacts
           pattern: jcode-*
 
-      - name: Validate at least one completed platform asset
+      - name: Validate complete platform asset set
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -d '' assets < <(
-            find artifacts -type f \( -name '*.tar.gz' -o -name '*.exe' \) -print0 2>/dev/null
+          expected=(
+            artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz
+            artifacts/jcode-linux-aarch64/jcode-linux-aarch64.tar.gz
+            artifacts/jcode-macos-aarch64/jcode-macos-aarch64.tar.gz
+            artifacts/jcode-macos-x86_64/jcode-macos-x86_64.tar.gz
+            artifacts/jcode-windows-x86_64/jcode-windows-x86_64.exe
+            artifacts/jcode-windows-x86_64/jcode-windows-x86_64.tar.gz
+            artifacts/jcode-windows-aarch64/jcode-windows-aarch64.exe
+            artifacts/jcode-windows-aarch64/jcode-windows-aarch64.tar.gz
+            artifacts/jcode-freebsd-x86_64/jcode-freebsd-x86_64.tar.gz
           )
-          if [ "${#assets[@]}" -eq 0 ]; then
-            echo "No platform produced a releasable asset; keeping the release as a draft" >&2
+
+          missing=()
+          for asset in "${expected[@]}"; do
+            if [ ! -f "$asset" ]; then
+              missing+=("$asset")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'Missing required release asset: %s\n' "${missing[@]}" >&2
+            echo "Keeping the release as a draft until every platform succeeds" >&2
             exit 1
           fi
 
