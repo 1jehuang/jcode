@@ -7,11 +7,18 @@ edition = "2024"
 name = "jcode_notify_email"
 path = "src/lib.rs"
 
+[features]
+# The CentOS 7 compatibility image only provides OpenSSL 1.0.2, which current
+# openssl-sys no longer supports. Release builds opt into a current vendored
+# OpenSSL without changing TLS behavior for normal platform builds.
+linux-compat-vendored-openssl = ["dep:native-tls", "native-tls/vendored"]
+
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
 imap = { version = "3.0.0-alpha.15", default-features = true }
 lettre = { version = "0.11.22", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 mail-parser = "0.9"
+native-tls = { version = "0.2.18", optional = true }
 pulldown-cmark = "0.12"
 urlencoding = "2"

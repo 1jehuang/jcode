@@ -221,6 +221,9 @@ embeddings = ["jcode-tui/embeddings"]
 # Live AWS Bedrock support (the AWS SDK stack) lives in jcode-provider-bedrock;
 # forwards down through jcode-tui -> jcode-app-core -> jcode-base.
 bedrock = ["jcode-tui/bedrock"]
+# Internal release feature: build a supported OpenSSL inside the CentOS 7
+# compatibility image while preserving the glibc 2.17 runtime baseline.
+linux-compat-vendored-openssl = ["jcode-tui/linux-compat-vendored-openssl"]
 mmdr-size-api = ["jcode-tui/mmdr-size-api"]
 pdf = ["jcode-tui/pdf"]
 
