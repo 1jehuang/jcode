@@ -100,6 +100,25 @@ fn enter_test_runtime() -> tokio::runtime::Runtime {
         .expect("build tokio runtime")
 }
 
+#[test]
+fn openai_compatible_profile_catalog_cache_is_fresh_before_soft_refresh_boundary() {
+    assert!(!openai_compatible_profile_catalog_cache_is_stale(
+        1_000,
+        1_000 + OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS - 1,
+    ));
+}
+
+#[test]
+fn openai_compatible_profile_catalog_cache_is_stale_at_soft_refresh_boundary() {
+    assert!(openai_compatible_profile_catalog_cache_is_stale(
+        1_000,
+        1_000 + OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS,
+    ));
+    assert!(!openai_compatible_profile_catalog_cache_is_stale(
+        2_000, 1_000
+    ));
+}
+
 fn with_env_var<T>(key: &str, value: &str, f: impl FnOnce() -> T) -> T {
     let prev = std::env::var_os(key);
     crate::env::set_var(key, value);

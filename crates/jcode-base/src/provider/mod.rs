@@ -141,10 +141,22 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
     )
 }
 
+// Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
+// the active OpenRouter/OpenAI-compatible runtime. We continue serving the
+// cached routes immediately while a background refresh updates the catalog.
+const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
+
+fn openai_compatible_profile_catalog_cache_is_stale(cached_at: u64, now: u64) -> bool {
+    now.saturating_sub(cached_at) >= OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS
+}
+
 fn cached_live_models_for_openai_compatible_profile(
     resolved: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, bool)> {
     let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
+    let cache_is_stale = jcode_provider_openrouter::current_unix_secs()
+        .map(|now| openai_compatible_profile_catalog_cache_is_stale(cache.cached_at, now))
+        .unwrap_or(false);
     let source_api_base = cache
         .source_api_base
         .as_deref()
@@ -163,7 +175,7 @@ fn cached_live_models_for_openai_compatible_profile(
     if models.is_empty() {
         None
     } else {
-        Some(models)
+        Some((models, cache_is_stale))
     }
 }
 
@@ -172,23 +184,30 @@ fn direct_openai_compatible_profile_routes(
 ) -> Vec<ModelRoute> {
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
     let static_models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
-    let (mut models, from_live_catalog) =
-        if let Some(models) = cached_live_models_for_openai_compatible_profile(&resolved) {
-            (models, true)
-        } else {
+    let (mut models, from_live_catalog) = if let Some((models, cache_is_stale)) =
+        cached_live_models_for_openai_compatible_profile(&resolved)
+    {
+        if cache_is_stale {
             crate::provider::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
                 profile,
-                "inactive direct profile route cache miss",
+                "inactive direct profile stale route cache",
             );
-            let mut models = static_models;
-            if models.is_empty()
-                && let Some(default_model) = resolved.default_model.as_ref()
-                && !default_model.trim().is_empty()
-            {
-                models.push(default_model.trim().to_string());
-            }
-            (models, false)
-        };
+        }
+        (models, true)
+    } else {
+        crate::provider::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
+            profile,
+            "inactive direct profile route cache miss",
+        );
+        let mut models = static_models;
+        if models.is_empty()
+            && let Some(default_model) = resolved.default_model.as_ref()
+            && !default_model.trim().is_empty()
+        {
+            models.push(default_model.trim().to_string());
+        }
+        (models, false)
+    };
 
     let provider = resolved.display_name.clone();
     let api_method = format!("openai-compatible:{}", resolved.id);
