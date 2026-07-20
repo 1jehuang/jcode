@@ -413,12 +413,26 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
         }
         crate::auth::AuthStatus::invalidate_cache();
 
-        assert_eq!(app.remote_model_options.len(), 7);
+        let expected = crate::subscription_catalog::curated_models()
+            .iter()
+            .filter(|model| {
+                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
+            })
+            .map(|model| model.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(app.remote_model_options.len(), expected.len());
         assert!(app.remote_model_options.iter().all(|route| {
             route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
                 && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
                 && route.available
         }));
+        assert_eq!(
+            app.remote_model_options
+                .iter()
+                .map(|route| route.model.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
     });
 }
 
@@ -596,21 +610,20 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                     && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
             })
             .collect::<Vec<_>>();
-        assert_eq!(jcode_routes.len(), 7);
+        let expected = crate::subscription_catalog::curated_models()
+            .iter()
+            .filter(|model| {
+                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
+            })
+            .map(|model| model.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(jcode_routes.len(), expected.len());
         assert_eq!(
             jcode_routes
                 .iter()
                 .map(|route| route.model.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([
-                "claude-opus-4-8",
-                "claude-sonnet-4-6",
-                "deepseek-v3.2",
-                "devstral-2-123b",
-                "gpt-5.5",
-                "gpt-5.6-sol",
-                "qwen3-coder-next",
-            ])
+            expected
         );
         assert!(app.remote_model_options.iter().any(|route| {
             route.model == "claude-opus-4-8"
@@ -624,16 +637,10 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
         }));
         assert!(app.remote_model_options.iter().all(|route| {
             route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                || matches!(
-                    route.model.as_str(),
-                    "claude-opus-4-8"
-                        | "claude-sonnet-4-6"
-                        | "deepseek-v3.2"
-                        | "devstral-2-123b"
-                        | "gpt-5.5"
-                        | "gpt-5.6-sol"
-                        | "qwen3-coder-next"
-                )
+                || crate::subscription_catalog::find_curated_model(&route.model)
+                    .is_some_and(|model| {
+                        crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
+                    })
         }));
     });
 }

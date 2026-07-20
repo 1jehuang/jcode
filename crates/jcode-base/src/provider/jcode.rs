@@ -339,6 +339,20 @@ mod tests {
             "qwen3-coder-next",
             "devstral-2-123b",
             "deepseek-v3.2",
+            "nova-2-lite",
+            "llama-4-maverick",
+            "llama-4-scout",
+            "minimax-m2.5",
+            "mistral-large-3",
+            "kimi-k2.5",
+            "kimi-k2-thinking",
+            "nemotron-nano-3-30b",
+            "nemotron-super-3-120b",
+            "gpt-oss-120b",
+            "gpt-oss-20b",
+            "qwen3-next-80b",
+            "glm-5",
+            "glm-4.7-flash",
         ];
 
         assert_eq!(
@@ -369,7 +383,7 @@ mod tests {
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
-        assert_eq!(flagship_routes.len(), 8);
+        assert_eq!(flagship_routes.len(), 22);
         assert!(
             flagship_routes
                 .iter()

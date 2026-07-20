@@ -193,6 +193,144 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         min_tier: JcodeTier::Plus,
         note: "Open-weight reasoning and coding model; routed server-side to Amazon Bedrock by the jcode router.",
     },
+    CuratedModel {
+        id: "nova-2-lite",
+        display_name: "Amazon Nova 2 Lite",
+        aliases: &["nova-2-lite", "nova 2 lite", "amazon nova 2 lite"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Recent efficient multimodal model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "llama-4-maverick",
+        display_name: "Llama 4 Maverick",
+        aliases: &[
+            "llama-4-maverick",
+            "llama 4 maverick",
+            "meta llama 4 maverick",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight general model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "llama-4-scout",
+        display_name: "Llama 4 Scout",
+        aliases: &["llama-4-scout", "llama 4 scout", "meta llama 4 scout"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight efficient model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "minimax-m2.5",
+        display_name: "MiniMax M2.5",
+        aliases: &["minimax-m2.5", "minimax m2.5", "minimax m2 5"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Recent reasoning and coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "mistral-large-3",
+        display_name: "Mistral Large 3",
+        aliases: &["mistral-large-3", "mistral large 3"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight general and coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "kimi-k2.5",
+        display_name: "Kimi K2.5",
+        aliases: &["kimi-k2.5", "kimi k2.5", "kimi k2 5"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Recent reasoning and agentic model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "kimi-k2-thinking",
+        display_name: "Kimi K2 Thinking",
+        aliases: &["kimi-k2-thinking", "kimi k2 thinking"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Reasoning-focused model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "nemotron-nano-3-30b",
+        display_name: "Nemotron Nano 3 30B",
+        aliases: &[
+            "nemotron-nano-3-30b",
+            "nemotron nano 3 30b",
+            "nvidia nemotron nano 3 30b",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Efficient open-weight reasoning model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "nemotron-super-3-120b",
+        display_name: "Nemotron Super 3 120B",
+        aliases: &[
+            "nemotron-super-3-120b",
+            "nemotron super 3 120b",
+            "nvidia nemotron super 3 120b",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Large open-weight reasoning model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "gpt-oss-120b",
+        display_name: "GPT-OSS 120B",
+        aliases: &["gpt-oss-120b", "gpt oss 120b", "openai gpt oss 120b"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Large open-weight reasoning model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "gpt-oss-20b",
+        display_name: "GPT-OSS 20B",
+        aliases: &["gpt-oss-20b", "gpt oss 20b", "openai gpt oss 20b"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Efficient open-weight reasoning model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "qwen3-next-80b",
+        display_name: "Qwen3 Next 80B A3B",
+        aliases: &["qwen3-next-80b", "qwen3 next 80b", "qwen 3 next 80b a3b"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Open-weight general and coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "glm-5",
+        display_name: "GLM-5",
+        aliases: &["glm-5", "glm 5", "zai glm 5"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Recent general and coding model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
+        id: "glm-4.7-flash",
+        display_name: "GLM 4.7 Flash",
+        aliases: &["glm-4.7-flash", "glm 4.7 flash", "zai glm 4.7 flash"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Efficient recent general model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
 ];
 
 pub fn curated_models() -> &'static [CuratedModel] {
@@ -406,6 +544,30 @@ pub fn clear_runtime_env() {
 mod tests {
     use super::*;
 
+    const EXPECTED_PLUS_MODELS: &[&str] = &[
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "qwen3-coder-next",
+        "devstral-2-123b",
+        "deepseek-v3.2",
+        "nova-2-lite",
+        "llama-4-maverick",
+        "llama-4-scout",
+        "minimax-m2.5",
+        "mistral-large-3",
+        "kimi-k2.5",
+        "kimi-k2-thinking",
+        "nemotron-nano-3-30b",
+        "nemotron-super-3-120b",
+        "gpt-oss-120b",
+        "gpt-oss-20b",
+        "qwen3-next-80b",
+        "glm-5",
+        "glm-4.7-flash",
+    ];
+
     #[test]
     fn curated_model_aliases_resolve_to_canonical_ids() {
         assert_eq!(canonical_model_id("opus 4.8"), Some("claude-opus-4-8"));
@@ -433,6 +595,24 @@ mod tests {
             Some("devstral-2-123b")
         );
         assert_eq!(canonical_model_id("DeepSeek 3.2"), Some("deepseek-v3.2"));
+        for (alias, expected) in [
+            ("Amazon Nova 2 Lite", "nova-2-lite"),
+            ("Meta Llama 4 Maverick", "llama-4-maverick"),
+            ("Meta Llama 4 Scout", "llama-4-scout"),
+            ("MiniMax M2.5", "minimax-m2.5"),
+            ("Mistral Large 3", "mistral-large-3"),
+            ("Kimi K2.5", "kimi-k2.5"),
+            ("Kimi K2 Thinking", "kimi-k2-thinking"),
+            ("NVIDIA Nemotron Nano 3 30B", "nemotron-nano-3-30b"),
+            ("NVIDIA Nemotron Super 3 120B", "nemotron-super-3-120b"),
+            ("OpenAI GPT OSS 120B", "gpt-oss-120b"),
+            ("OpenAI GPT OSS 20B", "gpt-oss-20b"),
+            ("Qwen 3 Next 80B A3B", "qwen3-next-80b"),
+            ("ZAI GLM 5", "glm-5"),
+            ("ZAI GLM 4.7 Flash", "glm-4.7-flash"),
+        ] {
+            assert_eq!(canonical_model_id(alias), Some(expected), "alias {alias}");
+        }
         assert_eq!(canonical_model_id("unknown-model"), None);
     }
 
@@ -448,6 +628,29 @@ mod tests {
     #[test]
     fn default_model_is_opus() {
         assert_eq!(default_model().id, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn curated_catalog_has_exact_paid_and_flagship_sets() {
+        assert_eq!(
+            CURATED_MODELS
+                .iter()
+                .filter(|model| model.min_tier == JcodeTier::Plus)
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            EXPECTED_PLUS_MODELS
+        );
+        assert_eq!(
+            CURATED_MODELS
+                .iter()
+                .filter(|model| model.min_tier == JcodeTier::Flagship)
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+            vec!["claude-fable-5"]
+        );
+        assert_eq!(CURATED_MODELS.len(), 22);
+        assert!(find_curated_model("magistral-small-1.2").is_none());
+        assert!(find_curated_model("gemma-3-27b").is_none());
     }
 
     #[test]
@@ -507,13 +710,9 @@ mod tests {
         }
 
         for tier in JcodeTier::ALL {
-            assert!(tier.allows(find_curated_model("claude-opus-4-8").unwrap().min_tier));
-            assert!(tier.allows(find_curated_model("claude-sonnet-4-6").unwrap().min_tier));
-            assert!(tier.allows(find_curated_model("gpt-5.5").unwrap().min_tier));
-            assert!(tier.allows(find_curated_model("gpt-5.6-sol").unwrap().min_tier));
-            assert!(tier.allows(find_curated_model("qwen3-coder-next").unwrap().min_tier));
-            assert!(tier.allows(find_curated_model("devstral-2-123b").unwrap().min_tier));
-            assert!(tier.allows(find_curated_model("deepseek-v3.2").unwrap().min_tier));
+            for model in EXPECTED_PLUS_MODELS {
+                assert!(tier.allows(find_curated_model(model).unwrap().min_tier));
+            }
             assert_eq!(
                 tier.allows(find_curated_model("claude-fable-5").unwrap().min_tier),
                 *tier == JcodeTier::Flagship
@@ -530,13 +729,9 @@ mod tests {
 
         assert_eq!(cached_tier(), None);
         assert_eq!(effective_tier(), JcodeTier::Plus);
-        assert!(is_model_allowed_for_current_tier("claude-opus-4-8"));
-        assert!(is_model_allowed_for_current_tier("claude-sonnet-4-6"));
-        assert!(is_model_allowed_for_current_tier("gpt-5.5"));
-        assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
-        assert!(is_model_allowed_for_current_tier("qwen3-coder-next"));
-        assert!(is_model_allowed_for_current_tier("devstral-2-123b"));
-        assert!(is_model_allowed_for_current_tier("deepseek-v3.2"));
+        for model in EXPECTED_PLUS_MODELS {
+            assert!(is_model_allowed_for_current_tier(model));
+        }
         assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
 
         crate::env::set_var(JCODE_TIER_ENV, "mystery");
@@ -546,13 +741,9 @@ mod tests {
         for tier in [JcodeTier::Pro, JcodeTier::Max, JcodeTier::Ultra] {
             crate::env::set_var(JCODE_TIER_ENV, tier.as_str());
             assert_eq!(effective_tier(), tier);
-            assert!(is_model_allowed_for_current_tier("claude-opus-4-8"));
-            assert!(is_model_allowed_for_current_tier("claude-sonnet-4-6"));
-            assert!(is_model_allowed_for_current_tier("gpt-5.5"));
-            assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
-            assert!(is_model_allowed_for_current_tier("qwen3-coder-next"));
-            assert!(is_model_allowed_for_current_tier("devstral-2-123b"));
-            assert!(is_model_allowed_for_current_tier("deepseek-v3.2"));
+            for model in EXPECTED_PLUS_MODELS {
+                assert!(is_model_allowed_for_current_tier(model));
+            }
             assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
         }
 
