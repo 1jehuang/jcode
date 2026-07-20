@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
 use std::sync::{LazyLock, Mutex};
 #[cfg(windows)]
@@ -13,17 +13,52 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 const SECRET_HARDEN_CACHE_TTL: Duration = Duration::from_secs(60);
+#[cfg(windows)]
+const SECRET_HARDEN_DEFER_DELAY: Duration = Duration::from_secs(30);
 
 #[cfg(windows)]
 #[derive(Default)]
-struct SecretHardenCache {
+struct SecretHardenState {
     directories: HashMap<PathBuf, Instant>,
     files: HashMap<PathBuf, Instant>,
+    pending_directories: HashSet<PathBuf>,
+    pending_files: HashSet<PathBuf>,
+    worker_running: bool,
 }
 
 #[cfg(windows)]
-static SECRET_HARDEN_CACHE: LazyLock<Mutex<SecretHardenCache>> =
-    LazyLock::new(|| Mutex::new(SecretHardenCache::default()));
+impl SecretHardenState {
+    /// Queue a path for best-effort hardening. Returns true when the caller
+    /// should start the single worker for this process.
+    fn enqueue(&mut self, path: &Path, directory: bool, now: Instant) -> bool {
+        let attempted = if directory {
+            &self.directories
+        } else {
+            &self.files
+        };
+        if attempted.get(path).is_some_and(|attempted_at| {
+            now.saturating_duration_since(*attempted_at) < SECRET_HARDEN_CACHE_TTL
+        }) {
+            return false;
+        }
+
+        if directory {
+            self.pending_directories.insert(path.to_path_buf());
+        } else {
+            self.pending_files.insert(path.to_path_buf());
+        }
+        if self.worker_running {
+            false
+        } else {
+            self.worker_running = true;
+            true
+        }
+    }
+}
+
+#[cfg(windows)]
+static SECRET_HARDEN_STATE: LazyLock<Mutex<SecretHardenState>> =
+    LazyLock::new(|| Mutex::new(SecretHardenState::default()));
 
 mod active_pids;
 pub use active_pids::{
@@ -170,17 +205,37 @@ pub fn user_home_path(relative: impl AsRef<Path>) -> Result<PathBuf> {
 /// This intentionally ignores failures so startup does not fail on exotic
 /// filesystems, but it narrows exposure on typical Unix systems.
 pub fn harden_user_config_permissions() {
-    if let Some(config_dir) = dirs::config_dir() {
-        let jcode_config_dir = config_dir.join("jcode");
-        if jcode_config_dir.exists() {
-            let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_config_dir);
+    #[cfg(windows)]
+    {
+        if let Some(config_dir) = dirs::config_dir() {
+            let jcode_config_dir = config_dir.join("jcode");
+            if jcode_config_dir.exists() {
+                schedule_windows_path_hardening(&jcode_config_dir, true);
+            }
         }
+
+        if let Ok(jcode_home) = jcode_dir()
+            && jcode_home.exists()
+        {
+            schedule_windows_path_hardening(&jcode_home, true);
+        }
+        return;
     }
 
-    if let Ok(jcode_home) = jcode_dir()
-        && jcode_home.exists()
+    #[cfg(not(windows))]
     {
-        let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_home);
+        if let Some(config_dir) = dirs::config_dir() {
+            let jcode_config_dir = config_dir.join("jcode");
+            if jcode_config_dir.exists() {
+                let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_config_dir);
+            }
+        }
+
+        if let Ok(jcode_home) = jcode_dir()
+            && jcode_home.exists()
+        {
+            let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_home);
+        }
     }
 }
 
@@ -210,48 +265,93 @@ pub fn harden_secret_file_permissions(path: &Path) {
 fn harden_secret_file_permissions_windows(path: &Path) {
     // Windows ACL replacement is substantially more expensive than chmod and
     // security products can amplify it into seconds. Credential readers call
-    // this helper frequently, including from TUI render getters, so repeating
-    // the same SetNamedSecurityInfoW calls can freeze an otherwise empty frame.
-    // Jcode's own secret writes always harden the new file directly. This cache
-    // only coalesces opportunistic read-time rechecks, and the short TTL still
-    // repairs permissions changed externally while the process remains alive.
+    // this helper frequently, including on the startup and TUI render paths.
+    // Read-time hardening is opportunistic, while Jcode's own secret writes
+    // harden synchronously below. Defer the opportunistic repair so first-frame
+    // latency does not inherit multi-second SetNamedSecurityInfoW calls. The
+    // worker coalesces repeated probes and retries paths after a short TTL.
     if let Some(parent) = path.parent() {
-        harden_windows_path_cached(parent, true);
+        schedule_windows_path_hardening(parent, true);
     }
     if path.exists() {
-        harden_windows_path_cached(path, false);
+        schedule_windows_path_hardening(path, false);
     }
 }
 
 #[cfg(windows)]
-fn harden_windows_path_cached(path: &Path, directory: bool) {
-    let Ok(mut cache) = SECRET_HARDEN_CACHE.lock() else {
-        return;
+fn schedule_windows_path_hardening(path: &Path, directory: bool) {
+    let should_spawn = {
+        let Ok(mut state) = SECRET_HARDEN_STATE.lock() else {
+            return;
+        };
+        state.enqueue(path, directory, Instant::now())
     };
-    let entries = if directory {
-        &mut cache.directories
-    } else {
-        &mut cache.files
-    };
-    if entries
-        .get(path)
-        .is_some_and(|hardened_at| hardened_at.elapsed() < SECRET_HARDEN_CACHE_TTL)
-    {
+
+    if !should_spawn {
         return;
     }
 
-    // Keep the cache lock through the ACL call. Credential probes can race on
-    // startup, and allowing every waiter to perform the same expensive syscall
-    // defeats the purpose of coalescing it.
-    let result = if directory {
-        jcode_core::fs::set_directory_permissions_owner_only(path)
-    } else {
-        jcode_core::fs::set_permissions_owner_only(path)
-    };
-    if result.is_ok() {
-        entries.insert(path.to_path_buf(), Instant::now());
-    } else {
-        entries.remove(path);
+    if std::thread::Builder::new()
+        .name("jcode-windows-acl-harden".to_string())
+        .spawn(|| {
+            std::thread::sleep(SECRET_HARDEN_DEFER_DELAY);
+            run_windows_hardening_worker();
+        })
+        .is_err()
+        && let Ok(mut state) = SECRET_HARDEN_STATE.lock()
+    {
+        state.worker_running = false;
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_hardening_worker() {
+    loop {
+        let (directories, files) = {
+            let Ok(mut state) = SECRET_HARDEN_STATE.lock() else {
+                return;
+            };
+            if state.pending_directories.is_empty() && state.pending_files.is_empty() {
+                state.worker_running = false;
+                return;
+            }
+            let directories = std::mem::take(&mut state.pending_directories);
+            let files = std::mem::take(&mut state.pending_files);
+            // Mark attempts before releasing the lock. Otherwise render-time
+            // probes can requeue the same paths while a slow ACL call is in
+            // flight, keeping the worker in an endless hardening loop.
+            let attempted_at = Instant::now();
+            for path in &directories {
+                state.directories.insert(path.clone(), attempted_at);
+            }
+            for path in &files {
+                state.files.insert(path.clone(), attempted_at);
+            }
+            (directories, files)
+        };
+
+        // Record attempts regardless of outcome. Best-effort hardening should
+        // retry later, but a persistent ACL/filesystem error must not create a
+        // tight loop from render-time credential probes.
+        for path in &directories {
+            let _ = jcode_core::fs::set_directory_permissions_owner_only(path);
+        }
+        for path in &files {
+            if path.exists() {
+                let _ = jcode_core::fs::set_permissions_owner_only(path);
+            }
+        }
+
+        let Ok(mut state) = SECRET_HARDEN_STATE.lock() else {
+            return;
+        };
+        if state.pending_directories.is_empty() && state.pending_files.is_empty() {
+            state.worker_running = false;
+            return;
+        }
+        // New paths arrived while the ACL calls were running. Process them in
+        // this worker without another startup delay.
+        drop(state);
     }
 }
 
@@ -298,12 +398,7 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 pub fn write_text_secret(path: &Path, content: &str) -> Result<()> {
-    write_bytes_inner(path, content.as_bytes(), true)?;
-    if let Some(parent) = path.parent() {
-        jcode_core::fs::set_directory_permissions_owner_only(parent)?;
-    }
-    jcode_core::fs::set_permissions_owner_only(path)?;
-    Ok(())
+    write_bytes_inner(path, content.as_bytes(), true, true)
 }
 
 pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) -> Result<()> {
@@ -335,40 +430,47 @@ pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) ->
 }
 
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true)
+    write_json_inner(path, value, true, false)
 }
 
 pub fn write_json_secret<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true)?;
-    if let Some(parent) = path.parent() {
-        jcode_core::fs::set_directory_permissions_owner_only(parent)?;
-    }
-    jcode_core::fs::set_permissions_owner_only(path)?;
-    Ok(())
+    write_json_inner(path, value, true, true)
 }
 
 /// Fast JSON write: atomic rename but no fsync. Good for frequent saves where
 /// durability on power loss is not critical (e.g., session saves during tool execution).
 /// Data is still safe against process crashes (atomic rename protects against partial writes).
 pub fn write_json_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, false)
+    write_json_inner(path, value, false, false)
 }
 
 /// Atomically write raw bytes to `path` (temp file + rename), fsync'd for
 /// durability. Used for editing user config files where a torn write would be
 /// catastrophic.
 pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_bytes_inner(path, bytes, true)
+    write_bytes_inner(path, bytes, true, false)
 }
 
-fn write_json_inner<T: Serialize + ?Sized>(path: &Path, value: &T, durable: bool) -> Result<()> {
+fn write_json_inner<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+    durable: bool,
+    secret: bool,
+) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    write_bytes_inner(path, &bytes, durable)
+    write_bytes_inner(path, &bytes, durable, secret)
 }
 
-fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
+fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
+        if secret {
+            // Writes remain strict even though read-time legacy repair is
+            // deferred on Windows. Harden the container before any secret
+            // bytes are created so a permissive inherited ACL is never
+            // published, even briefly.
+            jcode_core::fs::set_directory_permissions_owner_only(parent)?;
+        }
     }
 
     let pid = std::process::id();
@@ -377,6 +479,9 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
 
     let result = (|| -> Result<()> {
         let file = std::fs::File::create(&tmp_path)?;
+        if secret {
+            jcode_core::fs::set_permissions_owner_only(&tmp_path)?;
+        }
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(bytes)?;
         let file = writer
@@ -389,6 +494,9 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
 
         if path.exists() {
             let bak_path = path.with_extension("bak");
+            if secret {
+                jcode_core::fs::set_permissions_owner_only(path)?;
+            }
             // Preserve the previous version as .bak without ever leaving the
             // primary path missing. On Unix, rename(tmp, path) atomically
             // replaces the destination, so the backup can be a hard link to
@@ -407,11 +515,18 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
             // unavoidable without platform-specific replace APIs.
             #[cfg(not(unix))]
             {
+                let _ = std::fs::remove_file(&bak_path);
                 let _ = std::fs::rename(path, &bak_path);
+            }
+            if secret && bak_path.exists() {
+                jcode_core::fs::set_permissions_owner_only(&bak_path)?;
             }
         }
 
         std::fs::rename(&tmp_path, path)?;
+        if secret {
+            jcode_core::fs::set_permissions_owner_only(path)?;
+        }
 
         #[cfg(unix)]
         if durable
@@ -513,4 +628,36 @@ pub fn append_json_line_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> R
         .open(path)?;
     file.write_all(&line)?;
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn first_path_starts_one_worker_and_repeated_paths_are_coalesced() {
+        let mut state = SecretHardenState::default();
+        let now = Instant::now();
+        let directory = Path::new(r"C:\Users\test\.jcode");
+        let file = directory.join("auth.json");
+
+        assert!(state.enqueue(directory, true, now));
+        assert!(!state.enqueue(directory, true, now));
+        assert!(!state.enqueue(&file, false, now));
+        assert!(state.worker_running);
+        assert_eq!(state.pending_directories.len(), 1);
+        assert_eq!(state.pending_files.len(), 1);
+    }
+
+    #[test]
+    fn recently_attempted_paths_are_not_requeued() {
+        let mut state = SecretHardenState::default();
+        let attempted_at = Instant::now();
+        let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
+        state.files.insert(file.clone(), attempted_at);
+
+        assert!(!state.enqueue(&file, false, attempted_at));
+        assert!(!state.worker_running);
+        assert!(state.pending_files.is_empty());
+    }
 }

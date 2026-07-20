@@ -1116,6 +1116,19 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     provider_choice: &ProviderChoice,
 ) -> Result<()> {
     startup_profile::mark("cred_check_start");
+
+    // Normal interactive launches perform onboarding inside the TUI, and an
+    // explicit provider choice never needs auto-detection here. Avoid probing
+    // every credential backend unless the caller explicitly opted into the
+    // legacy headless CLI bootstrap flow. On Windows those reads may trigger
+    // expensive security-product inspection even when credentials are already
+    // configured, delaying every cold launch before the server is spawned.
+    let cli_bootstrap_requested = std::env::var_os("JCODE_CLI_BOOTSTRAP_LOGIN").is_some();
+    if !should_detect_cli_bootstrap_credentials(provider_choice, cli_bootstrap_requested) {
+        startup_profile::mark("cred_check_done");
+        return Ok(());
+    }
+
     let cred_state = detect_bootstrap_credentials().await;
     startup_profile::mark("cred_check_done");
 
@@ -1130,10 +1143,7 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     // The only thing left to honor at the CLI layer is an explicit headless
     // bootstrap (e.g. CI / non-interactive provisioning), which opts in via the
     // `JCODE_CLI_BOOTSTRAP_LOGIN` env var.
-    if cred_state.has_any || *provider_choice != ProviderChoice::Auto {
-        return Ok(());
-    }
-    if std::env::var_os("JCODE_CLI_BOOTSTRAP_LOGIN").is_none() {
+    if cred_state.has_any {
         return Ok(());
     }
 
@@ -1153,6 +1163,13 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     output::stderr_blank_line();
 
     Ok(())
+}
+
+fn should_detect_cli_bootstrap_credentials(
+    provider_choice: &ProviderChoice,
+    cli_bootstrap_requested: bool,
+) -> bool {
+    cli_bootstrap_requested && *provider_choice == ProviderChoice::Auto
 }
 
 struct BootstrapCredentialState {

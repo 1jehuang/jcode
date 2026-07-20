@@ -49,6 +49,22 @@ fn auth_doctor_positional_provider_wins_over_global_provider() {
     );
 }
 
+#[test]
+fn interactive_startup_skips_bootstrap_credential_detection() {
+    assert!(!should_detect_cli_bootstrap_credentials(
+        &ProviderChoice::Auto,
+        false
+    ));
+    assert!(!should_detect_cli_bootstrap_credentials(
+        &ProviderChoice::Openai,
+        true
+    ));
+    assert!(should_detect_cli_bootstrap_credentials(
+        &ProviderChoice::Auto,
+        true
+    ));
+}
+
 struct ReloadTestEnv {
     prev_socket: Option<std::ffi::OsString>,
     prev_runtime: Option<std::ffi::OsString>,
