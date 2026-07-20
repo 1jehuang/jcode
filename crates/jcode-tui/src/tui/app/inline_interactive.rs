@@ -24,7 +24,7 @@ use helpers::{
 };
 
 const REMOTE_MODEL_CATALOG_CACHE_FILE: &str = "remote_model_catalog_cache.json";
-const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 1;
+const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 2;
 const MODEL_PICKER_USAGE_FILE: &str = "model_picker_usage.json";
 const MODEL_PICKER_USAGE_VERSION: u8 = 1;
 const MODEL_PICKER_FAVORITES_FILE: &str = "model_picker_favorites.json";
@@ -487,19 +487,53 @@ impl App {
         // Jcode subscription routes are a complete, server-managed catalog.
         // Do not mix in locally configured Anthropic/OpenAI credentials merely
         // because a curated model also belongs to one of those upstreams.
-        let is_jcode_subscription = self.remote_provider_name.as_deref().is_some_and(|name| {
-            name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-        }) || (!routes.is_empty()
-            && routes.iter().all(|route| {
-                route
-                    .api_method
-                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
-            }));
-        if is_jcode_subscription {
+        let provider_is_jcode_subscription = self
+            .remote_provider_name
+            .as_deref()
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case(
+                    crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME,
+                )
+            });
+        if provider_is_jcode_subscription {
             *routes = crate::provider::remote_model_routes_fallback(
                 Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
                 &self.remote_available_entries,
             );
+            return;
+        }
+        let poisoned_by_jcode_subscription = !routes.is_empty()
+            && routes.iter().all(|route| {
+                route
+                    .api_method
+                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
+            });
+        if poisoned_by_jcode_subscription {
+            // Version 1 could turn a mixed provider catalog into all-Jcode rows
+            // after seeing just one managed subscription route. Rebuild ordinary
+            // routes from the names catalog, then append only the current tier's
+            // actual subscription entitlements.
+            *routes = crate::provider::remote_model_routes_fallback(
+                self.remote_provider_name.as_deref(),
+                &self.remote_available_entries,
+            );
+            let tier = crate::subscription_catalog::effective_tier();
+            for model in crate::subscription_catalog::curated_models().iter().filter(|model| {
+                tier.allows(model.min_tier)
+                    && self.remote_available_entries.iter().any(|available| {
+                        crate::subscription_catalog::canonical_model_id(available)
+                            == Some(model.id)
+                    })
+            }) {
+                routes.push(crate::provider::ModelRoute {
+                    model: model.id.to_string(),
+                    provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                    api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                    available: true,
+                    detail: crate::subscription_catalog::routing_policy_detail(model),
+                    cheapness: None,
+                });
+            }
             return;
         }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =

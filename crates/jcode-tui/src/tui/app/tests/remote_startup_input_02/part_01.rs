@@ -477,6 +477,76 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
 }
 
 #[test]
+fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
+    with_temp_jcode_home(|| {
+        let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
+        crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "plus");
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_available_entries = vec![
+            "claude-fable-5".to_string(),
+            "claude-opus-4-8".to_string(),
+            "gpt-5.5".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "deepseek/deepseek-v4-pro".to_string(),
+        ];
+        app.remote_model_options = app
+            .remote_available_entries
+            .iter()
+            .map(|model| crate::provider::ModelRoute {
+                model: model.clone(),
+                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                available: true,
+                detail: "poisoned version 1 cache".to_string(),
+                cheapness: None,
+            })
+            .collect();
+
+        app.open_model_picker();
+
+        match previous_tier {
+            Some(value) => crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, value),
+            None => crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV),
+        }
+
+        let jcode_routes = app
+            .remote_model_options
+            .iter()
+            .filter(|route| {
+                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(jcode_routes.len(), 3);
+        assert_eq!(
+            jcode_routes
+                .iter()
+                .map(|route| route.model.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "claude-opus-4-8",
+                "gpt-5.5",
+                "gpt-5.6-sol",
+            ])
+        );
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == "deepseek/deepseek-v4-pro"
+                && route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+        }));
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                || matches!(
+                    route.model.as_str(),
+                    "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+                )
+        }));
+    });
+}
+
+#[test]
 fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
