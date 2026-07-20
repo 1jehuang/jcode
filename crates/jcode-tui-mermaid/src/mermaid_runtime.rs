@@ -361,6 +361,28 @@ pub fn image_protocol_available() -> bool {
     PICKER.get().and_then(|p| p.as_ref()).is_some() || VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
 }
 
+fn protocol_supports_native_images(
+    protocol: Option<ProtocolType>,
+    video_export_mode: bool,
+) -> bool {
+    video_export_mode
+        || matches!(
+            protocol,
+            Some(ProtocolType::Kitty | ProtocolType::Iterm2 | ProtocolType::Sixel)
+        )
+}
+
+/// Whether Mermaid and other image-only content can use a real terminal image
+/// protocol. Unicode half-block rendering intentionally does not count: it is a
+/// useful raster fallback, but Mermaid source is more useful than a degraded
+/// diagram on terminals without Kitty, iTerm2, or Sixel support.
+pub fn native_image_protocol_available() -> bool {
+    if let Some(enabled) = IMAGE_PROTOCOL_OVERRIDE.with(|cell| cell.get()) {
+        return enabled;
+    }
+    protocol_supports_native_images(protocol_type(), VIDEO_EXPORT_MODE.load(Ordering::Relaxed))
+}
+
 fn protocol_uses_text_image_fallback(
     protocol: Option<ProtocolType>,
     video_export_mode: bool,
@@ -685,5 +707,37 @@ mod tests {
             Some(ProtocolType::Halfblocks),
             true
         ));
+    }
+
+    #[test]
+    fn native_image_capability_excludes_halfblocks_but_allows_video_export() {
+        assert!(protocol_supports_native_images(
+            Some(ProtocolType::Kitty),
+            false
+        ));
+        assert!(protocol_supports_native_images(
+            Some(ProtocolType::Iterm2),
+            false
+        ));
+        assert!(protocol_supports_native_images(
+            Some(ProtocolType::Sixel),
+            false
+        ));
+        assert!(!protocol_supports_native_images(
+            Some(ProtocolType::Halfblocks),
+            false
+        ));
+        assert!(!protocol_supports_native_images(None, false));
+        assert!(protocol_supports_native_images(None, true));
+    }
+
+    #[test]
+    fn native_image_capability_respects_scoped_test_override() {
+        with_image_protocol_override(Some(false), || {
+            assert!(!native_image_protocol_available());
+        });
+        with_image_protocol_override(Some(true), || {
+            assert!(native_image_protocol_available());
+        });
     }
 }

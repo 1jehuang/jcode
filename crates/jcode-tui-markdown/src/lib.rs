@@ -150,6 +150,12 @@ pub use jcode_render_core::reasoning_summary_line_markup;
 use render_support::{
     highlight_code_cached, line_plain_text, placeholder_code_block, ranges_overlap, render_table,
 };
+
+fn should_render_mermaid_block(lang: Option<&str>) -> bool {
+    mermaid_rendering_enabled()
+        && lang.map(mermaid::is_mermaid_lang).unwrap_or(false)
+        && mermaid::native_image_protocol_available()
+}
 pub use render_support::{highlight_file_lines, highlight_line, render_table_with_width};
 
 // Syntax highlighting resources (loaded once)

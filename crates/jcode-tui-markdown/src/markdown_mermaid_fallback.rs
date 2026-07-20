@@ -20,6 +20,15 @@ pub fn image_protocol_available() -> bool {
     false
 }
 
+pub fn native_image_protocol_available() -> bool {
+    false
+}
+
+#[cfg(test)]
+pub fn with_image_protocol_override<T>(_enabled: Option<bool>, f: impl FnOnce() -> T) -> T {
+    f()
+}
+
 pub fn get_font_size() -> Option<(u16, u16)> {
     None
 }

@@ -371,19 +371,9 @@ pub fn render_markdown_lazy(
                 code_block_content.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
-                let is_mermaid = mermaid_rendering_enabled()
-                    && code_block_lang
-                        .as_ref()
-                        .map(|l| mermaid::is_mermaid_lang(l))
-                        .unwrap_or(false);
+                let is_mermaid = should_render_mermaid_block(code_block_lang.as_deref());
 
                 if is_mermaid {
-                    if !mermaid_should_register_active() && !mermaid::image_protocol_available() {
-                        lines.push(mermaid_sidebar_placeholder(
-                            "↗ mermaid diagram (image protocols unavailable)",
-                        ));
-                        continue;
-                    }
                     let terminal_width = max_width.and_then(|w| u16::try_from(w).ok());
                     let result = if deferred_mermaid_mode {
                         mermaid::render_mermaid_deferred_with_registration(

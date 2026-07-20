@@ -508,6 +508,7 @@ mod tests {
         assert_ne!(cache_key("x", false, 240), cache_key("x", false, 312));
     }
 
+    #[cfg(feature = "mermaid-renderer")]
     #[test]
     fn image_placeholder_extracts_math_copy_target_with_source_delimiters() {
         let hash = 0x1a7e_c0de_u64;

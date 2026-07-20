@@ -408,26 +408,13 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             }
             Event::End(TagEnd::CodeBlock) => {
                 // Check if this is a mermaid diagram
-                let is_mermaid = mermaid_rendering_enabled()
-                    && code_block_lang
-                        .as_ref()
-                        .map(|l| mermaid::is_mermaid_lang(l))
-                        .unwrap_or(false);
+                let is_mermaid = should_render_mermaid_block(code_block_lang.as_deref());
 
                 if is_mermaid {
                     dbg_mermaid_blocks += 1;
                     // Render mermaid diagram.
                     // In streaming mode this updates only the ephemeral preview entry.
                     let terminal_width = max_width.and_then(|w| u16::try_from(w).ok());
-                    if !streaming_mode
-                        && !mermaid_should_register_active()
-                        && !mermaid::image_protocol_available()
-                    {
-                        lines.push(mermaid_sidebar_placeholder(
-                            "↗ mermaid diagram (image protocols unavailable)",
-                        ));
-                        continue;
-                    }
                     let result = if streaming_mode {
                         mermaid::render_mermaid_deferred_with_stream_scope(
                             &code_block_content,
@@ -982,10 +969,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     // Handle incomplete code block (streaming case)
     // If we're still inside a code block, render what we have so far
     if in_code_block && !code_block_content.is_empty() {
-        let is_mermaid = code_block_lang
-            .as_ref()
-            .map(|l| mermaid::is_mermaid_lang(l))
-            .unwrap_or(false);
+        let is_mermaid = should_render_mermaid_block(code_block_lang.as_deref());
 
         if is_mermaid {
             // For mermaid, show "rendering..." placeholder while streaming
