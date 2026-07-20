@@ -1,10 +1,10 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
-    LOW_HILL_CLIMBABILITY, TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
-    TODO_OWNERSHIP_CONTINUATION_MESSAGE, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
-    load_goals, load_todos, newly_completed_groups_have_sufficient_ownership, save_goals,
-    save_todos,
+    LOW_ALIGNMENT_SCORE, LOW_HILL_CLIMBABILITY, TODO_ALIGNMENT_CONTINUATION_MESSAGE,
+    TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE, TODO_OWNERSHIP_CONTINUATION_MESSAGE, TodoGoal,
+    TodoGoalChange, TodoGoalField, TodoItem, load_goals, load_todos,
+    newly_completed_groups_have_sufficient_ownership, save_goals, save_todos,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -132,10 +132,8 @@ fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> V
     {
         fields.push(TodoGoalField::UserIntention);
     }
-    if before.and_then(|goal| goal.user_intention_alignment)
-        != after.and_then(|goal| goal.user_intention_alignment)
-    {
-        fields.push(TodoGoalField::UserIntentionAlignment);
+    if before.and_then(|goal| goal.alignment_score) != after.and_then(|goal| goal.alignment_score) {
+        fields.push(TodoGoalField::AlignmentScore);
     }
     if before.and_then(|goal| goal.hill_climbability)
         != after.and_then(|goal| goal.hill_climbability)
@@ -196,7 +194,8 @@ fn goal_changes(before: &[TodoGoal], after: &[TodoGoal]) -> Vec<TodoGoalChange> 
     changes
 }
 
-/// Reframe nudges for goals that score low on hill-climbability.
+/// Reframe nudges for goals whose representation coverage or hill-climbability
+/// is too low to support a trustworthy feedback loop.
 ///
 /// A low score means there is no credible metric to iterate against, so the
 /// objective must be reframed into something measurable. The nudge is
@@ -205,12 +204,6 @@ fn goal_changes(before: &[TodoGoal], after: &[TodoGoal]) -> Vec<TodoGoalChange> 
 fn take_reframe_nudges(goals: &[TodoGoal], todos: &[TodoItem]) -> Vec<String> {
     let mut nudges = Vec::new();
     for goal in goals {
-        let Some(score) = goal.hill_climbability else {
-            continue;
-        };
-        if score >= LOW_HILL_CLIMBABILITY {
-            continue;
-        }
         let group_open = todos.iter().any(|todo| {
             goal_group_key(todo.group.as_deref()) == goal.group
                 && todo.status != "completed"
@@ -219,7 +212,18 @@ fn take_reframe_nudges(goals: &[TodoGoal], todos: &[TodoItem]) -> Vec<String> {
         if !group_open {
             continue;
         }
-        nudges.push(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.to_string());
+        if goal
+            .alignment_score
+            .is_none_or(|score| score < LOW_ALIGNMENT_SCORE)
+        {
+            nudges.push(TODO_ALIGNMENT_CONTINUATION_MESSAGE.to_string());
+        }
+        if goal
+            .hill_climbability
+            .is_none_or(|score| score < LOW_HILL_CLIMBABILITY)
+        {
+            nudges.push(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.to_string());
+        }
     }
     nudges
 }
@@ -299,6 +303,7 @@ fn normalize_todo_input(mut input: Value) -> Value {
                 for key in [
                     "confidence",
                     "completion_confidence",
+                    "alignment_score",
                     "user_intention_alignment",
                     "hill_climbability",
                     "end_to_end_ownership",
@@ -405,7 +410,7 @@ impl Tool for TodoTool {
                     "description": "Optional goal-level assessments, one per todo group. Use group: null for an ungrouped list. Stored assessments for groups omitted from an update are retained.",
                     "items": {
                         "type": "object",
-                        "required": ["user_intention_alignment", "hill_climbability", "feedback_loop"],
+                        "required": ["alignment_score", "hill_climbability", "feedback_loop"],
                         "properties": {
                             "group": {
                                 "type": "string",
@@ -415,11 +420,11 @@ impl Tool for TodoTool {
                                 "type": "string",
                                 "description": "Optional concise statement of the user's underlying reason or desired outcome for this goal. Omit on later updates to retain the stored intention."
                             },
-                            "user_intention_alignment": {
+                            "alignment_score": {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessment, 0-100, of how well the current goal, objective, and planned work align with the user's stated request and underlying intention."
+                                "description": "Self-assessment, 0-100, of how faithfully the objective and feedback loop together represent the user's stated request and underlying intention. Score the weaker link rather than averaging: (1) whether the objective captures the intended outcome, and (2) whether the feedback loop can detect achievement or failure across every material requirement, constraint, integration path, edge case, and necessary follow-through. This measures representation coverage, not implementation progress or completion confidence."
                             },
                             "hill_climbability": {
                                 "type": "integer",
@@ -429,11 +434,11 @@ impl Tool for TodoTool {
                             },
                             "objective": {
                                 "type": "string",
-                                "description": "Optional concise statement of the intended measurable outcome."
+                                "description": "Optional concise measurable outcome that faithfully represents the user's intention, including material constraints and necessary follow-through."
                             },
                             "feedback_loop": {
                                 "type": "string",
-                                "description": "Concrete process, observation, or check used to compare progress across iterations."
+                                "description": "Concrete process, observation, or check used to compare progress across iterations and detect whether the objective and user intention are satisfied or violated. It should cover material requirements, constraints, integration paths, edge cases, and necessary follow-through."
                             },
                             "end_to_end_ownership": {
                                 "type": "integer",
@@ -559,7 +564,8 @@ mod tests {
             .expect("goals should describe item objects");
         assert!(goal_props.contains_key("group"));
         assert!(goal_props.contains_key("user_intention"));
-        assert!(goal_props.contains_key("user_intention_alignment"));
+        assert!(goal_props.contains_key("alignment_score"));
+        assert!(!goal_props.contains_key("user_intention_alignment"));
         assert!(goal_props.contains_key("hill_climbability"));
         assert!(goal_props.contains_key("objective"));
         assert!(goal_props.contains_key("feedback_loop"));
@@ -575,10 +581,31 @@ mod tests {
                 .any(|value| value == "hill_climbability")
         );
         assert!(goal_required.iter().any(|value| value == "feedback_loop"));
+        assert!(goal_required.iter().any(|value| value == "alignment_score"));
+
+        let alignment_description = goal_props["alignment_score"]
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("alignment score should describe representation coverage");
+        for required_concept in [
+            "weaker link",
+            "objective captures the intended outcome",
+            "feedback loop can detect achievement or failure",
+            "every material requirement",
+            "integration path",
+            "edge case",
+            "necessary follow-through",
+            "not implementation progress",
+        ] {
+            assert!(
+                alignment_description.contains(required_concept),
+                "alignment description omitted {required_concept}: {alignment_description}"
+            );
+        }
         assert!(
-            goal_required
-                .iter()
-                .any(|value| value == "user_intention_alignment")
+            !alignment_description
+                .to_ascii_lowercase()
+                .contains("threshold")
         );
 
         let ownership_description = goal_props["end_to_end_ownership"]
@@ -699,14 +726,14 @@ mod tests {
     fn accepts_goals_including_string_coercion() {
         let input = json!({
             "goals": [
-                {"group": "optimize grep", "user_intention": "make repository search feel instant", "user_intention_alignment": "97", "hill_climbability": "95", "objective": "p50 under 50ms", "feedback_loop": "run the grep benchmark and compare p50"},
+                {"group": "optimize grep", "user_intention": "make repository search feel instant", "alignment_score": "97", "hill_climbability": "95", "objective": "p50 under 50ms", "feedback_loop": "run the grep benchmark and compare p50"},
                 {"hill_climbability": 20}
             ]
         });
         let parsed = parse(input).expect("goals should parse");
         let goals = parsed.goals.expect("goals present");
         assert_eq!(goals[0].hill_climbability, Some(95));
-        assert_eq!(goals[0].user_intention_alignment, Some(97));
+        assert_eq!(goals[0].alignment_score, Some(97));
         assert_eq!(
             goals[0].user_intention.as_deref(),
             Some("make repository search feel instant")
@@ -718,14 +745,41 @@ mod tests {
         );
         // Runtime parsing remains backward-compatible with stored or older
         // provider payloads even though the advertised schema requires the field.
-        assert_eq!(goals[1].user_intention_alignment, None);
+        assert_eq!(goals[1].alignment_score, None);
         assert_eq!(goals[1].feedback_loop, None);
         assert_eq!(goals[1].group, None);
+    }
+
+    #[test]
+    fn accepts_legacy_alignment_key_but_serializes_the_new_name() {
+        let parsed = parse(json!({
+            "goals": [{
+                "user_intention_alignment": "97",
+                "hill_climbability": 96,
+                "feedback_loop": "compare every requirement against observed behavior"
+            }]
+        }))
+        .expect("legacy alignment key should remain readable");
+        let goal = parsed.goals.expect("goals present").remove(0);
+        assert_eq!(goal.alignment_score, Some(97));
+
+        let serialized = serde_json::to_value(goal).expect("goal should serialize");
+        assert_eq!(serialized["alignment_score"], 97);
+        assert!(serialized.get("user_intention_alignment").is_none());
+
+        let legacy_field: TodoGoalField = serde_json::from_str("\"user_intention_alignment\"")
+            .expect("legacy goal-change field should deserialize");
+        assert_eq!(legacy_field, TodoGoalField::AlignmentScore);
+        assert_eq!(
+            serde_json::to_string(&legacy_field).expect("goal field should serialize"),
+            "\"alignment_score\""
+        );
     }
 
     fn goal(group: Option<&str>, score: u8) -> TodoGoal {
         TodoGoal {
             group: group.map(str::to_string),
+            alignment_score: Some(100),
             hill_climbability: Some(score),
             ..Default::default()
         }
@@ -748,15 +802,15 @@ mod tests {
     fn merge_goals_retains_user_intention_when_update_omits_it() {
         let mut stored_goal = goal(Some("a"), 20);
         stored_goal.user_intention = Some("make search feel instant".to_string());
-        stored_goal.user_intention_alignment = Some(60);
+        stored_goal.alignment_score = Some(60);
         let stored = vec![stored_goal];
 
         let mut updated_goal = goal(Some("a"), 90);
-        updated_goal.user_intention_alignment = Some(95);
+        updated_goal.alignment_score = Some(95);
         let merged = merge_goals(&stored, Some(vec![updated_goal]));
 
         assert_eq!(merged[0].hill_climbability, Some(90));
-        assert_eq!(merged[0].user_intention_alignment, Some(95));
+        assert_eq!(merged[0].alignment_score, Some(95));
         assert_eq!(
             merged[0].user_intention.as_deref(),
             Some("make search feel instant")
@@ -801,7 +855,7 @@ mod tests {
         let before = TodoGoal {
             group: Some("search".to_string()),
             user_intention: Some("make search feel instant".to_string()),
-            user_intention_alignment: Some(99),
+            alignment_score: Some(99),
             hill_climbability: Some(90),
             objective: Some("Keep p50 below 50ms".to_string()),
             feedback_loop: Some("Run one benchmark".to_string()),
@@ -838,6 +892,53 @@ mod tests {
         // A subsequent write receives the same generic guidance while the
         // private condition remains applicable.
         assert_eq!(take_reframe_nudges(&goals, &todos).len(), 1);
+    }
+
+    #[test]
+    fn alignment_nudge_requires_comprehensive_objective_and_feedback_coverage() {
+        let todos = vec![open_todo(Some("coverage"))];
+        let mut goal = goal(Some("coverage"), 96);
+        goal.alignment_score = Some(95);
+        let nudges = take_reframe_nudges(&[goal], &todos);
+
+        assert_eq!(nudges, vec![TODO_ALIGNMENT_CONTINUATION_MESSAGE]);
+        assert!(nudges[0].contains("objective"));
+        assert!(nudges[0].contains("feedback loop"));
+        assert!(nudges[0].contains("every material requirement"));
+        assert!(!nudges[0].contains("95"));
+        assert!(!nudges[0].to_ascii_lowercase().contains("threshold"));
+    }
+
+    #[test]
+    fn alignment_and_hill_nudges_report_both_independent_weak_links() {
+        let todos = vec![open_todo(Some("coverage"))];
+        let mut goal = goal(Some("coverage"), 95);
+        goal.alignment_score = Some(95);
+        let nudges = take_reframe_nudges(&[goal], &todos);
+
+        assert_eq!(
+            nudges,
+            vec![
+                TODO_ALIGNMENT_CONTINUATION_MESSAGE,
+                TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_quality_scores_do_not_bypass_open_goal_gates() {
+        let todos = vec![open_todo(Some("coverage"))];
+        let mut goal = goal(Some("coverage"), 96);
+        goal.alignment_score = None;
+        goal.hill_climbability = None;
+
+        assert_eq!(
+            take_reframe_nudges(&[goal], &todos),
+            vec![
+                TODO_ALIGNMENT_CONTINUATION_MESSAGE,
+                TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
+            ]
+        );
     }
 
     #[test]

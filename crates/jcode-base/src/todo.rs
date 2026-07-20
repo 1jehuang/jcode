@@ -14,6 +14,14 @@ pub const QUALITY_GATE_THRESHOLD: u8 = 96;
 /// quantifiable and verifiable.
 pub const LOW_HILL_CLIMBABILITY: u8 = QUALITY_GATE_THRESHOLD;
 
+/// Goals below this score do not yet have an objective and feedback loop that
+/// comprehensively represent the user's intention.
+pub const LOW_ALIGNMENT_SCORE: u8 = QUALITY_GATE_THRESHOLD;
+
+/// Model-facing continuation for the private alignment check. It explains the
+/// two representation links without disclosing the score or threshold.
+pub const TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. First, revise the objective so it faithfully represents the user's intended outcome. Then revise the feedback loop so it can detect success or failure across every material requirement, constraint, integration path, edge case, and necessary follow-through. Reassess the alignment score before continuing the task.";
+
 /// Model-facing continuation for the private hill-climbability check. Names the
 /// assessment category without disclosing the score or threshold.
 pub const TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-climbability is not high enough. First, improve the goal's objective and feedback loop so progress can be measured across iterations. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
@@ -127,6 +135,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         && trimmed.contains(" incomplete todo")
         && trimmed.ends_with("update the todo tool."))
         || trimmed.starts_with(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(TODO_ALIGNMENT_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
@@ -254,6 +263,7 @@ mod tests {
         assert!(is_auto_poke_message(
             TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE
         ));
+        assert!(is_auto_poke_message(TODO_ALIGNMENT_CONTINUATION_MESSAGE));
         assert!(is_auto_poke_message(TODO_OWNERSHIP_CONTINUATION_MESSAGE));
         assert!(is_auto_poke_message(TODO_COMPLETION_CONTINUATION_MESSAGE));
         assert!(is_auto_poke_message(
@@ -269,6 +279,7 @@ mod tests {
                 TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
                 "hill-climbability",
             ),
+            (TODO_ALIGNMENT_CONTINUATION_MESSAGE, "alignment score"),
             (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "end-to-end ownership"),
             (
                 TODO_COMPLETION_CONTINUATION_MESSAGE,
@@ -282,10 +293,16 @@ mod tests {
             let lower = message.to_ascii_lowercase();
             assert!(lower.contains(category));
             assert!(!message.chars().any(|ch| ch.is_ascii_digit()));
-            for disclosure in ["threshold", "score", "percent", "below", "quality gate"] {
+            for disclosure in ["threshold", "percent", "below", "quality gate"] {
                 assert!(
                     !lower.contains(disclosure),
                     "category-only continuation disclosed {disclosure}: {message}"
+                );
+            }
+            if category != "alignment score" {
+                assert!(
+                    !lower.contains("score"),
+                    "category-only continuation disclosed score: {message}"
                 );
             }
         }
@@ -294,6 +311,9 @@ mod tests {
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("First, improve"));
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("call the todo tool again"));
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("before continuing the task"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("user's intended outcome"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("every material requirement"));
+        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("success or failure"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("full user outcome"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("complete workflow"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("necessary follow-through"));
@@ -496,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_intention_fields_round_trip_through_storage() {
+    fn goal_alignment_fields_round_trip_through_storage() {
         let _guard = crate::storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -505,19 +525,22 @@ mod tests {
         let goals = vec![TodoGoal {
             group: Some("todo user intention".to_string()),
             user_intention: Some("Preserve why the user requested the work".to_string()),
-            user_intention_alignment: Some(97),
+            alignment_score: Some(97),
             ..Default::default()
         }];
         save_goals("user-intention-round-trip", &goals).expect("save goals");
+        let stored = std::fs::read_to_string(
+            goals_path("user-intention-round-trip").expect("goal storage path"),
+        )
+        .expect("read stored goals");
+        assert!(stored.contains("\"alignment_score\""));
+        assert!(!stored.contains("\"user_intention_alignment\""));
         let loaded = load_goals("user-intention-round-trip").expect("load goals");
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].group, goals[0].group);
         assert_eq!(loaded[0].user_intention, goals[0].user_intention);
-        assert_eq!(
-            loaded[0].user_intention_alignment,
-            goals[0].user_intention_alignment
-        );
+        assert_eq!(loaded[0].alignment_score, goals[0].alignment_score);
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),

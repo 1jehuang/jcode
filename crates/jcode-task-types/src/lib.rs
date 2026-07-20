@@ -242,10 +242,18 @@ pub struct TodoGoal {
     /// distinct from the agent's measurable objective and validation loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_intention: Option<String>,
-    /// How well the current goal, objective, and planned work align with the
-    /// user's stated request and underlying intention, from 0-100.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_intention_alignment: Option<u8>,
+    /// How faithfully the objective and feedback loop together represent the
+    /// user's stated request and underlying intention, from 0-100. This is the
+    /// weaker of two links: whether the objective captures the intended outcome,
+    /// and whether the feedback loop can detect achievement or failure across
+    /// the material requirements, constraints, integration paths, edge cases,
+    /// and necessary follow-through. It does not measure implementation progress.
+    #[serde(
+        default,
+        alias = "user_intention_alignment",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub alignment_score: Option<u8>,
     /// How hill-climbable this goal is, from 0-100: can progress be measured
     /// against a quantifiable, verifiable objective and iterated on?
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,7 +280,8 @@ pub struct TodoGoal {
 #[serde(rename_all = "snake_case")]
 pub enum TodoGoalField {
     UserIntention,
-    UserIntentionAlignment,
+    #[serde(alias = "user_intention_alignment")]
+    AlignmentScore,
     HillClimbability,
     Objective,
     FeedbackLoop,

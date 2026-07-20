@@ -434,11 +434,11 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
     {
         line.push_str(&format!("\n- User intention: {}\n", user_intention.trim()));
     }
-    if let Some(score) = goal.user_intention_alignment {
+    if let Some(score) = goal.alignment_score {
         if line.is_empty() {
             line.push('\n');
         }
-        line.push_str(&format!("- User intention alignment: **{}%**\n", score));
+        line.push_str(&format!("- Alignment score: **{}%**\n", score));
     }
     if let Some(score) = goal.hill_climbability {
         if line.is_empty() {
@@ -630,7 +630,7 @@ fn hash_todos_payload(
     for goal in goals {
         goal.group.hash(&mut hasher);
         goal.user_intention.hash(&mut hasher);
-        goal.user_intention_alignment.hash(&mut hasher);
+        goal.alignment_score.hash(&mut hasher);
         goal.hill_climbability.hash(&mut hasher);
         goal.objective.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
@@ -754,7 +754,7 @@ mod tests {
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
                 user_intention: Some("make navigation feel immediate".to_string()),
-                user_intention_alignment: Some(96),
+                alignment_score: Some(96),
                 hill_climbability: Some(90),
                 objective: Some("frame time under 8ms".to_string()),
                 feedback_loop: Some(
@@ -773,7 +773,7 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- User intention alignment: **96%**"),
+            markdown.contains("- Alignment score: **96%**"),
             "{markdown}"
         );
         assert!(
@@ -852,14 +852,14 @@ mod tests {
     }
 
     #[test]
-    fn todos_view_hash_changes_when_user_intention_alignment_changes() {
+    fn todos_view_hash_changes_when_alignment_score_changes() {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let mut goals = vec![crate::todo::TodoGoal {
-            user_intention_alignment: Some(70),
+            alignment_score: Some(70),
             ..Default::default()
         }];
         let before = hash_todos_payload(Some("session_test"), &todos, &goals);
-        goals[0].user_intention_alignment = Some(95);
+        goals[0].alignment_score = Some(95);
         let after = hash_todos_payload(Some("session_test"), &todos, &goals);
         assert_ne!(before, after);
     }
