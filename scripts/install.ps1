@@ -76,6 +76,20 @@ function Write-Info($msg) { Write-Host $msg -ForegroundColor Blue }
 function Write-Err($msg) { throw "error: $msg" }
 function Write-Warn($msg) { Write-Host "warning: $msg" -ForegroundColor Yellow }
 
+function ConvertFrom-JcodeWebContent($Content) {
+    if ($null -eq $Content) { return "" }
+
+    # Windows PowerShell 5.1 returns Byte[] for some text responses when the
+    # server uses application/octet-stream (including jcode.sh metadata and
+    # GitHub release checksum manifests). Casting Byte[] directly to [string]
+    # produces a space-separated list of decimal bytes instead of the text.
+    if ($Content -is [byte[]]) {
+        return [System.Text.Encoding]::UTF8.GetString($Content)
+    }
+
+    return [string]$Content
+}
+
 function Test-JcodeReleaseTag([string]$Tag) {
     return [bool]($Tag -match '^v[0-9]+\.[0-9]+\.[0-9]+(?:[+.-][A-Za-z0-9.-]+)?$')
 }
@@ -94,7 +108,7 @@ function Get-LatestJcodeReleaseTag {
     $metadataTag = $null
     try {
         $metadataResponse = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/latest/version"
-        $candidate = ([string]$metadataResponse.Content).Trim()
+        $candidate = (ConvertFrom-JcodeWebContent -Content $metadataResponse.Content).Trim()
         if (Test-JcodeReleaseTag $candidate) { $metadataTag = $candidate }
     } catch {}
 
@@ -136,7 +150,7 @@ function Get-JcodeReleaseDownloadBases([string]$ReleaseTag) {
     $bases = New-Object System.Collections.Generic.List[string]
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/$ReleaseTag/download-bases"
-        foreach ($line in ([string]$response.Content -split "`r?`n")) {
+        foreach ($line in ((ConvertFrom-JcodeWebContent -Content $response.Content) -split "`r?`n")) {
             $candidate = $line.Trim().TrimEnd('/')
             if ($candidate -match '^https://\S+$' -and -not $bases.Contains($candidate)) {
                 $bases.Add($candidate)
@@ -175,7 +189,7 @@ function Get-ReleaseChecksum([string]$ReleaseTag, [string]$AssetName) {
     )) {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri $checksumUrl
-            $expected = Get-JcodeSha256FromManifest -ManifestText ([string]$response.Content) -AssetName $AssetName
+            $expected = Get-JcodeSha256FromManifest -ManifestText (ConvertFrom-JcodeWebContent -Content $response.Content) -AssetName $AssetName
             if ($expected) { return $expected }
         } catch {
             $lastError = $_

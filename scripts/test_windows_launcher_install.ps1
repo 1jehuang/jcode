@@ -88,6 +88,10 @@ try {
     Set-Content -LiteralPath $checksumFile -Value 'known-content' -NoNewline
     $digest = (Get-FileHash -LiteralPath $checksumFile -Algorithm SHA256).Hash.ToLowerInvariant()
     $manifest = "$digest  nested/path/jcode-windows-x86_64.exe"
+    $manifestBytes = [System.Text.Encoding]::UTF8.GetBytes($manifest)
+    Assert-Equal $manifest (ConvertFrom-JcodeWebContent -Content $manifest) 'web response decoder should preserve string content'
+    Assert-Equal $manifest (ConvertFrom-JcodeWebContent -Content $manifestBytes) 'web response decoder should decode Windows PowerShell 5.1 byte-array content as UTF-8'
+    Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText (ConvertFrom-JcodeWebContent -Content $manifestBytes) -AssetName 'jcode-windows-x86_64.exe') 'checksum parser should accept a manifest decoded from a byte-array web response'
     Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText $manifest -AssetName 'jcode-windows-x86_64.exe') 'checksum parser should match release assets by file name'
     Assert-Equal $null (Get-JcodeSha256FromManifest -ManifestText $manifest -AssetName 'missing.exe') 'checksum parser should fail closed when the requested asset is absent'
     Assert-Equal $digest (Assert-JcodeFileChecksum -FilePath $checksumFile -ExpectedSha256 $digest -AssetName 'jcode-windows-x86_64.exe') 'checksum validation should accept the matching digest'
