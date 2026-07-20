@@ -7,6 +7,11 @@ edition = "2024"
 name = "jcode_notify_email"
 path = "src/lib.rs"
 
+[package.metadata.cargo-machete]
+# This dependency only activates native-tls's vendored feature for portable
+# Linux release builds, so it intentionally has no direct Rust references.
+ignored = ["native-tls"]
+
 [features]
 # The CentOS 7 compatibility image only provides OpenSSL 1.0.2, which current
 # openssl-sys no longer supports. Release builds opt into a current vendored
