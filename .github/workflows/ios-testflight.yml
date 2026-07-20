@@ -84,22 +84,21 @@ jobs:
           printf '%s' "$APPSTORE_API_KEY_P8" > ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
           chmod 600 ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
 
-      - name: Archive (cloud-managed signing)
+      - name: Archive (unsigned; signing happens at export)
         working-directory: ios
         run: |
           set -o pipefail
+          # The team has no registered devices, so a development profile can
+          # never be created at archive time. Archive unsigned; the export
+          # step signs with cloud-managed Apple Distribution via the ASC key.
           xcodebuild archive \
             -project JCodeMobile.xcodeproj \
             -scheme "$SCHEME" \
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath build/JCodeMobile.xcarchive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$HOME/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8" \
-            -authenticationKeyID "${{ secrets.APPSTORE_API_KEY_ID }}" \
-            -authenticationKeyIssuerID "${{ secrets.APPSTORE_ISSUER_ID }}" \
-            CODE_SIGN_STYLE=Automatic \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             | tail -100
@@ -118,6 +117,8 @@ jobs:
             <string>upload</string>
             <key>teamID</key>
             <string>TAS6ARKDN7</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
             <key>uploadSymbols</key>
             <true/>
             <key>manageAppVersionAndBuildNumber</key>
