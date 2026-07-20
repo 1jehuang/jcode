@@ -49,7 +49,7 @@ struct ToolCallCard: View {
                 }
             }
         }
-        .padding(8)
+        .padding(12)
         .background(Theme.surfaceElevated)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
@@ -106,6 +106,7 @@ struct ToolCallCard: View {
                 .foregroundStyle(Theme.textSecondary)
                 .padding(8)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.background)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }

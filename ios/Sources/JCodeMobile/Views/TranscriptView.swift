@@ -101,7 +101,6 @@ struct TranscriptView: View {
                 .font(Theme.mono(12))
                 .foregroundStyle(Theme.textTertiary)
         }
-        .padding(.leading, 4)
     }
 }
 
