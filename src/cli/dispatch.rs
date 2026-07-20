@@ -21,7 +21,39 @@ use super::{
 };
 use provider_init::ProviderChoice;
 
+fn is_file_controlled_debug_client() -> bool {
+    std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
+}
+
+/// Tie file-controlled debug clients to the process that launched them.
+///
+/// These clients are automation helpers, not user-owned terminals. Without a
+/// parent-death signal they are reparented to init when a verification script
+/// or debug server exits, retaining a full TUI and session history indefinitely.
+#[cfg(target_os = "linux")]
+fn arm_debug_client_parent_death_signal() {
+    if !is_file_controlled_debug_client() {
+        return;
+    }
+
+    // Capture the parent first, then check it again after prctl. This closes the
+    // race where the launcher exits immediately before the signal is armed.
+    // Safety: getppid has no preconditions and does not dereference pointers.
+    let parent_pid = unsafe { libc::getppid() };
+    // Safety: PR_SET_PDEATHSIG accepts a signal number as its scalar argument.
+    let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } == 0;
+    // Safety: getppid has no preconditions and does not dereference pointers.
+    let current_parent_pid = unsafe { libc::getppid() };
+    if armed && (parent_pid <= 1 || current_parent_pid != parent_pid) {
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn arm_debug_client_parent_death_signal() {}
+
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    arm_debug_client_parent_death_signal();
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old

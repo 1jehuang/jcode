@@ -2,6 +2,23 @@ use super::*;
 use crate::transport::Listener;
 
 #[test]
+fn only_file_controlled_debug_clients_need_parent_lifetime_binding() {
+    let _lock = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_DEBUG_CMD_PATH");
+    crate::env::remove_var("JCODE_DEBUG_CMD_PATH");
+    assert!(!is_file_controlled_debug_client());
+
+    crate::env::set_var("JCODE_DEBUG_CMD_PATH", "/tmp/jcode-test-debug-command");
+    assert!(is_file_controlled_debug_client());
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_DEBUG_CMD_PATH", previous);
+    } else {
+        crate::env::remove_var("JCODE_DEBUG_CMD_PATH");
+    }
+}
+
+#[test]
 fn auth_doctor_provider_focus_uses_global_provider_when_positional_is_absent() {
     assert_eq!(
         auth_doctor_provider_arg(None, &ProviderChoice::Cerebras),
