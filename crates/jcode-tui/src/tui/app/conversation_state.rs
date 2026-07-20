@@ -378,6 +378,14 @@ impl App {
     }
 
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
+        // Compaction intentionally replaces the provider-facing transcript
+        // (typically hundreds of messages become summary + recent tail). The
+        // previous request is therefore not a valid append-only cache baseline.
+        // Advance the generation as well as clearing the current baseline so a
+        // pre-compaction request that completes later cannot restore stale state.
+        self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
+        self.kv_cache.kv_cache_baseline = None;
+        self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.context_warning_shown = false;

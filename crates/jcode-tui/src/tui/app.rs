@@ -190,6 +190,10 @@ struct KvCacheBaseline {
     /// the new (often smaller) history look like a broken prefix and produces a
     /// spurious `harness:_prefix_changed` miss.
     session_id: Option<String>,
+    /// Cache-history generation this baseline belongs to. Compaction replaces
+    /// the provider-facing transcript, so a baseline captured before it must
+    /// never be compared with or restored over the compacted request history.
+    cache_generation: u64,
     /// Effective prompt size of the last completed request. This includes input,
     /// cache-read, and cache-creation tokens for split-accounting providers like
     /// Anthropic. It is the reusable cached prefix, meaning what gets resent if
@@ -213,6 +217,7 @@ struct PendingKvCacheRequest {
     signature: Option<KvCacheRequestSignature>,
     baseline_messages_prefix_matches: Option<bool>,
     baseline: Option<KvCacheBaseline>,
+    cache_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,6 +682,10 @@ struct TokenAccounting {
 struct KvCacheState {
     kv_cache_baseline: Option<KvCacheBaseline>,
     pending_kv_cache_request: Option<PendingKvCacheRequest>,
+    /// Incremented whenever compaction replaces the provider-facing history.
+    /// Pending requests retain the generation they started in so an older
+    /// in-flight request cannot restore a stale baseline after compaction.
+    cache_generation: u64,
     current_api_usage_recorded: bool,
     kv_cache_turn_number: Option<usize>,
     kv_cache_turn_call_index: u16,
@@ -1648,6 +1657,7 @@ impl App {
             signature: Some(signature),
             baseline_messages_prefix_matches,
             baseline,
+            cache_generation: self.kv_cache.cache_generation,
         });
     }
 
@@ -1694,6 +1704,7 @@ impl App {
             signature: Some(signature),
             baseline_messages_prefix_matches,
             baseline,
+            cache_generation: self.kv_cache.cache_generation,
         });
     }
 
@@ -1719,7 +1730,9 @@ impl App {
     fn kv_cache_baseline_for_current_session(&self) -> Option<KvCacheBaseline> {
         let baseline = self.kv_cache.kv_cache_baseline.clone()?;
         let current = self.kv_cache_session_id();
-        if baseline.session_id == current {
+        if baseline.session_id == current
+            && baseline.cache_generation == self.kv_cache.cache_generation
+        {
             Some(baseline)
         } else {
             None
@@ -1874,6 +1887,7 @@ impl App {
         if !has_cache_telemetry {
             self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
                 session_id: baseline_session_id,
+                cache_generation: request.cache_generation,
                 input_tokens: self.streaming.streaming_input_tokens,
                 completed_at: Instant::now(),
                 provider: request.provider,
@@ -1914,6 +1928,7 @@ impl App {
 
         self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
             session_id: baseline_session_id,
+            cache_generation: request.cache_generation,
             input_tokens: effective_prompt_tokens,
             completed_at: Instant::now(),
             provider: request.provider,
@@ -2122,6 +2137,7 @@ impl App {
             signature: None,
             baseline_messages_prefix_matches: None,
             baseline: self.kv_cache_baseline_for_current_session(),
+            cache_generation: self.kv_cache.cache_generation,
         }
     }
 
