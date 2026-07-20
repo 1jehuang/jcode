@@ -91,6 +91,15 @@ def build_user_model(
             response_s=0.0,
         ),
         Action(
+            id="tap_suggestion", label="Tap a starter prompt (empty state)",
+            src="chat", dst="chat", weight=wt("tap_suggestion", 0.02),
+            target_id=None,  # centered chips; no fixed chrome frame
+            # One decision + one tap replaces compose-from-scratch (M + 12K):
+            # this edge is the cheap alternative to send_message on first use.
+            operators=["M", "TAP"],
+            response_s=0.0,
+        ),
+        Action(
             id="read_idle", label="Read / dwell (no input)",
             src="chat", dst="chat", weight=wt("read_idle", 0.10),
             target_id=None,

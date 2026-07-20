@@ -2,7 +2,18 @@ import JCodeKit
 import SwiftUI
 
 /// Friendly placeholder for a fresh session, centered in the canvas.
+///
+/// Beyond the affordance text, it offers one-tap starter prompts so the first
+/// interaction costs a single tap instead of composing from scratch.
 struct EmptyTranscript: View {
+    var onSuggestion: ((String) -> Void)? = nil
+
+    private static let suggestions = [
+        "What's the state of this repo?",
+        "Run the tests",
+        "Summarize recent changes",
+    ]
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "terminal")
@@ -15,6 +26,27 @@ struct EmptyTranscript: View {
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
+            if let onSuggestion {
+                VStack(spacing: 8) {
+                    ForEach(Self.suggestions, id: \.self) { suggestion in
+                        Button {
+                            onSuggestion(suggestion)
+                        } label: {
+                            Text(suggestion)
+                                .font(.subheadline)
+                                .foregroundStyle(Theme.textPrimary)
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: 44)
+                                .background(Theme.surface)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Fills the composer with this prompt")
+                    }
+                }
+                .padding(.top, 8)
+            }
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

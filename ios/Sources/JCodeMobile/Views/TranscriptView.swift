@@ -11,6 +11,7 @@ import SwiftUI
 struct TranscriptView: View {
     let entries: [TranscriptEntry]
     let isReasoning: Bool
+    var onSuggestion: ((String) -> Void)? = nil
 
     /// True while the viewport is at (or near) the bottom of the content.
     @State private var isPinnedToBottom = true
@@ -20,7 +21,7 @@ struct TranscriptView: View {
 
     var body: some View {
         if entries.isEmpty && !isReasoning {
-            EmptyTranscript()
+            EmptyTranscript(onSuggestion: onSuggestion)
         } else {
             GeometryReader { viewport in
                 scroller(viewportHeight: viewport.size.height)

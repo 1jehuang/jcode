@@ -37,7 +37,8 @@ struct ChatView: View {
 
             TranscriptView(
                 entries: model.session.transcript,
-                isReasoning: model.session.isReasoning
+                isReasoning: model.session.isReasoning,
+                onSuggestion: { model.draft = $0 }
             )
 
             if model.session.hasPendingInterrupts {
