@@ -1102,7 +1102,9 @@ fn description_includes_swarm_prompt_guidance() {
         "description should advertise the enforced light/ad hoc spawn boundary"
     );
     assert!(
-        description.contains("Recursive spawning is enabled only when the root session is running in swarm-deep mode"),
+        description.contains(
+            "Recursive spawning is enabled only when the root session is running in swarm-deep mode"
+        ),
         "description should reserve recursive spawning for deep-swarm roots"
     );
 }

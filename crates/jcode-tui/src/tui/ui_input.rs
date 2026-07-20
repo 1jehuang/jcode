@@ -1139,13 +1139,16 @@ mod tests {
                 None,
             );
             let expected_top = (0..=HEIGHT - STACK_HEIGHT).rev().find(|&start| {
-                (start..start + STACK_HEIGHT)
-                    .all(|row| occupied_mask & (1 << row) == 0)
+                (start..start + STACK_HEIGHT).all(|row| occupied_mask & (1 << row) == 0)
             });
 
             match expected_top {
                 Some(start) => {
-                    assert_eq!(placements.len(), STACK_HEIGHT as usize, "mask {occupied_mask:08b}");
+                    assert_eq!(
+                        placements.len(),
+                        STACK_HEIGHT as usize,
+                        "mask {occupied_mask:08b}"
+                    );
                     assert_eq!(
                         placements
                             .iter()
@@ -2397,14 +2400,12 @@ fn right_fact_area_on_row(
     transcript_scrollbar_visible: bool,
     protected_position: Option<Position>,
 ) -> Option<Rect> {
-    let row_right = if transcript_scrollbar_visible
-        && row >= messages_area.y
-        && row < messages_area.bottom()
-    {
-        right.saturating_sub(1)
-    } else {
-        right
-    };
+    let row_right =
+        if transcript_scrollbar_visible && row >= messages_area.y && row < messages_area.bottom() {
+            right.saturating_sub(1)
+        } else {
+            right
+        };
 
     let required = line
         .width
