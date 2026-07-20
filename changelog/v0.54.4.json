@@ -1,0 +1,10 @@
+{
+  "version": "0.54.4",
+  "date": "2026-07-20",
+  "title": "Complete cross-platform release artifacts",
+  "fixes": [
+    "Restores the portable Linux x86_64 download by including the complete runtime needed to build bundled OpenSSL",
+    "Windows x86_64 and ARM64 downloads publish reliably from the release pipeline",
+    "Release publication now remains gated until every Linux, macOS, Windows, and FreeBSD artifact is available"
+  ]
+}
