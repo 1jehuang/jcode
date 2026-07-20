@@ -331,7 +331,12 @@ mod tests {
             .expect("Plus tier includes GPT-5.5");
         let route_selection = jcode_provider_core::RouteSelection::from_model_route(gpt_route);
         let flagship_routes = JcodeProvider::model_routes_for(JcodeTier::Flagship);
-        let expected_models = vec!["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol"];
+        let expected_models = vec![
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+        ];
 
         assert_eq!(
             plus_routes
@@ -361,7 +366,7 @@ mod tests {
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
-        assert_eq!(flagship_routes.len(), 4);
+        assert_eq!(flagship_routes.len(), 5);
         assert!(
             flagship_routes
                 .iter()

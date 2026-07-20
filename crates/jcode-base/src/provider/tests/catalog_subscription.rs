@@ -249,6 +249,8 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
 
     assert!(ensure_model_allowed_for_subscription("claude-opus-4-8").is_ok());
     assert!(ensure_model_allowed_for_subscription("opus 4.8").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-sonnet-4-6").is_ok());
+    assert!(ensure_model_allowed_for_subscription("sonnet 4.6").is_ok());
     assert!(ensure_model_allowed_for_subscription("gpt-5.5").is_ok());
     assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_err());
 
@@ -294,6 +296,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
     let filtered = filtered_display_models(vec![
         "gpt-5.4".to_string(),
         "claude-opus-4-8".to_string(),
+        "claude-sonnet-4-6".to_string(),
         "gpt-5.5".to_string(),
         "gpt-5.6-sol".to_string(),
         "claude-fable-5".to_string(),
@@ -304,6 +307,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
         filtered,
         vec![
             "claude-opus-4-8".to_string(),
+            "claude-sonnet-4-6".to_string(),
             "gpt-5.5".to_string(),
             "gpt-5.6-sol".to_string(),
         ]
@@ -329,6 +333,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
 fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
     let models = vec![
         "claude-opus-4-8".to_string(),
+        "claude-sonnet-4-6".to_string(),
         "gpt-5.5".to_string(),
         "gpt-5.6-sol".to_string(),
     ];
@@ -342,7 +347,12 @@ fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
             .iter()
             .map(|route| route.model.as_str())
             .collect::<Vec<_>>(),
-        vec!["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol"]
+        vec![
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+        ]
     );
     assert!(routes.iter().all(|route| {
         route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME

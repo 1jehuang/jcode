@@ -122,6 +122,20 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         note: "Frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        aliases: &[
+            "claude-sonnet-4-6",
+            "sonnet-4-6",
+            "sonnet 4.6",
+            "claude sonnet 4.6",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Frontier model; routed server-side to Amazon Bedrock by the jcode router.",
+    },
+    CuratedModel {
         id: "gpt-5.5",
         display_name: "GPT-5.5",
         aliases: &["gpt-5.5", "gpt-5-5", "gpt 5.5"],
@@ -370,6 +384,11 @@ mod tests {
         );
         assert_eq!(canonical_model_id("gpt-5.5"), Some("gpt-5.5"));
         assert_eq!(canonical_model_id("GPT 5.5"), Some("gpt-5.5"));
+        assert_eq!(
+            canonical_model_id("Claude Sonnet 4.6"),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(canonical_model_id("sonnet 4.6"), Some("claude-sonnet-4-6"));
         assert_eq!(canonical_model_id("fable-5"), Some("claude-fable-5"));
         assert_eq!(canonical_model_id("Claude Fable 5"), Some("claude-fable-5"));
         assert_eq!(canonical_model_id("sol"), Some("gpt-5.6-sol"));
@@ -449,6 +468,7 @@ mod tests {
 
         for tier in JcodeTier::ALL {
             assert!(tier.allows(find_curated_model("claude-opus-4-8").unwrap().min_tier));
+            assert!(tier.allows(find_curated_model("claude-sonnet-4-6").unwrap().min_tier));
             assert!(tier.allows(find_curated_model("gpt-5.5").unwrap().min_tier));
             assert!(tier.allows(find_curated_model("gpt-5.6-sol").unwrap().min_tier));
             assert_eq!(
@@ -468,6 +488,7 @@ mod tests {
         assert_eq!(cached_tier(), None);
         assert_eq!(effective_tier(), JcodeTier::Plus);
         assert!(is_model_allowed_for_current_tier("claude-opus-4-8"));
+        assert!(is_model_allowed_for_current_tier("claude-sonnet-4-6"));
         assert!(is_model_allowed_for_current_tier("gpt-5.5"));
         assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
         assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
@@ -480,6 +501,7 @@ mod tests {
             crate::env::set_var(JCODE_TIER_ENV, tier.as_str());
             assert_eq!(effective_tier(), tier);
             assert!(is_model_allowed_for_current_tier("claude-opus-4-8"));
+            assert!(is_model_allowed_for_current_tier("claude-sonnet-4-6"));
             assert!(is_model_allowed_for_current_tier("gpt-5.5"));
             assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
             assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
