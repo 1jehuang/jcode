@@ -477,6 +477,47 @@ impl App {
     /// auth method: an older session may have baked an OAuth-only fallback
     /// route into the cache, which would otherwise permanently hide the
     /// API-key route for that model.
+    fn append_jcode_subscription_routes(
+        &self,
+        routes: &mut Vec<crate::provider::ModelRoute>,
+        require_credentials: bool,
+    ) {
+        if require_credentials && !crate::subscription_catalog::has_credentials() {
+            return;
+        }
+
+        let tier = crate::subscription_catalog::effective_tier();
+        let existing = routes
+            .iter()
+            .filter(|route| {
+                route
+                    .api_method
+                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
+            })
+            .filter_map(|route| crate::subscription_catalog::canonical_model_id(&route.model))
+            .collect::<HashSet<_>>();
+        for model in crate::subscription_catalog::curated_models()
+            .iter()
+            .filter(|model| {
+                tier.allows(model.min_tier)
+                    && !existing.contains(model.id)
+                    && self.remote_available_entries.iter().any(|available| {
+                        crate::subscription_catalog::canonical_model_id(available)
+                            == Some(model.id)
+                    })
+            })
+        {
+            routes.push(crate::provider::ModelRoute {
+                model: model.id.to_string(),
+                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                available: true,
+                detail: crate::subscription_catalog::routing_policy_detail(model),
+                cheapness: None,
+            });
+        }
+    }
+
     fn extend_remote_routes_for_uncovered_models(
         &self,
         routes: &mut Vec<crate::provider::ModelRoute>,
@@ -487,13 +528,9 @@ impl App {
         // Jcode subscription routes are a complete, server-managed catalog.
         // Do not mix in locally configured Anthropic/OpenAI credentials merely
         // because a curated model also belongs to one of those upstreams.
-        let provider_is_jcode_subscription = self
-            .remote_provider_name
-            .as_deref()
-            .is_some_and(|name| {
-                name.eq_ignore_ascii_case(
-                    crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME,
-                )
+        let provider_is_jcode_subscription =
+            self.remote_provider_name.as_deref().is_some_and(|name| {
+                name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
             });
         if provider_is_jcode_subscription {
             *routes = crate::provider::remote_model_routes_fallback(
@@ -517,23 +554,7 @@ impl App {
                 self.remote_provider_name.as_deref(),
                 &self.remote_available_entries,
             );
-            let tier = crate::subscription_catalog::effective_tier();
-            for model in crate::subscription_catalog::curated_models().iter().filter(|model| {
-                tier.allows(model.min_tier)
-                    && self.remote_available_entries.iter().any(|available| {
-                        crate::subscription_catalog::canonical_model_id(available)
-                            == Some(model.id)
-                    })
-            }) {
-                routes.push(crate::provider::ModelRoute {
-                    model: model.id.to_string(),
-                    provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                    api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-                    available: true,
-                    detail: crate::subscription_catalog::routing_policy_detail(model),
-                    cheapness: None,
-                });
-            }
+            self.append_jcode_subscription_routes(routes, false);
             return;
         }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =
@@ -559,31 +580,34 @@ impl App {
             })
             .cloned()
             .collect();
-        if missing.is_empty() {
-            return;
-        }
-        let existing: HashSet<(String, String, String)> = routes
-            .iter()
-            .map(|route| {
-                (
+        if !missing.is_empty() {
+            let existing: HashSet<(String, String, String)> = routes
+                .iter()
+                .map(|route| {
+                    (
+                        route.model.clone(),
+                        route.provider.clone(),
+                        route.api_method.clone(),
+                    )
+                })
+                .collect();
+            for route in crate::provider::remote_model_routes_fallback(
+                self.remote_provider_name.as_deref(),
+                &missing,
+            ) {
+                if !existing.contains(&(
                     route.model.clone(),
                     route.provider.clone(),
                     route.api_method.clone(),
-                )
-            })
-            .collect();
-        for route in crate::provider::remote_model_routes_fallback(
-            self.remote_provider_name.as_deref(),
-            &missing,
-        ) {
-            if !existing.contains(&(
-                route.model.clone(),
-                route.provider.clone(),
-                route.api_method.clone(),
-            )) {
-                routes.push(route);
+                )) {
+                    routes.push(route);
+                }
             }
         }
+        // Detailed provider hydration describes ordinary configured routes. A
+        // signed-in Jcode subscriber still needs the managed route for each
+        // entitled curated model alongside those Anthropic/OpenAI/etc. rows.
+        self.append_jcode_subscription_routes(routes, true);
     }
 
     fn hydrate_remote_model_catalog_snapshot(

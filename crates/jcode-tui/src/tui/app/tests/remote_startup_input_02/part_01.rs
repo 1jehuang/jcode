@@ -477,6 +477,115 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
 }
 
 #[test]
+fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
+    with_temp_jcode_home(|| {
+        let previous_key = std::env::var_os(crate::subscription_catalog::JCODE_API_KEY_ENV);
+        let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
+        crate::env::set_var(
+            crate::subscription_catalog::JCODE_API_KEY_ENV,
+            "jcode_test_subscription_key",
+        );
+        crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "plus");
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_available_entries = vec![
+            "claude-fable-5".to_string(),
+            "claude-opus-4-8".to_string(),
+            "gpt-5.5".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "deepseek/deepseek-v4-pro".to_string(),
+        ];
+        app.remote_model_options = vec![
+            crate::provider::ModelRoute {
+                model: "claude-opus-4-8".to_string(),
+                provider: "Anthropic".to_string(),
+                api_method: "claude-api".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.5".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.6-sol".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek/deepseek-v4-pro".to_string(),
+                provider: "auto".to_string(),
+                api_method: "openrouter".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+        ];
+
+        app.open_model_picker();
+
+        match previous_key {
+            Some(value) => {
+                crate::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, value)
+            }
+            None => crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV),
+        }
+        match previous_tier {
+            Some(value) => crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, value),
+            None => crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV),
+        }
+
+        let jcode_routes = app
+            .remote_model_options
+            .iter()
+            .filter(|route| {
+                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(jcode_routes.len(), 3);
+        assert_eq!(
+            jcode_routes
+                .iter()
+                .map(|route| route.model.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "claude-opus-4-8",
+                "gpt-5.5",
+                "gpt-5.6-sol",
+            ])
+        );
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == "claude-opus-4-8"
+                && route.provider == "Anthropic"
+                && route.api_method == "claude-api"
+        }));
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == "deepseek/deepseek-v4-pro"
+                && route.provider == "auto"
+                && route.api_method == "openrouter"
+        }));
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                || matches!(
+                    route.model.as_str(),
+                    "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+                )
+        }));
+    });
+}
+
+#[test]
 fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
     with_temp_jcode_home(|| {
         let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
