@@ -1229,6 +1229,7 @@ fn swarm_member_status_is_stale_for_coordination(status: &str) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_spawn_coordinator_swarm(
     id: u64,
     req_session_id: &str,
