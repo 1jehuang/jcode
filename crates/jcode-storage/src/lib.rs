@@ -14,13 +14,23 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 const SECRET_HARDEN_CACHE_TTL: Duration = Duration::from_secs(60);
 #[cfg(windows)]
+const SECRET_HARDEN_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+#[cfg(windows)]
 const SECRET_HARDEN_DEFER_DELAY: Duration = Duration::from_secs(30);
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum SecretHardenAttempt {
+    InFlight,
+    Succeeded(Instant),
+    Failed(Instant),
+}
 
 #[cfg(windows)]
 #[derive(Default)]
 struct SecretHardenState {
-    directories: HashMap<PathBuf, Instant>,
-    files: HashMap<PathBuf, Instant>,
+    directories: HashMap<PathBuf, SecretHardenAttempt>,
+    files: HashMap<PathBuf, SecretHardenAttempt>,
     pending_directories: HashSet<PathBuf>,
     pending_files: HashSet<PathBuf>,
     worker_running: bool,
@@ -36,9 +46,17 @@ impl SecretHardenState {
         } else {
             &self.files
         };
-        if attempted.get(path).is_some_and(|attempted_at| {
-            now.saturating_duration_since(*attempted_at) < SECRET_HARDEN_CACHE_TTL
-        }) {
+        let should_suppress = match attempted.get(path) {
+            Some(SecretHardenAttempt::InFlight) => true,
+            Some(SecretHardenAttempt::Succeeded(attempted_at)) => {
+                now.saturating_duration_since(*attempted_at) < SECRET_HARDEN_CACHE_TTL
+            }
+            Some(SecretHardenAttempt::Failed(attempted_at)) => {
+                now.saturating_duration_since(*attempted_at) < SECRET_HARDEN_FAILURE_BACKOFF
+            }
+            None => false,
+        };
+        if should_suppress {
             return false;
         }
 
@@ -320,31 +338,55 @@ fn run_windows_hardening_worker() {
             // Mark attempts before releasing the lock. Otherwise render-time
             // probes can requeue the same paths while a slow ACL call is in
             // flight, keeping the worker in an endless hardening loop.
-            let attempted_at = Instant::now();
             for path in &directories {
-                state.directories.insert(path.clone(), attempted_at);
+                state
+                    .directories
+                    .insert(path.clone(), SecretHardenAttempt::InFlight);
             }
             for path in &files {
-                state.files.insert(path.clone(), attempted_at);
+                state
+                    .files
+                    .insert(path.clone(), SecretHardenAttempt::InFlight);
             }
             (directories, files)
         };
 
-        // Record attempts regardless of outcome. Best-effort hardening should
-        // retry later, but a persistent ACL/filesystem error must not create a
-        // tight loop from render-time credential probes.
+        let mut directory_results = Vec::with_capacity(directories.len());
         for path in &directories {
-            let _ = jcode_core::fs::set_directory_permissions_owner_only(path);
+            let succeeded = jcode_core::fs::set_directory_permissions_owner_only(path).is_ok();
+            directory_results.push((path.clone(), succeeded));
         }
+        let mut file_results = Vec::with_capacity(files.len());
         for path in &files {
-            if path.exists() {
-                let _ = jcode_core::fs::set_permissions_owner_only(path);
-            }
+            let succeeded =
+                !path.exists() || jcode_core::fs::set_permissions_owner_only(path).is_ok();
+            file_results.push((path.clone(), succeeded));
         }
 
         let Ok(mut state) = SECRET_HARDEN_STATE.lock() else {
             return;
         };
+        let completed_at = Instant::now();
+        for (path, succeeded) in directory_results {
+            state.directories.insert(
+                path,
+                if succeeded {
+                    SecretHardenAttempt::Succeeded(completed_at)
+                } else {
+                    SecretHardenAttempt::Failed(completed_at)
+                },
+            );
+        }
+        for (path, succeeded) in file_results {
+            state.files.insert(
+                path,
+                if succeeded {
+                    SecretHardenAttempt::Succeeded(completed_at)
+                } else {
+                    SecretHardenAttempt::Failed(completed_at)
+                },
+            );
+        }
         if state.pending_directories.is_empty() && state.pending_files.is_empty() {
             state.worker_running = false;
             return;
@@ -402,6 +444,18 @@ pub fn write_text_secret(path: &Path, content: &str) -> Result<()> {
 }
 
 pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) -> Result<()> {
+    let mut key_bytes = env_key.bytes();
+    let key_is_safe = key_bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && key_bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !key_is_safe {
+        anyhow::bail!("invalid environment variable name");
+    }
+    if value.is_some_and(|value| value.contains(['\r', '\n'])) {
+        anyhow::bail!("environment variable value cannot contain a newline");
+    }
+
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let prefix = format!("{}=", env_key);
 
@@ -654,10 +708,63 @@ mod windows_hardening_tests {
         let mut state = SecretHardenState::default();
         let attempted_at = Instant::now();
         let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
-        state.files.insert(file.clone(), attempted_at);
+        state
+            .files
+            .insert(file.clone(), SecretHardenAttempt::Succeeded(attempted_at));
 
         assert!(!state.enqueue(&file, false, attempted_at));
         assert!(!state.worker_running);
         assert!(state.pending_files.is_empty());
+    }
+
+    #[test]
+    fn failed_paths_retry_after_shorter_backoff() {
+        let mut state = SecretHardenState::default();
+        let attempted_at = Instant::now();
+        let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
+        state
+            .files
+            .insert(file.clone(), SecretHardenAttempt::Failed(attempted_at));
+
+        assert!(!state.enqueue(&file, false, attempted_at));
+        let retry_at = attempted_at + SECRET_HARDEN_FAILURE_BACKOFF;
+        assert!(state.enqueue(&file, false, retry_at));
+    }
+
+    #[test]
+    fn in_flight_paths_are_not_requeued() {
+        let mut state = SecretHardenState::default();
+        let now = Instant::now();
+        let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
+        state
+            .files
+            .insert(file.clone(), SecretHardenAttempt::InFlight);
+
+        assert!(!state.enqueue(&file, false, now));
+        assert!(state.pending_files.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod env_file_tests {
+    use super::*;
+
+    #[test]
+    fn env_upsert_rejects_key_and_value_injection() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.env");
+
+        assert!(upsert_env_file_value(&path, "SAFE_KEY", Some("safe-value")).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("saved env"),
+            "SAFE_KEY=safe-value\n"
+        );
+        assert!(upsert_env_file_value(&path, "SAFE_KEY\nINJECTED", Some("x")).is_err());
+        assert!(upsert_env_file_value(&path, "SAFE_KEY", Some("x\nINJECTED=y")).is_err());
+        assert!(upsert_env_file_value(&path, "BAD=KEY", Some("x")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("unchanged env"),
+            "SAFE_KEY=safe-value\n"
+        );
     }
 }
