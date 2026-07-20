@@ -2,6 +2,27 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn server_start_and_internal_keepalive_parse() {
+    let args = Args::try_parse_from(["jcode", "server", "start", "--json"])
+        .expect("server start should parse");
+    assert!(matches!(
+        args.command,
+        Some(Command::Server {
+            action: ServerCommand::Start { json: true }
+        })
+    ));
+
+    let keepalive = Args::try_parse_from(["jcode", "server", "keepalive"])
+        .expect("internal server keepalive should parse");
+    assert!(matches!(
+        keepalive.command,
+        Some(Command::Server {
+            action: ServerCommand::Keepalive
+        })
+    ));
+}
+
+#[test]
 fn test_provider_choice_aliases_parse() {
     let args = Args::try_parse_from(["jcode", "--provider", "z.ai", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Zai);

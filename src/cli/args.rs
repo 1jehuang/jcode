@@ -553,6 +553,17 @@ pub(crate) enum AccountCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ServerCommand {
+    /// Start the background server if it is not already running.
+    Start {
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: hold a lightweight connection open until stdin closes.
+    #[command(hide = true)]
+    Keepalive,
+
     /// Gracefully reload the running background server onto the newest binary.
     ///
     /// This is the preferred way to pick up an upgrade: the daemon hands its

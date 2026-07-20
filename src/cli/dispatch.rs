@@ -152,6 +152,32 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             tui_launch::run_client().await?;
         }
         Some(Command::Server { action }) => match action {
+            ServerCommand::Start { json } => {
+                spawn_server(
+                    &args.provider,
+                    args.model.as_deref(),
+                    args.provider_profile.as_deref(),
+                )
+                .await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "running",
+                        })
+                    );
+                } else {
+                    println!("Jcode server is running.");
+                }
+            }
+            ServerCommand::Keepalive => {
+                run_server_keepalive(
+                    &args.provider,
+                    args.model.as_deref(),
+                    args.provider_profile.as_deref(),
+                )
+                .await?;
+            }
             ServerCommand::Reload { force, json } => {
                 commands::run_server_reload_command(force, json).await?;
             }
@@ -1301,6 +1327,65 @@ pub(crate) async fn spawn_server(
 
     #[cfg(unix)]
     Ok(())
+}
+
+async fn run_server_keepalive(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Result<()> {
+    let mut owner_closed = tokio::task::spawn_blocking(|| {
+        let mut stdin = std::io::stdin();
+        let mut buffer = [0u8; 256];
+        loop {
+            match std::io::Read::read(&mut stdin, &mut buffer) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    });
+    let mut client: Option<server::Client> = None;
+    let mut first_attempt = true;
+
+    loop {
+        let delay = if first_attempt {
+            first_attempt = false;
+            std::time::Duration::ZERO
+        } else if client.is_some() {
+            std::time::Duration::from_secs(30)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        tokio::select! {
+            _ = &mut owner_closed => return Ok(()),
+            _ = tokio::time::sleep(delay) => {
+                if client.is_some() {
+                    // A Ping is a one-shot control request, so sending it over
+                    // the held connection would make the server close that
+                    // connection after replying. Probe through a short-lived
+                    // client instead and leave the counted keepalive connected.
+                    let healthy = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        async {
+                            let mut probe = server::Client::connect().await?;
+                            probe.ping().await
+                        },
+                    )
+                    .await
+                    .is_ok_and(|result| result.unwrap_or(false));
+                    if healthy {
+                        continue;
+                    }
+                    client = None;
+                }
+                if spawn_server(provider_choice, model, provider_profile).await.is_ok()
+                    && let Ok(connected) = server::Client::connect().await
+                {
+                    client = Some(connected);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
