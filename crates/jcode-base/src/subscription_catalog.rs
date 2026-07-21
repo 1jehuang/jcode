@@ -58,7 +58,7 @@ impl JcodeTier {
             Self::Pro => "Pro",
             Self::Max => "Max",
             Self::Ultra => "Ultra",
-            Self::Flagship => "Flagship",
+            Self::Flagship => "Solo",
         }
     }
 
@@ -80,7 +80,7 @@ impl JcodeTier {
             "pro" => Some(Self::Pro),
             "max" => Some(Self::Max),
             "ultra" => Some(Self::Ultra),
-            "flagship" => Some(Self::Flagship),
+            "flagship" | "solo" => Some(Self::Flagship),
             _ => None,
         }
     }
@@ -628,7 +628,7 @@ mod tests {
             (JcodeTier::Pro, "pro", "Pro", 20, 40.00),
             (JcodeTier::Max, "max", "Max", 100, 225.00),
             (JcodeTier::Ultra, "ultra", "Ultra", 200, 500.00),
-            (JcodeTier::Flagship, "flagship", "Flagship", 1000, 3000.00),
+            (JcodeTier::Flagship, "flagship", "Solo", 1000, 3000.00),
         ];
 
         assert_eq!(JcodeTier::ALL, expected.map(|(tier, ..)| tier));
@@ -650,6 +650,7 @@ mod tests {
         assert_eq!(JcodeTier::parse("MAX"), Some(JcodeTier::Max));
         assert_eq!(JcodeTier::parse(" ultra "), Some(JcodeTier::Ultra));
         assert_eq!(JcodeTier::parse(" Flagship "), Some(JcodeTier::Flagship));
+        assert_eq!(JcodeTier::parse(" Solo "), Some(JcodeTier::Flagship));
         assert_eq!(JcodeTier::parse("starter"), None);
     }
 
