@@ -119,6 +119,12 @@ impl Provider for OpenRouterProvider {
             "stream": true,
         });
 
+        if !self.supports_provider_features {
+            request["stream_options"] = serde_json::json!({
+                "include_usage": true,
+            });
+        }
+
         if let Some(max_tokens) = self.max_tokens {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }

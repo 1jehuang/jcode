@@ -2132,6 +2132,10 @@ model_catalog = false
         "request should use named profile default model: {request}"
     );
     assert!(
+        request.contains(r#""stream_options":{"include_usage":true}"#),
+        "named compatible stream must request the terminal usage chunk: {request}"
+    );
+    assert!(
         !request.contains(r#""provider":"#),
         "direct OpenAI-compatible request must not include OpenRouter provider routing object: {request}"
     );
