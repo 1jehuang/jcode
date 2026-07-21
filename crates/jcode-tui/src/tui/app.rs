@@ -93,6 +93,7 @@ mod state_ui_maintenance;
 mod state_ui_messages;
 mod state_ui_runtime;
 mod state_ui_storage;
+mod subscribe_nudge;
 mod support;
 mod swarm_hint;
 mod terminal_liveness;
@@ -1363,6 +1364,12 @@ pub struct App {
     // Whether the inline sponsored-discovery policy detail has been attached
     // this session. It appears once, on the first discover_tools result.
     sponsor_disclosure_shown_this_session: bool,
+    // Whether the subscribe nudge (rate-limit or long-task trigger) has fired
+    // this session. Backed by a persisted weekly gate in subscribe_nudge.rs.
+    subscribe_nudge_shown_this_session: bool,
+    // When this session's todo list first showed incomplete work, for the
+    // 1h+ long-task subscribe nudge.
+    subscribe_nudge_todo_started: Option<Instant>,
     // Inline hotkey feedback: "you just pressed X → does Y" for rarely-used
     // known chords, or "X isn't bound · nearest: ..." for unknown chords.
     // Rendered in the same pop-out slot as learn_hint.

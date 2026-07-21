@@ -164,6 +164,9 @@ impl App {
             "subscription" => {
                 "/subscription\nShow curated jcode subscription status for this session, including router config, runtime mode, curated models, and planned tier budget scaffolding."
             }
+            "subscribe" => {
+                "/subscribe\nWhy subscribe to jcode: more tokens on curated frontier models, one browser sign-in with no API keys, failover routing, and funding open-source development. Lists plans and prices, then start with /login jcode."
+            }
             "version" => "/version\nShow jcode version/build details.",
             "changelog" => "/changelog\nShow recent changes embedded in this build.",
             "quit" => "/quit\nExit jcode.",

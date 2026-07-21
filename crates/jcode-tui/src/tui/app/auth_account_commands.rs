@@ -78,6 +78,11 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/subscribe" {
+        app.show_subscribe_pitch();
+        return true;
+    }
+
     if let Some(parsed) = parse_account_command(trimmed) {
         match parsed {
             Ok(command) => execute_account_command_local(app, command),

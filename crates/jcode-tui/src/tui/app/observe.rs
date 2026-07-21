@@ -114,6 +114,9 @@ impl App {
             // observe the completed tool call. Refresh here as well so both paths
             // adopt the same todo-derived title that /resume displays.
             self.update_terminal_title();
+            // Long-task subscribe nudge: arms while incomplete todos exist,
+            // fires once when a 1h+ batch completes with quality gates passed.
+            self.note_todo_update_for_subscribe_nudge(&session_id);
         }
 
         // The schedule tool queues/cancels ambient tasks, which the ambient panel
