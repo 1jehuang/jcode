@@ -1083,7 +1083,6 @@ impl MultiProvider {
                 Ok(())
             }
             ActiveProvider::OpenRouter => {
-                self.clear_active_openai_compatible_profile();
                 // Decide whether the slot must be rebound to the real
                 // OpenRouter API-key runtime. Rebinding repairs a slot left
                 // flavored as a *known catalog profile* runtime by startup
@@ -1117,22 +1116,27 @@ impl MultiProvider {
                                 .unwrap_or(false)
                     }
                 };
-                if needs_rebind {
-                    let provider = external::instantiate_openrouter_runtime(
+                let (openrouter, install_openrouter) = if needs_rebind {
+                    let openrouter = external::instantiate_openrouter_runtime(
                         external::OpenRouterRuntimeSpec::OpenRouterApiKey,
                     )?;
+                    (openrouter, true)
+                } else {
+                    let Some(openrouter) = self.openrouter_provider() else {
+                        anyhow::bail!(
+                            "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."
+                        );
+                    };
+                    (openrouter, false)
+                };
+                openrouter.set_model(model)?;
+                if install_openrouter {
                     *self
                         .openrouter
                         .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(openrouter);
                 }
-
-                let Some(openrouter) = self.openrouter_provider() else {
-                    anyhow::bail!(
-                        "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."
-                    );
-                };
-                openrouter.set_model(model)?;
+                self.clear_active_openai_compatible_profile();
                 self.set_active_provider(ActiveProvider::OpenRouter);
                 Ok(())
             }
