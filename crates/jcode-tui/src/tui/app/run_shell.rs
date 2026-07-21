@@ -81,6 +81,13 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
         return None;
     }
 
+    // Slash suggestions are a late overlay and can cover the recorded status
+    // row. Do not let the out-of-band one-cell redraw write through them. Check
+    // the cheap prefix first so normal spinner ticks never rebuild suggestions.
+    if is_slash_command_input(&app.input) && !app.command_suggestions().is_empty() {
+        return None;
+    }
+
     if status_uses_primary_spinner(&app.status) {
         Some(jcode_tui_style::theme::activity_indicator(
             status_spinner_elapsed(app),
@@ -90,6 +97,10 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn is_slash_command_input(input: &str) -> bool {
+    input.trim_start().starts_with('/')
 }
 
 /// Statuses whose full status line starts with the primary green circular spinner.
@@ -310,7 +321,9 @@ impl StatusSpinnerRenderer {
 fn render_status_spinner_into_buffer(buffer: &Buffer, area: Rect, symbol: &str) -> bool {
     area.width > 0
         && area.height > 0
-        && buffer.cell((area.x, area.y)).is_some()
+        && buffer
+            .cell((area.x, area.y))
+            .is_some_and(|cell| jcode_tui_style::theme::is_activity_indicator_frame(cell.symbol()))
         && !symbol.is_empty()
 }
 
@@ -834,6 +847,13 @@ mod tests {
     }
 
     #[test]
+    fn slash_command_palette_suspends_spinner_fast_path() {
+        assert!(is_slash_command_input("/"));
+        assert!(is_slash_command_input("  /help"));
+        assert!(!is_slash_command_input("normal prompt"));
+    }
+
+    #[test]
     fn status_spinner_reset_targets_next_frame_boundary() {
         assert_duration_close(
             status_spinner_delay_until_next_frame(0.0),
@@ -859,16 +879,20 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         buffer.set_string(0, 0, "abcdefgh", Style::default().fg(Color::White));
         buffer.set_string(0, 1, "ABCDEFGH", Style::default().fg(Color::Blue));
+        buffer
+            .cell_mut((2, 1))
+            .expect("status cell")
+            .set_symbol("⠋");
         let before = buffer.clone();
 
         let status_area = Rect::new(2, 1, 6, 1);
-        assert!(render_status_spinner_into_buffer(&buffer, status_area, "⠂"));
-        render_status_spinner_into_buffer_mut(&mut buffer, status_area, "⠂");
+        assert!(render_status_spinner_into_buffer(&buffer, status_area, "⠙"));
+        render_status_spinner_into_buffer_mut(&mut buffer, status_area, "⠙");
 
         for y in 0..2 {
             for x in 0..8 {
                 if (x, y) == (2, 1) {
-                    assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "⠂");
+                    assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "⠙");
                     assert_eq!(
                         buffer.cell((x, y)).unwrap().fg,
                         jcode_tui_style::theme::ai_color()
@@ -878,5 +902,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn status_spinner_partial_does_not_overwrite_slash_palette_cell() {
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "/help  show help", Style::default().fg(Color::Yellow));
+
+        assert!(
+            !render_status_spinner_into_buffer(&buffer, area, "⠙"),
+            "late overlays own the status cell until the next full frame"
+        );
     }
 }

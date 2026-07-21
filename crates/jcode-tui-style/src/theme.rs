@@ -81,6 +81,15 @@ pub fn spinner_frame(elapsed: f32, fps: f32) -> &'static str {
     SPINNER_FRAMES[spinner_frame_index(elapsed, fps)]
 }
 
+/// Whether `symbol` is one of the cells owned by the primary activity spinner.
+///
+/// The TUI's single-cell spinner redraw uses this to avoid patching a status-row
+/// cell after a late overlay, such as the slash-command palette, has taken
+/// ownership of it.
+pub fn is_activity_indicator_frame(symbol: &str) -> bool {
+    SPINNER_FRAMES.contains(&symbol)
+}
+
 pub fn activity_indicator_frame_index(
     elapsed: f32,
     fps: f32,
@@ -216,6 +225,9 @@ mod tests {
             SPINNER_FRAMES,
             &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         );
+        assert!(is_activity_indicator_frame("⠋"));
+        assert!(is_activity_indicator_frame("⠏"));
+        assert!(!is_activity_indicator_frame("/"));
     }
 
     #[test]

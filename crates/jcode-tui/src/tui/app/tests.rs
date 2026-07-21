@@ -45,6 +45,7 @@ include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
+include!("tests/spinner_slash_commands.rs");
 
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
