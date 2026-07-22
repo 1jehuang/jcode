@@ -23,9 +23,9 @@ pub(super) fn note_paste() {
 /// suppression window after a paste, meaning it belongs to the paste rather
 /// than being a user submit.
 pub(super) fn consume_paste_trailing_enter() -> bool {
-    LAST_PASTE.with(|cell| match cell.take() {
-        Some(at) if at.elapsed() < PASTE_ENTER_SUPPRESS_WINDOW => true,
-        _ => false,
+    LAST_PASTE.with(|cell| {
+        cell.take()
+            .is_some_and(|at| at.elapsed() < PASTE_ENTER_SUPPRESS_WINDOW)
     })
 }
 
