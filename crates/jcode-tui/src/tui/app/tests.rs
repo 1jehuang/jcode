@@ -1741,3 +1741,34 @@ fn remote_clear_resets_provider_reported_context_usage() {
 
     assert_clear_usage_reset(&app);
 }
+
+#[test]
+fn bare_enter_immediately_after_paste_does_not_submit() {
+    // Windows Terminal / conhost sends a separate bare Enter key event after
+    // a bracketed paste ending with \n; it must not submit the chat (#544).
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = create_test_app();
+    crate::tui::app::input::handle_paste(&mut app, "hello world\n".to_string());
+    assert_eq!(
+        app.input,
+        "hello world\n".trim_end_matches('\n').to_owned() + "\n"
+    );
+
+    app.handle_key_press_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        !app.is_processing,
+        "Enter right after paste must not submit"
+    );
+    assert!(
+        !app.input.is_empty(),
+        "input should be preserved after paste"
+    );
+
+    // A later, human-timed Enter still submits.
+    app.last_paste_event = Some(std::time::Instant::now() - std::time::Duration::from_millis(500));
+    app.handle_key_press_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.input.is_empty(), "later Enter should submit normally");
+}

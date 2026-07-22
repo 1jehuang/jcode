@@ -603,6 +603,7 @@ where
 }
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    app.last_paste_event = Some(std::time::Instant::now());
     // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
     // terminal always deliver text. Checking clipboard_image() here caused a bug where
     // text pastes were misidentified as images when the clipboard also had image data
@@ -2624,6 +2625,17 @@ impl App {
         }
 
         if code == KeyCode::Enter {
+            // Some terminals (Windows Terminal / conhost) deliver a separate
+            // bare Enter key event immediately after a bracketed paste that
+            // ended with a newline. Treat that Enter as part of the paste
+            // rather than a submit (issue #544).
+            if self
+                .last_paste_event
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(150))
+            {
+                self.last_paste_event = None;
+                return Ok(());
+            }
             // During the onboarding model-selection phase, Enter on an empty
             // prompt opens the model picker instead of submitting nothing.
             if self.input.trim().is_empty()
