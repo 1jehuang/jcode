@@ -340,7 +340,15 @@ fn normalize_required_properties(map: &mut serde_json::Map<String, Value>) {
 /// Unknown formats (e.g. "uri") cause the API to reject the request, so they
 /// are stripped during normalization.
 const OPENAI_SUPPORTED_STRING_FORMATS: &[&str] = &[
-    "date-time", "time", "date", "duration", "email", "hostname", "ipv4", "ipv6", "uuid",
+    "date-time",
+    "time",
+    "date",
+    "duration",
+    "email",
+    "hostname",
+    "ipv4",
+    "ipv6",
+    "uuid",
 ];
 
 fn is_supported_string_format(value: &Value) -> bool {
