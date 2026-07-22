@@ -75,9 +75,9 @@ impl CopilotApiProvider {
 
     fn current_reasoning_effort(&self) -> Option<String> {
         self.reasoning_effort
-            .try_read()
-            .ok()
-            .and_then(|guard| guard.clone())
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Add top-level `reasoning_effort` when set and the model supports it.
