@@ -177,7 +177,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
                 app.schedule_auto_poke_followup_if_needed(),
                 "attempt {attempt} should still schedule a gate nudge"
             );
-            app.hidden_queued_system_messages.clear();
+            app.queued_messages.clear();
             app.pending_queued_dispatch = false;
         }
 
@@ -189,6 +189,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         );
         assert!(!app.auto_poke_incomplete_todos);
         assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
         assert_eq!(app.todo_completion_gate_attempts, 0);
     });

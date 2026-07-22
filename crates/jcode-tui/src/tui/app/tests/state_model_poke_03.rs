@@ -2436,15 +2436,18 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
 
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_queued_dispatch);
-        assert!(app.queued_messages().is_empty());
-        assert_eq!(app.hidden_queued_system_messages.len(), 1);
-        let summary = &app.hidden_queued_system_messages[0];
+        assert_eq!(app.queued_messages.len(), 1);
+        let summary = app.queued_messages[0].clone();
+        let summary = &summary;
         assert!(super::commands::is_poke_message(summary));
         assert!(super::commands::is_todo_confidence_summary_message(summary));
         assert_eq!(summary, crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE);
         assert!(!summary.chars().any(|ch| ch.is_ascii_digit()));
         assert!(summary.contains("completion confidence"));
-        assert!(!summary.to_ascii_lowercase().contains("gate"));
+        // The continuation self-identifies as an automated gate so the model
+        // does not mistake it for a user message, but never discloses the
+        // numeric threshold.
+        assert!(summary.contains("automated todo completion gate"));
         assert!(!summary.to_ascii_lowercase().contains("threshold"));
         assert!(!summary.contains("Finish risky provider path"));
         assert!(
@@ -2458,13 +2461,13 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         // Dispatching the follow-up does not disarm the gate. If the model
         // finishes another turn without improving completion confidence, the
         // same validation follow-up is queued again.
-        app.hidden_queued_system_messages.clear();
+        app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
         super::local::finish_turn(&mut app);
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_queued_dispatch);
-        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert_eq!(app.queued_messages.len(), 1);
 
         // Once the model records sufficient completion confidence through the
         // todo tool, the next completion check passes and disarms auto-poke.
@@ -2477,12 +2480,13 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             };
         }
         crate::todo::save_todos(&app.session.id, &validated).expect("save validated todos");
-        app.hidden_queued_system_messages.clear();
+        app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
         super::local::finish_turn(&mut app);
         assert!(!app.auto_poke_incomplete_todos);
         assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
@@ -2552,7 +2556,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(app.todo_confidence_spike_challenged);
         assert!(app.pending_queued_dispatch);
         assert_eq!(
-            app.hidden_queued_system_messages,
+            app.queued_messages,
             vec![crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE]
         );
         assert!(app.display_messages().iter().any(|msg| {
@@ -2560,7 +2564,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 .contains("abrupt confidence increase needs independent validation")
         }));
 
-        app.hidden_queued_system_messages.clear();
+        app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
         super::local::finish_turn(&mut app);

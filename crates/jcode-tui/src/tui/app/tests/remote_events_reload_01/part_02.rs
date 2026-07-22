@@ -158,7 +158,7 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         assert!(app.todo_confidence_spike_challenged);
         assert!(app.pending_queued_dispatch);
         assert_eq!(
-            app.hidden_queued_system_messages,
+            app.queued_messages,
             vec![crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE]
         );
         assert!(app.display_messages().iter().any(|msg| {
@@ -199,9 +199,9 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_queued_dispatch);
-        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert_eq!(app.queued_messages.len(), 1);
         assert_eq!(
-            app.hidden_queued_system_messages[0],
+            app.queued_messages[0],
             crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE
         );
         assert!(app.display_messages().iter().any(|msg| {
