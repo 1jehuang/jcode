@@ -2256,10 +2256,10 @@ impl Provider for MultiProvider {
                 .active_openrouter_execution_provider()
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
-            ActiveProvider::Copilot => self
-                .copilot_provider()
-                .map(|o| o.available_efforts())
-                .unwrap_or_default(),
+            ActiveProvider::Copilot => match self.copilot_provider() {
+                Some(provider) => provider.available_efforts(),
+                None => vec![],
+            },
             _ => vec![],
         }
     }
