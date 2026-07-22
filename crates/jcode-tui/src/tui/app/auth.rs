@@ -2300,7 +2300,9 @@ impl App {
                             ],
                         );
                         if key_name == crate::provider::bedrock::API_KEY_ENV {
-                            crate::provider::activation::lock_runtime_provider_key("bedrock");
+                            crate::provider::activation::select_initial_runtime_provider_key(
+                                "bedrock",
+                            );
                             if let Some(default_model) = default_model.as_deref() {
                                 crate::env::set_var("JCODE_BEDROCK_MODEL", default_model);
                             }
@@ -2651,17 +2653,16 @@ impl App {
                 .default_model
                 .as_deref()
                 .is_some_and(|model| !model.trim().is_empty());
-        let runtime_provider_forced =
-            std::env::var("JCODE_FORCE_PROVIDER")
-                .ok()
-                .is_some_and(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                });
+        let runtime_provider_explicit = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
 
-        !has_explicit_default && !runtime_provider_forced
+        !has_explicit_default && !runtime_provider_explicit
     }
 
     fn trigger_provider_auth_changed(

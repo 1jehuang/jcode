@@ -604,7 +604,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
-        "JCODE_FORCE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
@@ -1511,7 +1511,7 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
         "JCODE_OPENROUTER_MODEL",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
-        "JCODE_FORCE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
     crate::env::set_var("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
     crate::env::set_var("AZURE_OPENAI_MODEL", "azure-deployment");

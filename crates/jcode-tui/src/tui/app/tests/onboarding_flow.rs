@@ -86,8 +86,8 @@ fn onboarding_test_app() -> App {
 #[test]
 fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
     with_temp_jcode_home(|| {
-        let previous_force = std::env::var_os("JCODE_FORCE_PROVIDER");
-        crate::env::remove_var("JCODE_FORCE_PROVIDER");
+        let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");
+        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
         let mut app = onboarding_test_app();
         assert!(app.onboarding_should_prefer_strongest_model());
@@ -104,7 +104,7 @@ fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
 
         config.provider.default_provider = None;
         config.save().expect("clear explicit defaults");
-        crate::env::set_var("JCODE_FORCE_PROVIDER", "1");
+        crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
         assert!(!app.onboarding_should_prefer_strongest_model());
 
         app.onboarding_auto_model_selection_active
@@ -116,10 +116,10 @@ fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
             "finishing onboarding must cancel a delayed catalog selection"
         );
 
-        if let Some(value) = previous_force {
-            crate::env::set_var("JCODE_FORCE_PROVIDER", value);
+        if let Some(value) = previous_explicit {
+            crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", value);
         } else {
-            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
         }
     });
 }
