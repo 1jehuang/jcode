@@ -123,22 +123,40 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Connect to an MCP server
+    /// Connect to an MCP server, inheriting the current process working directory
     pub async fn connect(name: String, config: &McpServerConfig) -> Result<Self> {
+        Self::connect_in_dir(name, config, None).await
+    }
+
+    /// Connect to an MCP server, optionally running it in `working_dir`.
+    ///
+    /// The working directory is only applied when it exists; otherwise the
+    /// subprocess falls back to inheriting the current process cwd (issue #557).
+    pub async fn connect_in_dir(
+        name: String,
+        config: &McpServerConfig,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let working_dir = working_dir.filter(|dir| dir.is_dir());
         crate::logging::info(&format!(
-            "MCP: Connecting to '{}' ({} {:?})",
-            name, config.command, config.args
+            "MCP: Connecting to '{}' ({} {:?}) cwd={:?}",
+            name, config.command, config.args, working_dir
         ));
 
         let mut env: HashMap<String, String> = std::env::vars().collect();
         env.extend(config.env.clone());
 
-        let mut child = Command::new(&config.command)
+        let mut command = Command::new(&config.command);
+        command
             .args(&config.args)
             .envs(&env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(dir) = working_dir {
+            command.current_dir(dir);
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("Failed to spawn MCP server: {}", config.command))?;
 
@@ -349,5 +367,75 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::McpClient;
+    use crate::mcp::protocol::McpServerConfig;
+
+    /// A minimal fake stdio MCP server (shell script) that reports its own
+    /// process cwd as the serverInfo name.
+    fn fake_server_config() -> McpServerConfig {
+        let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"%s","version":"0"}}}\n' "$PWD"
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'
+      ;;
+  esac
+done
+"#;
+        McpServerConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            env: Default::default(),
+            shared: false,
+            transport: None,
+            url: None,
+            enabled: None,
+            disabled: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_in_dir_sets_subprocess_cwd() {
+        // Issue #557: owned MCP servers must run in the session project dir.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expected = dir.path().canonicalize().expect("canonicalize");
+
+        let client = McpClient::connect_in_dir(
+            "cwd-test".to_string(),
+            &fake_server_config(),
+            Some(dir.path()),
+        )
+        .await
+        .expect("connect");
+
+        let reported = client.server_info().expect("server info").name;
+        assert_eq!(
+            std::path::Path::new(&reported)
+                .canonicalize()
+                .expect("canonicalize reported"),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_in_dir_missing_dir_falls_back_to_inherited_cwd() {
+        let client = McpClient::connect_in_dir(
+            "cwd-fallback-test".to_string(),
+            &fake_server_config(),
+            Some(std::path::Path::new("/nonexistent/jcode-557")),
+        )
+        .await
+        .expect("connect should fall back to inherited cwd");
+
+        let reported = client.server_info().expect("server info").name;
+        assert!(!reported.is_empty());
     }
 }
