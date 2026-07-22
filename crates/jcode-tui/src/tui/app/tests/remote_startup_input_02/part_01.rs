@@ -211,6 +211,48 @@ fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
 }
 
 #[test]
+fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
+    // A poisoned persisted catalog can pin OpenAI models to placeholder
+    // "remote-catalog" routes (provider "OpenAI", detail "refreshing route
+    // details…"). Opening the picker must re-synthesize the model's real
+    // routes (OpenAI OAuth/API key) instead of showing the placeholder as
+    // the only option.
+    with_temp_jcode_home(|| {
+        crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-key");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let model = "gpt-5.5";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "remote-catalog".to_string(),
+            available: true,
+            detail: "refreshing route details…".to_string(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+
+        crate::env::remove_var("OPENAI_API_KEY");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        assert!(
+            app.remote_model_options.iter().any(|route| {
+                route.model == model
+                    && crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                        .is_openai_credential_route()
+            }),
+            "expected a real OpenAI credential route for {model}, got {:?}",
+            app.remote_model_options
+        );
+    });
+}
+
+#[test]
 fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
     with_temp_jcode_home(|| {
         let previous_enable = std::env::var_os("JCODE_BEDROCK_ENABLE");

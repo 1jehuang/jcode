@@ -655,6 +655,19 @@ impl App {
             .filter(|model| match methods_by_model.get(model.as_str()) {
                 None => true,
                 Some(methods) => {
+                    // "remote-catalog"/"current" are placeholder methods from
+                    // names-only catalog downgrades, not real provider routes.
+                    // A model covered only by placeholders still needs its
+                    // actual routes (OpenAI OAuth/API key, OpenRouter, ...)
+                    // synthesized, otherwise a poisoned cache pins it to a
+                    // useless "remote-catalog" row forever.
+                    let placeholder_only = methods.iter().all(|method| {
+                        matches!(
+                            crate::provider::ModelRouteApiMethod::parse(method),
+                            crate::provider::ModelRouteApiMethod::RemoteCatalog
+                                | crate::provider::ModelRouteApiMethod::Current
+                        )
+                    });
                     let missing_anthropic_method = crate::provider::provider_for_model(model)
                         == Some("claude")
                         && !model.contains('/')
@@ -663,7 +676,7 @@ impl App {
                     let missing_bedrock_method = bedrock_available
                         && crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(model)
                         && !methods.contains("bedrock");
-                    missing_anthropic_method || missing_bedrock_method
+                    placeholder_only || missing_anthropic_method || missing_bedrock_method
                 }
             })
             .cloned()
@@ -728,7 +741,21 @@ impl App {
             return;
         }
 
-        let snapshot = self.remote_model_catalog_snapshot();
+        let mut snapshot = self.remote_model_catalog_snapshot();
+        // Placeholder routes ("remote-catalog"/"current") describe a catalog
+        // that is still refreshing, not real provider routing. Persisting them
+        // would resurrect useless rows on the next cold start and mask the
+        // fallback synthesis of real routes.
+        snapshot.model_routes.retain(|route| {
+            !matches!(
+                crate::provider::ModelRouteApiMethod::parse(&route.api_method),
+                crate::provider::ModelRouteApiMethod::RemoteCatalog
+                    | crate::provider::ModelRouteApiMethod::Current
+            )
+        });
+        if snapshot.model_routes.is_empty() {
+            return;
+        }
         if !remote_model_catalog_snapshot_is_safe(&snapshot) {
             crate::logging::warn("Refusing to persist an invalid remote model catalog");
             return;
@@ -1753,8 +1780,9 @@ impl App {
         );
 
         let routes_started = std::time::Instant::now();
+        let took_remote_options = self.is_remote && !self.remote_model_options.is_empty();
         let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
-            if !self.remote_model_options.is_empty() {
+            if took_remote_options {
                 let mut routes = std::mem::take(&mut self.remote_model_options);
                 self.extend_remote_routes_for_uncovered_models(&mut routes);
                 routes
@@ -1823,7 +1851,10 @@ impl App {
         self.model_picker_cache = previous_model_picker_cache;
         self.pending_model_picker_load = previous_pending_model_picker_load;
         self.model_picker_load_request_id = previous_model_picker_load_request_id;
-        if self.is_remote && self.remote_model_options.is_empty() {
+        if took_remote_options && self.remote_model_options.is_empty() {
+            // Restore only routes that originated from remote_model_options.
+            // Lightweight fallback routes carry placeholder "remote-catalog"
+            // methods and must never be written back as the detailed catalog.
             self.remote_model_options = routes;
         }
         self.input = previous_input;
