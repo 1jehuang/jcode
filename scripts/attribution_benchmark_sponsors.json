@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "default_marker": "via=jcode-discovery",
+  "sponsors": [
+    {
+      "tool": "agentcard",
+      "category": "payments",
+      "mechanism": "referral-link",
+      "marker": "via=jcode-discovery",
+      "signup_survives_navigation": true
+    },
+    {
+      "tool": "greptile",
+      "category": "code-review",
+      "mechanism": "referral-link",
+      "marker": "via=jcode-discovery",
+      "signup_survives_navigation": true
+    },
+    {
+      "tool": "context.dev",
+      "category": "web-data",
+      "mechanism": "referral-link",
+      "marker": "via=jcode-discovery",
+      "signup_survives_navigation": true
+    },
+    {
+      "tool": "agentmail",
+      "category": "email-messaging",
+      "mechanism": "referral-link",
+      "marker": "via=jcode-discovery",
+      "signup_survives_navigation": true
+    }
+  ]
+}
