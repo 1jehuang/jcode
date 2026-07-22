@@ -13,7 +13,7 @@ const MATCH: i32 = 16;
 const CONSECUTIVE: i32 = 8;
 const BOUNDARY: i32 = 9;
 const FIRST: i32 = 12;
-const GAP: i32 = -1;
+const GAP: i32 = -3;
 const LEADING_GAP: i32 = -3;
 const SUBSTITUTION: i32 = -10;
 const DELETION: i32 = -12;
@@ -111,6 +111,61 @@ fn error_budget(meaningful_len: usize) -> u8 {
     }
 }
 
+/// Minimum acceptable score for a match, scaled by pattern length. Weak,
+/// scattered matches (long gaps, mostly substitutions/deletions) fall below
+/// this floor and are discarded instead of cluttering picker results.
+fn score_floor(meaningful_len: usize) -> i32 {
+    // A clean boundary-anchored match earns at least MATCH per char plus
+    // bonuses. Requiring slightly more than half of the plain per-char MATCH
+    // total keeps typo matches while rejecting noise stitched across a token.
+    (meaningful_len as i32) * MATCH * 11 / 20
+}
+
+/// Cheap rejection test: every pattern char (up to the error budget) must be
+/// present in the haystack at all. This avoids running the DP for the vast
+/// majority of non-matching entries.
+fn prefilter(pat: &[char], hay: &[char], max_err: u8) -> bool {
+    let mut ascii = [0u16; 128];
+    let mut other: Vec<char> = Vec::new();
+    for &c in hay {
+        let idx = c as usize;
+        if idx < 128 {
+            ascii[idx] += 1;
+        } else {
+            other.push(c);
+        }
+    }
+    let mut missing = 0u8;
+    for &c in pat {
+        if c.is_whitespace() {
+            continue;
+        }
+        let present = {
+            let idx = c as usize;
+            if idx < 128 {
+                if ascii[idx] > 0 {
+                    ascii[idx] -= 1;
+                    true
+                } else {
+                    false
+                }
+            } else if let Some(pos) = other.iter().position(|&h| h == c) {
+                other.swap_remove(pos);
+                true
+            } else {
+                false
+            }
+        };
+        if !present {
+            missing += 1;
+            if missing > max_err {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn fuzzy_match_impl<P: PositionTracker>(
     needle: &str,
     haystack: &str,
@@ -146,8 +201,14 @@ fn fuzzy_match_impl<P: PositionTracker>(
     let n = hay.len();
     let meaningful = pat.iter().filter(|c| !c.is_whitespace()).count();
     let max_err = error_budget(meaningful);
-    let mut dp: Vec<Vec<Option<Cell<P>>>> = vec![vec![None; n + 1]; m + 1];
-    dp[0][0] = Some(Cell {
+    if !prefilter(&pat, &hay, max_err) {
+        return None;
+    }
+    // Rolling DP rows: the recurrence only reads rows i-1 and i-2.
+    let mut row_prev2: Vec<Option<Cell<P>>> = vec![None; n + 1];
+    let mut row_prev: Vec<Option<Cell<P>>> = vec![None; n + 1];
+    let mut row_cur: Vec<Option<Cell<P>>> = vec![None; n + 1];
+    row_prev[0] = Some(Cell {
         score: 0,
         errors: 0,
         last: -1,
@@ -155,8 +216,8 @@ fn fuzzy_match_impl<P: PositionTracker>(
         positions: P::default(),
     });
     for j in 1..=n {
-        if let Some(prev) = dp[0][j - 1].clone() {
-            dp[0][j] = Some(Cell {
+        if let Some(prev) = row_prev[j - 1].clone() {
+            row_prev[j] = Some(Cell {
                 score: prev.score + LEADING_GAP,
                 errors: prev.errors,
                 last: prev.last,
@@ -167,11 +228,14 @@ fn fuzzy_match_impl<P: PositionTracker>(
     }
 
     for i in 1..=m {
+        for cell in row_cur.iter_mut() {
+            *cell = None;
+        }
         for j in 0..=n {
             let mut best = None;
 
             if j >= 1
-                && let Some(prev) = dp[i][j - 1].clone()
+                && let Some(prev) = row_cur[j - 1].clone()
             {
                 keep_best(
                     &mut best,
@@ -186,7 +250,7 @@ fn fuzzy_match_impl<P: PositionTracker>(
             }
 
             if j >= 1
-                && let Some(prev) = dp[i - 1][j - 1].clone()
+                && let Some(prev) = row_prev[j - 1].clone()
             {
                 let pos = j - 1;
                 if pat[i - 1] == hay[pos] {
@@ -230,7 +294,7 @@ fn fuzzy_match_impl<P: PositionTracker>(
             }
 
             if !pat[i - 1].is_whitespace()
-                && let Some(prev) = dp[i - 1][j].clone()
+                && let Some(prev) = row_prev[j].clone()
                 && prev.errors < max_err
             {
                 keep_best(
@@ -252,7 +316,7 @@ fn fuzzy_match_impl<P: PositionTracker>(
                 && pat[i - 1] != pat[i - 2]
                 && !pat[i - 1].is_whitespace()
                 && !pat[i - 2].is_whitespace()
-                && let Some(prev) = dp[i - 2][j - 2].clone()
+                && let Some(prev) = row_prev2[j - 2].clone()
                 && prev.errors < max_err
             {
                 let first = j - 2;
@@ -275,12 +339,14 @@ fn fuzzy_match_impl<P: PositionTracker>(
                 );
             }
 
-            dp[i][j] = best;
+            row_cur[j] = best;
         }
+        std::mem::swap(&mut row_prev2, &mut row_prev);
+        std::mem::swap(&mut row_prev, &mut row_cur);
     }
 
     let mut answer = None;
-    for row in &dp[m] {
+    for row in &row_prev {
         if let Some(cell) = row.clone()
             && (!require_true_tail || cell.tail_true)
         {
@@ -294,11 +360,11 @@ fn fuzzy_match_impl<P: PositionTracker>(
     }
 
     let exact = pat == hay;
-    Some((
-        cell.score + if exact { EXACT } else { 0 },
-        cell.positions,
-        hay_offset,
-    ))
+    let score = cell.score + if exact { EXACT } else { 0 };
+    if !exact && score < score_floor(meaningful) {
+        return None;
+    }
+    Some((score, cell.positions, hay_offset))
 }
 
 fn fuzzy_match_full(
@@ -349,22 +415,25 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
     fuzzy_score_only(needle, haystack, false, false, false)
 }
 
-/// Score search text composed of whitespace-separated metadata fields. A
-/// single-token query must match within one field, which prevents a weak match
-/// from stitching characters across unrelated model, provider, and detail
-/// columns. Multi-word queries may intentionally span the full text.
+/// Score search text composed of whitespace-separated metadata fields. Each
+/// query word must match within one field, which prevents a weak match from
+/// stitching characters across unrelated model, provider, and detail columns.
+/// Multi-word query scores are the sum of the best per-word field scores, and
+/// every word must match somewhere for the entry to match at all.
 pub fn fuzzy_score_tokens(needle: &str, haystack: &str) -> Option<i32> {
     let needle = needle.trim();
     if needle.is_empty() {
         return Some(0);
     }
-    if needle.contains(char::is_whitespace) {
-        return fuzzy_score(needle, haystack);
+    let mut total = 0i32;
+    for word in needle.split_whitespace() {
+        let best = haystack
+            .split_whitespace()
+            .filter_map(|token| fuzzy_score(word, token))
+            .max()?;
+        total = total.saturating_add(best);
     }
-    haystack
-        .split_whitespace()
-        .filter_map(|token| fuzzy_score(needle, token))
-        .max()
+    Some(total)
 }
 
 /// Return matched positions for free-form picker highlighting.
@@ -438,5 +507,24 @@ mod tests {
     fn token_scoring_does_not_stitch_across_metadata_fields() {
         assert!(fuzzy_score_tokens("codxe", "gpt-5-codex openai coding model").is_some());
         assert!(fuzzy_score_tokens("codxe", "claude-opus anthropic premium").is_none());
+    }
+
+    #[test]
+    fn multi_word_queries_require_every_word_to_match() {
+        assert!(fuzzy_score_tokens("gpt openai", "gpt-5-codex openai responses").is_some());
+        assert!(fuzzy_score_tokens("gpt anthropic", "gpt-5-codex openai responses").is_none());
+        // Words may hit different fields in any order.
+        assert!(fuzzy_score_tokens("openai gpt", "gpt-5-codex openai responses").is_some());
+    }
+
+    #[test]
+    fn weak_scattered_matches_are_discarded() {
+        // All chars are present but scattered mid-token with long gaps: reject.
+        assert!(fuzzy_score("mrca", "premium-orchestra-cathedral").is_none());
+        // Boundary-aligned acronym matches remain valid.
+        assert!(fuzzy_score("aeiu", "america-external-input-utility").is_some());
+        // Clean subsequence and light typos still pass.
+        assert!(fuzzy_score("gpt5", "gpt-5-codex").is_some());
+        assert!(fuzzy_score("sonet", "claude-sonnet-4.5").is_some());
     }
 }
