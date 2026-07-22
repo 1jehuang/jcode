@@ -122,6 +122,18 @@ fn transient_server_error_remains_retryable_for_auto_poke() {
 }
 
 #[test]
+fn openai_usage_limit_reached_is_non_retryable() {
+    use super::is_non_retryable_auto_poke_error;
+    assert!(is_non_retryable_auto_poke_error(
+        "usage_limit_reached: The usage limit has been reached"
+    ));
+    assert!(is_non_retryable_auto_poke_error(
+        "Rate limited: The usage limit has been reached. Plan: team. \
+         Resets in 30d 4h 29m (2026-08-21 04:31 UTC)."
+    ));
+}
+
+#[test]
 fn volcengine_ark_unsupported_model_is_fatal_model_endpoint_error() {
     use super::{is_fatal_model_endpoint_error, is_non_retryable_auto_poke_error};
     let err = "OpenAI-compatible chat request failed\n  endpoint: \

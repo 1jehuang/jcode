@@ -162,6 +162,14 @@ pub(super) fn is_non_retryable_auto_poke_error(error: &str) -> bool {
         "billing",
         "credit balance",
         "out of credits",
+        // Plan/usage-window exhaustion (e.g. OpenAI OAuth
+        // `usage_limit_reached`). These reset hours-to-days later, so
+        // re-poking the same request just burns refused API calls in a loop.
+        "usage_limit_reached",
+        "usage limit has been reached",
+        "usage limit reached",
+        "quota exceeded",
+        "quota_exceeded",
     ];
 
     deterministic_markers
