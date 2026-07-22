@@ -1114,53 +1114,21 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
 }
 
 fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
-    match normalized_login_provider_id(provider_id)? {
-        "claude" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Claude,
-            ActiveProvider::Claude,
-        )),
-        "claude-api" => Some(ProviderActivation::initial(
-            RuntimeProviderId::ClaudeApiKey,
-            ActiveProvider::Claude,
-        )),
-        "openai" => Some(ProviderActivation::initial(
-            RuntimeProviderId::OpenAi,
-            ActiveProvider::OpenAI,
-        )),
-        "openai-api" => Some(ProviderActivation::initial(
-            RuntimeProviderId::OpenAiApiKey,
-            ActiveProvider::OpenAI,
-        )),
-        "openrouter" => Some(ProviderActivation::initial(
-            RuntimeProviderId::OpenRouter,
-            ActiveProvider::OpenRouter,
-        )),
-        "jcode" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Jcode,
-            ActiveProvider::OpenRouter,
-        )),
-        "bedrock" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Bedrock,
-            ActiveProvider::Bedrock,
-        )),
-        "cursor" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Cursor,
-            ActiveProvider::Cursor,
-        )),
-        "copilot" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Copilot,
-            ActiveProvider::Copilot,
-        )),
-        "gemini" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Gemini,
-            ActiveProvider::Gemini,
-        )),
-        "antigravity" => Some(ProviderActivation::initial(
-            RuntimeProviderId::Antigravity,
-            ActiveProvider::Antigravity,
-        )),
-        _ => None,
-    }
+    let (runtime_id, active) = match normalized_login_provider_id(provider_id)? {
+        "claude" => (RuntimeProviderId::Claude, ActiveProvider::Claude),
+        "claude-api" => (RuntimeProviderId::ClaudeApiKey, ActiveProvider::Claude),
+        "openai" => (RuntimeProviderId::OpenAi, ActiveProvider::OpenAI),
+        "openai-api" => (RuntimeProviderId::OpenAiApiKey, ActiveProvider::OpenAI),
+        "openrouter" => (RuntimeProviderId::OpenRouter, ActiveProvider::OpenRouter),
+        "jcode" => (RuntimeProviderId::Jcode, ActiveProvider::OpenRouter),
+        "bedrock" => (RuntimeProviderId::Bedrock, ActiveProvider::Bedrock),
+        "cursor" => (RuntimeProviderId::Cursor, ActiveProvider::Cursor),
+        "copilot" => (RuntimeProviderId::Copilot, ActiveProvider::Copilot),
+        "gemini" => (RuntimeProviderId::Gemini, ActiveProvider::Gemini),
+        "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
+        _ => return None,
+    };
+    Some(ProviderActivation::initial(runtime_id, active))
 }
 
 pub fn model_switch_request_for_provider_id(
