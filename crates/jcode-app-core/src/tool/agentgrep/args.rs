@@ -8,8 +8,11 @@ struct ResolvedSearchScope {
 fn resolved_search_scope(
     ctx: &ToolContext,
     path: Option<&str>,
+    file: Option<&str>,
     glob: Option<&str>,
 ) -> ResolvedSearchScope {
+    // `file` scopes grep/find to one exact file when `path` is absent.
+    let path = path.or(file);
     let Some(path) = path else {
         return ResolvedSearchScope {
             root: None,
@@ -44,7 +47,12 @@ pub(super) fn build_grep_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
         .query
         .clone()
         .ok_or_else(|| anyhow::anyhow!("agentgrep grep requires 'query'"))?;
-    let scope = resolved_search_scope(ctx, params.path.as_deref(), params.glob.as_deref());
+    let scope = resolved_search_scope(
+        ctx,
+        params.path.as_deref(),
+        params.file.as_deref(),
+        params.glob.as_deref(),
+    );
     Ok(GrepArgs {
         query,
         regex: params.regex.unwrap_or(false),
@@ -62,6 +70,7 @@ pub(super) fn build_find_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
     let query = params.query.as_deref().unwrap_or_default();
     if query.trim().is_empty()
         && params.path.as_deref().is_none_or(str::is_empty)
+        && params.file.as_deref().is_none_or(str::is_empty)
         && normalized_agentgrep_glob(params.glob.as_deref()).is_none()
         && params.file_type.as_deref().is_none_or(str::is_empty)
     {
@@ -69,7 +78,12 @@ pub(super) fn build_find_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
             "agentgrep find requires 'query' unless path, glob, or type narrows the search"
         ));
     }
-    let scope = resolved_search_scope(ctx, params.path.as_deref(), params.glob.as_deref());
+    let scope = resolved_search_scope(
+        ctx,
+        params.path.as_deref(),
+        params.file.as_deref(),
+        params.glob.as_deref(),
+    );
     Ok(FindArgs {
         query_parts: query.split_whitespace().map(ToOwned::to_owned).collect(),
         file_type: params.file_type.clone(),
@@ -128,7 +142,12 @@ pub(super) fn build_smart_args_and_query(
             err
         )
     })?;
-    let scope = resolved_search_scope(ctx, params.path.as_deref(), params.glob.as_deref());
+    let scope = resolved_search_scope(
+        ctx,
+        params.path.as_deref(),
+        params.file.as_deref(),
+        params.glob.as_deref(),
+    );
 
     let args = SmartArgs {
         terms,
