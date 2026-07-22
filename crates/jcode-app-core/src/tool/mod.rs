@@ -5,7 +5,6 @@ mod bash;
 mod batch;
 mod bg;
 mod browser;
-mod browser_use;
 mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
@@ -188,12 +187,6 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "browser_use",
-                browser_use::BrowserUseTool::new,
-            );
             Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             #[cfg(target_os = "macos")]
             Self::insert_tool_timed(
