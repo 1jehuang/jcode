@@ -1479,12 +1479,6 @@ pub struct App {
     force_full_repaint: bool,
     /// Last mouse scroll event timestamp (for trackpad velocity detection)
     last_mouse_scroll: Option<Instant>,
-    /// Timestamp of the last bracketed-paste event. Some terminals (notably
-    /// Windows Terminal / conhost) send a separate bare Enter key event right
-    /// after a paste that ends with a newline; a bare Enter arriving within a
-    /// few milliseconds of a paste is treated as part of the paste instead of
-    /// a submit (issue #544).
-    pub(in crate::tui) last_paste_event: Option<Instant>,
     /// Active smooth-scroll target for queued mouse-wheel motion.
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
