@@ -381,9 +381,9 @@ pub struct MultiProvider {
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
     startup_notices: RwLock<Vec<String>>,
-    /// Optional explicit provider lock set by CLI `--provider`.
-    /// When present, cross-provider fallback is disabled.
-    forced_provider: Option<ActiveProvider>,
+    /// CLI/environment selection to use when creating fresh sessions. This is
+    /// only an initial preference and never restricts later model switches.
+    initial_provider: Option<ActiveProvider>,
     /// Short-TTL memo for the full route-catalog build.
     ///
     /// Building the catalog is expensive (per-route pricing lookups, endpoint
@@ -618,21 +618,8 @@ impl MultiProvider {
         let clamped_messages = image_clamp::clamp_outbound_images(messages);
         let messages: &[Message] = clamped_messages.as_deref().unwrap_or(messages);
 
-        let detected_active = self.active_provider();
-        let active = if let Some(forced) = self.forced_provider {
-            if detected_active != forced {
-                crate::logging::warn(&format!(
-                    "Provider lock corrected active provider from {} to {} before request",
-                    Self::provider_label(detected_active),
-                    Self::provider_label(forced),
-                ));
-                self.set_active_provider(forced);
-            }
-            forced
-        } else {
-            detected_active
-        };
-        let sequence = Self::fallback_sequence_for(active, self.forced_provider);
+        let active = self.active_provider();
+        let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
         let (estimated_input_chars, estimated_input_tokens) =
@@ -934,43 +921,6 @@ impl MultiProvider {
         Ok(())
     }
 
-    fn ensure_provider_lock_allows_model_target(
-        &self,
-        target: ActiveProvider,
-        requested_model: &str,
-    ) -> Result<()> {
-        let Some(forced) = self.forced_provider else {
-            return Ok(());
-        };
-        if forced == target {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "Model '{}' targets {} but --provider is locked to {}. Remove the provider-specific model prefix or use `--provider {}`.",
-            requested_model,
-            Self::provider_label(target),
-            Self::provider_label(forced),
-            Self::provider_key(target),
-        );
-    }
-
-    fn ensure_provider_lock_allows_openai_compatible_profile(
-        &self,
-        requested_model: &str,
-    ) -> Result<()> {
-        let Some(forced) = self.forced_provider else {
-            return Ok(());
-        };
-        if forced == ActiveProvider::OpenRouter {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "Model '{}' targets an OpenAI-compatible provider but --provider is locked to {}. Remove the provider-specific model prefix or use `--provider openai-compatible`.",
-            requested_model,
-            Self::provider_label(forced),
-        );
-    }
-
     fn set_model_on_provider(&self, provider: ActiveProvider, model: &str) -> Result<()> {
         self.set_model_on_provider_with_credential_modes(provider, model, None, None)
     }
@@ -1091,16 +1041,14 @@ impl MultiProvider {
                 // the slot was built as Cerebras), so an OpenRouter-targeted
                 // switch reaches the real aggregator again. But a *custom*
                 // OpenAI-compatible endpoint (generic profile or named config
-                // profile) or a CLI `--provider` lock owns the slot
+                // profile) owns the slot
                 // legitimately: its model IDs are provider-local and must not
                 // be re-routed through OpenRouter (or fail outright because no
                 // OPENROUTER_API_KEY is configured).
-                let locked_to_slot = self.forced_provider == Some(ActiveProvider::OpenRouter);
                 let needs_rebind = match self.openrouter_provider().as_deref() {
                     None => true,
                     Some(provider) => {
                         !provider.supports_provider_routing_features()
-                            && !locked_to_slot
                             && provider
                                 .direct_openai_compatible_route_parts()
                                 .and_then(|(_provider, api_method, _detail)| {
@@ -1702,9 +1650,7 @@ impl Provider for MultiProvider {
     }
 
     fn credential_mode(&self) -> CredentialMode {
-        let active = self
-            .forced_provider
-            .unwrap_or_else(|| self.active_provider());
+        let active = self.active_provider();
         match active {
             ActiveProvider::Claude => self
                 .anthropic_provider()
@@ -1719,9 +1665,7 @@ impl Provider for MultiProvider {
     }
 
     fn set_credential_mode(&self, mode: CredentialMode) -> Result<()> {
-        let active = self
-            .forced_provider
-            .unwrap_or_else(|| self.active_provider());
+        let active = self.active_provider();
         match active {
             ActiveProvider::Claude => self
                 .anthropic_provider()
@@ -1817,7 +1761,6 @@ impl Provider for MultiProvider {
 
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
         {
-            self.ensure_provider_lock_allows_openai_compatible_profile(requested_model)?;
             return self.set_model_on_openai_compatible_profile(profile, target_model);
         }
 
@@ -1828,17 +1771,15 @@ impl Provider for MultiProvider {
         if let Some((profile_name, target_model)) =
             Self::named_provider_profile_model_prefix(requested_model)
         {
-            self.ensure_provider_lock_allows_openai_compatible_profile(requested_model)?;
             return self.set_model_on_named_provider_profile(&profile_name, &target_model);
         }
 
         // Provider-prefixed model names are explicit routing directives. They
         // must never silently fall through to another provider when the target
-        // is unavailable or when --provider locks a different backend.
+        // is unavailable.
         if let Some((target, prefix, target_model)) =
             explicit_model_provider_prefix(requested_model)
         {
-            self.ensure_provider_lock_allows_model_target(target, requested_model)?;
             // The single canonical parser decides whether this prefix pins a
             // dual-auth credential (and which provider/mode). Bare `claude:` /
             // `openai:` prefixes route without pinning a credential.
@@ -1878,12 +1819,17 @@ impl Provider for MultiProvider {
             return self.set_model_on_provider(target, target_model);
         }
 
-        // A CLI --provider lock means the model string is provider-local. Do
-        // not apply global Claude/OpenAI/OpenRouter heuristics here: custom
-        // OpenAI-compatible endpoints often use model IDs that look like other
-        // providers' IDs, and GitHub Copilot uses Claude-looking dotted names.
-        if let Some(forced) = self.forced_provider {
-            return self.set_model_on_provider(forced, requested_model);
+        // A custom OpenAI-compatible endpoint owns opaque, provider-local model
+        // IDs. Keep unprefixed names on that active endpoint, even when they
+        // resemble a globally known model family. Picker and slash-command
+        // route specs carry explicit prefixes, so the branch above can switch
+        // to any configured provider at any time.
+        if self.active_provider() == ActiveProvider::OpenRouter
+            && self
+                .active_openrouter_execution_provider()
+                .is_some_and(|provider| !provider.supports_provider_routing_features())
+        {
+            return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
         }
 
         // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
@@ -1904,8 +1850,7 @@ impl Provider for MultiProvider {
             );
         }
 
-        // Detect which provider this model belongs to when no explicit
-        // --provider lock was requested.
+        // Detect which provider an unprefixed model belongs to.
         let target_provider = provider_for_model(model);
         if let Some(target_provider) = target_provider
             && let Some(target) = provider_from_model_key(target_provider)
@@ -2685,7 +2630,7 @@ impl Provider for MultiProvider {
             active: RwLock::new(active),
             use_claude_cli: self.use_claude_cli,
             startup_notices: RwLock::new(Vec::new()),
-            forced_provider: self.forced_provider,
+            initial_provider: self.initial_provider,
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::clone(&self.post_auth_refreshes_pending),
         };
@@ -2706,16 +2651,15 @@ impl Provider for MultiProvider {
         // the provider/model again.
         let provider = Self::new_fast();
 
-        // Explicit CLI provider/model overrides remain stronger than config. The
-        // forced provider is represented in process env, while the CLI model only
-        // lives on the template, so restore that exact route after reconstruction.
-        if self.forced_provider.is_some() {
+        // An explicit CLI initial provider/model remains the starting selection
+        // for new sessions, while each session can switch freely afterward.
+        if self.initial_provider.is_some() {
             let active = self.active_provider();
             let current_model = self.model();
             let switch_request = self.fork_model_switch_request(active, &current_model);
             if let Err(error) = provider.set_model(&switch_request) {
                 crate::logging::warn(&format!(
-                    "Failed to preserve forced provider model '{}' for new session: {}",
+                    "Failed to preserve initial provider model '{}' for new session: {}",
                     switch_request, error
                 ));
             }

@@ -1115,47 +1115,47 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
 
 fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
     match normalized_login_provider_id(provider_id)? {
-        "claude" => Some(ProviderActivation::locked(
+        "claude" => Some(ProviderActivation::initial(
             RuntimeProviderId::Claude,
             ActiveProvider::Claude,
         )),
-        "claude-api" => Some(ProviderActivation::locked(
+        "claude-api" => Some(ProviderActivation::initial(
             RuntimeProviderId::ClaudeApiKey,
             ActiveProvider::Claude,
         )),
-        "openai" => Some(ProviderActivation::locked(
+        "openai" => Some(ProviderActivation::initial(
             RuntimeProviderId::OpenAi,
             ActiveProvider::OpenAI,
         )),
-        "openai-api" => Some(ProviderActivation::locked(
+        "openai-api" => Some(ProviderActivation::initial(
             RuntimeProviderId::OpenAiApiKey,
             ActiveProvider::OpenAI,
         )),
-        "openrouter" => Some(ProviderActivation::locked(
+        "openrouter" => Some(ProviderActivation::initial(
             RuntimeProviderId::OpenRouter,
             ActiveProvider::OpenRouter,
         )),
-        "jcode" => Some(ProviderActivation::locked(
+        "jcode" => Some(ProviderActivation::initial(
             RuntimeProviderId::Jcode,
             ActiveProvider::OpenRouter,
         )),
-        "bedrock" => Some(ProviderActivation::locked(
+        "bedrock" => Some(ProviderActivation::initial(
             RuntimeProviderId::Bedrock,
             ActiveProvider::Bedrock,
         )),
-        "cursor" => Some(ProviderActivation::locked(
+        "cursor" => Some(ProviderActivation::initial(
             RuntimeProviderId::Cursor,
             ActiveProvider::Cursor,
         )),
-        "copilot" => Some(ProviderActivation::locked(
+        "copilot" => Some(ProviderActivation::initial(
             RuntimeProviderId::Copilot,
             ActiveProvider::Copilot,
         )),
-        "gemini" => Some(ProviderActivation::locked(
+        "gemini" => Some(ProviderActivation::initial(
             RuntimeProviderId::Gemini,
             ActiveProvider::Gemini,
         )),
-        "antigravity" => Some(ProviderActivation::locked(
+        "antigravity" => Some(ProviderActivation::initial(
             RuntimeProviderId::Antigravity,
             ActiveProvider::Antigravity,
         )),
@@ -1455,7 +1455,7 @@ mod tests {
         ] {
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
             let activation = activate_auth_change(&AuthActivationRequest::new(
                 None,
@@ -1471,7 +1471,10 @@ mod tests {
                 std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
                 Ok(active)
             );
-            assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+            assert_eq!(
+                std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
+                Ok("1")
+            );
         }
     }
 
@@ -1547,7 +1550,7 @@ mod tests {
 
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
             let activation = activate_auth_change(&AuthActivationRequest::new(
                 None,
@@ -1566,7 +1569,10 @@ mod tests {
                 std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
                 Ok(active)
             );
-            assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+            assert_eq!(
+                std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
+                Ok("1")
+            );
             let expected_switch = if switch_prefix.is_empty() {
                 "shared-model".to_string()
             } else {
