@@ -2206,23 +2206,15 @@ impl Provider for MultiProvider {
 
     fn reasoning_effort(&self) -> Option<String> {
         match self.active_provider() {
-            ActiveProvider::Claude => {
-                if self.use_claude_cli {
-                    None
-                } else {
-                    self.anthropic_provider()
-                        .and_then(|provider| provider.reasoning_effort())
-                }
-            }
+            ActiveProvider::Claude if !self.use_claude_cli => self
+                .anthropic_provider()
+                .and_then(|provider| provider.reasoning_effort()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::Copilot => self.copilot_provider().and_then(|o| o.reasoning_effort()),
-            ActiveProvider::Antigravity => None,
-            ActiveProvider::Gemini => None,
-            ActiveProvider::Cursor => None,
-            ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
                 .and_then(|o| o.reasoning_effort()),
+            _ => None,
         }
     }
 
@@ -2268,9 +2260,6 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
-            ActiveProvider::Antigravity => vec![],
-            ActiveProvider::Gemini => vec![],
-            ActiveProvider::Cursor => vec![],
             _ => vec![],
         }
     }
