@@ -1,0 +1,25 @@
+{
+  "version": "0.55.0",
+  "date": "2026-07-22",
+  "title": "Terminal panes, expanded model catalog, and smarter task tracking",
+  "highlights": [
+    "Terminal spawns inside tmux now open in split panes instead of new windows",
+    "Expanded Jcode Bedrock subscription model catalog",
+    "Todo planning now measures how well objectives and feedback loops match your request"
+  ],
+  "improvements": [
+    "New /subscribe command with helpful nudges at rate-limit and long-task moments",
+    "New no-emoji output option keeps responses emoji-free when configured",
+    "Unreliable Llama tool-calling routes and the unstable Nemotron Super route are excluded from the model picker"
+  ],
+  "fixes": [
+    "Interactive model switching across providers works again",
+    "OpenAI models in the model picker no longer show broken placeholder routes",
+    "Structured rate limit errors are formatted readably",
+    "Auto-retry stops promptly when an OpenAI usage limit is reached",
+    "Slash command palette no longer flickers from spinner redraws",
+    "Long-lived OpenAI websocket sessions keep their prompt cache alive",
+    "Native compaction correctly resets the cache baseline, avoiding wasted tokens",
+    "Todo completion follow-ups are delivered reliably"
+  ]
+}
