@@ -87,12 +87,9 @@ fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::AnthropicApiKey
         | Method::OpenAIOAuth
         | Method::OpenAIApiKey
-        | Method::OpenRouter
-        | Method::OpenAiCompatible {
-            profile_id: Some(_),
-        } => true,
+        | Method::OpenRouter => true,
+        Method::OpenAiCompatible { profile_id } => profile_id.is_some(),
         Method::JcodeSubscription
-        | Method::OpenAiCompatible { profile_id: None }
         | Method::Copilot
         | Method::Cursor
         | Method::Bedrock
@@ -3868,7 +3865,6 @@ mod tests {
         assert!(route_supports_reasoning_effort(
             "openai-compatible:llamacpp"
         ));
-
         assert!(!route_supports_reasoning_effort("copilot"));
         assert!(!route_supports_reasoning_effort("bedrock"));
         assert!(!route_supports_reasoning_effort("https"));
