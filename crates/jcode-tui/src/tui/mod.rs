@@ -366,6 +366,12 @@ pub trait TuiState {
     }
     /// Context window limit in tokens (if known)
     fn context_limit(&self) -> Option<usize>;
+    /// Whether floating information widgets should be drawn for this state.
+    /// Implementations normally use the default; deterministic render fixtures
+    /// can suppress overlays without mutating process-global widget settings.
+    fn info_widget_overlays_enabled(&self) -> bool {
+        true
+    }
     /// Whether a newer client binary is available
     fn client_update_available(&self) -> bool;
     /// Whether a newer server binary is available (remote mode)

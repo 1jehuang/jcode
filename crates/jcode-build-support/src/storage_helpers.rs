@@ -5,10 +5,34 @@ use std::path::PathBuf;
 
 /// Get path to builds directory
 pub fn builds_dir() -> Result<PathBuf> {
-    let base = storage::jcode_dir()?;
-    let dir = base.join("builds");
+    let dir = resolve_builds_dir(
+        std::env::var_os("JCODE_HOME").map(PathBuf::from),
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        storage::jcode_dir()?,
+        cfg!(windows),
+    );
     storage::ensure_dir(&dir)?;
     Ok(dir)
+}
+
+fn resolve_builds_dir(
+    jcode_home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    default_jcode_dir: PathBuf,
+    is_windows: bool,
+) -> PathBuf {
+    if let Some(jcode_home) = jcode_home {
+        return jcode_home.join("builds");
+    }
+
+    if is_windows && let Some(local_app_data) = local_app_data {
+        // Keep runtime channel discovery aligned with scripts/install.ps1 and
+        // the supported Windows layout under %LOCALAPPDATA%\jcode\builds.
+        // Durable user state and logs still live under ~/.jcode.
+        return local_app_data.join("jcode").join("builds");
+    }
+
+    default_jcode_dir.join("builds")
 }
 
 /// Get path to build manifest
@@ -37,6 +61,48 @@ pub fn current_binary_path() -> Result<PathBuf> {
 /// Get path to the shared server symlink (approved daemon channel).
 pub fn shared_server_binary_path() -> Result<PathBuf> {
     Ok(builds_dir()?.join("shared-server").join(binary_name()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_builds_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_builds_use_local_app_data() {
+        let resolved = resolve_builds_dir(
+            None,
+            Some(PathBuf::from("/local-app-data")),
+            PathBuf::from("/home/test/.jcode"),
+            true,
+        );
+
+        assert_eq!(resolved, PathBuf::from("/local-app-data/jcode/builds"));
+    }
+
+    #[test]
+    fn jcode_home_override_wins_on_windows() {
+        let resolved = resolve_builds_dir(
+            Some(PathBuf::from("/isolated-jcode")),
+            Some(PathBuf::from("/local-app-data")),
+            PathBuf::from("/home/test/.jcode"),
+            true,
+        );
+
+        assert_eq!(resolved, PathBuf::from("/isolated-jcode/builds"));
+    }
+
+    #[test]
+    fn non_windows_builds_stay_under_jcode_home() {
+        let resolved = resolve_builds_dir(
+            None,
+            Some(PathBuf::from("/ignored/local-app-data")),
+            PathBuf::from("/home/test/.jcode"),
+            false,
+        );
+
+        assert_eq!(resolved, PathBuf::from("/home/test/.jcode/builds"));
+    }
 }
 
 /// Get path to canary binary

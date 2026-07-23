@@ -313,9 +313,7 @@ impl App {
             manager.restore_persisted_state_with(&state, &provider_messages);
         }
 
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.context_warning_shown = false;
+        self.invalidate_kv_cache_after_compaction();
         self.session.save()?;
         Ok(())
     }
@@ -378,18 +376,7 @@ impl App {
     }
 
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.context_warning_shown = false;
-        // The sidebar/status context figure is derived from the last
-        // provider-reported stream usage, which described the *pre-compaction*
-        // message list. Mark it stale so the display falls back to the local
-        // estimate over the new (summary + recent) active messages until the
-        // next provider usage report arrives (issue #441). The raw counters
-        // are kept intact for turn footers and cost accounting.
-        self.streaming.streaming_context_stale = true;
-        self.streaming.streaming_usage_call_reset_pending = true;
-        self.bump_context_revision();
+        self.invalidate_kv_cache_after_compaction();
         if let Err(err) = self.session.save() {
             crate::logging::warn(&format!(
                 "Failed to persist provider session reset after compaction for session {}: {}",
@@ -404,6 +391,29 @@ impl App {
             Self::format_compaction_complete_message(&event, self.context_limit)
         };
         self.push_display_message(DisplayMessage::system(message));
+    }
+
+    fn invalidate_kv_cache_after_compaction(&mut self) {
+        // Compaction intentionally replaces the provider-facing transcript
+        // (typically hundreds of messages become summary + recent tail). The
+        // previous request is therefore not a valid append-only cache baseline.
+        // Advance the generation as well as clearing the current baseline so a
+        // pre-compaction request that completes later cannot restore stale state.
+        self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
+        self.kv_cache.kv_cache_baseline = None;
+        self.kv_cache.cold_cache_warned_baseline_completed_at = None;
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.context_warning_shown = false;
+        // The sidebar/status context figure is derived from the last
+        // provider-reported stream usage, which described the *pre-compaction*
+        // message list. Mark it stale so the display falls back to the local
+        // estimate over the new (summary + recent) active messages until the
+        // next provider usage report arrives (issue #441). The raw counters
+        // are kept intact for turn footers and cost accounting.
+        self.streaming.streaming_context_stale = true;
+        self.streaming.streaming_usage_call_reset_pending = true;
+        self.bump_context_revision();
     }
 
     pub fn set_status_notice(&mut self, text: impl Into<String>) {

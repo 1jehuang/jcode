@@ -1,8 +1,7 @@
 use super::{
-    build_resume_command, clear_ambient_info_cache_for_tests, effort_display_label,
-    extract_bracketed_system_message, format_countdown_until, gather_ambient_info,
-    inferred_reasoning_efforts, partition_queued_messages, pretty_model_display_name,
-    resume_invocation_args,
+    build_resume_command, effort_display_label, extract_bracketed_system_message,
+    format_countdown_until, gather_ambient_info_inner, inferred_reasoning_efforts,
+    partition_queued_messages, pretty_model_display_name, resume_invocation_args,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -368,16 +367,11 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
         })
         .expect("schedule second reminder");
 
-    clear_ambient_info_cache_for_tests();
-    let info = (0..20)
-        .find_map(|_| {
-            let info = gather_ambient_info(false);
-            if info.is_none() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            info
-        })
-        .expect("ambient info");
+    // This test exercises queue filtering, not the stale-while-revalidate cache.
+    // Read synchronously while the temporary JCODE_HOME and its files are pinned:
+    // an unrelated in-flight cache refresh can otherwise overwrite the cleared
+    // process-global cache with data loaded under another test's JCODE_HOME.
+    let info = gather_ambient_info_inner(false).expect("ambient info");
     assert!(info.show_widget);
     assert_eq!(info.queue_count, 3);
     assert_eq!(info.reminder_count, 2);

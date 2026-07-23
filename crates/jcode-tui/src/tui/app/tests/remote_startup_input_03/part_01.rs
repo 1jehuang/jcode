@@ -1069,20 +1069,22 @@ fn test_new_for_remote_restores_observe_mode_from_reload_state() {
 
 #[test]
 fn test_new_for_remote_restores_split_view_from_reload_state() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-splitview-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = "test-remote-splitview";
 
-    app.set_split_view_enabled(true, true);
-    app.save_input_for_reload(&session_id);
+        app.set_split_view_enabled(true, true);
+        app.save_input_for_reload(session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert!(restored.split_view_enabled());
-    let page = restored
-        .side_panel()
-        .focused_page()
-        .expect("split view page should be focused");
-    assert_eq!(page.id, "split_view");
-    assert!(page.content.contains("Split View"));
+        let restored = App::new_for_remote(Some(session_id.to_string()));
+        assert!(restored.split_view_enabled());
+        let page = restored
+            .side_panel()
+            .focused_page()
+            .expect("split view page should be focused");
+        assert_eq!(page.id, "split_view");
+        assert!(page.content.contains("Split View"));
+    });
 }
 
 #[test]
@@ -1101,62 +1103,63 @@ fn test_restore_reload_state_supports_legacy_input_format() {
 
 #[test]
 fn test_new_for_remote_requeues_restored_pending_soft_interrupts() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-restore-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = "test-remote-restore";
 
-    app.interleave_message = Some("local interleave".to_string());
-    app.pending_soft_interrupts = vec!["sent one".to_string(), "sent two".to_string()];
-    app.pending_soft_interrupt_requests =
-        vec![(101, "sent one".to_string()), (102, "sent two".to_string())];
-    app.queued_messages.push("queued later".to_string());
-    app.save_input_for_reload(&session_id);
+        app.interleave_message = Some("local interleave".to_string());
+        app.pending_soft_interrupts = vec!["sent one".to_string(), "sent two".to_string()];
+        app.pending_soft_interrupt_requests =
+            vec![(101, "sent one".to_string()), (102, "sent two".to_string())];
+        app.queued_messages.push("queued later".to_string());
+        app.save_input_for_reload(session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert!(restored.interleave_message.is_none());
-    assert_eq!(
-        restored.queued_messages(),
-        &["local interleave", "sent one", "sent two", "queued later"]
-    );
+        let restored = App::new_for_remote(Some(session_id.to_string()));
+        assert!(restored.interleave_message.is_none());
+        assert_eq!(
+            restored.queued_messages(),
+            &["local interleave", "sent one", "sent two", "queued later"]
+        );
+    });
 }
 
 #[test]
 fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-interleave-dispatch-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = "test-remote-interleave-dispatch";
 
-    app.interleave_message = Some("interrupt after reload".to_string());
-    app.save_input_for_reload(&session_id);
+        app.interleave_message = Some("interrupt after reload".to_string());
+        app.save_input_for_reload(session_id);
 
-    let mut restored = App::new_for_remote(Some(session_id));
-    assert!(restored.interleave_message.is_none());
-    assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-    assert!(!restored.pending_queued_dispatch);
-    assert!(!restored.is_processing);
-    assert!(matches!(restored.status, ProcessingStatus::Idle));
+        let mut restored = App::new_for_remote(Some(session_id.to_string()));
+        assert!(restored.interleave_message.is_none());
+        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
+        assert!(!restored.pending_queued_dispatch);
+        assert!(!restored.is_processing);
+        assert!(matches!(restored.status, ProcessingStatus::Idle));
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    rt.block_on(super::remote::process_remote_followups(
-        &mut restored,
-        &mut remote,
-    ));
-    assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-    assert!(!restored.is_processing);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut restored,
+            &mut remote,
+        ));
+        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
+        assert!(!restored.is_processing);
 
-    remote.mark_history_loaded();
-    rt.block_on(super::remote::process_remote_followups(
-        &mut restored,
-        &mut remote,
-    ));
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut restored,
+            &mut remote,
+        ));
 
-    assert!(restored.queued_messages().is_empty());
-    assert!(restored.is_processing);
-    assert!(matches!(restored.status, ProcessingStatus::Sending));
-    assert!(
-        restored
-            .display_messages()
-            .iter()
-            .any(|message| message.role == "user" && message.content == "interrupt after reload")
-    );
+        assert!(restored.queued_messages().is_empty());
+        assert!(restored.is_processing);
+        assert!(matches!(restored.status, ProcessingStatus::Sending));
+        assert!(restored.display_messages().iter().any(|message| {
+            message.role == "user" && message.content == "interrupt after reload"
+        }));
+    });
 }

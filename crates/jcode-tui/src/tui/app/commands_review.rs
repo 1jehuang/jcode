@@ -724,7 +724,7 @@ pub(super) fn launch_forked_session_local(
         }
         (true, false) => {
             app.push_display_message(DisplayMessage::system(format!(
-                "✂ Fork → {} (opened in new window)",
+                "✂ Fork → {} (opened in new pane/window)",
                 session_name
             )));
             app.set_status_notice(format!("Fork → {}", session_name));

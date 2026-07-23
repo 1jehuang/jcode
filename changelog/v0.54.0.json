@@ -1,0 +1,23 @@
+{
+  "version": "0.54.0",
+  "date": "2026-07-20",
+  "title": "Subscription models, session facts, and faster Windows startup",
+  "highlights": [
+    "Jcode subscription routes now include curated Bedrock coding models and appear reliably in model selection and provider diagnostics",
+    "Session facts now use available space beside the conversation while remaining grouped and readable",
+    "The Windows hotkey listener now prewarms the background server for faster first launches"
+  ],
+  "improvements": [
+    "Terminals without inline image support now explain the fallback, preserve image interactions, and show Mermaid source when rendering is unavailable",
+    "Long sessions use less memory by releasing transcript copies, trimming inactive clients, and unloading the embedding model sooner",
+    "Windows startup and credential maintenance avoid repeated or blocking security work"
+  ],
+  "fixes": [
+    "The input view follows new content to the bottom consistently",
+    "Swarm recursion is limited to deep-swarm roots, live agent counts remain bounded, and resumed sessions avoid a lock inversion",
+    "Mixed provider and subscription routes survive catalog hydration, stale catalogs refresh correctly, and direct Bedrock routes remain available",
+    "Bedrock uses configured AWS profiles while authentication and remote catalog inputs stay within their intended security scope",
+    "Onboarding credentials and deferred Windows ACL retries are handled more safely",
+    "Transport and PDF dependencies include current security fixes"
+  ]
+}

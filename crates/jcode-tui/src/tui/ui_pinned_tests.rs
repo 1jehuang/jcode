@@ -601,7 +601,7 @@ fn render_side_panel_markdown_multiple_mermaids_create_ordered_placements() {
 }
 
 #[test]
-fn render_side_panel_markdown_without_protocol_falls_back_to_text_placeholder() {
+fn render_side_panel_markdown_without_native_protocol_shows_mermaid_source() {
     let page = sample_mermaid_page("```mermaid\nflowchart TD\n    A --> B\n```\n");
 
     // Pin protocol availability OFF for this thread: PICKER is a
@@ -631,8 +631,13 @@ fn render_side_panel_markdown_without_protocol_falls_back_to_text_placeholder() 
         rendered.image_placements.len()
     );
     assert!(
-        text.iter().any(|line| line.contains("mermaid diagram")),
-        "expected textual placeholder when image protocols are unavailable: {:?}",
+        text.iter().any(|line| line.contains("┌─ mermaid")),
+        "expected a Mermaid source-code header without a native image protocol: {:?}",
+        text
+    );
+    assert!(
+        text.iter().any(|line| line.contains("flowchart TD")),
+        "expected readable Mermaid source without a native image protocol: {:?}",
         text
     );
 }

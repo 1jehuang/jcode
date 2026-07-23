@@ -9,4 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-pdf-extract = "0.8"
+pdf-extract = "0.12"

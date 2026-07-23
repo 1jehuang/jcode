@@ -599,3 +599,27 @@ fn live_verify_failure_record_blocks_auto_use() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn token_exchange_backoff_is_exponential_and_capped() {
+    assert_eq!(super::token_exchange_backoff_ms(1), 500);
+    assert_eq!(super::token_exchange_backoff_ms(2), 1_000);
+    assert_eq!(super::token_exchange_backoff_ms(3), 2_000);
+    assert_eq!(super::token_exchange_backoff_ms(4), 4_000);
+    assert_eq!(super::token_exchange_backoff_ms(5), 4_000);
+    assert_eq!(super::token_exchange_backoff_ms(100), 4_000);
+}
+
+#[test]
+fn token_exchange_retries_only_5xx() {
+    assert!(super::token_exchange_retryable_status(500));
+    assert!(super::token_exchange_retryable_status(502));
+    assert!(super::token_exchange_retryable_status(503));
+    assert!(super::token_exchange_retryable_status(599));
+    assert!(!super::token_exchange_retryable_status(400));
+    assert!(!super::token_exchange_retryable_status(401));
+    assert!(!super::token_exchange_retryable_status(403));
+    assert!(!super::token_exchange_retryable_status(404));
+    assert!(!super::token_exchange_retryable_status(429));
+    assert!(!super::token_exchange_retryable_status(200));
+}

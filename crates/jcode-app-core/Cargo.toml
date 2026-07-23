@@ -113,6 +113,8 @@ jemalloc-prof = ["jcode-base/jemalloc-prof"]
 embeddings = ["jcode-base/embeddings"]
 # live AWS Bedrock support lives in jcode-base (provider/bedrock); forward there.
 bedrock = ["jcode-base/bedrock"]
+# Used only by the CentOS 7 portable Linux release build.
+linux-compat-vendored-openssl = ["jcode-notify-email/linux-compat-vendored-openssl"]
 # PDF text extraction lives in this crate (tool/read.rs).
 pdf = ["dep:jcode-pdf"]
 # Compiles this crate's test-only helpers/accessors (e.g. the

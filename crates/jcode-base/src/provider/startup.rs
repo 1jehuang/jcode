@@ -247,25 +247,25 @@ impl MultiProvider {
             );
         }
 
-        let forced_provider = Self::forced_provider_from_env();
-        if let Some(forced) = forced_provider {
-            active = forced;
-            let is_configured = availability.is_configured(forced);
+        let initial_provider = Self::initial_provider_from_env();
+        if let Some(initial) = initial_provider {
+            active = initial;
+            let is_configured = availability.is_configured(initial);
             if is_configured {
-                let display = if matches!(forced, ActiveProvider::OpenRouter) {
+                let display = if matches!(initial, ActiveProvider::OpenRouter) {
                     crate::provider_catalog::active_openai_compatible_display_name()
-                        .unwrap_or_else(|| Self::provider_key(forced).to_string())
+                        .unwrap_or_else(|| Self::provider_key(initial).to_string())
                 } else {
-                    Self::provider_key(forced).to_string()
+                    Self::provider_key(initial).to_string()
                 };
                 crate::logging::info(&format!(
-                    "Using forced provider '{}' from CLI/environment",
+                    "Using initial provider '{}' from CLI/environment",
                     display
                 ));
             } else {
                 crate::logging::warn(&format!(
-                    "Forced provider '{}' is not configured; requests will fail until credentials are available",
-                    Self::provider_key(forced)
+                    "Initial provider '{}' is not configured; requests will fail until credentials are available or another model is selected",
+                    Self::provider_key(initial)
                 ));
             }
         } else if let Some(pref) = provider_state.default_provider_key() {
@@ -312,7 +312,7 @@ impl MultiProvider {
             active: RwLock::new(active),
             use_claude_cli,
             startup_notices: RwLock::new(Vec::new()),
-            forced_provider,
+            initial_provider,
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -445,7 +445,7 @@ impl MultiProvider {
     /// Create with explicit initial provider preference
     pub fn with_preference(prefer_openai: bool) -> Self {
         let provider = Self::new();
-        if provider.forced_provider.is_none()
+        if provider.initial_provider.is_none()
             && prefer_openai
             && provider.openai_provider().is_some()
         {
@@ -459,7 +459,7 @@ impl MultiProvider {
 
     pub fn with_preference_fast(prefer_openai: bool) -> Self {
         let provider = Self::new_fast();
-        if provider.forced_provider.is_none()
+        if provider.initial_provider.is_none()
             && prefer_openai
             && provider.openai_provider().is_some()
         {

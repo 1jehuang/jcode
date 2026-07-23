@@ -14,6 +14,31 @@ pub fn extract_copy_targets_from_rendered_lines(lines: &[Line<'static>]) -> Vec<
     while idx < lines.len() {
         let text = line_plain_text(&lines[idx]);
         let trimmed = text.trim_start();
+        // Successful LaTeX image renders emit a dim `math` label followed by an
+        // image placeholder. The source is kept in a bounded hash registry so
+        // both the inline badge and semantic text selection can recover the
+        // original markup instead of copying an opaque image marker.
+        if trimmed == "math"
+            && let Some(marker) = lines.get(idx + 1)
+            && let Some(source) = latex_image::copy_source_for_placeholder(marker)
+        {
+            let rows = mermaid::parse_inline_image_placeholder(marker)
+                .map(|(_, rows, _)| rows as usize)
+                .unwrap_or(1)
+                .max(1);
+            let end = (idx + 1 + rows).min(lines.len());
+            targets.push(RawCopyTarget {
+                kind: CopyTargetKind::Math {
+                    display: source.display,
+                },
+                content: latex_image::copy_text(&source),
+                start_raw_line: idx,
+                end_raw_line: end,
+                badge_raw_line: idx,
+            });
+            idx = end;
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("┌─ ") {
             let label = rest.trim();
             let language = if label.is_empty() || label == "code" {

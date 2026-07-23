@@ -188,13 +188,71 @@ fn test_persistent_ws_idle_policy_thresholds() {
 }
 
 #[tokio::test]
+async fn persistent_ws_response_idle_expiry_ignores_recent_ping_activity() {
+    let (mut state, server) = test_persistent_ws_state().await;
+    state.last_activity_at = Instant::now();
+    state.last_response_completed_at =
+        Instant::now() - Duration::from_secs(WEBSOCKET_PERSISTENT_IDLE_RECONNECT_SECS_DEFAULT);
+
+    let outcome = ensure_persistent_ws_is_healthy(&mut state, false)
+        .await
+        .expect("idle policy should not require websocket I/O");
+    assert!(matches!(
+        outcome,
+        PersistentWsHealth::Reconnect {
+            reset_reason: "idle_reconnect",
+            ..
+        }
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn persistent_ws_background_keepalive_round_trips_and_answers_server_ping() {
+    let (mut state, server, ping_notify, pong_notify) =
+        test_persistent_ws_state_with_ping_notify().await;
+    state.last_activity_at =
+        Instant::now() - Duration::from_secs(WEBSOCKET_PERSISTENT_HEALTHCHECK_IDLE_SECS + 1);
+    let connection_started_at = state.connected_at;
+    let persistent_ws = Arc::new(Mutex::new(Some(state)));
+
+    let keepalive = spawn_persistent_ws_keepalive_with_interval(
+        Arc::downgrade(&persistent_ws),
+        connection_started_at,
+        "gpt-test".to_string(),
+        Duration::from_millis(5),
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), ping_notify.notified())
+        .await
+        .expect("background keepalive should send a ping");
+    tokio::time::timeout(Duration::from_secs(1), pong_notify.notified())
+        .await
+        .expect("background keepalive should answer a server ping");
+    keepalive.abort();
+
+    let mut guard = persistent_ws.lock().await;
+    let state = guard.as_mut().expect("keepalive should retain the socket");
+    assert!(
+        !persistent_ws_idle_needs_healthcheck(state.last_activity_at.elapsed()),
+        "successful background round trip should refresh socket activity"
+    );
+    drop(guard);
+
+    *persistent_ws.lock().await = None;
+    server.abort();
+}
+
+#[tokio::test]
 #[allow(
     clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide active OpenAI account model cache across async websocket state setup"
 )]
 async fn test_set_model_clears_persistent_ws_state() {
     let _guard = jcode_base::storage::lock_test_env();
-    jcode_base::auth::codex::set_active_account_override(Some("openai-set-model-clears-ws".to_string()));
+    jcode_base::auth::codex::set_active_account_override(Some(
+        "openai-set-model-clears-ws".to_string(),
+    ));
     jcode_base::provider::populate_account_models(vec!["gpt-5.3-codex".to_string()]);
 
     let provider = OpenAIProvider::new(CodexCredentials {

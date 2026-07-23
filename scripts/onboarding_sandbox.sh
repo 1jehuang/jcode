@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 command=${1:-help}
@@ -8,13 +9,23 @@ if [[ $# -gt 0 ]]; then
 fi
 
 sandbox_name=${JCODE_ONBOARDING_SANDBOX:-default}
-sandbox_root_default="$repo_root/.tmp/onboarding/$sandbox_name"
+if [[ ! "$sandbox_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ || "$sandbox_name" == "." || "$sandbox_name" == ".." ]]; then
+  echo "Invalid onboarding sandbox name: $sandbox_name" >&2
+  exit 2
+fi
+scratch_root=${JCODE_SCRATCH_DIR:-$HOME/.jcode/scratch}
+sandbox_parent="$scratch_root/onboarding"
+sandbox_root_default="$sandbox_parent/$sandbox_name"
 sandbox_root=${JCODE_ONBOARDING_DIR:-$sandbox_root_default}
 jcode_home="$sandbox_root/home"
 runtime_dir="$sandbox_root/runtime"
+marker_file="$sandbox_root/.jcode-onboarding-sandbox"
 
 ensure_dirs() {
   mkdir -p "$jcode_home" "$runtime_dir"
+  chmod 700 "$sandbox_root" "$jcode_home" "$runtime_dir"
+  : > "$marker_file"
+  chmod 600 "$marker_file"
 }
 
 run_in_sandbox() {
@@ -42,6 +53,7 @@ Commands:
   env                    Print the sandbox environment exports
   status                 Show sandbox paths and current contents
   reset                  Delete the sandbox entirely
+  purge-external         Delete copied real credentials/transcripts only
   shell                  Open a clean shell with sandbox env vars set
   jcode [args...]        Run jcode inside the sandbox
   auth-status            Run 'jcode auth status' inside the sandbox
@@ -67,6 +79,8 @@ Environment overrides:
   JCODE_ONBOARDING_SANDBOX   Sandbox name (default: default)
   JCODE_ONBOARDING_DIR       Explicit sandbox directory
   JCODE_AUTH_FIXTURE_DIR     Fixture store (default: .tmp/auth-fixtures)
+  JCODE_ONBOARDING_KEEP_EXTERNAL=1
+                              Keep copied real credentials after fresh-real exits
 
 Examples:
   $(basename "$0") fresh
@@ -97,11 +111,40 @@ status() {
     echo "Home contents:"
     find "$jcode_home" -maxdepth 3 \( -type f -o -type d \) | sed "s#^$sandbox_root#.#" | sort
   fi
+
+  if [[ -d "$jcode_home/external" ]]; then
+    echo
+    echo "WARNING: this sandbox contains copies of real credentials or transcripts."
+    echo "Remove them with: $(basename "$0") purge-external"
+  fi
 }
 
 reset() {
+  if [[ ! -e "$sandbox_root" ]]; then
+    echo "Onboarding sandbox is already absent: $sandbox_root"
+    return
+  fi
+  case "$sandbox_root" in
+    ""|/|"$HOME"|"$repo_root")
+      echo "Refusing to delete unsafe sandbox path: $sandbox_root" >&2
+      return 1
+      ;;
+  esac
+  if [[ ! -f "$marker_file" && "$sandbox_root" != "$sandbox_root_default" ]]; then
+    echo "Refusing to delete unmarked custom sandbox: $sandbox_root" >&2
+    return 1
+  fi
   rm -rf "$sandbox_root"
   echo "Removed onboarding sandbox: $sandbox_root"
+}
+
+purge_external() {
+  if [[ -d "$jcode_home/external" ]]; then
+    rm -rf "$jcode_home/external"
+    echo "Removed copied external credentials/transcripts: $jcode_home/external"
+  else
+    echo "No copied external credentials/transcripts found."
+  fi
 }
 
 open_shell() {
@@ -263,6 +306,7 @@ seed_real_logins() {
   fi
   echo
   echo "These are copies; your real \$HOME files are untouched."
+  echo "They contain sensitive data and persist until reset or purge-external."
   echo "Onboarding will now offer to import them. Start it with:"
   echo "  $(basename "$0") jcode"
 }
@@ -285,6 +329,9 @@ case "$command" in
   reset)
     reset
     ;;
+  purge-external)
+    purge_external
+    ;;
   shell)
     open_shell
     ;;
@@ -306,7 +353,17 @@ case "$command" in
     seed_real_logins "$@"
     echo
     echo "Launching sandbox jcode with your real logins available to import..."
-    run_jcode
+    if run_jcode; then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [[ "${JCODE_ONBOARDING_KEEP_EXTERNAL:-0}" != "1" ]]; then
+      purge_external
+    else
+      echo "Keeping copied external credentials because JCODE_ONBOARDING_KEEP_EXTERNAL=1."
+    fi
+    exit "$rc"
     ;;
   login)
     if [[ $# -lt 1 ]]; then

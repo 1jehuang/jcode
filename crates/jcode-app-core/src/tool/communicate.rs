@@ -25,7 +25,8 @@ const REQUEST_ID: u64 = 1;
 
 /// Default number of workers `run_plan` keeps active at once for a **light**-mode
 /// plan. Light mode is the cheap fan-out preset, so this stays small. Deep mode
-/// instead uses `agents.swarm_max_concurrent_agents` (high, configurable).
+/// instead uses `agents.swarm_max_concurrent_agents` (configurable and shared
+/// with the server's recursive-spawn RAM safety guard).
 const LIGHT_MODE_DEFAULT_CONCURRENCY: usize = 4;
 
 mod transport;
@@ -1786,7 +1787,7 @@ pub struct CommunicateTool {
 
 impl CommunicateTool {
     pub fn new() -> Self {
-        const BASE_DESCRIPTION: &str = "Coordinate agents. Any agent can spawn child agents, and those children can spawn their own, forming a recursive spawn tree with no depth limit (growth is bounded only by the total swarm member cap). For spawn, prefer providing a prompt so the new agent starts with a concrete task instead of idling. Spawned/assigned agents automatically report their final response back to the agent that spawned them; you can stop any agent in the subtree you spawned.\n\nCommunication: prefer structural dataflow (task-graph artifacts via complete_node) over chat, and DMs for point-to-point coordination. broadcast reaches only your spawned subtree (whole swarm for the coordinator) and should be rare; channels and shared-context are discouraged legacy primitives.";
+        const BASE_DESCRIPTION: &str = "Coordinate agents. In light-swarm and normal ad hoc use, only the root session may spawn agents, keeping execution to one level of fan-out. Recursive spawning is enabled only when the root session is running in swarm-deep mode; deep descendants may then spawn their own children, bounded by the configured live-agent limit and the absolute swarm member cap. For spawn, prefer providing a prompt so the new agent starts with a concrete task instead of idling. Spawned/assigned agents automatically report their final response back to the agent that spawned them; you can stop any agent in the subtree you spawned.\n\nCommunication: prefer structural dataflow (task-graph artifacts via complete_node) over chat, and DMs for point-to-point coordination. broadcast reaches only your spawned subtree (whole swarm for the coordinator) and should be rare; channels and shared-context are discouraged legacy primitives.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(None);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
@@ -2082,7 +2083,7 @@ impl Tool for CommunicateTool {
                 "concurrency_limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max swarm worker agents active at once. For fill_slots this is required. For run_plan it is optional and overrides the mode-based default (deep fans out wide up to agents.swarm_max_concurrent_agents; light uses a small default). Total agents over the whole run is still bounded only by the swarm member cap."
+                    "description": "Max swarm worker agents active at once. For fill_slots this is required. For run_plan it is optional and overrides the mode-based default (deep uses agents.swarm_max_concurrent_agents; light uses a small default). The server also applies agents.swarm_max_concurrent_agents to recursive ad hoc spawning as a live-worker RAM safety limit, plus an absolute hard member cap."
                 },
                 "force": {
                     "type": "boolean",

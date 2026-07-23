@@ -26,8 +26,8 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -84,6 +84,11 @@ const WEBSOCKET_PERSISTENT_IDLE_RECONNECT_SECS_DEFAULT: u64 = 600; // 10 min
 /// If a persistent socket has been idle for a while, send a lightweight ping
 /// before reuse so we can proactively detect half-closed connections.
 const WEBSOCKET_PERSISTENT_HEALTHCHECK_IDLE_SECS: u64 = 15;
+/// Keep an otherwise-idle response chain alive while it remains within the
+/// configured reuse window. OpenAI commonly closes quiet sockets after roughly
+/// 60-90 seconds; waiting until the next user request to ping is therefore too
+/// late and forces a cold full-prompt resend.
+const WEBSOCKET_PERSISTENT_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 
 /// Resolved idle-reconnect threshold (seconds), read once from the environment.
 /// `Some(secs)` means reconnect after that idle duration; `None` means never
@@ -121,6 +126,7 @@ static WEBSOCKET_COOLDOWNS: LazyLock<Arc<RwLock<HashMap<String, Instant>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 static WEBSOCKET_FAILURE_STREAKS: LazyLock<Arc<RwLock<HashMap<String, u32>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+static WEBSOCKET_PING_ID: AtomicU64 = AtomicU64::new(1);
 
 #[expect(
     clippy::upper_case_acronyms,
@@ -270,10 +276,30 @@ struct PersistentWsState {
     last_response_id: String,
     connected_at: Instant,
     last_activity_at: Instant,
+    /// Last completed model response. Unlike `last_activity_at`, background
+    /// ping/pong traffic does not advance this, so the configured idle lifetime
+    /// still bounds how long an unused session retains a socket.
+    last_response_completed_at: Instant,
     /// Number of messages sent in this conversation chain
     message_count: usize,
     /// Number of items we sent in the last full request (for detecting conversation changes)
     last_input_item_count: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PersistentWsHealth {
+    Healthy,
+    Reconnect {
+        reset_reason: &'static str,
+        detail: String,
+    },
+}
+
+fn next_persistent_ws_ping_payload() -> Vec<u8> {
+    WEBSOCKET_PING_ID
+        .fetch_add(1, AtomicOrdering::Relaxed)
+        .to_be_bytes()
+        .to_vec()
 }
 
 #[derive(Debug, Clone)]
@@ -438,28 +464,38 @@ fn format_status_duration(duration: Duration) -> String {
     }
 }
 
-async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Result<bool, String> {
-    let idle_for = state.last_activity_at.elapsed();
-    if persistent_ws_idle_requires_reconnect(idle_for) {
+async fn ensure_persistent_ws_is_healthy(
+    state: &mut PersistentWsState,
+    verbose: bool,
+) -> Result<PersistentWsHealth, String> {
+    let response_idle_for = state.last_response_completed_at.elapsed();
+    if persistent_ws_idle_requires_reconnect(response_idle_for) {
         jcode_base::logging::info(&format!(
             "Persistent WS idle for {}s; reconnecting before reuse",
-            idle_for.as_secs()
+            response_idle_for.as_secs()
         ));
-        return Ok(false);
+        return Ok(PersistentWsHealth::Reconnect {
+            reset_reason: "idle_reconnect",
+            detail: format!("response_idle_secs={}", response_idle_for.as_secs()),
+        });
     }
 
+    let idle_for = state.last_activity_at.elapsed();
     if !persistent_ws_idle_needs_healthcheck(idle_for) {
-        return Ok(true);
+        return Ok(PersistentWsHealth::Healthy);
     }
 
-    jcode_base::logging::info(&format!(
-        "Persistent WS idle for {}ms; sending healthcheck ping before reuse",
-        idle_for.as_millis()
-    ));
+    if verbose {
+        jcode_base::logging::info(&format!(
+            "Persistent WS idle for {}ms; sending healthcheck ping before reuse",
+            idle_for.as_millis()
+        ));
+    }
 
+    let ping_payload = next_persistent_ws_ping_payload();
     state
         .ws_stream
-        .send(WsMessage::Ping(Vec::new()))
+        .send(WsMessage::Ping(ping_payload.clone()))
         .await
         .map_err(|err| format!("healthcheck ping send error: {}", err))?;
 
@@ -478,13 +514,21 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
             })?;
 
         match next_item {
-            Some(Ok(WsMessage::Pong(_))) => {
+            Some(Ok(WsMessage::Pong(payload))) if payload == ping_payload => {
                 state.last_activity_at = Instant::now();
-                jcode_base::logging::info(&format!(
-                    "Persistent WS healthcheck pong after {}ms",
-                    started_at.elapsed().as_millis()
-                ));
-                return Ok(true);
+                if verbose {
+                    jcode_base::logging::info(&format!(
+                        "Persistent WS healthcheck pong after {}ms",
+                        started_at.elapsed().as_millis()
+                    ));
+                }
+                return Ok(PersistentWsHealth::Healthy);
+            }
+            Some(Ok(WsMessage::Pong(_))) => {
+                // A delayed pong from an earlier probe may be observed before
+                // this probe's response. Only the payload-correlated pong proves
+                // the socket is currently healthy.
+                continue;
             }
             Some(Ok(WsMessage::Ping(payload))) => {
                 state
@@ -494,8 +538,14 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
                     .map_err(|err| format!("healthcheck pong send error: {}", err))?;
                 state.last_activity_at = Instant::now();
             }
-            Some(Ok(WsMessage::Close(_))) => {
-                return Ok(false);
+            Some(Ok(WsMessage::Close(frame))) => {
+                let detail = frame
+                    .map(|frame| format!("close_code={} close_reason={}", frame.code, frame.reason))
+                    .unwrap_or_else(|| "close_frame_without_status".to_string());
+                return Ok(PersistentWsHealth::Reconnect {
+                    reset_reason: "healthcheck_reconnect",
+                    detail,
+                });
             }
             Some(Ok(other)) => {
                 return Err(format!(
@@ -507,12 +557,143 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
                 return Err(format!("healthcheck receive error: {}", err));
             }
             None => {
-                return Ok(false);
+                return Ok(PersistentWsHealth::Reconnect {
+                    reset_reason: "healthcheck_reconnect",
+                    detail: "websocket_stream_ended".to_string(),
+                });
             }
         }
     }
 
-    Ok(false)
+    Ok(PersistentWsHealth::Reconnect {
+        reset_reason: "healthcheck_reconnect",
+        detail: format!(
+            "healthcheck_ended_without_pong_after_{}ms",
+            WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
+        ),
+    })
+}
+
+fn spawn_persistent_ws_keepalive(
+    persistent_ws: Weak<Mutex<Option<PersistentWsState>>>,
+    connection_started_at: Instant,
+    model: String,
+) -> tokio::task::JoinHandle<()> {
+    spawn_persistent_ws_keepalive_with_interval(
+        persistent_ws,
+        connection_started_at,
+        model,
+        Duration::from_secs(WEBSOCKET_PERSISTENT_KEEPALIVE_INTERVAL_SECS),
+    )
+}
+
+fn spawn_persistent_ws_keepalive_with_interval(
+    persistent_ws: Weak<Mutex<Option<PersistentWsState>>>,
+    connection_started_at: Instant,
+    model: String,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+
+            let Some(persistent_ws) = persistent_ws.upgrade() else {
+                return;
+            };
+            let mut guard = persistent_ws.lock().await;
+            let Some(state) = guard.as_mut() else {
+                return;
+            };
+            if state.connected_at != connection_started_at {
+                return;
+            }
+
+            if state.connected_at.elapsed()
+                >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS)
+            {
+                log_openai_stream_lifecycle(
+                    jcode_base::logging::LogLevel::Info,
+                    "persistent_state_reset",
+                    vec![
+                        ("model", model.clone()),
+                        ("reason", "max_age".to_string()),
+                        ("source", "background_keepalive".to_string()),
+                    ],
+                );
+                *guard = None;
+                return;
+            }
+
+            let response_idle_for = state.last_response_completed_at.elapsed();
+            if persistent_ws_idle_requires_reconnect(response_idle_for) {
+                jcode_base::logging::info(&format!(
+                    "Persistent WS idle for {}s; stopping background keepalive",
+                    response_idle_for.as_secs()
+                ));
+                log_openai_stream_lifecycle(
+                    jcode_base::logging::LogLevel::Info,
+                    "persistent_state_reset",
+                    vec![
+                        ("model", model.clone()),
+                        ("reason", "idle_reconnect".to_string()),
+                        ("source", "background_keepalive".to_string()),
+                    ],
+                );
+                *guard = None;
+                return;
+            }
+
+            // The Responses endpoint can send its own WebSocket ping while the
+            // conversation is idle. A send-only heartbeat does not poll the
+            // stream, so it cannot answer that server ping and the connection
+            // can still be closed. Run the same payload-correlated round trip
+            // used before foreground reuse while holding the state mutex. This
+            // keeps one reader at a time and gives server control frames a
+            // bounded opportunity to be processed.
+            match ensure_persistent_ws_is_healthy(state, false).await {
+                Ok(PersistentWsHealth::Healthy) => {}
+                Ok(PersistentWsHealth::Reconnect {
+                    reset_reason,
+                    detail,
+                }) => {
+                    jcode_base::logging::info(&format!(
+                        "Persistent WS background keepalive requested reconnect: {}",
+                        detail
+                    ));
+                    log_openai_stream_lifecycle(
+                        jcode_base::logging::LogLevel::Info,
+                        "persistent_state_reset",
+                        vec![
+                            ("model", model.clone()),
+                            ("reason", reset_reason.to_string()),
+                            ("source", "background_keepalive".to_string()),
+                            ("detail", detail),
+                        ],
+                    );
+                    *guard = None;
+                    return;
+                }
+                Err(error) => {
+                    jcode_base::logging::warn(&format!(
+                        "Persistent WS background keepalive failed: {}",
+                        error
+                    ));
+                    log_openai_stream_lifecycle(
+                        jcode_base::logging::LogLevel::Warn,
+                        "persistent_state_reset",
+                        vec![
+                            ("model", model.clone()),
+                            ("reason", "healthcheck_failed".to_string()),
+                            ("source", "background_keepalive".to_string()),
+                            ("error", error),
+                        ],
+                    );
+                    *guard = None;
+                    return;
+                }
+            }
+        }
+    })
 }
 
 pub struct OpenAIProvider {

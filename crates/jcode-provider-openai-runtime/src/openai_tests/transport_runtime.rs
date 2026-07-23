@@ -534,6 +534,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         last_response_id: "resp_previous".to_string(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
+        last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
     })));

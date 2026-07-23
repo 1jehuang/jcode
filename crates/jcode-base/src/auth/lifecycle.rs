@@ -767,10 +767,12 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
             );
         }
         "jcode" => {
-            // The Jcode subscription runtime is the OpenRouter transport with a
-            // curated catalog, so its routes carry the `openrouter` api_method
-            // even though the runtime identity is `jcode`.
-            return matches!(api_method, crate::provider::ModelRouteApiMethod::OpenRouter);
+            // Jcode subscription routes deliberately keep their managed public
+            // identity even though the runtime reuses OpenRouter transport code.
+            return matches!(
+                api_method,
+                crate::provider::ModelRouteApiMethod::JcodeSubscription
+            );
         }
         "azure-openai" => {
             // Azure OpenAI reuses the OpenRouter transport (configured via Azure
@@ -1112,53 +1114,21 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
 }
 
 fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
-    match normalized_login_provider_id(provider_id)? {
-        "claude" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Claude,
-            ActiveProvider::Claude,
-        )),
-        "claude-api" => Some(ProviderActivation::locked(
-            RuntimeProviderId::ClaudeApiKey,
-            ActiveProvider::Claude,
-        )),
-        "openai" => Some(ProviderActivation::locked(
-            RuntimeProviderId::OpenAi,
-            ActiveProvider::OpenAI,
-        )),
-        "openai-api" => Some(ProviderActivation::locked(
-            RuntimeProviderId::OpenAiApiKey,
-            ActiveProvider::OpenAI,
-        )),
-        "openrouter" => Some(ProviderActivation::locked(
-            RuntimeProviderId::OpenRouter,
-            ActiveProvider::OpenRouter,
-        )),
-        "jcode" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Jcode,
-            ActiveProvider::OpenRouter,
-        )),
-        "bedrock" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Bedrock,
-            ActiveProvider::Bedrock,
-        )),
-        "cursor" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Cursor,
-            ActiveProvider::Cursor,
-        )),
-        "copilot" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Copilot,
-            ActiveProvider::Copilot,
-        )),
-        "gemini" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Gemini,
-            ActiveProvider::Gemini,
-        )),
-        "antigravity" => Some(ProviderActivation::locked(
-            RuntimeProviderId::Antigravity,
-            ActiveProvider::Antigravity,
-        )),
-        _ => None,
-    }
+    let (runtime_id, active) = match normalized_login_provider_id(provider_id)? {
+        "claude" => (RuntimeProviderId::Claude, ActiveProvider::Claude),
+        "claude-api" => (RuntimeProviderId::ClaudeApiKey, ActiveProvider::Claude),
+        "openai" => (RuntimeProviderId::OpenAi, ActiveProvider::OpenAI),
+        "openai-api" => (RuntimeProviderId::OpenAiApiKey, ActiveProvider::OpenAI),
+        "openrouter" => (RuntimeProviderId::OpenRouter, ActiveProvider::OpenRouter),
+        "jcode" => (RuntimeProviderId::Jcode, ActiveProvider::OpenRouter),
+        "bedrock" => (RuntimeProviderId::Bedrock, ActiveProvider::Bedrock),
+        "cursor" => (RuntimeProviderId::Cursor, ActiveProvider::Cursor),
+        "copilot" => (RuntimeProviderId::Copilot, ActiveProvider::Copilot),
+        "gemini" => (RuntimeProviderId::Gemini, ActiveProvider::Gemini),
+        "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
+        _ => return None,
+    };
+    Some(ProviderActivation::initial(runtime_id, active))
 }
 
 pub fn model_switch_request_for_provider_id(
@@ -1179,7 +1149,8 @@ pub fn model_switch_request_for_provider_id(
         Some("claude-api") => format!("claude-api:{}", model),
         Some("openai") => format!("openai-oauth:{}", model),
         Some("openai-api") => format!("openai-api:{}", model),
-        Some("openrouter") | Some("jcode") => format!("openrouter:{}", model),
+        Some("openrouter") => format!("openrouter:{}", model),
+        Some("jcode") => model.to_string(),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),
@@ -1452,7 +1423,7 @@ mod tests {
         ] {
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
             let activation = activate_auth_change(&AuthActivationRequest::new(
                 None,
@@ -1468,7 +1439,10 @@ mod tests {
                 std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
                 Ok(active)
             );
-            assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+            assert_eq!(
+                std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
+                Ok("1")
+            );
         }
     }
 
@@ -1482,7 +1456,7 @@ mod tests {
         for provider in crate::provider_catalog::login_providers() {
             let Some((normalized, runtime, active, switch_prefix)) = (match provider.target {
                 crate::provider_catalog::LoginProviderTarget::Jcode => {
-                    Some(("jcode", "jcode", "openrouter", "openrouter"))
+                    Some(("jcode", "jcode", "openrouter", ""))
                 }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))
@@ -1544,7 +1518,7 @@ mod tests {
 
             crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
             crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-            crate::env::remove_var("JCODE_FORCE_PROVIDER");
+            crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
 
             let activation = activate_auth_change(&AuthActivationRequest::new(
                 None,
@@ -1563,11 +1537,19 @@ mod tests {
                 std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
                 Ok(active)
             );
-            assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+            assert_eq!(
+                std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
+                Ok("1")
+            );
+            let expected_switch = if switch_prefix.is_empty() {
+                "shared-model".to_string()
+            } else {
+                format!("{switch_prefix}:shared-model")
+            };
             assert_eq!(
                 activation.model_switch_request("ignored-runtime", "shared-model"),
-                format!("{switch_prefix}:shared-model"),
-                "{} direct auth model switch must stay provider-explicit",
+                expected_switch,
+                "{} direct auth model switch must preserve its canonical route identity",
                 provider.id
             );
         }
@@ -1613,7 +1595,7 @@ mod tests {
             ("openai", "openai-oauth:shared-model"),
             ("openai-api", "openai-api:shared-model"),
             ("openrouter", "openrouter:shared-model"),
-            ("jcode", "openrouter:shared-model"),
+            ("jcode", "shared-model"),
             ("azure-openai", "openrouter:shared-model"),
             ("bedrock", "bedrock:shared-model"),
             ("cursor", "cursor:shared-model"),
@@ -1628,6 +1610,44 @@ mod tests {
                 "{provider} auth switch request must route explicitly so duplicate model IDs cannot select the wrong provider"
             );
         }
+    }
+
+    #[test]
+    fn jcode_auth_lifecycle_matches_only_managed_subscription_routes() {
+        let activation = AuthActivationResult {
+            provider_id: Some("jcode".to_string()),
+            provider_label: Some("Jcode Subscription".to_string()),
+            activated_model: Some("gpt-5.5".to_string()),
+            expected_runtime: Some("jcode-subscription".to_string()),
+            expected_catalog_namespace: Some("jcode-subscription".to_string()),
+        };
+        let routes = vec![
+            route("gpt-5.5", "OpenRouter", "openrouter", true),
+            route(
+                "gpt-5.5",
+                "Jcode Subscription",
+                crate::subscription_catalog::JCODE_ROUTE_API_METHOD,
+                true,
+            ),
+        ];
+
+        let report = validate_catalog_invariants(&activation, Some("gpt-5.5"), &routes);
+        assert!(
+            report.ok(),
+            "canonical Jcode route should match: {report:?}"
+        );
+        assert_eq!(report.selectable_provider_routes, 1);
+        assert_eq!(
+            report.route_sample,
+            vec![format!(
+                "`gpt-5.5` via {}",
+                crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            )]
+        );
+        assert_eq!(
+            activation.model_switch_request("Jcode Subscription", "gpt-5.5"),
+            "gpt-5.5"
+        );
     }
 
     #[test]

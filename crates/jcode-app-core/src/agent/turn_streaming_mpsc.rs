@@ -151,6 +151,11 @@ impl Agent {
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
             self.record_client_cache_request(&messages);
 
+            // `messages` now owns the provider-facing request snapshot. Do not
+            // retain the session's second, derived copy for the entire network
+            // wait and response stream.
+            self.session.release_provider_messages_cache();
+
             let mut cache_signature_messages =
                 if crate::config::config().features.message_timestamps {
                     Message::with_timestamps(&messages)
@@ -193,13 +198,11 @@ impl Agent {
             ));
             let api_start = Instant::now();
 
-            let stamped;
-            let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
-                stamped = Message::with_timestamps(&messages_with_memory);
-                &stamped
-            } else {
-                &messages_with_memory
-            };
+            let stamped = crate::config::config()
+                .features
+                .message_timestamps
+                .then(|| Message::with_timestamps(&messages_with_memory));
+            let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
             // transparently switch models mid-request (e.g. Anthropic's retired
@@ -217,6 +220,11 @@ impl Agent {
                 &split_prompt.static_part,
                 &ephemeral_signature_messages,
             ));
+            // These vectors are only needed to build the cache telemetry event.
+            // Explicitly release their deeply cloned transcript strings before
+            // waiting for the provider stream.
+            drop(cache_signature_messages);
+            drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
@@ -272,6 +280,15 @@ impl Agent {
                     }
                 }
             };
+
+            // `complete_split` has consumed the request and returned an owned
+            // response stream. Keeping these full transcript snapshots alive
+            // while tokens arrive needlessly multiplies active-session memory.
+            drop(stamped);
+            drop(messages_with_memory);
+            drop(memory_pending);
+            drop(messages);
+            drop(split_prompt);
 
             // Successful API call - reset retry counter
             context_limit_retries = 0;
@@ -1070,6 +1087,23 @@ impl Agent {
 
             if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
                 self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+                // Native OpenAI compaction is applied after the provider stream,
+                // so `messages_for_provider()` did not have an event to emit at
+                // the top of this iteration. Notify clients now, before any
+                // tool-driven continuation can enqueue its next KvCacheRequest.
+                // The FIFO event ordering lets the TUI invalidate its old
+                // append-only baseline before seeing the compacted signature.
+                let _ = event_tx.send(ServerEvent::Compaction {
+                    trigger: "openai_native".to_string(),
+                    pre_tokens: usage_input,
+                    post_tokens: None,
+                    tokens_saved: None,
+                    duration_ms: None,
+                    messages_dropped: None,
+                    messages_compacted: Some(compacted_count),
+                    summary_chars: None,
+                    active_messages: None,
+                });
             }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls

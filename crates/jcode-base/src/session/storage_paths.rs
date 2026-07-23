@@ -1,5 +1,4 @@
 use anyhow::Result;
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::PersistVectorMode;
@@ -9,11 +8,7 @@ pub(crate) fn session_path_in_dir(base: &std::path::Path, session_id: &str) -> P
     base.join("sessions").join(format!("{}.json", session_id))
 }
 
-pub(super) fn estimate_json_bytes<T: Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0)
-}
+pub(super) use crate::process_memory::estimate_json_bytes;
 
 pub(super) fn file_len_or_zero(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)

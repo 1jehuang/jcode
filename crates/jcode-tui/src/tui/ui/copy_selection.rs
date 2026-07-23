@@ -1,8 +1,8 @@
 use unicode_width::UnicodeWidthStr;
 
-use super::CopyViewportSnapshot;
 use super::display_width::{clamp_display_col, display_col_slice, line_display_width};
 use super::url_regex_support::link_target_for_display_column;
+use super::{CopyViewportData, CopyViewportSnapshot};
 
 pub(super) fn copy_point_from_snapshot(
     snapshot: &CopyViewportSnapshot,
@@ -43,6 +43,17 @@ struct RawSelectionPoint {
 }
 
 pub(super) fn copy_selection_text_from_raw_lines(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
+        return Some(text);
+    }
+    copy_selection_text_from_raw_lines_base(snapshot, start, end)
+}
+
+fn copy_selection_text_from_raw_lines_base(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
     end: crate::tui::CopySelectionPoint,
@@ -102,6 +113,73 @@ pub(super) fn copy_selection_text_from_raw_lines(
     Some(out)
 }
 
+/// Replace selected terminal-image placeholder rows with their semantic LaTeX
+/// source. Normal spans on either side still use the raw logical-line path, so
+/// wrapped prose retains the same copy behavior it has without an image.
+fn copy_selection_text_with_math_targets(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    let prepared = match &snapshot.data {
+        CopyViewportData::ChatFrame { prepared } => prepared,
+        CopyViewportData::Dense { .. } => return None,
+    };
+    let math_targets: Vec<_> = prepared
+        .copy_targets
+        .iter()
+        .filter(|target| {
+            matches!(
+                &target.kind,
+                jcode_tui_markdown::CopyTargetKind::Math { .. }
+            )
+                // Selection points are half-open display positions. Ending at
+                // column zero of the label does not select the image; dragging
+                // into any part of its label/body does.
+                && (target.start_line, 0) < (end.abs_line, end.column)
+                && (start.abs_line, start.column) < (target.end_line, 0)
+        })
+        .collect();
+    if math_targets.is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(math_targets.len().saturating_mul(2) + 1);
+    let mut cursor = start;
+    for target in math_targets {
+        if cursor.abs_line < target.start_line {
+            let last_line = target.start_line - 1;
+            let last_col = snapshot
+                .wrapped_plain_line(last_line)
+                .map(line_display_width)
+                .unwrap_or(0);
+            let normal_end = crate::tui::CopySelectionPoint {
+                pane: cursor.pane,
+                abs_line: last_line,
+                column: last_col,
+            };
+            parts.push(copy_selection_text_from_raw_lines_base(
+                snapshot, cursor, normal_end,
+            )?);
+        }
+        parts.push(target.content.clone());
+        cursor = crate::tui::CopySelectionPoint {
+            pane: cursor.pane,
+            abs_line: target.end_line,
+            column: 0,
+        };
+    }
+
+    if (cursor.abs_line, cursor.column) <= (end.abs_line, end.column)
+        && cursor.abs_line < snapshot.wrapped_plain_line_count()
+    {
+        parts.push(copy_selection_text_from_raw_lines_base(
+            snapshot, cursor, end,
+        )?);
+    }
+    Some(parts.join("\n"))
+}
+
 /// Selection metrics (character count and line count) for the raw-lines path,
 /// computed without allocating the full joined selection string. Mirrors the
 /// slicing in [`copy_selection_text_from_raw_lines`] exactly so the displayed
@@ -111,6 +189,9 @@ pub(super) fn copy_selection_metrics_from_raw_lines(
     start: crate::tui::CopySelectionPoint,
     end: crate::tui::CopySelectionPoint,
 ) -> Option<(usize, usize)> {
+    if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
+        return Some((text.chars().count(), text.split('\n').count().max(1)));
+    }
     if snapshot.raw_plain_line_count() == 0 || snapshot.wrapped_line_map(start.abs_line).is_none() {
         return None;
     }
@@ -183,4 +264,96 @@ fn raw_selection_point(
                 .saturating_sub(display_copy_start)
                 .min(segment_width),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jcode_tui_markdown::CopyTargetKind;
+    use jcode_tui_messages::{CopyTarget, PreparedChatFrame, PreparedMessages, WrappedLineMap};
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+    use std::sync::Arc;
+
+    fn math_snapshot() -> CopyViewportSnapshot {
+        let plain = vec![
+            "before".to_string(),
+            "  math".to_string(),
+            "\0IIMG:000000001a7ec0de:0002:0014\0".to_string(),
+            String::new(),
+            "after".to_string(),
+        ];
+        let wrapped_lines = plain.iter().cloned().map(Line::from).collect();
+        let maps = plain
+            .iter()
+            .enumerate()
+            .map(|(raw_line, text)| WrappedLineMap {
+                raw_line,
+                start_col: 0,
+                end_col: line_display_width(text),
+            })
+            .collect();
+        let prepared = PreparedMessages {
+            wrapped_lines,
+            wrapped_plain_lines: Arc::new(plain.clone()),
+            wrapped_copy_offsets: Arc::new(vec![0; plain.len()]),
+            raw_plain_lines: Arc::new(plain.clone()),
+            wrapped_line_map: Arc::new(maps),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: vec![CopyTarget {
+                kind: CopyTargetKind::Math { display: true },
+                content: "$$\nx^2 + \\alpha\n$$".to_string(),
+                start_line: 1,
+                end_line: 4,
+                badge_line: 1,
+            }],
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        };
+        CopyViewportSnapshot {
+            pane: crate::tui::CopySelectionPane::Chat,
+            data: CopyViewportData::ChatFrame {
+                prepared: Arc::new(PreparedChatFrame::from_single(Arc::new(prepared))),
+            },
+            scroll: 0,
+            visible_end: plain.len(),
+            content_area: Rect::new(0, 0, 80, plain.len() as u16),
+            left_margins: vec![0; plain.len()],
+        }
+    }
+
+    fn point(line: usize, column: usize) -> crate::tui::CopySelectionPoint {
+        crate::tui::CopySelectionPoint {
+            pane: crate::tui::CopySelectionPane::Chat,
+            abs_line: line,
+            column,
+        }
+    }
+
+    #[test]
+    fn selection_replaces_latex_image_rows_with_source_and_preserves_neighbors() {
+        let snapshot = math_snapshot();
+        let copied = copy_selection_text_from_raw_lines(&snapshot, point(0, 0), point(4, 5))
+            .expect("selection should resolve");
+        assert_eq!(copied, "before\n$$\nx^2 + \\alpha\n$$\nafter");
+        assert!(!copied.contains("IIMG"));
+        assert_eq!(
+            copy_selection_metrics_from_raw_lines(&snapshot, point(0, 0), point(4, 5)),
+            Some((copied.chars().count(), copied.split('\n').count()))
+        );
+    }
+
+    #[test]
+    fn selection_inside_latex_image_copies_complete_source() {
+        let snapshot = math_snapshot();
+        assert_eq!(
+            copy_selection_text_from_raw_lines(&snapshot, point(1, 0), point(3, 0)),
+            Some("$$\nx^2 + \\alpha\n$$".to_string())
+        );
+    }
 }

@@ -140,7 +140,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
     let goal = |score| crate::todo::TodoGoal {
         group: None,
         user_intention: Some("keep the plan state visible".to_string()),
-        user_intention_alignment: Some(95),
+        alignment_score: Some(95),
         hill_climbability: Some(score),
         objective: Some("readable card".to_string()),
         feedback_loop: Some("inspect the frame".to_string()),
@@ -156,7 +156,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         .find(|message| message.role == "todos")
         .expect("todo card pushed");
     assert!(card.content.contains("\"hill_climbability\":70"));
-    assert!(card.content.contains("\"user_intention_alignment\":95"));
+    assert!(card.content.contains("\"alignment_score\":95"));
 
     crate::todo::save_goals(&session_id, &[goal(95)]).unwrap();
     assert!(app.refresh_todo_card_if_needed());

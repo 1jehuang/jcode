@@ -159,13 +159,12 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         return Ok(());
     };
 
-    if invocation.prompt.is_none() {
+    let Some(trailing_prompt) = invocation.prompt else {
         app.input = raw_input;
         app.cursor_pos = app.input.len();
         app.submit_input();
         return Ok(());
-    }
-    let trailing_prompt = invocation.prompt.expect("prompt checked above");
+    };
 
     let skill_name = invocation.name.to_string();
     let mut skill = app.current_skills_snapshot().get(&skill_name).cloned();

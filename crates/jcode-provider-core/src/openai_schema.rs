@@ -336,10 +336,35 @@ fn normalize_required_properties(map: &mut serde_json::Map<String, Value>) {
     );
 }
 
+/// String `format` values accepted by OpenAI strict structured-output schemas.
+/// Unknown formats (e.g. "uri") cause the API to reject the request, so they
+/// are stripped during normalization.
+const OPENAI_SUPPORTED_STRING_FORMATS: &[&str] = &[
+    "date-time",
+    "time",
+    "date",
+    "duration",
+    "email",
+    "hostname",
+    "ipv4",
+    "ipv6",
+    "uuid",
+];
+
+fn is_supported_string_format(value: &Value) -> bool {
+    value
+        .as_str()
+        .map(|s| OPENAI_SUPPORTED_STRING_FORMATS.contains(&s))
+        .unwrap_or(false)
+}
+
 pub fn strict_normalize_schema(schema: &Value) -> Value {
     fn normalize_map(map: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
         let mut out = serde_json::Map::new();
         for (key, value) in map {
+            if key == "format" && !is_supported_string_format(value) {
+                continue;
+            }
             let normalized = normalize_strict_schema_keyword(key, value);
             out.insert(key.clone(), normalized);
         }
@@ -393,6 +418,54 @@ mod tests {
                 "required": ["optional_age", "required_name"],
                 "additionalProperties": false
             })
+        );
+    }
+
+    #[test]
+    fn strict_normalize_schema_strips_unsupported_formats() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "format": "uri" },
+                "when": { "type": "string", "format": "date-time" },
+                "format": { "type": "string" }
+            },
+            "required": ["url", "when", "format"]
+        });
+
+        let normalized = strict_normalize_schema(&schema);
+
+        // Unsupported format "uri" is dropped.
+        assert_eq!(normalized["properties"]["url"], json!({ "type": "string" }));
+        // Supported format is preserved.
+        assert_eq!(
+            normalized["properties"]["when"],
+            json!({ "type": "string", "format": "date-time" })
+        );
+        // A property literally named "format" is untouched.
+        assert_eq!(
+            normalized["properties"]["format"],
+            json!({ "type": "string" })
+        );
+    }
+
+    #[test]
+    fn strict_normalize_schema_strips_nested_unsupported_formats() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "links": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "uri" }
+                }
+            },
+            "required": ["links"]
+        });
+
+        let normalized = strict_normalize_schema(&schema);
+        assert_eq!(
+            normalized["properties"]["links"]["items"],
+            json!({ "type": "string" })
         );
     }
 

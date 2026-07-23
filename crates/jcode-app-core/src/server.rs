@@ -635,8 +635,10 @@ mod file_activity_tests;
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
 
-/// How often to check whether the embedding model can be unloaded.
-const EMBEDDING_IDLE_CHECK_SECS: u64 = 30;
+/// How often to check whether the embedding model can be unloaded. Keep this
+/// comfortably below the default idle threshold so reclamation is prompt and
+/// predictable rather than delayed by another full sampling interval.
+const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 /// How often the retained-heap watchdog samples allocator retention.
 const HEAP_RETENTION_CHECK_SECS: u64 = 120;

@@ -79,6 +79,10 @@ pub fn set_latex_log_hook(hook: fn(&str)) {
     latex_image::set_log_hook(hook);
 }
 
+pub use latex_image::{
+    HandtermNativeLatex, encode_handterm_latex_apc, handterm_native_latex_for_hash,
+};
+
 pub(crate) fn config_snapshot() -> MarkdownConfigSnapshot {
     CONFIG_SNAPSHOT_HOOK
         .lock()
@@ -150,6 +154,12 @@ pub use jcode_render_core::reasoning_summary_line_markup;
 use render_support::{
     highlight_code_cached, line_plain_text, placeholder_code_block, ranges_overlap, render_table,
 };
+
+fn should_render_mermaid_block(lang: Option<&str>) -> bool {
+    mermaid_rendering_enabled()
+        && lang.map(mermaid::is_mermaid_lang).unwrap_or(false)
+        && mermaid::native_image_protocol_available()
+}
 pub use render_support::{highlight_file_lines, highlight_line, render_table_with_width};
 
 // Syntax highlighting resources (loaded once)
@@ -989,6 +999,9 @@ fn latex_image_lines(
     display: bool,
     max_width: Option<usize>,
 ) -> Option<Vec<Line<'static>>> {
+    if let Some(lines) = latex_image::render_handterm_native_latex(math, display, max_width) {
+        return Some(lines);
+    }
     match latex_image::render_latex_image(math, display, max_width) {
         Ok(lines) => Some(lines),
         Err(error) => {

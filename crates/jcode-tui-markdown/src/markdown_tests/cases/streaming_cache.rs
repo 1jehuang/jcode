@@ -341,7 +341,8 @@ fn test_incremental_renderer_defers_mermaid_render_until_background_ready() {
 
     let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
     let text = "Plan:\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n";
-    let lines = renderer.update(text);
+    let lines =
+        jcode_tui_mermaid::with_image_protocol_override(Some(true), || renderer.update(text));
     let rendered = lines_to_string(&lines);
 
     assert!(
@@ -395,7 +396,8 @@ fn test_incremental_renderer_rerenders_pending_mermaid_after_epoch_bump() {
     // Unique content so no earlier test populated the render cache for it.
     let text = "Plan:\n\n```mermaid\nflowchart LR\n  E1[EpochBump] --> E2[FastPath]\n```\n";
 
-    let lines = renderer.update(text);
+    let lines =
+        jcode_tui_mermaid::with_image_protocol_override(Some(true), || renderer.update(text));
     if !lines.iter().any(line_is_mermaid_pending_placeholder) {
         // Cache already warm (render finished before this update); nothing to pin.
         return;
@@ -407,7 +409,7 @@ fn test_incremental_renderer_rerenders_pending_mermaid_after_epoch_bump() {
     jcode_tui_mermaid::debug_bump_deferred_render_epoch_for_tests();
 
     let before = thread_render_count();
-    let _ = renderer.update(text);
+    let _ = jcode_tui_mermaid::with_image_protocol_override(Some(true), || renderer.update(text));
     assert!(
         thread_render_count() > before,
         "identical text with an advanced deferred epoch must re-render \

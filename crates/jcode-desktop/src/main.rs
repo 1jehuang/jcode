@@ -140,6 +140,7 @@ const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
 const DESKTOP_RELOAD_WINDOW_ENV: &str = "JCODE_DESKTOP_RELOAD_WINDOW";
 const DESKTOP_RELOAD_HANDOFF_READY_ENV: &str = "JCODE_DESKTOP_RELOAD_READY_FILE";
 const DESKTOP_RELOAD_HANDOFF_RELEASE_ENV: &str = "JCODE_DESKTOP_RELOAD_RELEASE_FILE";
+const DESKTOP_RELOAD_HANDOFF_PLACEMENT_ENV: &str = "JCODE_DESKTOP_RELOAD_PLACEMENT_FILE";
 const DESKTOP_RELOAD_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DESKTOP_RELOAD_HANDOFF_TIMEOUT: Duration = Duration::from_secs(8);
 const DESKTOP_RELOAD_STARTUP_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -495,7 +496,8 @@ async fn run() -> Result<()> {
     let mut selecting_draft = false;
     let mut scroll_accumulator = ScrollLineAccumulator::default();
     let mut scroll_metrics_cache = SingleSessionScrollMetricsCache::default();
-    let mut hot_reloader = DesktopHotReloader::new(process_role.reload_strategy());
+    let mut hot_reloader =
+        DesktopHotReloader::new(process_role.reload_strategy(), event_loop_proxy.clone());
     if process_role == DesktopProcessRole::StableHost {
         hot_reloader.start_app_worker_for_current_binary(&app, &window, "stable host startup");
     }
@@ -1480,7 +1482,12 @@ async fn run() -> Result<()> {
                         ready_canvas.resize(window.inner_size());
                         renderer = DesktopHostRendererState::GpuReady(Box::new(ready_canvas));
                         if let Some(handoff) = reload_startup_handoff.as_ref() {
-                            handoff.signal_ready_and_wait_for_release();
+                            if let Some(placement) = handoff.signal_ready_and_wait_for_release() {
+                                if let Some(position) = placement.position {
+                                    window.set_outer_position(position);
+                                }
+                                let _ = window.request_inner_size(placement.inner_size);
+                            }
                             window.set_visible(true);
                             startup_trace.mark("reload handoff released");
                         }
@@ -1498,6 +1505,7 @@ async fn run() -> Result<()> {
                     }
                 }
             }
+            Event::UserEvent(DesktopUserEvent::AppWorkerActivity) => {}
             Event::UserEvent(DesktopUserEvent::SessionCardsLoaded {
                 purpose,
                 cards,
@@ -1819,6 +1827,7 @@ async fn run() -> Result<()> {
 }
 
 enum DesktopUserEvent {
+    AppWorkerActivity,
     CanvasReady(Box<DesktopCanvasInitResult>),
     SessionEvents(DesktopSessionEventBatch),
     SessionCardsLoaded {

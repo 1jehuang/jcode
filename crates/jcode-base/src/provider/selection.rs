@@ -51,12 +51,16 @@ impl MultiProvider {
         jcode_provider_core::parse_provider_hint(value)
     }
 
-    pub(super) fn forced_provider_from_env() -> Option<ActiveProvider> {
-        let force = std::env::var("JCODE_FORCE_PROVIDER")
+    pub(super) fn initial_provider_from_env() -> Option<ActiveProvider> {
+        let explicit = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        if !force {
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        if !explicit {
             return None;
         }
 
@@ -161,6 +165,7 @@ impl MultiProvider {
         };
 
         let provider_key = match &api_method_kind {
+            ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -415,6 +420,7 @@ impl MultiProvider {
             .filter(|api_method| !api_method.is_empty())
         {
             match ModelRouteApiMethod::parse(api_method) {
+                ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),
                 ModelRouteApiMethod::OpenAIOAuth => return format!("openai-oauth:{model}"),

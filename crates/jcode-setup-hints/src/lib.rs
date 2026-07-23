@@ -187,7 +187,6 @@ const LAUNCH_HOTKEY_TRACKING_VERSION: u32 = 1;
 /// to a user (across all launches and platforms). After this many nudges we stop
 /// asking, even if the user never explicitly picked "Don't ask again".
 pub const MAX_TERMINAL_NUDGES: u64 = 5;
-#[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
 const LAUNCH_HOTKEY_LEARNED_USES: u64 = 3;
 #[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
 const LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP: u64 = 10;
@@ -312,7 +311,6 @@ fn mac_hotkey_plan_file() -> Result<PathBuf> {
 /// Returns the default (empty -> built-in 3 hotkeys) when the file is missing or
 /// the section is absent. Best-effort: a malformed config falls back to default
 /// rather than blocking hotkey install.
-#[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
 fn load_launch_hotkeys_config() -> jcode_config_types::LaunchHotkeysConfig {
     #[derive(serde::Deserialize, Default)]
     struct Wrapper {

@@ -46,6 +46,7 @@ fn estimate_copy_target_kind_bytes(kind: &CopyTargetKind) -> usize {
             language.as_ref().map(|value| value.capacity()).unwrap_or(0)
         }
         CopyTargetKind::Blockquote => 0,
+        CopyTargetKind::Math { .. } => 0,
         CopyTargetKind::Error => 0,
         CopyTargetKind::ToolOutput => 0,
     }

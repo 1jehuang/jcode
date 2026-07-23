@@ -281,6 +281,8 @@ fn test_default_swarm_prompt_mentions_model_and_list_models() {
     assert!(DEFAULT_SWARM_PROMPT.contains("list_models"));
     assert!(DEFAULT_SWARM_PROMPT.contains("model"));
     assert!(DEFAULT_SWARM_PROMPT.contains("effort"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("only the root session may spawn agents"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("swarm-deep"));
 }
 
 #[test]

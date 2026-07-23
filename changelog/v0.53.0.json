@@ -1,0 +1,21 @@
+{
+  "version": "0.53.0",
+  "date": "2026-07-19",
+  "title": "GitHub triage, copyable math, and sturdier reloads",
+  "highlights": [
+    "New built-in /triage command helps review and organize GitHub issues from a jcode session",
+    "Rendered LaTeX equations can now be copied as their original math source instead of opaque image markers"
+  ],
+  "improvements": [
+    "Bursty response streams reveal more smoothly while keeping the terminal responsive",
+    "Desktop resizing and hot reloads use fewer unnecessary redraws, react promptly to worker activity, and preserve the final window position and size"
+  ],
+  "fixes": [
+    "Remote skill prompts are dispatched correctly instead of remaining stuck in the client",
+    "Noninteractive Google sign-in now completes OAuth callbacks reliably",
+    "Windows updates and server startup avoid launcher replacement and named-pipe probe stalls",
+    "Terminal images choose a reliable protocol for each terminal instead of reusing an incompatible global choice",
+    "Swarm clients drop cleared plans, omit long-finished members, bound durable plan graphs, and prune stale recovery state",
+    "Exited jcode client processes are reaped instead of accumulating in the background"
+  ]
+}

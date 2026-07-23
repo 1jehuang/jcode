@@ -666,6 +666,53 @@ fn test_remote_typing_resumes_bottom_follow_mode() {
 }
 
 #[test]
+fn test_local_typing_resumes_bottom_follow_mode() {
+    let mut app = create_test_app();
+    app.scroll_offset = 7;
+    app.auto_scroll_paused = true;
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.input, "x");
+    assert_eq!(app.cursor_pos, 1);
+    assert_eq!(app.scroll_offset, 0);
+    assert!(
+        !app.auto_scroll_paused,
+        "local typing should follow newest content just like remote typing"
+    );
+}
+
+#[test]
+fn test_local_typing_snaps_rendered_viewport_to_bottom_in_one_frame() {
+    let _lock = scroll_render_test_lock();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 32);
+    let _ = render_and_snap(&app, &mut terminal);
+    let max_scroll = crate::tui::ui::last_max_scroll();
+    assert!(max_scroll > 8, "expected a long transcript, got {max_scroll}");
+
+    app.auto_scroll_paused = true;
+    app.scroll_offset = max_scroll - 8;
+    let _ = render_and_snap(&app, &mut terminal);
+    assert_eq!(
+        crate::tui::ui::last_resolved_chat_scroll(),
+        max_scroll - 8
+    );
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .unwrap();
+    let _ = render_and_snap(&app, &mut terminal);
+
+    assert_eq!(
+        crate::tui::ui::last_resolved_chat_scroll(),
+        crate::tui::ui::last_max_scroll(),
+        "typing should explicitly snap to the exact transcript tail, not use content catch-up"
+    );
+}
+
+#[test]
 fn test_remote_shift_slash_preserves_layout_translated_slash() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -848,6 +895,26 @@ fn test_remote_typing_scroll_lock_preserves_scroll_position() {
     assert!(
         app.auto_scroll_paused,
         "typing scroll lock should preserve paused scroll state"
+    );
+}
+
+#[test]
+fn test_local_typing_scroll_lock_preserves_scroll_position() {
+    let mut app = create_test_app();
+    app.scroll_offset = 7;
+    app.auto_scroll_paused = true;
+
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
+        .unwrap();
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.input, "x");
+    assert_eq!(app.cursor_pos, 1);
+    assert_eq!(app.scroll_offset, 7);
+    assert!(
+        app.auto_scroll_paused,
+        "typing scroll lock should preserve local paused scroll state"
     );
 }
 

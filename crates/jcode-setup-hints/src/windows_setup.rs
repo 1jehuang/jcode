@@ -326,6 +326,28 @@ fn launch_windows_hotkey(entry: &WindowsHotkey) -> Result<()> {
     Ok(())
 }
 
+fn prewarm_windows_server() -> Option<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return None;
+    };
+    // The listener is launched at interactive login and remains resident, so
+    // it is the natural place to pay the daemon's cold-start cost before the
+    // user opens a terminal. The child keeps one lightweight server connection
+    // open using stdin as a lifetime pipe. Killing or uninstalling this listener
+    // closes the pipe, so the helper exits and normal server idle shutdown resumes.
+    std::process::Command::new(exe)
+        .args(["--provider", "auto", "server", "keepalive"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()
+}
+
 pub(super) fn run_windows_hotkey_listener() -> Result<()> {
     let entries: Vec<WindowsHotkey> = resolve_windows_hotkeys()
         .into_iter()
@@ -334,6 +356,7 @@ pub(super) fn run_windows_hotkey_listener() -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
+    let _server_keepalive = prewarm_windows_server();
     windows_native_hotkey_loop(entries)
 }
 

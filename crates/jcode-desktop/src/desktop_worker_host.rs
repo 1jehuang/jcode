@@ -8,9 +8,9 @@ use crate::desktop_protocol::{
     DesktopHostToWorkerMessage, DesktopProtocolEnvelope, DesktopWorkerToHostMessage,
 };
 use anyhow::{Context, Result, anyhow};
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 pub(crate) struct DesktopWorkerConnection {
@@ -22,7 +22,10 @@ pub(crate) struct DesktopWorkerConnection {
 }
 
 impl DesktopWorkerConnection {
-    pub(crate) fn spawn(command: &mut Command) -> Result<Self> {
+    pub(crate) fn spawn(
+        command: &mut Command,
+        notify_event_loop: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command
             .spawn()
@@ -38,20 +41,7 @@ impl DesktopWorkerConnection {
         let (tx, events) = mpsc::channel();
         let reader_thread = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            loop {
-                match read_desktop_ipc_frame::<DesktopWorkerToHostEnvelope>(&mut reader) {
-                    Ok(Some(envelope)) => {
-                        if tx.send(Ok(envelope)).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        let _ = tx.send(Err(error));
-                        break;
-                    }
-                }
-            }
+            read_desktop_worker_events(&mut reader, tx, notify_event_loop);
         });
 
         Ok(Self {
@@ -118,6 +108,32 @@ impl DesktopWorkerConnection {
     }
 }
 
+fn read_desktop_worker_events(
+    reader: &mut impl BufRead,
+    events: Sender<Result<DesktopWorkerToHostEnvelope, DesktopIpcFrameError>>,
+    notify_event_loop: impl Fn(),
+) {
+    loop {
+        match read_desktop_ipc_frame::<DesktopWorkerToHostEnvelope>(reader) {
+            Ok(Some(envelope)) => {
+                if events.send(Ok(envelope)).is_err() {
+                    break;
+                }
+                notify_event_loop();
+            }
+            Ok(None) => {
+                notify_event_loop();
+                break;
+            }
+            Err(error) => {
+                let _ = events.send(Err(error));
+                notify_event_loop();
+                break;
+            }
+        }
+    }
+}
+
 pub(crate) struct DesktopWorkerIpcWriter<W> {
     writer: W,
     next_sequence: u64,
@@ -144,7 +160,39 @@ impl<W: Write> DesktopWorkerIpcWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desktop_protocol::{DesktopInputEvent, DesktopKeyEvent, DesktopKeyModifiers};
+    use crate::desktop_protocol::{
+        DesktopInputEvent, DesktopKeyEvent, DesktopKeyModifiers, DesktopWorkerMode,
+        DesktopWorkerReady, DesktopWorkerToHostMessage,
+    };
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn worker_reader_notifies_for_messages_and_disconnect() {
+        let mut bytes = Vec::new();
+        write_desktop_ipc_frame(
+            &mut bytes,
+            &DesktopProtocolEnvelope::new(
+                1,
+                DesktopWorkerToHostMessage::Ready(DesktopWorkerReady {
+                    worker_pid: 42,
+                    mode: DesktopWorkerMode::Workspace,
+                }),
+            ),
+        )
+        .expect("encode worker frame");
+        let (tx, rx) = mpsc::channel();
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let notification_counter = notifications.clone();
+
+        read_desktop_worker_events(&mut Cursor::new(bytes), tx, move || {
+            notification_counter.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(rx.recv().expect("worker event").is_ok());
+        assert_eq!(notifications.load(Ordering::Relaxed), 2);
+    }
 
     #[test]
     fn worker_ipc_writer_assigns_monotonic_sequences() {

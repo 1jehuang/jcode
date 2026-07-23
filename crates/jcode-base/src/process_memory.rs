@@ -450,8 +450,25 @@ pub fn set_allocator_profile_prefix(prefix: &str) -> Result<()> {
 }
 
 pub fn estimate_json_bytes<T: Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
+    #[derive(Default)]
+    struct ByteCounter {
+        bytes: usize,
+    }
+
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self.bytes.saturating_add(buffer.len());
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.bytes)
         .unwrap_or(0)
 }
 
@@ -905,6 +922,38 @@ fn parse_proc_value_bytes(status: &str, key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimate_json_bytes_matches_serialized_length_without_buffering_output() {
+        let value = serde_json::json!({
+            "escaped": "line one\nline two\t\"quoted\"",
+            "unicode": "RAM profile 🦊",
+            "nested": [null, true, -42, {"payload": "x".repeat(64 * 1024)}],
+        });
+
+        assert_eq!(
+            estimate_json_bytes(&value),
+            serde_json::to_vec(&value)
+                .expect("serialize reference value")
+                .len()
+        );
+    }
+
+    #[test]
+    fn estimate_json_bytes_returns_zero_when_serialization_fails() {
+        struct FailingSerialize;
+
+        impl serde::Serialize for FailingSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+
+        assert_eq!(estimate_json_bytes(&FailingSerialize), 0);
+    }
 
     #[test]
     fn release_retained_heap_is_safe_to_call() {

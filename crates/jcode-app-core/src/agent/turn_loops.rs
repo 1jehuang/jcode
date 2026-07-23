@@ -61,6 +61,10 @@ impl Agent {
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
             self.record_client_cache_request(&messages);
 
+            // The request snapshot now owns everything the provider needs. Drop
+            // the session's derived transcript copy before the network wait.
+            self.session.release_provider_messages_cache();
+
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
             if let Some(memory) = memory_pending.as_ref() {
@@ -90,13 +94,11 @@ impl Agent {
                 model: Some(self.provider.model()),
             }));
 
-            let stamped;
-            let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
-                stamped = Message::with_timestamps(&messages_with_memory);
-                &stamped
-            } else {
-                &messages_with_memory
-            };
+            let stamped = crate::config::config()
+                .features
+                .message_timestamps
+                .then(|| Message::with_timestamps(&messages_with_memory));
+            let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
             let mut stream = match self
@@ -128,6 +130,14 @@ impl Agent {
                     return Err(e);
                 }
             };
+
+            // The provider returned an owned stream, so the request transcript
+            // copies are no longer needed while the response is consumed.
+            drop(stamped);
+            drop(messages_with_memory);
+            drop(memory_pending);
+            drop(messages);
+            drop(split_prompt);
 
             // Successful API call - reset retry counter
             context_limit_retries = 0;

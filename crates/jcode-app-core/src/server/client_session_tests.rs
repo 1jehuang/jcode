@@ -1,8 +1,8 @@
 use super::{
     claim_live_target_agent, handle_clear_session, handle_reload, handle_resume_session,
     handle_subscribe, mark_remote_reload_started, remove_detached_source_if_unclaimed,
-    rename_shutdown_signal, restored_session_was_interrupted, session_was_interrupted_by_reload,
-    subscribe_should_mark_ready,
+    rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
+    session_was_interrupted_by_reload, subscribe_should_mark_ready,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -66,6 +66,72 @@ async fn subscribe_marks_non_running_member_ready() {
         test_swarm_member("worker", "spawned"),
     )])));
     assert!(subscribe_should_mark_ready("worker", &swarm_members).await);
+}
+
+#[tokio::test]
+async fn resume_rename_releases_member_lock_before_waiting_for_swarm_map() {
+    let old_session_id = "session-old";
+    let new_session_id = "session-new";
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (
+            old_session_id.to_string(),
+            test_swarm_member(old_session_id, "spawned"),
+        ),
+        (
+            "child".to_string(),
+            SwarmMember {
+                report_back_to_session_id: Some(old_session_id.to_string()),
+                ..test_swarm_member("child", "running")
+            },
+        ),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        "swarm-test".to_string(),
+        HashSet::from([old_session_id.to_string(), "child".to_string()]),
+    )])));
+
+    // Force the rename to wait for swarms_by_id. While it waits, the member map
+    // must remain readable or coordinator cleanup can form a permanent cycle.
+    let swarm_map_guard = swarms_by_id.write().await;
+    let rename_task = tokio::spawn({
+        let swarm_members = Arc::clone(&swarm_members);
+        let swarms_by_id = Arc::clone(&swarms_by_id);
+        async move {
+            rename_swarm_member_session(
+                old_session_id,
+                new_session_id,
+                &swarm_members,
+                &swarms_by_id,
+            )
+            .await;
+        }
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let members = swarm_members.read().await;
+            if members.contains_key(new_session_id) {
+                assert_eq!(
+                    members
+                        .get("child")
+                        .and_then(|member| member.report_back_to_session_id.as_deref()),
+                    Some(new_session_id)
+                );
+                break;
+            }
+            drop(members);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("member map stayed locked while waiting for swarm map");
+
+    drop(swarm_map_guard);
+    rename_task.await.expect("rename task");
+    let swarms = swarms_by_id.read().await;
+    let swarm = swarms.get("swarm-test").expect("swarm remains present");
+    assert!(!swarm.contains(old_session_id));
+    assert!(swarm.contains(new_session_id));
 }
 
 #[async_trait]

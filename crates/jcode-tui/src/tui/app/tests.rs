@@ -1,5 +1,4 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
-
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/commands_accounts_01/part_01.rs");
@@ -44,6 +43,7 @@ include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/issue_496_input_routing.rs");
+include!("tests/issue_544_paste_enter.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 
 #[test]
@@ -155,6 +155,7 @@ fn cold_cache_warning_is_persisted_when_starting_next_request() {
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id,
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 911_873,
         completed_at: Instant::now() - Duration::from_secs(3723),
         provider: "anthropic".to_string(),
@@ -193,6 +194,7 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id,
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(3700),
         provider: "anthropic".to_string(),
@@ -252,6 +254,7 @@ fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id: session_id.clone(),
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(60),
         provider: "anthropic".to_string(),
@@ -289,6 +292,7 @@ fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
 
 #[test]
 fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
+    let _invalidation_guard = crate::storage::lock_test_env();
     // A warm session whose system prompt hash silently changes between turns is
     // the exact failure mode of the skill-ordering bug: the conversation only
     // grew, yet the cached prefix is invalidated. We must surface that loudly.
@@ -313,6 +317,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
     let model = app.kv_cache_provider_model();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id,
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
         provider,
@@ -345,6 +350,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
 
 #[test]
 fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
+    let _invalidation_guard = crate::storage::lock_test_env();
     // Config/skill reloads legitimately change the system prompt mid-session.
     // Those sites document the invalidation; a harness-attributed miss that
     // follows must be surfaced as an informational "refresh" with the cause,
@@ -364,6 +370,7 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
     let model = app.kv_cache_provider_model();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id,
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
         provider,
@@ -443,6 +450,7 @@ fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id,
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
         provider: "anthropic".to_string(),
@@ -485,6 +493,7 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
     let big_signature = App::kv_cache_request_signature(&big_history, &[], "system", "");
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id: Some("session_big".to_string()),
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 200_000,
         completed_at: Instant::now(),
         provider: "anthropic".to_string(),
@@ -532,6 +541,7 @@ fn kv_cache_baseline_same_session_still_compares() {
     let baseline_signature = App::kv_cache_request_signature(&history, &[], "system", "");
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
         session_id: Some("session_same".to_string()),
+        cache_generation: app.kv_cache.cache_generation,
         input_tokens: 1_000,
         completed_at: Instant::now(),
         provider: "anthropic".to_string(),
@@ -560,6 +570,127 @@ fn kv_cache_baseline_same_session_still_compares() {
         Some(true),
         "append-only same-session growth keeps the cached prefix"
     );
+}
+
+#[test]
+fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_it() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_compacted".to_string());
+
+    let old_history: Vec<Message> = (0..176)
+        .map(|i| Message::user(format!("old message {i}").as_str()))
+        .collect();
+    let old_signature = App::kv_cache_request_signature(&old_history, &[], "system", "memory");
+    app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        session_id: Some("session_compacted".to_string()),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 80_169,
+        completed_at: Instant::now(),
+        provider: app.kv_cache_provider_name(),
+        model: app.kv_cache_provider_model(),
+        upstream_provider: None,
+        signature: Some(old_signature.clone()),
+    });
+
+    // Model the request that was already in flight when background compaction
+    // finished. Its completion must not re-establish a pre-compaction baseline.
+    app.begin_remote_kv_cache_request(old_signature);
+    let old_generation = app.kv_cache.cache_generation;
+    app.handle_compaction_event(crate::compaction::CompactionEvent {
+        trigger: "semantic".to_string(),
+        pre_tokens: Some(80_169),
+        post_tokens: Some(27_641),
+        tokens_saved: Some(52_528),
+        duration_ms: Some(500),
+        messages_dropped: None,
+        messages_compacted: Some(173),
+        summary_chars: Some(10_000),
+        active_messages: Some(3),
+    });
+    assert_ne!(app.kv_cache.cache_generation, old_generation);
+    assert!(app.kv_cache.kv_cache_baseline.is_none());
+
+    app.streaming.streaming_input_tokens = 80_169;
+    app.streaming.streaming_cache_read_tokens = Some(80_000);
+    app.streaming.streaming_cache_creation_tokens = Some(0);
+    app.kv_cache.current_api_usage_recorded = false;
+    app.record_completed_stream_cache_usage();
+    assert!(
+        app.kv_cache_baseline_for_current_session().is_none(),
+        "a pre-compaction request completion must remain stale"
+    );
+
+    // The first compacted request is a new cache generation, not an unexplained
+    // mutation of the old 176-message prefix.
+    let compacted = vec![
+        Message::user("compaction summary"),
+        Message::assistant_text("recent answer"),
+        Message::user("next tool callback"),
+    ];
+    let compacted_signature = App::kv_cache_request_signature(&compacted, &[], "system", "");
+    app.begin_remote_kv_cache_request(compacted_signature);
+    let request = app
+        .kv_cache
+        .pending_kv_cache_request
+        .as_ref()
+        .expect("compacted request should be pending");
+    assert!(request.baseline.is_none());
+    assert_eq!(request.baseline_messages_prefix_matches, None);
+
+    app.streaming.streaming_input_tokens = 27_641;
+    app.streaming.streaming_cache_read_tokens = Some(20_224);
+    app.streaming.streaming_cache_creation_tokens = Some(0);
+    app.kv_cache.current_api_usage_recorded = false;
+    app.record_completed_stream_cache_usage();
+
+    assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("KV cache miss")),
+        "compaction must not surface as a harness-caused cache miss"
+    );
+}
+
+#[test]
+fn native_compaction_application_invalidates_kv_cache_baseline_before_continuation() {
+    let mut app = create_test_app();
+    let old_history: Vec<Message> = (0..264)
+        .map(|i| Message::user(format!("old message {i}").as_str()))
+        .collect();
+    let old_signature = App::kv_cache_request_signature(&old_history, &[], "system", "");
+    app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        session_id: app.kv_cache_session_id(),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 262_419,
+        completed_at: Instant::now(),
+        provider: app.kv_cache_provider_name(),
+        model: app.kv_cache_provider_model(),
+        upstream_provider: None,
+        signature: Some(old_signature),
+    });
+    let old_generation = app.kv_cache.cache_generation;
+
+    app.apply_openai_native_compaction("enc_native_test".to_string(), old_history.len())
+        .expect("native compaction should persist");
+
+    assert_ne!(app.kv_cache.cache_generation, old_generation);
+    assert!(app.kv_cache.kv_cache_baseline.is_none());
+
+    let compacted = vec![
+        Message::user("native summary"),
+        Message::assistant_text("recent answer"),
+        Message::user("next callback"),
+    ];
+    app.begin_kv_cache_request(&compacted, &[], "system", "");
+    let request = app
+        .kv_cache
+        .pending_kv_cache_request
+        .as_ref()
+        .expect("compacted request should be pending");
+    assert!(request.baseline.is_none());
+    assert_eq!(request.baseline_messages_prefix_matches, None);
 }
 
 #[test]

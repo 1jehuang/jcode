@@ -1392,16 +1392,17 @@ impl NativeProviderKind {
             Self::Jcode => NativeProviderSpec {
                 provider_id: "jcode",
                 label: "Jcode Subscription",
-                // The Jcode subscription runtime routes through the OpenRouter
-                // transport, so its catalog routes carry the `openrouter`
-                // api_method/label and switch with the `openrouter:` prefix even
-                // though its runtime identity is `jcode`.
+                // The transport is OpenAI-compatible internally, but the public
+                // route identity is the managed Jcode subscription. Model
+                // switches use a bare model id so they stay on that runtime.
                 contract: WiringContract {
-                    api_method: "openrouter".to_string(),
-                    route_provider: "auto".to_string(),
+                    api_method: jcode_base::subscription_catalog::JCODE_ROUTE_API_METHOD
+                        .to_string(),
+                    route_provider: jcode_base::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                        .to_string(),
                     expected_runtime: "jcode",
                     expected_namespace: None,
-                    switch_prefix: "openrouter:".to_string(),
+                    switch_prefix: String::new(),
                 },
                 auth_source: "Jcode subscription API key (JCODE_API_KEY)",
                 auth_env_key: Some("JCODE_API_KEY"),
@@ -1946,7 +1947,8 @@ struct WiringContract {
     expected_runtime: &'static str,
     /// `expected_catalog_namespace` for the AuthChanged activation, if any.
     expected_namespace: Option<String>,
-    /// The `provider:` prefix a model-switch request must produce.
+    /// The `provider:` prefix a model-switch request must produce. An empty
+    /// prefix means the runtime deliberately expects the bare model id.
     switch_prefix: String,
 }
 
@@ -2125,7 +2127,11 @@ fn run_wiring_checks_for_contract(
     match switch_target {
         Some(target) => {
             let request = activation.model_switch_request("mock-auth", target);
-            let request_ok = request.starts_with(&contract.switch_prefix);
+            let request_ok = if contract.switch_prefix.is_empty() {
+                request == target.as_str()
+            } else {
+                request.starts_with(&contract.switch_prefix)
+            };
             if request_ok {
                 checks.push(DoctorCheck::passed(
                     checkpoints::MODEL_SWITCH_ROUTE,
@@ -2137,8 +2143,12 @@ fn run_wiring_checks_for_contract(
                     checkpoints::MODEL_SWITCH_ROUTE,
                     label_for(checkpoints::MODEL_SWITCH_ROUTE),
                     format!(
-                        "model switch produced non-provider-explicit request `{request}` (expected `{}`)",
-                        contract.switch_prefix
+                        "model switch produced unexpected request `{request}` (expected {}model id)",
+                        if contract.switch_prefix.is_empty() {
+                            "bare "
+                        } else {
+                            contract.switch_prefix.as_str()
+                        }
                     ),
                 ));
             }
@@ -2447,10 +2457,17 @@ mod tests {
             let spec = kind.spec();
             assert!(!spec.provider_id.is_empty(), "{kind:?} has empty id");
             assert!(!spec.label.is_empty(), "{kind:?} has empty label");
-            assert!(
-                spec.contract.switch_prefix.ends_with(':'),
-                "{kind:?} switch_prefix must end with ':'"
-            );
+            if kind == NativeProviderKind::Jcode {
+                assert!(
+                    spec.contract.switch_prefix.is_empty(),
+                    "Jcode switches must use bare managed model ids"
+                );
+            } else {
+                assert!(
+                    spec.contract.switch_prefix.ends_with(':'),
+                    "{kind:?} switch_prefix must end with ':'"
+                );
+            }
             // Round-trips through the id map.
             assert_eq!(
                 NativeProviderKind::from_normalized(spec.provider_id),
@@ -2564,6 +2581,22 @@ mod tests {
         assert_eq!(contract.expected_runtime, "antigravity");
         assert!(contract.expected_namespace.is_none());
         assert_eq!(contract.switch_prefix, "antigravity:");
+    }
+
+    #[test]
+    fn native_jcode_contract_uses_managed_subscription_identity() {
+        let contract = NativeProviderKind::Jcode.spec().contract;
+        assert_eq!(
+            contract.api_method,
+            jcode_base::subscription_catalog::JCODE_ROUTE_API_METHOD
+        );
+        assert_eq!(
+            contract.route_provider,
+            jcode_base::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+        );
+        assert_eq!(contract.expected_runtime, "jcode");
+        assert!(contract.expected_namespace.is_none());
+        assert!(contract.switch_prefix.is_empty());
     }
 
     #[test]

@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+/// Hard upper bound for one swarm's durable plan graph. A plan is coordination
+/// state, not an append-only activity log; without a bound, repeated seed,
+/// expand, inject, and approve calls can retain and broadcast thousands of
+/// stale nodes forever. This is four times the live swarm-member cap and well
+/// above normal deep graphs while bounding server, disk, and per-client state.
+pub const MAX_PLAN_ITEMS: usize = 1024;
+
 pub mod bridge;
 pub mod dag;
 pub mod mermaid;
@@ -163,6 +170,48 @@ impl VersionedPlan {
             task_progress: HashMap::new(),
             mode: "light".to_string(),
             node_meta: HashMap::new(),
+        }
+    }
+
+    /// Replace the authoritative item set and discard side-map entries whose
+    /// task ids no longer exist. Plan updates are snapshots, not an append-only
+    /// log, so retaining progress or DAG metadata for removed items leaks state
+    /// across every subsequent persistence and broadcast.
+    pub fn replace_items(&mut self, items: Vec<PlanItem>) {
+        self.items = items;
+        self.prune_side_maps();
+    }
+
+    /// Remove task-scoped metadata that no longer belongs to a live plan item.
+    pub fn prune_side_maps(&mut self) {
+        let item_ids: HashSet<&str> = self.items.iter().map(|item| item.id.as_str()).collect();
+        self.task_progress
+            .retain(|task_id, _| item_ids.contains(task_id.as_str()));
+        self.node_meta
+            .retain(|task_id, _| item_ids.contains(task_id.as_str()));
+    }
+
+    /// Rewrite all durable references when a live client replaces its session
+    /// id. This keeps ownership, task progress, and DAG planner affinity from
+    /// accumulating dangling historical identities.
+    pub fn rename_session(&mut self, old_session_id: &str, new_session_id: &str) {
+        if self.participants.remove(old_session_id) {
+            self.participants.insert(new_session_id.to_string());
+        }
+        for item in &mut self.items {
+            if item.assigned_to.as_deref() == Some(old_session_id) {
+                item.assigned_to = Some(new_session_id.to_string());
+            }
+        }
+        for progress in self.task_progress.values_mut() {
+            if progress.assigned_session_id.as_deref() == Some(old_session_id) {
+                progress.assigned_session_id = Some(new_session_id.to_string());
+            }
+        }
+        for meta in self.node_meta.values_mut() {
+            if meta.planner.as_deref() == Some(old_session_id) {
+                meta.planner = Some(new_session_id.to_string());
+            }
         }
     }
 

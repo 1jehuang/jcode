@@ -31,7 +31,7 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
-    /// Provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect)
+    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 
@@ -553,6 +553,17 @@ pub(crate) enum AccountCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ServerCommand {
+    /// Start the background server if it is not already running.
+    Start {
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: hold a lightweight connection open until stdin closes.
+    #[command(hide = true)]
+    Keepalive,
+
     /// Gracefully reload the running background server onto the newest binary.
     ///
     /// This is the preferred way to pick up an upgrade: the daemon hands its

@@ -87,6 +87,13 @@ the client actually has set are forwarded.
 
 ## Examples
 
+When jcode detects that the requesting client is inside tmux, its built-in
+launcher automatically opens headed spawns in a right-side pane targeted at the
+requesting `TMUX_PANE`. This covers `/split`, `/fork`, resume-in-new-terminal,
+self-dev, and visible agent spawns. `JCODE_TERMINAL` can explicitly choose a
+terminal emulator instead, and a configured `spawn_hook` still takes complete
+precedence.
+
 ### tmux: one window per agent
 
 ```toml
@@ -94,8 +101,9 @@ the client actually has set are forwarded.
 spawn_hook = "tmux new-window"
 ```
 
+Use a hook when you want to override the automatic pane behavior. For example,
 `tmux new-window <jcode> --resume ses_x` runs the command in a new window of
-the current tmux server. For panes instead:
+the current tmux server. To explicitly preserve the right-side pane behavior:
 
 ```toml
 [terminal]

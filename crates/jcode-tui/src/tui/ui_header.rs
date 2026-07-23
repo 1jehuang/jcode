@@ -588,7 +588,17 @@ fn configured_auth_count(auth: &AuthStatus) -> usize {
     .count()
 }
 
+#[cfg(test)]
 pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
+    let auth = app.auth_status();
+    build_persistent_header_with_auth(app, width, &auth)
+}
+
+fn build_persistent_header_with_auth(
+    app: &dyn TuiState,
+    width: u16,
+    auth: &AuthStatus,
+) -> Vec<Line<'static>> {
     let model = app.provider_model();
     let session_name = app.session_display_name().unwrap_or_default();
     let server_name = app.server_display_name();
@@ -722,11 +732,10 @@ pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Lin
             || trimmed.ends_with('…')
             || trimmed.starts_with("connecting")
     };
-    let auth = app.auth_status();
     let provider_label = if model_is_placeholder {
         String::new()
     } else {
-        header_provider_label(&app.provider_name(), &auth)
+        header_provider_label(&app.provider_name(), auth)
     };
     let upstream = if model_is_placeholder {
         None
@@ -813,13 +822,22 @@ pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Lin
     lines
 }
 
+#[cfg(test)]
 pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
+    let auth = app.auth_status();
+    build_header_lines_with_auth(app, width, &auth)
+}
+
+fn build_header_lines_with_auth(
+    app: &dyn TuiState,
+    width: u16,
+    auth: &AuthStatus,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let align = ratatui::layout::Alignment::Center;
-    let auth = app.auth_status();
     let w = width as usize;
 
-    let auth_line = build_auth_status_line(&auth, w);
+    let auth_line = build_auth_status_line(auth, w);
     if !auth_line.spans.is_empty() {
         lines.push(auth_line.alignment(align));
     }
@@ -966,6 +984,20 @@ pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'st
     lines
 }
 
+/// Build both header sections from one authentication snapshot. Credential
+/// discovery can touch several files on Windows, so the render path must not
+/// repeat it for the persistent and secondary portions of the same frame.
+pub(super) fn build_header_sections(
+    app: &dyn TuiState,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let auth = app.auth_status();
+    (
+        build_persistent_header_with_auth(app, width, &auth),
+        build_header_lines_with_auth(app, width, &auth),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,6 +1097,15 @@ mod tests {
                 .all(|line| line.alignment == Some(Alignment::Center)),
             "header detail lines should remain centered in left-aligned mode: {non_empty:?}"
         );
+    }
+
+    #[test]
+    fn combined_header_sections_match_individual_builders() {
+        let app = create_test_app();
+        let (persistent, secondary) = build_header_sections(&app, 80);
+
+        assert_eq!(persistent, build_persistent_header(&app, 80));
+        assert_eq!(secondary, build_header_lines(&app, 80));
     }
 
     #[test]

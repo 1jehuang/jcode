@@ -249,6 +249,8 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
 
     assert!(ensure_model_allowed_for_subscription("claude-opus-4-8").is_ok());
     assert!(ensure_model_allowed_for_subscription("opus 4.8").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-sonnet-4-6").is_ok());
+    assert!(ensure_model_allowed_for_subscription("sonnet 4.6").is_ok());
     assert!(ensure_model_allowed_for_subscription("gpt-5.5").is_ok());
     assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_err());
 
@@ -256,7 +258,7 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
 }
 
 #[test]
-fn test_subscription_model_guard_gates_flagship_models_on_plus_tier() {
+fn test_subscription_model_guard_gates_ultra_models_on_plus_tier() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::tempdir().expect("temp home");
     crate::env::set_var("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
@@ -265,15 +267,15 @@ fn test_subscription_model_guard_gates_flagship_models_on_plus_tier() {
     crate::subscription_catalog::apply_runtime_env();
 
     // Unknown/absent tier behaves like Plus: Sol is available, while the
-    // Flagship-only Fable model is rejected with an upgrade hint.
+    // Ultra-tier Fable model is rejected with an upgrade hint.
     assert!(ensure_model_allowed_for_subscription("gpt-5.6-sol").is_ok());
     let error = ensure_model_allowed_for_subscription("claude-fable-5")
         .expect_err("fable should be gated on Plus");
-    assert!(error.to_string().contains("Flagship"), "{error}");
+    assert!(error.to_string().contains("Ultra"), "{error}");
     assert!(error.to_string().contains("Upgrade"), "{error}");
 
-    // Flagship tier unlocks Fable too.
-    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "flagship");
+    // Ultra tier unlocks Fable too.
+    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
     assert!(ensure_model_allowed_for_subscription("sol").is_ok());
 
@@ -294,22 +296,24 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
     let filtered = filtered_display_models(vec![
         "gpt-5.4".to_string(),
         "claude-opus-4-8".to_string(),
+        "claude-sonnet-4-6".to_string(),
         "gpt-5.5".to_string(),
         "gpt-5.6-sol".to_string(),
         "claude-fable-5".to_string(),
     ]);
 
-    // Plus (default) tier includes Sol and hides only Flagship-only Fable.
+    // Plus (default) tier includes Sol and hides only Ultra-tier Fable.
     assert_eq!(
         filtered,
         vec![
             "claude-opus-4-8".to_string(),
+            "claude-sonnet-4-6".to_string(),
             "gpt-5.5".to_string(),
             "gpt-5.6-sol".to_string(),
         ]
     );
 
-    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "flagship");
+    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     let filtered = filtered_display_models(vec![
         "claude-fable-5".to_string(),
         "gpt-5.6-sol".to_string(),
@@ -323,6 +327,38 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
     crate::env::remove_var("JCODE_HOME");
     crate::subscription_catalog::clear_runtime_env();
+}
+
+#[test]
+fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
+    let models = vec![
+        "claude-opus-4-8".to_string(),
+        "claude-sonnet-4-6".to_string(),
+        "gpt-5.5".to_string(),
+        "gpt-5.6-sol".to_string(),
+    ];
+    let routes = remote_model_routes_fallback(
+        Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
+        &models,
+    );
+
+    assert_eq!(
+        routes
+            .iter()
+            .map(|route| route.model.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+        ]
+    );
+    assert!(routes.iter().all(|route| {
+        route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+            && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            && route.available
+    }));
 }
 
 #[test]

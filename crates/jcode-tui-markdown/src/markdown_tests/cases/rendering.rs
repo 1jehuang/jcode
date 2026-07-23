@@ -293,10 +293,12 @@ fn test_table_cjk_alignment() {
 
 #[test]
 fn test_mermaid_block_detection() {
-    // Mermaid rendering is temporarily disabled by default, so Mermaid fences
-    // should safely fall back to normal code blocks unless explicitly opted in.
+    // Without a native image protocol, Mermaid fences stay useful as readable
+    // source code instead of becoming a half-block image or a text stub.
     let md = "```mermaid\nflowchart LR\n    A --> B\n```";
-    let lines = render_markdown(md);
+    let lines = with_mermaid_rendering_override(Some(true), || {
+        mermaid::with_image_protocol_override(Some(false), || render_markdown(md))
+    });
     let text: String = lines
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -310,6 +312,64 @@ fn test_mermaid_block_detection() {
         text.contains("flowchart LR"),
         "Expected raw Mermaid source: {text}"
     );
+    assert!(
+        lines.iter().all(|line| {
+            mermaid::parse_image_placeholder(line).is_none()
+                && mermaid::parse_inline_image_placeholder(line).is_none()
+        }),
+        "Unsupported terminals must not receive a Mermaid image placeholder: {text}"
+    );
+}
+
+#[cfg(feature = "mermaid-renderer")]
+#[test]
+fn lazy_mermaid_without_native_protocol_also_renders_source() {
+    let md = "```mermaid\nflowchart TD\n    Start --> Finish\n```";
+    let lines = with_mermaid_rendering_override(Some(true), || {
+        mermaid::with_image_protocol_override(Some(false), || {
+            render_markdown_lazy(md, Some(80), 0..usize::MAX)
+        })
+    });
+    let text = lines_to_string(&lines);
+
+    assert!(text.contains("┌─ mermaid"), "missing source header: {text}");
+    assert!(text.contains("Start --> Finish"), "missing source: {text}");
+    assert!(lines.iter().all(|line| {
+        mermaid::parse_image_placeholder(line).is_none()
+            && mermaid::parse_inline_image_placeholder(line).is_none()
+    }));
+}
+
+#[test]
+fn streaming_mermaid_without_native_protocol_keeps_source_visible() {
+    let md = "```mermaid\nflowchart TD\n    Stream --> Source\n```";
+    let lines = with_mermaid_rendering_override(Some(true), || {
+        mermaid::with_image_protocol_override(Some(false), || {
+            with_streaming_render_context(|| render_markdown_with_width(md, Some(80)))
+        })
+    });
+    let text = lines_to_string(&lines);
+
+    assert!(text.contains("┌─ mermaid"), "missing source header: {text}");
+    assert!(text.contains("Stream --> Source"), "missing source: {text}");
+    assert!(!text.contains("rendering mermaid diagram"), "{text}");
+    assert!(lines.iter().all(|line| {
+        mermaid::parse_image_placeholder(line).is_none()
+            && mermaid::parse_inline_image_placeholder(line).is_none()
+    }));
+}
+
+#[cfg(feature = "mermaid-renderer")]
+#[test]
+fn mermaid_gate_accepts_native_protocol_and_rejects_halfblock_fallback() {
+    with_mermaid_rendering_override(Some(true), || {
+        mermaid::with_image_protocol_override(Some(false), || {
+            assert!(!should_render_mermaid_block(Some("mermaid")));
+        });
+        mermaid::with_image_protocol_override(Some(true), || {
+            assert!(should_render_mermaid_block(Some("mermaid")));
+        });
+    });
 }
 
 #[test]

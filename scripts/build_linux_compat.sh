@@ -100,6 +100,7 @@ docker run --rm \
         curl \
         git \
         libssl-dev \
+        perl \
         pkg-config
     elif command -v yum >/dev/null 2>&1; then
       yum install -y \
@@ -110,6 +111,7 @@ docker run --rm \
         git \
         make \
         openssl-devel \
+        perl-core \
         pkgconfig \
         tar \
         gzip
@@ -118,6 +120,11 @@ docker run --rm \
       echo "Unsupported build image: expected apt-get or yum" >&2
       exit 1
     fi
+
+    # The OpenSSL 3 Configure script imports core modules that minimal
+    # manylinux2014 images split into separate RPMs. Installing perl-core keeps
+    # the build from failing one missing module at a time as OpenSSL evolves.
+    perl -MIPC::Cmd -MTime::Piece -e 1
 
     if [[ ! -x /root/.cargo/bin/cargo ]]; then
       curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
@@ -134,7 +141,8 @@ docker run --rm \
 	    export CARGO_TARGET_DIR=/work/target/linux-compat
 	    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 	    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-static-libgcc}"
-	    cargo build --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" -p jcode --bin jcode
+	    cargo build --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
+	      -p jcode --bin jcode --features linux-compat-vendored-openssl
 
 	    cp "$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode" "/out/'"$artifact"'.bin"
 	    chmod +x "/out/'"$artifact"'.bin"

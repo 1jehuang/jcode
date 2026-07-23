@@ -591,22 +591,54 @@ fn desktop_reload_window_placement_rejects_invalid_values() {
 }
 
 #[test]
+fn desktop_reload_window_placement_roundtrips_through_handoff_file() -> Result<()> {
+    let dir = unique_desktop_test_dir("desktop-reload-placement")?;
+    let placement_file = dir.join("placement");
+    let placement = DesktopReloadWindowPlacement {
+        position: Some(PhysicalPosition::new(320, 180)),
+        inner_size: PhysicalSize::new(1440, 900),
+    };
+
+    write_desktop_reload_window_placement(&placement_file, placement)?;
+
+    assert_eq!(
+        read_desktop_reload_window_placement(&placement_file),
+        Some(placement)
+    );
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
 fn desktop_reload_handoff_watcher_releases_ready_child() -> Result<()> {
     let dir = desktop_reload_handoff_temp_dir();
     std::fs::create_dir_all(&dir)?;
     let ready_file = dir.join("ready");
     let release_file = dir.join("release");
+    let placement_file = dir.join("placement");
     let watcher = DesktopReloadHandoffWatcher {
         ready_file: ready_file.clone(),
         release_file: release_file.clone(),
+        placement_file,
         spawned_at: Instant::now(),
     };
 
     assert_eq!(watcher.poll()?, DesktopReloadHandoffPoll::Waiting);
     std::fs::write(&ready_file, b"ready")?;
+    let final_placement = DesktopReloadWindowPlacement {
+        position: Some(PhysicalPosition::new(640, 360)),
+        inner_size: PhysicalSize::new(1600, 1000),
+    };
 
-    assert_eq!(watcher.poll()?, DesktopReloadHandoffPoll::Ready);
+    assert_eq!(
+        watcher.poll_with_placement(Some(final_placement))?,
+        DesktopReloadHandoffPoll::Ready
+    );
     assert!(release_file.exists());
+    assert_eq!(
+        read_desktop_reload_window_placement(&watcher.placement_file),
+        Some(final_placement)
+    );
 
     watcher.cleanup();
     assert!(!dir.exists());

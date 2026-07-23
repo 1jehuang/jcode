@@ -743,6 +743,7 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         width: 600,
         height: 400,
         label: "shot.png".to_string(),
+        uses_text_fallback: true,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
 
@@ -754,8 +755,9 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         .position(|line| line.contains("shot.png"))
         .expect("section should contain the image label line");
 
-    // The Fit image region must sit exactly one line below the label line, which
-    // is how `inline_image_id_for_label_line` maps a click back to the image.
+    // Even with the terminal fallback note attached below the image, the Fit
+    // region must remain exactly one line below the label. This adjacency is how
+    // `inline_image_id_for_label_line` maps a click back to the image.
     assert!(
         section
             .image_regions
@@ -844,6 +846,7 @@ fn test_kitty_jitter_click_on_image_label_still_cycles_level() {
         width: 600,
         height: 400,
         label: "shot.png".to_string(),
+        uses_text_fallback: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let label_line = section
@@ -1182,6 +1185,7 @@ fn test_click_on_inline_image_body_cycles_level() {
         width: 320,
         height: 200,
         label: "shot.png".to_string(),
+        uses_text_fallback: false,
     }];
     let section = build_section(&items, chat_width, 40, false, true, &AllFit);
     let region = *section

@@ -31,6 +31,7 @@ pub(crate) struct InlineImageItem {
     pub width: u32,
     pub height: u32,
     pub label: String,
+    pub uses_text_fallback: bool,
 }
 
 /// Cap an inline image at this fraction of the chat viewport height so a tall
@@ -666,6 +667,7 @@ fn resolve_item(
         width,
         height,
         label,
+        uses_text_fallback: mermaid::uses_text_image_fallback(),
     })
 }
 
@@ -889,6 +891,13 @@ pub(crate) fn image_label_line(
     )
 }
 
+fn image_fallback_note_line(width: u16) -> Line<'static> {
+    jcode_tui_render::truncate_line_with_ellipsis_to_width(
+        &mermaid::text_image_fallback_note_line(),
+        width as usize,
+    )
+}
+
 /// Lines for images anchored at a transcript message: per image, a leading
 /// blank, a dim label, a geometry-encoding marker line plus blank placeholder
 /// rows (recognized by the image-region scan), and a trailing blank. When
@@ -909,6 +918,9 @@ pub(crate) fn anchored_image_lines(
         if images_visible {
             let (rows, cols) = fit_geometry_anchored(item.width, item.height, width, level);
             lines.extend(mermaid::inline_image_placeholder_lines(item.id, rows, cols));
+            if item.uses_text_fallback {
+                lines.push(image_fallback_note_line(width));
+            }
         }
         lines.push(Line::from(""));
     }
@@ -968,6 +980,9 @@ pub(crate) fn build_section(
                 width: cols,
                 render: ImageRegionRender::Fit,
             });
+            if item.uses_text_fallback {
+                lines.push(image_fallback_note_line(width));
+            }
         }
         // Trailing spacer between images.
         lines.push(Line::from(""));
@@ -1027,6 +1042,7 @@ mod tests {
             width,
             height,
             label: "test.png".to_string(),
+            uses_text_fallback: false,
         }
     }
 
@@ -1203,6 +1219,42 @@ mod tests {
         let text = jcode_tui_render::line_plain_text(&line);
         assert!(text.contains("[⇧] [I]"), "badge keys missing: {text:?}");
         assert!(text.contains("hide"), "hide hint missing: {text:?}");
+    }
+
+    #[test]
+    fn fallback_image_has_an_attached_terminal_capability_note() {
+        let mut fallback = item(600, 400);
+        fallback.uses_text_fallback = true;
+        let section = build_section(&[fallback], 80, 40, false, true, &AllFit);
+        let text = section
+            .wrapped_lines
+            .iter()
+            .map(jcode_tui_render::line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(mermaid::TERMINAL_IMAGE_FALLBACK_NOTE));
+        let region = section.image_regions[0];
+        assert_eq!(region.abs_line_idx, 1);
+        assert!(
+            section.wrapped_lines[region.end_line..]
+                .iter()
+                .map(jcode_tui_render::line_plain_text)
+                .any(|line| line.contains(mermaid::TERMINAL_IMAGE_FALLBACK_NOTE)),
+            "fallback note should be attached immediately after the image body"
+        );
+    }
+
+    #[test]
+    fn native_image_render_does_not_show_the_fallback_note() {
+        let section = build_section(&[item(600, 400)], 80, 40, false, true, &AllFit);
+        let text = section
+            .wrapped_lines
+            .iter()
+            .map(jcode_tui_render::line_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains(mermaid::TERMINAL_IMAGE_FALLBACK_NOTE));
+        assert_eq!(section.image_regions[0].abs_line_idx, 1);
     }
 
     #[test]

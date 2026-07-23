@@ -15,6 +15,8 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
+struct NativeCompactionStreamProvider;
+
 fn content_text(content: &[ContentBlock]) -> &str {
     match content.first() {
         Some(ContentBlock::Text { text, .. }) => text,
@@ -101,6 +103,50 @@ impl Provider for NativeAutoCompactionProvider {
 
     async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
         Ok("manual summary from native-auto provider".to_string())
+    }
+}
+
+#[async_trait]
+impl Provider for NativeCompactionStreamProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::Compaction {
+                    trigger: "openai_native".to_string(),
+                    pre_tokens: Some(80_000),
+                    openai_encrypted_content: Some("enc_native_test".to_string()),
+                }))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
+    fn uses_jcode_compaction(&self) -> bool {
+        false
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
     }
 }
 
@@ -214,6 +260,45 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
 
     assert!(saw_text, "expected delayed provider text after keepalive");
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeCompactionStreamProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "compact this".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+
+    let mut saw_native_compaction = false;
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::Compaction {
+            trigger,
+            messages_compacted,
+            ..
+        } = event
+        {
+            assert_eq!(trigger, "openai_native");
+            assert!(
+                messages_compacted.is_some_and(|count| count > 0),
+                "native compaction should report a non-empty compacted prefix"
+            );
+            saw_native_compaction = true;
+        }
+    }
+    assert!(
+        saw_native_compaction,
+        "native provider compaction must reach clients so they clear KV baselines"
+    );
 }
 
 /// Provider that transparently switches its model mid-stream, mimicking the

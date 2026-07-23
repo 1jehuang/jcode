@@ -4,8 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-/// Default embedding idle unload threshold (15 minutes).
-const EMBEDDING_IDLE_UNLOAD_DEFAULT_SECS: u64 = 15 * 60;
+/// Default embedding idle unload threshold. The local MiniLM runtime adds about
+/// 150 MiB of resident memory after its first query, while loading it takes only
+/// about 200 ms and memory retrieval runs off the interactive turn path. Keep it
+/// warm for short bursts, but do not pin it through long quiet periods.
+const EMBEDDING_IDLE_UNLOAD_DEFAULT_SECS: u64 = 60;
 
 pub(crate) fn debug_control_allowed() -> bool {
     // Check config file setting
@@ -29,11 +32,31 @@ pub(crate) fn debug_control_allowed() -> bool {
 }
 
 pub(crate) fn embedding_idle_unload_secs() -> u64 {
-    std::env::var("JCODE_EMBEDDING_IDLE_UNLOAD_SECS")
-        .ok()
+    parse_embedding_idle_unload_secs(
+        std::env::var("JCODE_EMBEDDING_IDLE_UNLOAD_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_embedding_idle_unload_secs(value: Option<&str>) -> u64 {
+    value
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(EMBEDDING_IDLE_UNLOAD_DEFAULT_SECS)
+}
+
+#[cfg(test)]
+mod embedding_idle_tests {
+    use super::*;
+
+    #[test]
+    fn idle_unload_defaults_to_one_minute_and_accepts_positive_override() {
+        assert_eq!(parse_embedding_idle_unload_secs(None), 60);
+        assert_eq!(parse_embedding_idle_unload_secs(Some("15")), 15);
+        assert_eq!(parse_embedding_idle_unload_secs(Some("0")), 60);
+        assert_eq!(parse_embedding_idle_unload_secs(Some("invalid")), 60);
+    }
 }
 
 pub(crate) async fn get_shared_mcp_pool(

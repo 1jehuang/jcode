@@ -1171,7 +1171,7 @@ fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'stat
     };
     let mut spans = Vec::new();
     for (label, score) in [
-        ("User intention alignment", goal.user_intention_alignment),
+        ("Alignment score", goal.alignment_score),
         ("Hill climbability", goal.hill_climbability),
         ("Ownership", goal.end_to_end_ownership),
     ] {
@@ -1326,7 +1326,7 @@ fn push_todo_goal_details(
     if !scores.is_empty() {
         let score_width = Line::from(scores.clone()).width();
         let score_count = [
-            goal.user_intention_alignment,
+            goal.alignment_score,
             goal.hill_climbability,
             goal.end_to_end_ownership,
         ]
@@ -1335,7 +1335,7 @@ fn push_todo_goal_details(
         .count();
         if score_width > inner_width.saturating_sub(2) && score_count > 1 {
             for (label, score) in [
-                ("User intention alignment", goal.user_intention_alignment),
+                ("Alignment score", goal.alignment_score),
                 ("Hill climbability", goal.hill_climbability),
                 ("Ownership", goal.end_to_end_ownership),
             ] {
@@ -1426,17 +1426,11 @@ fn render_todo_goal_updates(
 
         for field in &update.fields {
             match field {
-                crate::todo::TodoGoalField::UserIntentionAlignment => push_todo_score_update(
+                crate::todo::TodoGoalField::AlignmentScore => push_todo_score_update(
                     &mut lines,
-                    "User intention alignment",
-                    update
-                        .before
-                        .as_ref()
-                        .and_then(|goal| goal.user_intention_alignment),
-                    update
-                        .after
-                        .as_ref()
-                        .and_then(|goal| goal.user_intention_alignment),
+                    "Alignment score",
+                    update.before.as_ref().and_then(|goal| goal.alignment_score),
+                    update.after.as_ref().and_then(|goal| goal.alignment_score),
                     base_indent,
                     inner_width,
                 ),

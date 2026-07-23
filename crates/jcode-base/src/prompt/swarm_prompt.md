@@ -21,12 +21,9 @@ Structure guidance for spawned swarm agents:
 - Always pass `label` when spawning (e.g. `label: "api reviewer"`) so the swarm
   UI shows what each agent is for. The explicit `spawn` action rejects missing or
   blank labels.
-- Any agent may spawn children; the spawner owns them (children report back to
-  it, and it may stop them). There is no special "manager" role: a manager is
-  just an agent whose prompt tells it to decompose work, delegate via spawn,
-  and synthesize the reports.
-- When you are a worker with focused work of your own and want to delegate more
-  than 2-3 subtasks, do not fan them out directly. Spawn one manager agent with
-  a prompt like "own X: decompose it, spawn workers for the pieces, synthesize
-  their reports, and report back", and let it own that subtree. This keeps your
-  own context on your task and keeps report-back traffic structured.
+- In normal and light-swarm mode, only the root session may spawn agents. Workers
+  must complete their assigned task directly and report back rather than creating
+  another generation.
+- Recursive spawning is reserved for a root running in `swarm-deep` mode. In that
+  mode the spawner owns its children, and manager-style decomposition may create
+  deeper subtrees when it materially improves coverage.

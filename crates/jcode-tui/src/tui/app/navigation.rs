@@ -1756,6 +1756,7 @@ impl App {
         self.pending_history_anchor = None;
         self.scroll_offset = 0;
         self.auto_scroll_paused = false;
+        super::super::ui::request_tail_follow_snap();
     }
 
     /// Record an overscroll tick (downward scroll while already pinned to the

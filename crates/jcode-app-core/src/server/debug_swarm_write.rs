@@ -392,6 +392,15 @@ pub(super) async fn maybe_handle_swarm_write_command(
                             let versioned_plan = plans
                                 .entry(swarm_id.clone())
                                 .or_insert_with(VersionedPlan::new);
+                            let merged_count =
+                                versioned_plan.items.len().saturating_add(items.len());
+                            if merged_count > jcode_plan::MAX_PLAN_ITEMS {
+                                return Err(anyhow::anyhow!(
+                                    "Plan approval would contain {} items, exceeding the per-swarm limit of {}",
+                                    merged_count,
+                                    jcode_plan::MAX_PLAN_ITEMS
+                                ));
+                            }
                             versioned_plan.items.extend(items.clone());
                             versioned_plan.version += 1;
                             versioned_plan

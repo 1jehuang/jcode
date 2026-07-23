@@ -21,7 +21,57 @@ use super::{
 };
 use provider_init::ProviderChoice;
 
+fn is_file_controlled_debug_client() -> bool {
+    std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
+}
+
+#[cfg(target_os = "linux")]
+fn is_orphan_adopter_name(name: &str) -> bool {
+    matches!(name.trim(), "init" | "systemd")
+}
+
+#[cfg(target_os = "linux")]
+fn parent_is_orphan_adopter(parent_pid: libc::pid_t) -> bool {
+    if parent_pid <= 1 {
+        return true;
+    }
+    std::fs::read_to_string(format!("/proc/{parent_pid}/comm"))
+        .is_ok_and(|name| is_orphan_adopter_name(&name))
+}
+
+/// Tie file-controlled debug clients to the process that launched them.
+///
+/// These clients are automation helpers, not user-owned terminals. Without a
+/// parent-death signal they are reparented to init when a verification script
+/// or debug server exits, retaining a full TUI and session history indefinitely.
+#[cfg(target_os = "linux")]
+fn arm_debug_client_parent_death_signal() {
+    if !is_file_controlled_debug_client() {
+        return;
+    }
+
+    // Capture the parent first, then check it again after prctl. This closes the
+    // race where the launcher exits immediately before the signal is armed.
+    // Safety: getppid has no preconditions and does not dereference pointers.
+    let parent_pid = unsafe { libc::getppid() };
+    // Safety: PR_SET_PDEATHSIG accepts a signal number as its scalar argument.
+    let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } == 0;
+    // Safety: getppid has no preconditions and does not dereference pointers.
+    let current_parent_pid = unsafe { libc::getppid() };
+    if armed
+        && (parent_is_orphan_adopter(parent_pid)
+            || current_parent_pid != parent_pid
+            || parent_is_orphan_adopter(current_parent_pid))
+    {
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn arm_debug_client_parent_death_signal() {}
+
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    arm_debug_client_parent_death_signal();
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old
@@ -102,6 +152,32 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             tui_launch::run_client().await?;
         }
         Some(Command::Server { action }) => match action {
+            ServerCommand::Start { json } => {
+                spawn_server(
+                    &args.provider,
+                    args.model.as_deref(),
+                    args.provider_profile.as_deref(),
+                )
+                .await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "running",
+                        })
+                    );
+                } else {
+                    println!("Jcode server is running.");
+                }
+            }
+            ServerCommand::Keepalive => {
+                run_server_keepalive(
+                    &args.provider,
+                    args.model.as_deref(),
+                    args.provider_profile.as_deref(),
+                )
+                .await?;
+            }
             ServerCommand::Reload { force, json } => {
                 commands::run_server_reload_command(force, json).await?;
             }
@@ -981,7 +1057,11 @@ pub(crate) async fn wait_for_reloading_server() -> bool {
 }
 
 async fn server_is_running_at(path: &std::path::Path) -> bool {
-    server::is_server_ready(path).await || server::has_live_listener(path).await
+    // Check liveness before performing a protocol handshake. On Windows the
+    // named pipe may be busy while another client is connecting; that already
+    // proves a daemon exists, while a handshake connect can otherwise wait in
+    // the transport's ERROR_PIPE_BUSY retry loop and block server startup.
+    server::has_live_listener(path).await || server::is_server_ready(path).await
 }
 
 #[cfg(unix)]
@@ -1062,6 +1142,19 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     provider_choice: &ProviderChoice,
 ) -> Result<()> {
     startup_profile::mark("cred_check_start");
+
+    // Normal interactive launches perform onboarding inside the TUI, and an
+    // explicit provider choice never needs auto-detection here. Avoid probing
+    // every credential backend unless the caller explicitly opted into the
+    // legacy headless CLI bootstrap flow. On Windows those reads may trigger
+    // expensive security-product inspection even when credentials are already
+    // configured, delaying every cold launch before the server is spawned.
+    let cli_bootstrap_requested = std::env::var_os("JCODE_CLI_BOOTSTRAP_LOGIN").is_some();
+    if !should_detect_cli_bootstrap_credentials(provider_choice, cli_bootstrap_requested) {
+        startup_profile::mark("cred_check_done");
+        return Ok(());
+    }
+
     let cred_state = detect_bootstrap_credentials().await;
     startup_profile::mark("cred_check_done");
 
@@ -1076,10 +1169,7 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     // The only thing left to honor at the CLI layer is an explicit headless
     // bootstrap (e.g. CI / non-interactive provisioning), which opts in via the
     // `JCODE_CLI_BOOTSTRAP_LOGIN` env var.
-    if cred_state.has_any || *provider_choice != ProviderChoice::Auto {
-        return Ok(());
-    }
-    if std::env::var_os("JCODE_CLI_BOOTSTRAP_LOGIN").is_none() {
+    if cred_state.has_any {
         return Ok(());
     }
 
@@ -1099,6 +1189,13 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     output::stderr_blank_line();
 
     Ok(())
+}
+
+fn should_detect_cli_bootstrap_credentials(
+    provider_choice: &ProviderChoice,
+    cli_bootstrap_requested: bool,
+) -> bool {
+    cli_bootstrap_requested && *provider_choice == ProviderChoice::Auto
 }
 
 struct BootstrapCredentialState {
@@ -1197,14 +1294,9 @@ pub(crate) async fn spawn_server(
         // with its stderr.
         let timeout = std::time::Duration::from_secs(120);
         while start.elapsed() < timeout {
-            if crate::transport::is_socket_path(&server::socket_path()) {
-                if crate::transport::Stream::connect(server::socket_path())
-                    .await
-                    .is_ok()
-                {
-                    startup_profile::mark("server_ready");
-                    return Ok(());
-                }
+            if server::has_live_listener(&socket_path).await {
+                startup_profile::mark("server_ready");
+                return Ok(());
             }
 
             if let Some(status) = child.try_wait()? {
@@ -1235,6 +1327,65 @@ pub(crate) async fn spawn_server(
 
     #[cfg(unix)]
     Ok(())
+}
+
+async fn run_server_keepalive(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Result<()> {
+    let mut owner_closed = tokio::task::spawn_blocking(|| {
+        let mut stdin = std::io::stdin();
+        let mut buffer = [0u8; 256];
+        loop {
+            match std::io::Read::read(&mut stdin, &mut buffer) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    });
+    let mut client: Option<server::Client> = None;
+    let mut first_attempt = true;
+
+    loop {
+        let delay = if first_attempt {
+            first_attempt = false;
+            std::time::Duration::ZERO
+        } else if client.is_some() {
+            std::time::Duration::from_secs(30)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        tokio::select! {
+            _ = &mut owner_closed => return Ok(()),
+            _ = tokio::time::sleep(delay) => {
+                if client.is_some() {
+                    // A Ping is a one-shot control request, so sending it over
+                    // the held connection would make the server close that
+                    // connection after replying. Probe through a short-lived
+                    // client instead and leave the counted keepalive connected.
+                    let healthy = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        async {
+                            let mut probe = server::Client::connect().await?;
+                            probe.ping().await
+                        },
+                    )
+                    .await
+                    .is_ok_and(|result| result.unwrap_or(false));
+                    if healthy {
+                        continue;
+                    }
+                    client = None;
+                }
+                if spawn_server(provider_choice, model, provider_profile).await.is_ok()
+                    && let Ok(connected) = server::Client::connect().await
+                {
+                    client = Some(connected);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

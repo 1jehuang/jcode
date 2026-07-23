@@ -974,8 +974,8 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
 
 fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
     let build = || {
-        let mut all_header_lines = header::build_persistent_header(app, width);
-        all_header_lines.extend(header::build_header_lines(app, width));
+        let (mut all_header_lines, secondary_lines) = header::build_header_sections(app, width);
+        all_header_lines.extend(secondary_lines);
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 

@@ -200,6 +200,13 @@ static LAST_RESOLVED_CHAT_SCROLL: AtomicUsize = AtomicUsize::new(0);
 #[cfg(not(test))]
 static TAIL_CATCHUP_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Set by explicit user actions that resume bottom-follow (typing, End,
+/// submitting a prompt). The next renderer pass consumes this request and snaps
+/// directly to the tail instead of mistaking the large offset change for a
+/// newly-appended content block that should use catch-up animation.
+#[cfg(not(test))]
+static TAIL_FOLLOW_SNAP_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// Wrapped line indices where each user prompt starts (updated each render frame).
 /// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
 #[cfg(not(test))]
@@ -215,6 +222,7 @@ thread_local! {
     static TEST_LAST_TOTAL_WRAPPED_LINES: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -460,6 +468,34 @@ pub(crate) fn set_tail_catchup_active(active: bool) {
     #[cfg(not(test))]
     {
         TAIL_CATCHUP_ACTIVE.store(active, Ordering::Relaxed);
+    }
+}
+
+/// Request that the next tail-follow render land at the exact bottom.
+///
+/// This is reserved for explicit navigation or composer actions. Automatic
+/// transcript growth does not set it, so large committed blocks still use the
+/// bounded catch-up animation.
+pub(crate) fn request_tail_follow_snap() {
+    #[cfg(test)]
+    {
+        TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(true));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        TAIL_FOLLOW_SNAP_PENDING.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn take_tail_follow_snap_request() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.replace(false));
+    }
+    #[cfg(not(test))]
+    {
+        TAIL_FOLLOW_SNAP_PENDING.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -1365,7 +1401,12 @@ pub(crate) fn clear_test_render_state_for_tests() {
     set_last_diff_pane_max_scroll(0);
     set_last_total_wrapped_lines(0);
     set_last_resolved_chat_scroll(0);
+    TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(false));
     update_user_prompt_positions(&[]);
+    // Flicker events recorded by sibling tests add a "⚠ flicker detected"
+    // notification line to subsequent renders, shifting every layout-sensitive
+    // assertion (click mapping, snapshot rows).
+    frame_metrics::clear_flicker_frame_history_for_tests();
     TEST_LAST_LAYOUT.with(|snapshot| {
         *snapshot.borrow_mut() = None;
     });
@@ -3206,6 +3247,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             centered: margins.centered,
         });
     }
+    let chrome_start = Instant::now();
     if queued_height > 0 {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("draw_queued".to_string());
@@ -3227,7 +3269,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
-    input_ui::draw_input(
+    let input_cursor = input_ui::draw_input(
         frame,
         app,
         chunks[7],
@@ -3242,13 +3284,20 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if donut_height > 0 {
         animations::draw_idle_animation(frame, app, chunks[9]);
     }
+    let chrome_elapsed = chrome_start.elapsed();
 
     // Draw info widget overlays (skip during idle animation - they look out of place)
+    let widget_data_start = Instant::now();
     let widget_data = app.info_widget_data();
+    let widget_data_elapsed = widget_data_start.elapsed();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
-    if !widget_data.is_empty() && !show_donut && !swarm_page_active {
+    if app.info_widget_overlays_enabled()
+        && !widget_data.is_empty()
+        && !show_donut
+        && !swarm_page_active
+    {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
         }
@@ -3324,6 +3373,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }
 
+    // Session facts use actual final-frame cells for collision detection. They
+    // prefer the composer chrome and may climb into a few transcript-tail rows
+    // only when the right suffix is genuinely unused.
+    input_ui::draw_right_fact_stack(
+        frame,
+        app,
+        messages_area,
+        chunks[7],
+        chat_scrollbar_visible,
+        input_cursor,
+    );
+
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)
     // instead of reserving layout height and shoving everything around.
@@ -3337,6 +3398,28 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         app.scroll_offset(),
         !app.auto_scroll_paused(),
     );
+
+    let frame_elapsed = total_start.elapsed();
+    if frame_elapsed >= Duration::from_millis(250) {
+        crate::logging::warn(&format!(
+            "TUI_RENDER_PHASES prepare={}ms messages={}ms chrome={}ms widget_data={}ms widget_render={}ms final={}ms total={}ms",
+            prep_elapsed.as_millis(),
+            messages_draw.as_millis(),
+            chrome_elapsed.as_millis(),
+            widget_data_elapsed.as_millis(),
+            widget_render_ms.unwrap_or_default(),
+            frame_elapsed
+                .saturating_sub(prep_elapsed)
+                .saturating_sub(messages_draw)
+                .saturating_sub(chrome_elapsed)
+                .saturating_sub(widget_data_elapsed)
+                .saturating_sub(Duration::from_secs_f32(
+                    widget_render_ms.unwrap_or_default() / 1000.0,
+                ))
+                .as_millis(),
+            frame_elapsed.as_millis(),
+        ));
+    }
 
     // Record the frame capture if enabled
     if let Some(capture) = debug_capture {

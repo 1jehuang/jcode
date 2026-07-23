@@ -1583,10 +1583,20 @@ fn overscroll_reveal_does_not_relayout_transcript() {
                 .map(|row| {
                     // Drop the native scrollbar column: its thumb glyph
                     // legitimately moves with the one-row elastic slide.
-                    row.trim_end()
+                    let mut normalized = row
+                        .trim_end()
                         .trim_end_matches(['│', '╷', '╵', '•'])
                         .trim_end()
-                        .to_string()
+                        .to_string();
+                    // These fixture rows have a known logical end. Keep every
+                    // transcript byte through it, then discard only the blank
+                    // suffix where the compact session-fact stack may render.
+                    // Unlike splitting on arbitrary double spaces, this cannot
+                    // hide indentation or spacing changes in transcript text.
+                    if let Some(end) = normalized.find("dog.") {
+                        normalized.truncate(end + "dog.".len());
+                    }
+                    normalized
                 })
                 .collect()
         };
