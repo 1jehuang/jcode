@@ -1357,9 +1357,10 @@ impl App {
                 // user content, which models interpret as "the user sent an
                 // empty message" and answer conversationally instead of
                 // re-validating (observed live: five wasted gate turns).
-                self.queued_messages.push(
-                    super::commands::build_todo_confidence_summary_message(&todos),
-                );
+                self.queued_messages
+                    .push(super::commands::build_todo_confidence_summary_message(
+                        &todos,
+                    ));
                 self.pending_queued_dispatch = true;
                 return true;
             }

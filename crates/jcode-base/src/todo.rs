@@ -46,7 +46,8 @@ const LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX: &str = "All todos are done. Todo co
 /// Pre-gate-rewrite texts (before the "[automated todo completion gate" prefix)
 /// still exist in persisted transcripts; keep detecting them so reload/resume
 /// does not re-render them as user prompts.
-const LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "Your completion confidence is missing or not high enough.";
+const LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE: &str =
+    "Your completion confidence is missing or not high enough.";
 const LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str =
     "Your completion confidence rose too sharply to count as independently validated.";
 

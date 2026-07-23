@@ -106,10 +106,7 @@ fn long_task_todos_qualify(todos: &[crate::todo::TodoItem]) -> bool {
     }
     todos.iter().all(|todo| {
         todo.status == "completed"
-            && todo
-                .completion_confidence
-                .or(todo.confidence)
-                .unwrap_or(0)
+            && todo.completion_confidence.or(todo.confidence).unwrap_or(0)
                 >= crate::todo::QUALITY_GATE_THRESHOLD
     })
 }
@@ -142,9 +139,8 @@ fn long_task_message(elapsed: Duration) -> String {
 pub(super) fn subscribe_pitch_markdown() -> String {
     let mut message = String::from("Subscribe to jcode\n\n");
     message.push_str("One subscription, more tokens, zero API keys:\n\n");
-    message.push_str(
-        "  - Get more tokens: a monthly inference budget on curated frontier models\n",
-    );
+    message
+        .push_str("  - Get more tokens: a monthly inference budget on curated frontier models\n");
     let model_names: Vec<&str> = crate::subscription_catalog::curated_models()
         .iter()
         .map(|model| model.display_name)
