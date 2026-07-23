@@ -258,7 +258,7 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
 }
 
 #[test]
-fn test_subscription_model_guard_gates_flagship_models_on_plus_tier() {
+fn test_subscription_model_guard_gates_ultra_models_on_plus_tier() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::tempdir().expect("temp home");
     crate::env::set_var("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
@@ -267,15 +267,15 @@ fn test_subscription_model_guard_gates_flagship_models_on_plus_tier() {
     crate::subscription_catalog::apply_runtime_env();
 
     // Unknown/absent tier behaves like Plus: Sol is available, while the
-    // Flagship-only Fable model is rejected with an upgrade hint.
+    // Ultra-tier Fable model is rejected with an upgrade hint.
     assert!(ensure_model_allowed_for_subscription("gpt-5.6-sol").is_ok());
     let error = ensure_model_allowed_for_subscription("claude-fable-5")
         .expect_err("fable should be gated on Plus");
-    assert!(error.to_string().contains("Flagship"), "{error}");
+    assert!(error.to_string().contains("Ultra"), "{error}");
     assert!(error.to_string().contains("Upgrade"), "{error}");
 
-    // Flagship tier unlocks Fable too.
-    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "flagship");
+    // Ultra tier unlocks Fable too.
+    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
     assert!(ensure_model_allowed_for_subscription("sol").is_ok());
 
@@ -302,7 +302,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
         "claude-fable-5".to_string(),
     ]);
 
-    // Plus (default) tier includes Sol and hides only Flagship-only Fable.
+    // Plus (default) tier includes Sol and hides only Ultra-tier Fable.
     assert_eq!(
         filtered,
         vec![
@@ -313,7 +313,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
         ]
     );
 
-    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "flagship");
+    crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     let filtered = filtered_display_models(vec![
         "claude-fable-5".to_string(),
         "gpt-5.6-sol".to_string(),
