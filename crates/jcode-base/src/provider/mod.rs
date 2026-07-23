@@ -2151,23 +2151,15 @@ impl Provider for MultiProvider {
 
     fn reasoning_effort(&self) -> Option<String> {
         match self.active_provider() {
-            ActiveProvider::Claude => {
-                if self.use_claude_cli {
-                    None
-                } else {
-                    self.anthropic_provider()
-                        .and_then(|provider| provider.reasoning_effort())
-                }
-            }
+            ActiveProvider::Claude if !self.use_claude_cli => self
+                .anthropic_provider()
+                .and_then(|provider| provider.reasoning_effort()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
-            ActiveProvider::Copilot => None,
-            ActiveProvider::Antigravity => None,
-            ActiveProvider::Gemini => None,
-            ActiveProvider::Cursor => None,
-            ActiveProvider::Bedrock => None,
+            ActiveProvider::Copilot => self.copilot_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
                 .and_then(|o| o.reasoning_effort()),
+            _ => None,
         }
     }
 
@@ -2180,6 +2172,10 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
+                .set_reasoning_effort(effort),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .ok_or_else(|| anyhow::anyhow!("Copilot provider not available"))?
                 .set_reasoning_effort(effort),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
@@ -2205,10 +2201,10 @@ impl Provider for MultiProvider {
                 .active_openrouter_execution_provider()
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
-            ActiveProvider::Copilot => vec![],
-            ActiveProvider::Antigravity => vec![],
-            ActiveProvider::Gemini => vec![],
-            ActiveProvider::Cursor => vec![],
+            ActiveProvider::Copilot => match self.copilot_provider() {
+                Some(provider) => provider.available_efforts(),
+                None => vec![],
+            },
             _ => vec![],
         }
     }
