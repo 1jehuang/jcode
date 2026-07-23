@@ -225,6 +225,27 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(copilot_context_limit_for_model(model));
     }
 
+    // Claude models: classify long-context behavior centrally. This is the
+    // authoritative source for known Claude models because the live catalog's
+    // `max_input_tokens` field over-advertises 1M for models that are actually
+    // 200K-capped (verified against the live API). Unknown/future Claude models
+    // fall through to the dynamic cache below.
+    if base_is_known_claude_model(model) {
+        let mode = crate::anthropic::anthropic_context_mode(model);
+        return Some(if is_1m {
+            mode.long_context_window()
+        } else {
+            mode.default_context_window()
+        });
+    }
+
+    // Honor an explicitly configured/cached context limit before applying broad
+    // model-family fallbacks (e.g. custom openai-compatible providers may serve
+    // GPT-named models with different context windows). See issue #541.
+    if let Some(limit) = cached_context_limit(model) {
+        return Some(limit);
+    }
+
     // Spark variant has a smaller context window than the full codex model.
     if model.starts_with("gpt-5.3-codex-spark") {
         return Some(128_000);
@@ -246,24 +267,6 @@ pub fn context_limit_for_model_with_provider_and_cache(
     // Most GPT-5.x codex/reasoning models: 272k per Codex backend API.
     if model.starts_with("gpt-5") {
         return Some(272_000);
-    }
-
-    // Claude models: classify long-context behavior centrally. This is the
-    // authoritative source for known Claude models because the live catalog's
-    // `max_input_tokens` field over-advertises 1M for models that are actually
-    // 200K-capped (verified against the live API). Unknown/future Claude models
-    // fall through to the dynamic cache below.
-    if base_is_known_claude_model(model) {
-        let mode = crate::anthropic::anthropic_context_mode(model);
-        return Some(if is_1m {
-            mode.long_context_window()
-        } else {
-            mode.default_context_window()
-        });
-    }
-
-    if let Some(limit) = cached_context_limit(model) {
-        return Some(limit);
     }
 
     if model.starts_with("gemini-2.0-flash")
@@ -567,6 +570,37 @@ mod tests {
                 (model == "custom-model").then_some(42_000)
             }),
             Some(42_000)
+        );
+    }
+
+    #[test]
+    fn configured_context_window_overrides_gpt_family_fallback() {
+        // Issue #541: a user-configured context_window for a GPT-named model
+        // under a custom openai-compatible provider must beat the broad
+        // gpt-5* fallbacks.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache("gpt-5.4", None, |model| {
+                (model == "gpt-5.4").then_some(1_050_000)
+            }),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache("gpt-5.2-codex", None, |model| {
+                (model == "gpt-5.2-codex").then_some(1_050_000)
+            }),
+            Some(1_050_000)
+        );
+        // Copilot provider limits still take precedence over the cache.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache("gpt-5.4", Some("copilot"), |_| {
+                Some(1_050_000)
+            }),
+            Some(128_000)
+        );
+        // Fallbacks still apply when no cached value exists.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache("gpt-5.4", None, |_| None),
+            Some(1_000_000)
         );
     }
 
