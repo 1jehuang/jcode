@@ -163,8 +163,11 @@ impl McpManager {
             for (name, config) in owned_servers {
                 let name = name.clone();
                 let config = config.clone();
+                let project_dir = self.project_dir.clone();
                 let handle = tokio::spawn(async move {
-                    let result = McpClient::connect(name.clone(), &config).await;
+                    let result =
+                        McpClient::connect_in_dir(name.clone(), &config, project_dir.as_deref())
+                            .await;
                     (name, result)
                 });
                 spawn_handles.push(handle);
@@ -226,9 +229,10 @@ impl McpManager {
         }
 
         // Owned (non-shared or no pool available)
-        let client = McpClient::connect(name.to_string(), config)
-            .await
-            .with_context(|| format!("Failed to connect to MCP server '{}'", name))?;
+        let client =
+            McpClient::connect_in_dir(name.to_string(), config, self.project_dir.as_deref())
+                .await
+                .with_context(|| format!("Failed to connect to MCP server '{}'", name))?;
 
         self.owned_clients
             .write()
