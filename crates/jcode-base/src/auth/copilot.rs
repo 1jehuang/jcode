@@ -603,34 +603,78 @@ fn normalize_github_host_key(host: &str) -> Option<String> {
     }
 }
 
+/// Maximum attempts for the Copilot token exchange when GitHub returns a
+/// transient 5xx (e.g. a 502 from a bad gateway).
+const TOKEN_EXCHANGE_MAX_ATTEMPTS: u32 = 5;
+
+/// Backoff delay (milliseconds) before retry attempt `attempt` (1-based count
+/// of completed attempts). Exponential: 500ms, 1s, 2s, capped at 4s.
+pub(crate) fn token_exchange_backoff_ms(attempt: u32) -> u64 {
+    let base: u64 = 500;
+    base.saturating_mul(1u64 << attempt.saturating_sub(1).min(6))
+        .min(4_000)
+}
+
+/// Whether an HTTP status from the token exchange is worth retrying.
+pub(crate) fn token_exchange_retryable_status(status: u16) -> bool {
+    (500..600).contains(&status)
+}
+
 /// Exchange a GitHub OAuth token for a short-lived Copilot API bearer token.
+///
+/// GitHub's token service occasionally returns transient 5xx responses
+/// (see issue #548); those are retried with exponential backoff before
+/// failing. 4xx responses (bad/unauthorized token) fail immediately.
 pub async fn exchange_github_token(
     client: &reqwest::Client,
     github_token: &str,
 ) -> Result<CopilotApiToken> {
-    let resp = client
-        .get(COPILOT_TOKEN_URL)
-        .header("Authorization", format!("Token {}", github_token))
-        .header("User-Agent", EDITOR_VERSION)
-        .send()
-        .await
-        .context("Failed to exchange GitHub token for Copilot token")?;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let resp = client
+            .get(COPILOT_TOKEN_URL)
+            .header("Authorization", format!("Token {}", github_token))
+            .header("User-Agent", EDITOR_VERSION)
+            .send()
+            .await
+            .context("Failed to exchange GitHub token for Copilot token")?;
 
-    if !resp.status().is_success() {
         let status = resp.status();
+        if status.is_success() {
+            let token_resp: CopilotTokenResponse = resp
+                .json()
+                .await
+                .context("Failed to parse Copilot token response")?;
+
+            return Ok(CopilotApiToken {
+                token: token_resp.token,
+                expires_at: token_resp.expires_at,
+            });
+        }
+
+        let retryable = token_exchange_retryable_status(status.as_u16());
+        if retryable && attempt < TOKEN_EXCHANGE_MAX_ATTEMPTS {
+            let delay_ms = token_exchange_backoff_ms(attempt);
+            crate::logging::warn(&format!(
+                "Copilot token exchange got transient HTTP {}, retrying in {}ms (attempt {}/{})",
+                status, delay_ms, attempt, TOKEN_EXCHANGE_MAX_ATTEMPTS
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            continue;
+        }
+
         let body = crate::util::http_error_body(resp, "HTTP error").await;
+        if retryable {
+            anyhow::bail!(
+                "Copilot token exchange failed after {} attempts (HTTP {}): {}",
+                attempt,
+                status,
+                body
+            );
+        }
         anyhow::bail!("Copilot token exchange failed (HTTP {}): {}", status, body);
     }
-
-    let token_resp: CopilotTokenResponse = resp
-        .json()
-        .await
-        .context("Failed to parse Copilot token response")?;
-
-    Ok(CopilotApiToken {
-        token: token_resp.token,
-        expires_at: token_resp.expires_at,
-    })
 }
 
 /// Run a live Copilot auth check and persist the result as a validation record.
