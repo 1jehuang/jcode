@@ -74,6 +74,11 @@ impl SharedMcpPool {
             if !server_config.is_enabled() {
                 continue;
             }
+            // Non-shared servers are owned per-session (with the session cwd)
+            // and must never be spawned in the daemon-global pool (issue #557).
+            if !server_config.shared {
+                continue;
+            }
             let name = name.clone();
             let server_config = server_config.clone();
             connect_futures.push(async move {
@@ -430,5 +435,34 @@ mod tests {
         };
 
         assert!(Arc::ptr_eq(&first_notify, &second_notify));
+    }
+
+    #[tokio::test]
+    async fn connect_all_skips_non_shared_servers() {
+        // Issue #557: shared:false servers are owned per-session and must not
+        // be spawned in the daemon-global pool. If the pool tried to connect
+        // this nonexistent command it would show up as a failure.
+        let mut config = McpConfig::default();
+        config.servers.insert(
+            "owned-only".to_string(),
+            crate::mcp::protocol::McpServerConfig {
+                command: "/nonexistent/jcode-test-mcp-557".to_string(),
+                args: vec![],
+                env: Default::default(),
+                shared: false,
+                transport: None,
+                url: None,
+                enabled: None,
+                disabled: None,
+            },
+        );
+        let pool = SharedMcpPool::new(config);
+
+        let (successes, failures) = pool.connect_all().await;
+        assert_eq!(successes, 0);
+        assert!(
+            failures.is_empty(),
+            "non-shared server must be skipped, got failures: {failures:?}"
+        );
     }
 }

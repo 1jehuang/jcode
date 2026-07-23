@@ -58,7 +58,7 @@ impl JcodeTier {
             Self::Pro => "Pro",
             Self::Max => "Max",
             Self::Ultra => "Ultra",
-            Self::Flagship => "Flagship",
+            Self::Flagship => "Solo",
         }
     }
 
@@ -80,7 +80,7 @@ impl JcodeTier {
             "pro" => Some(Self::Pro),
             "max" => Some(Self::Max),
             "ultra" => Some(Self::Ultra),
-            "flagship" => Some(Self::Flagship),
+            "flagship" | "solo" => Some(Self::Flagship),
             _ => None,
         }
     }
@@ -150,8 +150,8 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         aliases: &["claude-fable-5", "fable-5", "fable 5", "claude fable 5"],
         default_enabled: false,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Flagship,
-        note: "Flagship-tier model; routed server-side to Anthropic by the jcode router.",
+        min_tier: JcodeTier::Ultra,
+        note: "Ultra-tier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
         id: "gpt-5.6-sol",
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn curated_catalog_has_exact_paid_and_flagship_sets() {
+    fn curated_catalog_has_exact_paid_and_ultra_sets() {
         assert_eq!(
             CURATED_MODELS
                 .iter()
@@ -603,10 +603,15 @@ mod tests {
         assert_eq!(
             CURATED_MODELS
                 .iter()
-                .filter(|model| model.min_tier == JcodeTier::Flagship)
+                .filter(|model| model.min_tier == JcodeTier::Ultra)
                 .map(|model| model.id)
                 .collect::<Vec<_>>(),
             vec!["claude-fable-5"]
+        );
+        assert!(
+            CURATED_MODELS
+                .iter()
+                .all(|model| model.min_tier != JcodeTier::Flagship)
         );
         assert_eq!(CURATED_MODELS.len(), 19);
         assert!(find_curated_model("magistral-small-1.2").is_none());
@@ -623,7 +628,7 @@ mod tests {
             (JcodeTier::Pro, "pro", "Pro", 20, 40.00),
             (JcodeTier::Max, "max", "Max", 100, 225.00),
             (JcodeTier::Ultra, "ultra", "Ultra", 200, 500.00),
-            (JcodeTier::Flagship, "flagship", "Flagship", 1000, 3000.00),
+            (JcodeTier::Flagship, "flagship", "Solo", 1000, 3000.00),
         ];
 
         assert_eq!(JcodeTier::ALL, expected.map(|(tier, ..)| tier));
@@ -645,6 +650,7 @@ mod tests {
         assert_eq!(JcodeTier::parse("MAX"), Some(JcodeTier::Max));
         assert_eq!(JcodeTier::parse(" ultra "), Some(JcodeTier::Ultra));
         assert_eq!(JcodeTier::parse(" Flagship "), Some(JcodeTier::Flagship));
+        assert_eq!(JcodeTier::parse(" Solo "), Some(JcodeTier::Flagship));
         assert_eq!(JcodeTier::parse("starter"), None);
     }
 
@@ -667,7 +673,7 @@ mod tests {
     fn model_entitlements_match_paid_tiers() {
         for model in CURATED_MODELS {
             match model.id {
-                "claude-fable-5" => assert_eq!(model.min_tier, JcodeTier::Flagship),
+                "claude-fable-5" => assert_eq!(model.min_tier, JcodeTier::Ultra),
                 _ => assert_eq!(model.min_tier, JcodeTier::Plus),
             }
         }
@@ -678,7 +684,7 @@ mod tests {
             }
             assert_eq!(
                 tier.allows(find_curated_model("claude-fable-5").unwrap().min_tier),
-                *tier == JcodeTier::Flagship
+                matches!(tier, JcodeTier::Ultra | JcodeTier::Flagship)
             );
         }
     }
@@ -701,7 +707,7 @@ mod tests {
         assert_eq!(cached_tier(), None);
         assert_eq!(effective_tier(), JcodeTier::Plus);
 
-        for tier in [JcodeTier::Pro, JcodeTier::Max, JcodeTier::Ultra] {
+        for tier in [JcodeTier::Pro, JcodeTier::Max] {
             crate::env::set_var(JCODE_TIER_ENV, tier.as_str());
             assert_eq!(effective_tier(), tier);
             for model in EXPECTED_PLUS_MODELS {
@@ -709,6 +715,10 @@ mod tests {
             }
             assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
         }
+
+        crate::env::set_var(JCODE_TIER_ENV, JcodeTier::Ultra.as_str());
+        assert_eq!(effective_tier(), JcodeTier::Ultra);
+        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
 
         crate::env::remove_var(JCODE_TIER_ENV);
         store_cached_tier(Some(JcodeTier::Flagship)).expect("persist tier");

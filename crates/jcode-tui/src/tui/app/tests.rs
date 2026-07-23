@@ -1,5 +1,4 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
-
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/commands_accounts_01/part_01.rs");
@@ -44,6 +43,7 @@ include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/issue_496_input_routing.rs");
+include!("tests/issue_544_paste_enter.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/spinner_slash_commands.rs");
 

@@ -51,7 +51,16 @@ pub struct CopilotApiProvider {
     init_done: Arc<std::sync::atomic::AtomicBool>,
     premium_mode: Arc<std::sync::atomic::AtomicU8>,
     user_turn_count: Arc<std::sync::atomic::AtomicU64>,
+    reasoning_effort: Arc<RwLock<Option<String>>>,
     created_at: std::time::Instant,
+}
+
+/// Reasoning efforts supported by Copilot's claude-sonnet-5 route,
+/// per live `/models` capabilities (issue #558).
+const SONNET5_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn copilot_model_supports_reasoning_effort(model: &str) -> bool {
+    model == "claude-sonnet-5"
 }
 
 impl CopilotApiProvider {
@@ -62,6 +71,23 @@ impl CopilotApiProvider {
 
     fn add_max_token_parameter(body: &mut Value, model: &str, max_tokens: u32) {
         add_copilot_max_token_parameter(body, model, max_tokens);
+    }
+
+    fn current_reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Add top-level `reasoning_effort` when set and the model supports it.
+    fn add_reasoning_effort_parameter(&self, body: &mut Value, model: &str) {
+        if !copilot_model_supports_reasoning_effort(model) {
+            return;
+        }
+        if let Some(effort) = self.current_reasoning_effort() {
+            body["reasoning_effort"] = json!(effort);
+        }
     }
 
     fn persisted_catalog_path() -> Result<std::path::PathBuf> {
@@ -137,6 +163,7 @@ impl CopilotApiProvider {
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -172,6 +199,7 @@ impl CopilotApiProvider {
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -475,6 +503,7 @@ impl CopilotApiProvider {
                 "stream": true,
             });
             Self::add_max_token_parameter(&mut body, &model, max_tokens);
+            self.add_reasoning_effort_parameter(&mut body, &model);
 
             if !tools.is_empty() {
                 body["tools"] = json!(tools);
@@ -885,6 +914,7 @@ impl Provider for CopilotApiProvider {
             "tools": &built_tools,
         });
         Self::add_max_token_parameter(&mut canonical_payload, &model_for_fingerprint, 32_768u32);
+        self.add_reasoning_effort_parameter(&mut canonical_payload, &model_for_fingerprint);
         let system_value = built_messages
             .first()
             .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
@@ -921,6 +951,7 @@ impl Provider for CopilotApiProvider {
             init_done: self.init_done.clone(),
             premium_mode: self.premium_mode.clone(),
             user_turn_count: self.user_turn_count.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
             created_at: self.created_at,
         };
 
@@ -1032,8 +1063,48 @@ impl Provider for CopilotApiProvider {
             init_done: self.init_done.clone(),
             premium_mode: self.premium_mode.clone(),
             user_turn_count: self.user_turn_count.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
             created_at: self.created_at,
         })
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        if !copilot_model_supports_reasoning_effort(&self.model()) {
+            return None;
+        }
+        self.current_reasoning_effort()
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let model = self.model();
+        if !copilot_model_supports_reasoning_effort(&model) {
+            anyhow::bail!(
+                "Reasoning effort is not supported for Copilot model '{}' (only claude-sonnet-5)",
+                model
+            );
+        }
+        let normalized = effort.trim().to_lowercase();
+        if !SONNET5_EFFORTS.contains(&normalized.as_str()) {
+            anyhow::bail!(
+                "Unsupported reasoning effort '{}' for Copilot claude-sonnet-5. Supported: {}",
+                effort,
+                SONNET5_EFFORTS.join(", ")
+            );
+        }
+        let mut guard = self
+            .reasoning_effort
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(normalized);
+        Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        if copilot_model_supports_reasoning_effort(&self.model()) {
+            SONNET5_EFFORTS.to_vec()
+        } else {
+            vec![]
+        }
     }
 }
 
