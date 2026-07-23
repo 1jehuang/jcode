@@ -249,6 +249,41 @@ fn build_grep_args_scopes_file_path_to_parent_and_exact_glob() {
 }
 
 #[test]
+fn build_grep_and_find_args_scope_file_field_to_exact_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src/app.rs"), "fn auth_status() {}\n").expect("write file");
+
+    let ctx = test_ctx(temp.path());
+    let params = AgentGrepInput {
+        mode: "grep".to_string(),
+        query: Some("auth_status".to_string()),
+        file: Some("src/app.rs".to_string()),
+        terms: None,
+        regex: Some(false),
+        path: None,
+        glob: Some("**/*.rs".to_string()),
+        file_type: Some("rs".to_string()),
+        hidden: None,
+        no_ignore: None,
+        max_files: None,
+        max_regions: None,
+        full_region: None,
+        debug_plan: None,
+        debug_score: None,
+        paths_only: None,
+    };
+
+    let grep = build_grep_args(&params, &ctx).unwrap();
+    let find = build_find_args(&params, &ctx).unwrap();
+    let expected_parent = temp.path().join("src").to_string_lossy().into_owned();
+    assert_eq!(grep.path.as_deref(), Some(expected_parent.as_str()));
+    assert_eq!(grep.glob.as_deref(), Some("app.rs"));
+    assert_eq!(find.path.as_deref(), Some(expected_parent.as_str()));
+    assert_eq!(find.glob.as_deref(), Some("app.rs"));
+}
+
+#[test]
 fn build_find_args_allows_glob_only_search() {
     let ctx = test_ctx(Path::new("/tmp/root"));
     let params = AgentGrepInput {
@@ -612,6 +647,30 @@ async fn execute_runs_linked_grep_when_mode_is_omitted() {
 
     assert!(output.output.contains("query: auth_status"));
     assert!(output.output.contains("app.rs"));
+}
+
+#[tokio::test]
+async fn execute_grep_file_field_does_not_scan_sibling_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    fs::write(temp.path().join("src/app.rs"), "fn target() {}\n").expect("write target");
+    fs::write(
+        temp.path().join("src/sibling.rs"),
+        "fn target() { panic!(\"sibling marker\") }\n",
+    )
+    .expect("write sibling");
+
+    let output = AgentGrepTool::new()
+        .execute(
+            json!({"mode": "grep", "query": "target", "file": "src/app.rs"}),
+            test_ctx(temp.path()),
+        )
+        .await
+        .expect("file-scoped grep");
+
+    assert!(output.output.contains("app.rs"));
+    assert!(!output.output.contains("sibling.rs"));
+    assert!(!output.output.contains("sibling marker"));
 }
 
 #[tokio::test]
