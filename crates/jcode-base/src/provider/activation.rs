@@ -67,9 +67,9 @@ impl RuntimeProviderId {
 /// How model routing should be represented in the current process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeSelection {
-    /// Force the multi-provider router onto a concrete execution slot.
-    Locked(ActiveProvider),
-    /// Do not force routing. Optionally set a preferred active provider for UI/session context.
+    /// Select the initial execution slot without restricting later model switches.
+    Initial(ActiveProvider),
+    /// Do not select a specific route. Optionally set an active provider hint for UI/session context.
     Unlocked { active_hint: Option<ActiveProvider> },
     /// Leave existing routing env untouched.
     Unchanged,
@@ -78,7 +78,7 @@ pub enum RuntimeSelection {
 impl RuntimeSelection {
     fn log_value(self) -> &'static str {
         match self {
-            Self::Locked(_) => "locked",
+            Self::Initial(_) => "initial",
             Self::Unlocked { .. } => "unlocked",
             Self::Unchanged => "unchanged",
         }
@@ -122,8 +122,8 @@ impl ProviderActivation {
         self
     }
 
-    pub fn locked(runtime_id: RuntimeProviderId, active_provider: ActiveProvider) -> Self {
-        Self::new(runtime_id, RuntimeSelection::Locked(active_provider))
+    pub fn initial(runtime_id: RuntimeProviderId, active_provider: ActiveProvider) -> Self {
+        Self::new(runtime_id, RuntimeSelection::Initial(active_provider))
     }
 
     pub fn unlocked(runtime_id: RuntimeProviderId, active_hint: Option<ActiveProvider>) -> Self {
@@ -131,7 +131,7 @@ impl ProviderActivation {
     }
 
     pub fn azure_openai(model: Option<String>) -> Self {
-        let activation = Self::locked(RuntimeProviderId::AzureOpenAi, ActiveProvider::OpenRouter);
+        let activation = Self::initial(RuntimeProviderId::AzureOpenAi, ActiveProvider::OpenRouter);
         if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
             activation.with_model_hint("JCODE_OPENROUTER_MODEL", model)
         } else {
@@ -140,7 +140,7 @@ impl ProviderActivation {
     }
 
     pub fn openai_compatible(model: Option<String>) -> Self {
-        let activation = Self::locked(
+        let activation = Self::initial(
             RuntimeProviderId::OpenAiCompatible,
             ActiveProvider::OpenRouter,
         );
@@ -152,7 +152,7 @@ impl ProviderActivation {
     }
 
     pub fn jcode_subscription(model: impl Into<String>) -> Self {
-        Self::locked(RuntimeProviderId::Jcode, ActiveProvider::OpenRouter)
+        Self::initial(RuntimeProviderId::Jcode, ActiveProvider::OpenRouter)
             .with_model_hint("JCODE_OPENROUTER_MODEL", model)
     }
 
@@ -180,16 +180,18 @@ impl ProviderActivation {
 
         let mut active_key_for_log = "";
         match self.selection {
-            RuntimeSelection::Locked(active_provider) => {
+            RuntimeSelection::Initial(active_provider) => {
                 active_key_for_log = provider_key(active_provider);
                 crate::env::set_var("JCODE_ACTIVE_PROVIDER", active_key_for_log);
-                crate::env::set_var("JCODE_FORCE_PROVIDER", "1");
+                crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
             }
             RuntimeSelection::Unlocked { active_hint } => {
-                crate::env::remove_var("JCODE_FORCE_PROVIDER");
+                crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
                 if let Some(active_provider) = active_hint {
                     active_key_for_log = provider_key(active_provider);
                     crate::env::set_var("JCODE_ACTIVE_PROVIDER", active_key_for_log);
+                } else {
+                    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
                 }
             }
             RuntimeSelection::Unchanged => {}
@@ -218,23 +220,25 @@ impl ProviderActivation {
     }
 }
 
-/// Backwards-compatible adapter for existing string-based call sites.
-pub fn lock_runtime_provider_key(provider_key_raw: &str) {
+/// Select the provider used when a new multi-provider runtime starts.
+/// Later model switches remain free to select any configured provider.
+pub fn select_initial_runtime_provider_key(provider_key_raw: &str) {
     crate::env::set_var("JCODE_ACTIVE_PROVIDER", provider_key_raw);
-    crate::env::set_var("JCODE_FORCE_PROVIDER", "1");
+    crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
     crate::logging::auth_event(
-        "runtime_activation_legacy_lock",
+        "runtime_activation_initial_provider",
         provider_key_raw,
-        &[("selection", "locked")],
+        &[("selection", "initial")],
     );
 }
 
-pub fn unlock_runtime_provider() {
-    crate::env::remove_var("JCODE_FORCE_PROVIDER");
+pub fn clear_initial_runtime_provider() {
+    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+    crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
     crate::logging::auth_event(
-        "runtime_activation_unlock",
+        "runtime_activation_clear_initial_provider",
         "runtime",
-        &[("selection", "unlocked")],
+        &[("selection", "auto")],
     );
 }
 
@@ -291,7 +295,7 @@ mod tests {
         let _guard = EnvGuard::new(&[
             "JCODE_RUNTIME_PROVIDER",
             "JCODE_ACTIVE_PROVIDER",
-            "JCODE_FORCE_PROVIDER",
+            "JCODE_INITIAL_PROVIDER_EXPLICIT",
             "JCODE_OPENROUTER_MODEL",
         ]);
 
@@ -307,7 +311,10 @@ mod tests {
             std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
             Ok("openrouter")
         );
-        assert_eq!(std::env::var("JCODE_FORCE_PROVIDER").as_deref(), Ok("1"));
+        assert_eq!(
+            std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
+            Ok("1")
+        );
         assert_eq!(
             std::env::var("JCODE_OPENROUTER_MODEL").as_deref(),
             Ok("gpt-4.1-mini")
