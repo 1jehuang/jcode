@@ -97,6 +97,23 @@ fn test_parse_provider_hint_supports_known_values() {
 }
 
 #[test]
+fn test_active_provider_env_only_seeds_sessions_when_explicitly_selected() {
+    with_clean_provider_test_env(|| {
+        crate::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
+        assert_eq!(MultiProvider::initial_provider_from_env(), None);
+
+        crate::provider::activation::select_initial_runtime_provider_key("openai");
+        assert_eq!(
+            MultiProvider::initial_provider_from_env(),
+            Some(ActiveProvider::OpenAI)
+        );
+
+        crate::provider::activation::clear_initial_runtime_provider();
+        assert_eq!(MultiProvider::initial_provider_from_env(), None);
+    });
+}
+
+#[test]
 fn test_cursor_models_are_included_in_available_models_display_when_configured() {
     with_clean_provider_test_env(|| {
         let provider = test_multi_provider_with_cursor();
@@ -151,58 +168,39 @@ fn test_set_model_supports_explicit_cursor_prefix() {
 }
 
 #[test]
-fn test_forced_provider_disables_cross_provider_fallback_sequence() {
-    assert_eq!(
-        MultiProvider::fallback_sequence_for(ActiveProvider::Claude, Some(ActiveProvider::OpenAI)),
-        vec![ActiveProvider::OpenAI]
-    );
-    assert_eq!(
-        MultiProvider::fallback_sequence_for(ActiveProvider::OpenAI, Some(ActiveProvider::OpenAI)),
-        vec![ActiveProvider::OpenAI]
-    );
-    assert_eq!(
-        MultiProvider::fallback_sequence_for(ActiveProvider::Claude, None),
-        MultiProvider::fallback_sequence(ActiveProvider::Claude)
-    );
-}
+fn test_initial_provider_allows_cross_provider_switch_and_reports_target_credentials() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenAI),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            initial_provider: Some(ActiveProvider::OpenAI),
+            routes_memo: std::sync::Mutex::new(None),
+            post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
 
-#[test]
-fn test_set_model_rejects_cross_provider_without_creds() {
-    let _guard = crate::storage::lock_test_env();
-    let runtime = enter_test_runtime();
-    let _enter = runtime.enter();
-    crate::subscription_catalog::clear_runtime_env();
-    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-    crate::env::remove_var("JCODE_FORCE_PROVIDER");
-
-    let provider = MultiProvider {
-        claude: RwLock::new(None),
-        anthropic: RwLock::new(None),
-        openai: RwLock::new(None),
-        copilot_api: RwLock::new(None),
-        antigravity: RwLock::new(None),
-        gemini: RwLock::new(None),
-        cursor: RwLock::new(None),
-        bedrock: RwLock::new(None),
-        openrouter: RwLock::new(None),
-        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
-        active_openai_compatible_profile: RwLock::new(None),
-        active: RwLock::new(ActiveProvider::OpenAI),
-        use_claude_cli: false,
-        startup_notices: RwLock::new(Vec::new()),
-        forced_provider: Some(ActiveProvider::OpenAI),
-        routes_memo: std::sync::Mutex::new(None),
-        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    };
-
-    let err = provider
-        .set_model("claude-sonnet-4-6")
-        .expect_err("forced provider should reject when the forced provider has no creds");
-    assert!(
-        err.to_string().contains("Unsupported OpenAI model 'claude-sonnet-4-6'"),
-        "expected forced-provider model validation error, got: {}",
-        err
-    );
+        let err = provider
+            .set_model("claude:claude-sonnet-4-6")
+            .expect_err("the target provider should report its missing credentials");
+        assert!(
+            err.to_string().contains("Claude credentials not available"),
+            "expected target-provider credential error, got: {}",
+            err
+        );
+    });
 }
 
 #[test]
@@ -307,7 +305,7 @@ fn test_no_provider_error_mentions_tokens_and_details() {
         active: RwLock::new(ActiveProvider::OpenAI),
         use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
-        forced_provider: None,
+        initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
@@ -347,7 +345,7 @@ fn test_active_compat_profile_counts_as_configured_openrouter_slot() {
                 active: RwLock::new(ActiveProvider::OpenRouter),
                 use_claude_cli: false,
                 startup_notices: RwLock::new(Vec::new()),
-                forced_provider: None,
+                initial_provider: None,
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };

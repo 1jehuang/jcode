@@ -36,7 +36,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "ANTHROPIC_API_KEY",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
-        "JCODE_FORCE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
         "JCODE_OPENAI_MODEL",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
@@ -222,7 +222,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         active: RwLock::new(ActiveProvider::OpenAI),
         use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
-        forced_provider: None,
+        initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
@@ -1024,7 +1024,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         active: RwLock::new(ActiveProvider::Cursor),
         use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
-        forced_provider: None,
+        initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
