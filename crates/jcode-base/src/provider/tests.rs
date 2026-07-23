@@ -1065,5 +1065,6 @@ fn new_session_fork_reloads_changed_config_provider_and_model() {
 
 include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
+include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
