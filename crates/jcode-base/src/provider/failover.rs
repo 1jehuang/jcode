@@ -18,17 +18,6 @@ impl MultiProvider {
         }
     }
 
-    pub(super) fn fallback_sequence_for(
-        active: ActiveProvider,
-        forced_provider: Option<ActiveProvider>,
-    ) -> Vec<ActiveProvider> {
-        if let Some(forced) = forced_provider {
-            vec![forced]
-        } else {
-            Self::fallback_sequence(active)
-        }
-    }
-
     pub(super) fn build_failover_prompt(
         &self,
         from: ActiveProvider,

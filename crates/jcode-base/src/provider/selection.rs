@@ -51,12 +51,16 @@ impl MultiProvider {
         jcode_provider_core::parse_provider_hint(value)
     }
 
-    pub(super) fn forced_provider_from_env() -> Option<ActiveProvider> {
-        let force = std::env::var("JCODE_FORCE_PROVIDER")
+    pub(super) fn initial_provider_from_env() -> Option<ActiveProvider> {
+        let explicit = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
             .ok()
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        if !force {
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        if !explicit {
             return None;
         }
 
