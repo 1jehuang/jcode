@@ -1243,21 +1243,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     .as_ref()
                     .map(|pending| pending.is_system)
                 {
-                    let mut rate_limit_line = format!(
-                        "⏳ Rate limit hit. Will auto-retry in {} seconds...",
-                        reset_duration.as_secs()
-                    );
-                    // High-intent subscribe nudge: the user is blocked on
-                    // tokens right now, which is exactly what a subscription
-                    // provides. Weekly-gated and suppressed for subscribers.
-                    if app.claim_subscribe_nudge(
-                        crate::tui::app::subscribe_nudge::SubscribeNudgeTrigger::RateLimited,
-                    ) {
-                        rate_limit_line.push_str(&format!(
-                            "\n{}",
-                            crate::tui::app::subscribe_nudge::RATE_LIMIT_NUDGE_LINE
-                        ));
-                    }
+                    let rate_limit_line =
+                        app.rate_limit_notice_with_nudge(reset_duration.as_secs());
                     app.push_display_message(DisplayMessage::system(rate_limit_line));
                     if is_system {
                         app.set_status_notice("Rate limited; queued system retry");

@@ -76,30 +76,9 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
         .map(|dir| dir.join(MODEL_PICKER_FAVORITES_FILE))
 }
 
-/// Whether a picker route's runtime can apply a per-request reasoning effort.
-/// Effort rows are only rendered for these routes; other routes (Copilot,
-/// Bedrock, Antigravity CLI, remote-catalog placeholders, ...) get one plain
-/// row per model because a picked effort could not actually be applied.
-fn route_supports_reasoning_effort(api_method: &str) -> bool {
-    use crate::provider::ModelRouteApiMethod as Method;
-    match Method::parse(api_method) {
-        Method::ClaudeOAuth
-        | Method::AnthropicApiKey
-        | Method::OpenAIOAuth
-        | Method::OpenAIApiKey
-        | Method::OpenRouter => true,
-        Method::JcodeSubscription
-        | Method::OpenAiCompatible { .. }
-        | Method::Copilot
-        | Method::Cursor
-        | Method::Bedrock
-        | Method::CodeAssistOAuth
-        | Method::AntigravityHttps
-        | Method::RemoteCatalog
-        | Method::Current
-        | Method::Other(_) => false,
-    }
-}
+#[path = "inline_interactive_placeholder_routes.rs"]
+mod placeholder_routes;
+use placeholder_routes::route_supports_reasoning_effort;
 
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
 ///
@@ -655,19 +634,10 @@ impl App {
             .filter(|model| match methods_by_model.get(model.as_str()) {
                 None => true,
                 Some(methods) => {
-                    // "remote-catalog"/"current" are placeholder methods from
-                    // names-only catalog downgrades, not real provider routes.
-                    // A model covered only by placeholders still needs its
-                    // actual routes (OpenAI OAuth/API key, OpenRouter, ...)
-                    // synthesized, otherwise a poisoned cache pins it to a
-                    // useless "remote-catalog" row forever.
-                    let placeholder_only = methods.iter().all(|method| {
-                        matches!(
-                            crate::provider::ModelRouteApiMethod::parse(method),
-                            crate::provider::ModelRouteApiMethod::RemoteCatalog
-                                | crate::provider::ModelRouteApiMethod::Current
-                        )
-                    });
+                    // Poisoned caches pin models to placeholder rows forever;
+                    // see inline_interactive_placeholder_routes.rs.
+                    let placeholder_only =
+                        placeholder_routes::methods_are_placeholder_only(methods.iter());
                     let missing_anthropic_method = crate::provider::provider_for_model(model)
                         == Some("claude")
                         && !model.contains('/')
@@ -742,17 +712,11 @@ impl App {
         }
 
         let mut snapshot = self.remote_model_catalog_snapshot();
-        // Placeholder routes ("remote-catalog"/"current") describe a catalog
-        // that is still refreshing, not real provider routing. Persisting them
-        // would resurrect useless rows on the next cold start and mask the
-        // fallback synthesis of real routes.
-        snapshot.model_routes.retain(|route| {
-            !matches!(
-                crate::provider::ModelRouteApiMethod::parse(&route.api_method),
-                crate::provider::ModelRouteApiMethod::RemoteCatalog
-                    | crate::provider::ModelRouteApiMethod::Current
-            )
-        });
+        // Never persist placeholder routes; see
+        // inline_interactive_placeholder_routes.rs.
+        snapshot
+            .model_routes
+            .retain(|route| !placeholder_routes::is_placeholder_route_method(&route.api_method));
         if snapshot.model_routes.is_empty() {
             return;
         }

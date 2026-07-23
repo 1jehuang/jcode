@@ -1352,15 +1352,10 @@ impl App {
                     "🛑 Todo completion gate: abrupt confidence increase needs independent validation."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
-                // Deliver the continuation as user-role content, not a hidden
-                // system reminder. A reminder-only turn arrives with empty
-                // user content, which models interpret as "the user sent an
-                // empty message" and answer conversationally instead of
-                // re-validating (observed live: five wasted gate turns).
-                self.queued_messages
-                    .push(super::commands::build_todo_confidence_summary_message(
-                        &todos,
-                    ));
+                // User-role content: reminder-only turns read as empty user
+                // messages and models answer instead of re-validating.
+                let summary = super::commands::build_todo_confidence_summary_message(&todos);
+                self.queued_messages.push(summary);
                 self.pending_queued_dispatch = true;
                 return true;
             }

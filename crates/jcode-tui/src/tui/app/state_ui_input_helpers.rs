@@ -292,9 +292,8 @@ impl App {
         candidates: Vec<(String, &'static str)>,
     ) -> Vec<(String, &'static str)> {
         let needle = needle.to_lowercase();
-        // Bucket 1 = literal prefix matches (kept ahead of looser fuzzy hits so
-        // exact typing always wins). Bucket 0 = typo-tolerant fuzzy matches,
-        // ordered by descending fuzzy score.
+        // Bucket 1 = literal prefix matches (exact typing always wins).
+        // Bucket 0 = typo-tolerant fuzzy matches by descending score.
         let mut scored: Vec<(u8, i32, String, &'static str)> = Vec::new();
         for (cmd, help) in candidates {
             let lower = cmd.to_lowercase();

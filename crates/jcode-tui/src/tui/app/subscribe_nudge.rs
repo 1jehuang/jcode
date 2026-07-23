@@ -170,6 +170,16 @@ pub(super) fn subscribe_pitch_markdown() -> String {
     message
 }
 
+/// Per-session state for the subscribe nudge.
+#[derive(Default)]
+pub(super) struct SubscribeNudgeState {
+    /// Whether the nudge already fired this session.
+    shown_this_session: bool,
+    /// When this session's todo list first showed incomplete work, for the
+    /// 1h+ long-task nudge.
+    todo_started: Option<std::time::Instant>,
+}
+
 impl App {
     /// Central gate for both triggers. Returns true when the nudge may be
     /// shown, and records the claim (session flag + weekly file) so a `true`
@@ -180,7 +190,7 @@ impl App {
         if cfg!(test) || !matches!(self.runtime_mode, AppRuntimeMode::RemoteClient) {
             return false;
         }
-        if self.subscribe_nudge_shown_this_session {
+        if self.subscribe_nudge.shown_this_session {
             return false;
         }
         // Never pitch during onboarding: the user has gotten zero value yet.
@@ -199,7 +209,7 @@ impl App {
         state.last_shown_unix = now;
         state.last_trigger = trigger.as_str().to_string();
         store_state(&state);
-        self.subscribe_nudge_shown_this_session = true;
+        self.subscribe_nudge.shown_this_session = true;
         true
     }
 
@@ -212,7 +222,7 @@ impl App {
         // nudge, and a session nudges at most once.
         if cfg!(test)
             || !matches!(self.runtime_mode, AppRuntimeMode::RemoteClient)
-            || self.subscribe_nudge_shown_this_session
+            || self.subscribe_nudge.shown_this_session
         {
             return;
         }
@@ -222,14 +232,15 @@ impl App {
         }
         if todos.iter().any(|todo| todo.status != "completed") {
             // Work in flight: arm (or keep) the long-task timer.
-            self.subscribe_nudge_todo_started
+            self.subscribe_nudge
+                .todo_started
                 .get_or_insert_with(Instant::now);
             return;
         }
         // Completion edge: evaluate exactly once per armed run. Taking the
         // timer here means a short batch can never leak its start time into a
         // later batch and inflate that batch's apparent duration.
-        let Some(started) = self.subscribe_nudge_todo_started.take() else {
+        let Some(started) = self.subscribe_nudge.todo_started.take() else {
             return;
         };
         let elapsed = started.elapsed();
@@ -336,5 +347,20 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_secs(60 * 61)), "1h 1m");
         assert_eq!(format_elapsed(Duration::from_secs(7200)), "2h");
         assert_eq!(format_elapsed(Duration::from_secs(60 * 45)), "45m");
+    }
+}
+
+impl App {
+    /// Rate-limit notice line, with the weekly-gated subscribe nudge appended
+    /// when the gate allows (user is blocked on tokens right now).
+    pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> String {
+        let mut line = format!(
+            "⏳ Rate limit hit. Will auto-retry in {} seconds...",
+            reset_secs
+        );
+        if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {
+            line.push_str(&format!("\n{}", RATE_LIMIT_NUDGE_LINE));
+        }
+        line
     }
 }

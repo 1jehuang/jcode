@@ -286,9 +286,8 @@ impl App {
         };
         self.overnight_auto_poke = None;
 
-        // Surface the streak in telemetry as an explicit auth_failed event so
-        // the dashboard can distinguish "breaker tripped on a dead credential"
-        // from one-off auth blips.
+        // Surface the streak as an explicit auth_failed telemetry event to
+        // distinguish "breaker tripped on a dead credential" from blips.
         let reason = crate::auth::login_diagnostics::classify_auth_failure_message(message);
         let provider = self.provider_name().to_string();
         crate::telemetry::record_auth_failed_reason(&provider, "session", reason.label());
@@ -624,8 +623,7 @@ impl App {
             learn_hint_shown_this_session: false,
             swarm_hint_shown_this_session: false,
             sponsor_disclosure_shown_this_session: false,
-            subscribe_nudge_shown_this_session: false,
-            subscribe_nudge_todo_started: None,
+            subscribe_nudge: Default::default(),
             hotkey_feedback: None,
             hotkey_usage: None,
             unknown_hotkey_seen: std::collections::HashMap::new(),
@@ -1050,8 +1048,7 @@ impl App {
             learn_hint_shown_this_session: false,
             swarm_hint_shown_this_session: false,
             sponsor_disclosure_shown_this_session: false,
-            subscribe_nudge_shown_this_session: false,
-            subscribe_nudge_todo_started: None,
+            subscribe_nudge: Default::default(),
             hotkey_feedback: None,
             hotkey_usage: None,
             unknown_hotkey_seen: std::collections::HashMap::new(),
@@ -1196,8 +1193,7 @@ impl App {
         );
         self.remote_session_id = Some(session_id.to_string());
         session.strip_transcript_for_remote_client();
-        // The strip above clears the large transcript vectors but keeps their
-        // capacity; free the backing buffers before retaining the session.
+        // Strip clears transcript vectors but keeps capacity; free buffers.
         session.messages.shrink_to_fit();
         session.env_snapshots.shrink_to_fit();
         session.memory_injections.shrink_to_fit();

@@ -1361,18 +1361,11 @@ pub struct App {
     learn_hint_shown_this_session: bool,
     // Whether the swarm-config-is-a-prompt hint has been surfaced this session.
     swarm_hint_shown_this_session: bool,
-    // Whether the inline sponsored-discovery policy detail has been attached
-    // this session. It appears once, on the first discover_tools result.
+    // Sponsored-discovery disclosure shown yet (once per session).
     sponsor_disclosure_shown_this_session: bool,
-    // Whether the subscribe nudge (rate-limit or long-task trigger) has fired
-    // this session. Backed by a persisted weekly gate in subscribe_nudge.rs.
-    subscribe_nudge_shown_this_session: bool,
-    // When this session's todo list first showed incomplete work, for the
-    // 1h+ long-task subscribe nudge.
-    subscribe_nudge_todo_started: Option<Instant>,
-    // Inline hotkey feedback: "you just pressed X → does Y" for rarely-used
-    // known chords, or "X isn't bound · nearest: ..." for unknown chords.
-    // Rendered in the same pop-out slot as learn_hint.
+    subscribe_nudge: subscribe_nudge::SubscribeNudgeState,
+    // Inline hotkey feedback: "pressed X → does Y" for rare known chords or
+    // "X isn't bound · nearest: ..." for unknown; same slot as learn_hint.
     hotkey_feedback: Option<(String, Instant)>,
     // Lazily-loaded persisted per-action hotkey usage counters.
     hotkey_usage: Option<hotkey_feedback::HotkeyUsageState>,
