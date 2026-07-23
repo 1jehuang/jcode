@@ -9,9 +9,7 @@ use std::time::Duration;
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DESKTOP_SESSION_WORKER_LIMIT: usize = 12;
-
 static DESKTOP_SESSION_WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 struct DesktopSessionWorkerPermit<'a> {
     counter: &'a AtomicUsize,
 }
@@ -64,9 +62,11 @@ fn spawn_bounded_desktop_session_worker(
 }
 
 mod events;
+#[cfg(unix)]
 mod server_io;
 mod terminal;
 
+#[cfg(unix)]
 use server_io::{
     DrainOutcome, connect_server_with_retry, connect_server_with_retry_path, drain_session_events,
     ensure_server_running, establish_session_id, read_control_response, read_model_catalog,
