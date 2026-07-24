@@ -3601,6 +3601,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-harness-api-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jcode-harness-api",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "jcode-import-core"
 version = "0.1.0"
 dependencies = [

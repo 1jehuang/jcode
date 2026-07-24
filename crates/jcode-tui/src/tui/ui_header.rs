@@ -350,21 +350,34 @@ fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
             auth.antigravity,
         ),
     ]
-    .into_iter()
-    .filter(|(_, state)| *state != AuthState::NotConfigured)
-    .collect()
 }
 
-/// Vertical auth inventory: one line per configured provider.
+/// Vertical auth inventory: one line per configured provider (green/yellow).
+/// Unconfigured providers are listed inline on the `/login` heading instead so
+/// the header height stays stable as credentials are added.
 pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
     auth_full_specs(auth)
         .into_iter()
+        .filter(|(_, state)| *state != AuthState::NotConfigured)
         .map(|(label, state)| {
             Line::from(vec![
-                Span::styled(auth_dot_char(state), Style::default().fg(auth_dot_color(state))),
+                Span::styled(
+                    auth_dot_char(state),
+                    Style::default().fg(auth_dot_color(state)),
+                ),
                 Span::styled(format!(" {}", label), Style::default().fg(dim_color())),
             ])
         })
+        .collect()
+}
+
+/// Bare names of providers with no configured credentials, for the `/login`
+/// heading's inline list.
+pub(super) fn unconfigured_auth_provider_names(auth: &AuthStatus) -> Vec<String> {
+    auth_full_specs(auth)
+        .into_iter()
+        .filter(|(_, state)| *state == AuthState::NotConfigured)
+        .map(|(label, _)| label)
         .collect()
 }
 
@@ -613,6 +626,43 @@ fn build_persistent_header_with_auth(
         .as_deref()
         .map(|version| header_version_label(version, include_hash));
 
+    // Unseen release notes render first, above the `jcode` line, in a rounded
+    // box that is only as wide as its content.
+    let new_entries = unseen_changelog_entries();
+    if !new_entries.is_empty() && w > 20 {
+        const MAX_LINES: usize = 8;
+        let available_width = w.saturating_sub(2);
+        let display_count = new_entries.len().min(MAX_LINES);
+        let has_more = new_entries.len() > MAX_LINES;
+
+        let mut content: Vec<Line> = Vec::new();
+        for entry in new_entries.iter().take(display_count) {
+            content.push(Line::from(Span::styled(
+                format!("• {}", entry),
+                Style::default().fg(dim_color()),
+            )));
+        }
+        if has_more {
+            content.push(Line::from(Span::styled(
+                format!(
+                    "  …{} more · /changelog to see all",
+                    new_entries.len() - MAX_LINES
+                ),
+                Style::default().fg(dim_color()),
+            )));
+        }
+
+        let boxed = render_rounded_box(
+            "Updates",
+            content,
+            available_width,
+            Style::default().fg(dim_color()),
+        );
+        for line in boxed {
+            lines.push(line.alignment(align));
+        }
+    }
+
     // First line: `jcode` (+ `self-dev` when running a dev/canary build),
     // followed by any remaining status badges rendered dimly.
     {
@@ -776,59 +826,26 @@ fn build_header_lines_with_auth(
     let align = ratatui::layout::Alignment::Left;
     let w = width as usize;
 
-    // Auth inventory: `/login` hint as a heading, then one configured
+    // Auth inventory: `/login` heading lists the providers that can still be
+    // added inline (so the header height stays stable), then one configured
     // provider per line.
     let auth_lines = build_auth_status_lines(auth);
+    let mut login_heading = "/login to add provider".to_string();
+    let missing = unconfigured_auth_provider_names(auth);
+    if !missing.is_empty() {
+        let inline = format!("/login to add provider: {}", missing.join(", "));
+        if inline.chars().count() <= w {
+            login_heading = inline;
+        } else {
+            login_heading = format!("/login to add provider: +{}", missing.len());
+        }
+    }
     lines.push(
-        Line::from(Span::styled(
-            "/login to add provider:".to_string(),
-            Style::default().fg(dim_color()),
-        ))
-        .alignment(align),
+        Line::from(Span::styled(login_heading, Style::default().fg(dim_color())))
+            .alignment(align),
     );
     for line in auth_lines {
         lines.push(line.alignment(align));
-    }
-
-    let new_entries = unseen_changelog_entries();
-    if !new_entries.is_empty() && w > 20 {
-        const MAX_LINES: usize = 8;
-        let available_width = w.saturating_sub(2);
-        let display_count = new_entries.len().min(MAX_LINES);
-        let has_more = new_entries.len() > MAX_LINES;
-
-        let mut content: Vec<Line> = Vec::new();
-        for entry in new_entries.iter().take(display_count) {
-            content.push(
-                Line::from(Span::styled(
-                    format!("• {}", entry),
-                    Style::default().fg(dim_color()),
-                ))
-                .alignment(align),
-            );
-        }
-        if has_more {
-            content.push(
-                Line::from(Span::styled(
-                    format!(
-                        "  …{} more · /changelog to see all",
-                        new_entries.len() - MAX_LINES
-                    ),
-                    Style::default().fg(dim_color()),
-                ))
-                .alignment(align),
-            );
-        }
-
-        let boxed = render_rounded_box(
-            "Updates",
-            content,
-            available_width,
-            Style::default().fg(dim_color()),
-        );
-        for line in boxed {
-            lines.push(line.alignment(align));
-        }
     }
 
     let mcps = app.mcp_servers();
@@ -1489,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_line_hides_not_configured_providers() {
+    fn auth_status_lines_show_configured_and_heading_lists_missing() {
         let auth = AuthStatus {
             anthropic: ProviderAuth {
                 state: AuthState::Expired,
@@ -1515,15 +1532,21 @@ mod tests {
             "rendered: {rendered}"
         );
         assert!(rendered.contains("openai(key)"), "rendered: {rendered}");
+        // Unconfigured providers move to the /login heading's inline list.
         assert!(!rendered.contains("openrouter"), "rendered: {rendered}");
-        assert!(!rendered.contains("copilot"), "rendered: {rendered}");
-        assert!(!rendered.contains("cursor"), "rendered: {rendered}");
+        let missing = unconfigured_auth_provider_names(&auth);
+        assert!(missing.contains(&"openrouter".to_string()), "{missing:?}");
+        assert!(missing.contains(&"cursor".to_string()), "{missing:?}");
+        assert!(missing.contains(&"copilot".to_string()), "{missing:?}");
+        assert!(!missing.iter().any(|name| name.starts_with("anthropic")), "{missing:?}");
     }
 
     #[test]
-    fn auth_status_lines_are_empty_when_nothing_was_attempted() {
+    fn auth_status_lines_are_empty_when_nothing_configured() {
         let lines = build_auth_status_lines(&AuthStatus::default());
         assert!(lines.is_empty(), "lines should be empty: {lines:?}");
+        let missing = unconfigured_auth_provider_names(&AuthStatus::default());
+        assert!(!missing.is_empty(), "all providers should be listed as missing: {missing:?}");
     }
 
     #[test]
