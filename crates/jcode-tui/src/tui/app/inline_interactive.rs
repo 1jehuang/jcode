@@ -3266,11 +3266,27 @@ impl App {
                         let method_label =
                             crate::provider::ModelRouteApiMethod::parse(&route.api_method)
                                 .display_label();
-                        let notice = format!(
-                            "Model → {} via {} ({})",
-                            entry.name, route.provider, method_label
-                        );
-                        let route_detail = route.detail.trim().to_string();
+                        // Placeholder routes ("remote-catalog"/"current") are
+                        // catalog-refresh stand-ins, not real provider routes:
+                        // surfacing them produced confusing notices like
+                        // "Model → x via Claude (remote-catalog) · refreshing
+                        // route details…" right before the real switch
+                        // confirmation. Show just the model in that case.
+                        let placeholder_route =
+                            placeholder_routes::is_placeholder_route_method(&route.api_method);
+                        let notice = if placeholder_route {
+                            format!("Model → {}", entry.name)
+                        } else {
+                            format!(
+                                "Model → {} via {} ({})",
+                                entry.name, route.provider, method_label
+                            )
+                        };
+                        let route_detail = if placeholder_route {
+                            String::new()
+                        } else {
+                            route.detail.trim().to_string()
+                        };
 
                         // Record exactly which model spec + route the user chose
                         // and how it will be applied. Pairs with the server-side
