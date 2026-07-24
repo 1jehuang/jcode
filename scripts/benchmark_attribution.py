@@ -22,9 +22,17 @@ whether the catalog data itself carries a working attribution mechanism:
                              2xx/3xx response and the marker survives
                              redirects, so the referral cookie can be set.
 
-Each sponsor gets a 0-100 score. 100 means every applicable check passed;
-the suite exits non-zero if any sponsor scores below --min-score
-(default 100).
+`cli_flow_attributable` is the primary check: nearly all jcode-driven signups
+happen inside an agent CLI flow, so a sponsor whose attribution only works for
+a human clicking a browser link is effectively unattributed for us. It is
+weighted (see CRITICAL_CHECK_WEIGHT) in the 0-100 score, reported as an
+explicit per-sponsor CLI-attribution verdict on every run, and a failure fails
+the suite regardless of --min-score. A skipped verdict is reported as
+`unknown` because unavailable setup text means attribution is unverified.
+
+Each sponsor gets a 0-100 weighted score. 100 means every applicable check
+passed; the suite exits non-zero if any sponsor scores below --min-score
+(default 100) or if any CLI-attribution verdict is not `attributed`.
 
 Run offline against a saved catalog:
 
@@ -59,6 +67,16 @@ DEFAULT_SPONSORS = REPO_ROOT / "scripts" / "attribution_benchmark_sponsors.json"
 DEFAULT_OUTPUT = REPO_ROOT / "target" / "attribution-benchmark" / "latest.json"
 DEFAULT_ENDPOINT = "https://api.jcode.sh/v1/discovery"
 BENCHMARK_HEADER = "x-jcode-discovery-benchmark"
+
+# The check that decides whether agent-driven (CLI) signups are credited to us.
+CRITICAL_CHECK = "cli_flow_attributable"
+# Weight applied to CRITICAL_CHECK when computing the 0-100 sponsor score.
+CRITICAL_CHECK_WEIGHT = 3
+CLI_VERDICTS = {
+    "pass": "attributed",
+    "fail": "NOT-ATTRIBUTED",
+    "skip": "unknown",
+}
 
 URL_RE = re.compile(r"https?://[^\s`'\")\]>]+")
 CLI_SETUP_RE = re.compile(
@@ -98,8 +116,30 @@ class SponsorReport:
         applicable = [c for c in self.checks if c.status != "skip"]
         if not applicable:
             return 0
-        passed = sum(1 for c in applicable if c.status == "pass")
-        return round(100 * passed / len(applicable))
+
+        def weight(check: CheckResult) -> int:
+            return CRITICAL_CHECK_WEIGHT if check.name == CRITICAL_CHECK else 1
+
+        total = sum(weight(c) for c in applicable)
+        passed = sum(weight(c) for c in applicable if c.status == "pass")
+        return round(100 * passed / total)
+
+    @property
+    def cli_check(self) -> CheckResult | None:
+        return next((c for c in self.checks if c.name == CRITICAL_CHECK), None)
+
+    @property
+    def cli_verdict(self) -> str:
+        """attributed | NOT-ATTRIBUTED | unknown - the headline result."""
+        check = self.cli_check
+        if check is None:
+            return "unknown"
+        return CLI_VERDICTS[check.status]
+
+    @property
+    def cli_detail(self) -> str:
+        check = self.cli_check
+        return check.detail if check else "CLI attribution never evaluated"
 
 
 def parse_args() -> argparse.Namespace:
@@ -334,12 +374,16 @@ def main() -> int:
         "endpoint": args.endpoint if args.live else None,
         "live_web": args.live_web,
         "errors": errors,
+        "primary_check": CRITICAL_CHECK,
+        "cli_attribution": {r.tool: r.cli_verdict for r in reports},
         "sponsors": [
             {
                 "tool": r.tool,
                 "category": r.category,
                 "mechanism": r.mechanism,
                 "score": r.score,
+                "cli_attribution": r.cli_verdict,
+                "cli_attribution_detail": r.cli_detail,
                 "checks": [c.__dict__ for c in r.checks],
             }
             for r in reports
@@ -349,13 +393,35 @@ def main() -> int:
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     worst = 100
+    not_attributed: list[SponsorReport] = []
+    unknown_attribution: list[SponsorReport] = []
     for r in reports:
         worst = min(worst, r.score)
+        if r.cli_verdict == "NOT-ATTRIBUTED":
+            not_attributed.append(r)
+        elif r.cli_verdict == "unknown":
+            unknown_attribution.append(r)
         print(f"{r.tool:<14} {r.category:<18} score={r.score:>3}  "
+              f"cli_attribution={r.cli_verdict:<14} "
               + " ".join(f"{c.name}={c.status}" for c in r.checks))
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     print(f"report: {args.output}")
+
+    # CLI attribution is the headline result: state it explicitly every run.
+    print()
+    print(f"CLI-flow attribution ({CRITICAL_CHECK}) is the primary signal: "
+          "agent CLI signups are how jcode actually drives acquisition.")
+    for r in reports:
+        print(f"  {r.tool:<14} {r.cli_verdict:<14} {r.cli_detail}")
+    attributed = len(reports) - len(not_attributed) - len(unknown_attribution)
+    print(f"  => {attributed}/{len(reports)} sponsors credit agent-driven CLI signups to jcode"
+          + (f"; {len(unknown_attribution)} unknown" if unknown_attribution else ""))
+
+    if not_attributed:
+        names = ", ".join(r.tool for r in not_attributed)
+        print(f"FAIL: CLI-flow attribution missing for: {names}", file=sys.stderr)
+        return 1
     if worst < args.min_score or (errors and not reports):
         print(f"FAIL: minimum sponsor score {worst} < required {args.min_score}", file=sys.stderr)
         return 1
