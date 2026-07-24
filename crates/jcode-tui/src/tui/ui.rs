@@ -520,7 +520,7 @@ use layout_support::{
 #[cfg(test)]
 pub(crate) use status_support::calculate_input_lines;
 use status_support::{
-    binary_age, format_status_for_debug, is_running_stable_release, semver, shorten_model_name,
+    format_status_for_debug, is_running_stable_release, semver, shorten_model_name,
 };
 use theme_support::{
     accent_color, activity_indicator, activity_indicator_frame_index, ai_color, ai_text,

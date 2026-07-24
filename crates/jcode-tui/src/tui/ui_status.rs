@@ -68,46 +68,6 @@ pub(crate) fn calculate_input_lines(input: &str, line_width: usize) -> usize {
     total_lines.max(1)
 }
 
-pub(super) fn format_age(secs: i64) -> String {
-    if secs < 0 {
-        "future?".to_string()
-    } else if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}
-
-pub(super) fn binary_age() -> Option<String> {
-    let git_date = jcode_build_meta::git_date();
-
-    let now = chrono::Utc::now();
-
-    let build_date = crate::build::current_binary_built_at()?;
-    let build_secs = now.signed_duration_since(build_date).num_seconds();
-
-    let git_commit_date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z")
-        .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-    let git_secs = git_commit_date.map(|d| now.signed_duration_since(d).num_seconds());
-
-    let build_age = format_age(build_secs);
-
-    if let Some(git_secs) = git_secs {
-        let diff = (git_secs - build_secs).abs();
-        if diff > 300 {
-            let git_age = format_age(git_secs);
-            return Some(format!("{}, code {}", build_age, git_age));
-        }
-    }
-
-    Some(build_age)
-}
-
 pub(super) fn shorten_model_name(model: &str) -> String {
     if model.contains('/') {
         return model.to_string();

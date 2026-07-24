@@ -1,7 +1,7 @@
 use super::box_utils::render_rounded_box;
 use super::changelog::get_unseen_changelog_entries;
 use super::{
-    TuiState, binary_age, dim_color, header_name_color, is_running_stable_release, semver,
+    TuiState, dim_color, header_name_color, is_running_stable_release, semver,
     shorten_model_name,
 };
 use crate::auth::{AuthState, AuthStatus};
@@ -270,31 +270,24 @@ fn claude_version_segment(raw: &str, family: &str) -> Option<String> {
     }
 }
 
-pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Line<'static> {
-    fn dot_color(state: AuthState) -> Color {
-        match state {
-            AuthState::Available => rgb(100, 200, 100),
-            AuthState::Expired => rgb(255, 200, 100),
-            AuthState::NotConfigured => rgb(80, 80, 80),
-        }
+fn auth_dot_color(state: AuthState) -> Color {
+    match state {
+        AuthState::Available => rgb(100, 200, 100),
+        AuthState::Expired => rgb(255, 200, 100),
+        AuthState::NotConfigured => rgb(80, 80, 80),
     }
+}
 
-    fn dot_char(state: AuthState) -> &'static str {
-        match state {
-            AuthState::Available => "●",
-            AuthState::Expired => "◐",
-            AuthState::NotConfigured => "○",
-        }
+fn auth_dot_char(state: AuthState) -> &'static str {
+    match state {
+        AuthState::Available => "●",
+        AuthState::Expired => "◐",
+        AuthState::NotConfigured => "○",
     }
+}
 
-    fn rendered_width(entries: &[&str]) -> usize {
-        if entries.is_empty() {
-            return 0;
-        }
-
-        entries.iter().map(|label| label.len() + 3).sum::<usize>() + (entries.len() - 1)
-    }
-
+/// Configured providers with their full labels, in display order.
+fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
     fn provider_label(name: &str, state: AuthState, method: Option<&str>) -> String {
         match (state, method) {
             (AuthState::NotConfigured, _) => name.to_string(),
@@ -303,11 +296,12 @@ pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Lin
         }
     }
 
-    // The auth line is a credential *inventory* (what is configured), while the
-    // provider tag above reports the *active* route. When both credentials are
-    // configured, mark the active one with `*` so the two surfaces read as one
-    // consistent story ("oauth*+key" = both configured, OAuth in use) instead
-    // of an ambiguous "oauth+key" that looks like both are being used at once.
+    // The auth list is a credential *inventory* (what is configured), while
+    // the provider tag above reports the *active* route. When both credentials
+    // are configured, mark the active one with `*` so the two surfaces read as
+    // one consistent story ("oauth*+key" = both configured, OAuth in use)
+    // instead of an ambiguous "oauth+key" that looks like both are being used
+    // at once.
     fn dual_method_label(
         provider: jcode_provider_core::ActiveProvider,
         auth: &AuthStatus,
@@ -344,13 +338,7 @@ pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Lin
         provider_label("gemini", auth.gemini, None)
     };
 
-    let gemini_compact_label = if auth.gemini != AuthState::NotConfigured {
-        provider_label("ge", auth.gemini, Some("oauth"))
-    } else {
-        provider_label("ge", auth.gemini, None)
-    };
-
-    let full_specs: Vec<(String, AuthState)> = vec![
+    vec![
         (anthropic_label, auth.anthropic.state),
         ("openrouter".to_string(), auth.openrouter),
         (openai_label, auth.openai),
@@ -364,58 +352,20 @@ pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Lin
     ]
     .into_iter()
     .filter(|(_, state)| *state != AuthState::NotConfigured)
-    .collect();
+    .collect()
+}
 
-    let compact_specs: Vec<(String, AuthState)> = vec![
-        (
-            provider_label("an", auth.anthropic.state, None),
-            auth.anthropic.state,
-        ),
-        ("or".to_string(), auth.openrouter),
-        (provider_label("oa", auth.openai, None), auth.openai),
-        (provider_label("cu", auth.cursor, None), auth.cursor),
-        (provider_label("cp", auth.copilot, None), auth.copilot),
-        (gemini_compact_label, auth.gemini),
-        (
-            provider_label("ag", auth.antigravity, None),
-            auth.antigravity,
-        ),
-    ]
-    .into_iter()
-    .filter(|(_, state)| *state != AuthState::NotConfigured)
-    .collect();
-
-    let full: Vec<&str> = full_specs.iter().map(|(label, _)| label.as_str()).collect();
-    let compact: Vec<&str> = compact_specs
-        .iter()
-        .map(|(label, _)| label.as_str())
-        .collect();
-
-    let provider_specs: Vec<&(String, AuthState)> = if rendered_width(&full) <= max_width {
-        full_specs.iter().collect()
-    } else if rendered_width(&compact) <= max_width {
-        compact_specs.iter().collect()
-    } else {
-        compact_specs.iter().take(4).collect()
-    };
-
-    let mut spans = Vec::new();
-    for (i, (label, state)) in provider_specs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" ", Style::default().fg(dim_color())));
-        }
-
-        spans.push(Span::styled(
-            dot_char(*state),
-            Style::default().fg(dot_color(*state)),
-        ));
-        spans.push(Span::styled(
-            format!(" {} ", label),
-            Style::default().fg(dim_color()),
-        ));
-    }
-
-    Line::from(spans)
+/// Vertical auth inventory: one line per configured provider.
+pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
+    auth_full_specs(auth)
+        .into_iter()
+        .map(|(label, state)| {
+            Line::from(vec![
+                Span::styled(auth_dot_char(state), Style::default().fg(auth_dot_color(state))),
+                Span::styled(format!(" {}", label), Style::default().fg(dim_color())),
+            ])
+        })
+        .collect()
 }
 
 fn header_provider_auth_tag(name: &str, auth: &AuthStatus) -> &'static str {
@@ -609,8 +559,7 @@ fn build_persistent_header_with_auth(
     let icon = crate::id::session_icon(&session_name);
     let connection_icon = connection_type_icon(app.connection_type().as_deref());
     let nice_model = header_model_display_name(&model, &app.provider_name());
-    let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
-    let align = Alignment::Center;
+    let align = Alignment::Left;
     let mut lines: Vec<Line> = Vec::new();
     let w = width as usize;
 
@@ -623,9 +572,6 @@ fn build_persistent_header_with_auth(
         status_items.push("replay");
     } else if is_remote {
         status_items.push("client");
-    }
-    if is_canary {
-        status_items.push("dev");
     }
     if server_update {
         status_items.push("srv↑");
@@ -667,13 +613,26 @@ fn build_persistent_header_with_auth(
         .as_deref()
         .map(|version| header_version_label(version, include_hash));
 
-    if !status_items.is_empty() {
-        let badge_text = format!("⟨{}⟩", status_items.join("·"));
-        lines.push(
-            Line::from(Span::styled(badge_text, Style::default().fg(dim_color()))).alignment(align),
-        );
-    } else {
-        lines.push(Line::from(""));
+    // First line: `jcode` (+ `self-dev` when running a dev/canary build),
+    // followed by any remaining status badges rendered dimly.
+    {
+        let mut spans = vec![Span::styled(
+            "jcode".to_string(),
+            Style::default().fg(header_name_color()).bold(),
+        )];
+        if is_canary {
+            spans.push(Span::styled(
+                " self-dev".to_string(),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        if !status_items.is_empty() {
+            spans.push(Span::styled(
+                format!(" · {}", status_items.join(" · ")),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        lines.push(Line::from(spans).alignment(align));
     }
 
     if let Some(server_name) = server_name.as_deref() {
@@ -744,9 +703,19 @@ fn build_persistent_header_with_auth(
     };
     let mut model_spans: Vec<Span> = Vec::new();
     let mut model_line_len = nice_model.chars().count();
-    // Keep a little headroom below the full width so the centered line never
+    // Keep a little headroom below the full width so the line never
     // wraps when the render area subtracts side margins.
     let fit_width = w.saturating_sub(4);
+    if !model_is_placeholder && !nice_model.is_empty() {
+        let hint = "/model to switch · ";
+        if model_line_len + hint.chars().count() <= fit_width {
+            model_line_len += hint.chars().count();
+            model_spans.push(Span::styled(
+                hint.to_string(),
+                Style::default().fg(dim_color()),
+            ));
+        }
+    }
     if !provider_label.is_empty() {
         let prefix = format!("{} · ", provider_label);
         if model_line_len + prefix.chars().count() <= fit_width {
@@ -763,58 +732,28 @@ fn build_persistent_header_with_auth(
     if let Some(upstream) = upstream.as_deref() {
         let suffix = format!(" via {}", upstream);
         if model_line_len + suffix.chars().count() <= fit_width {
-            model_line_len += suffix.chars().count();
             model_spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
         }
     }
     if !nice_model.is_empty() {
-        let hint = " · /model to switch";
-        if !model_is_placeholder && model_line_len + hint.chars().count() <= fit_width {
-            model_spans.push(Span::styled(
-                hint.to_string(),
-                Style::default().fg(dim_color()),
-            ));
-        }
         lines.push(Line::from(model_spans).alignment(align));
     }
 
-    let version_text = if client_version_label.is_some() {
-        // The server/client lines above already state both versions, so this
-        // line keeps only the (non-duplicated) client build age.
-        format!("built {}", build_info)
-    } else if is_running_stable_release() {
-        let tag = jcode_build_meta::git_tag();
-        if tag.is_empty() || tag.contains('-') {
-            let full = format!("{} · release · built {}", semver(), build_info);
-            if full.chars().count() <= w {
-                full
-            } else {
+    // When there is no server/client version labeling (standalone mode),
+    // still surface the running version on the jcode line's own row.
+    if client_version_label.is_none() {
+        let version_text = if is_running_stable_release() {
+            let tag = jcode_build_meta::git_tag();
+            if tag.is_empty() || tag.contains('-') {
                 format!("{} · release", semver())
-            }
-        } else {
-            let full = format!("{} · release {} · built {}", semver(), tag, build_info);
-            if full.chars().count() <= w {
-                full
             } else {
-                format!("{} · {}", semver(), tag)
+                format!("{} · release {}", semver(), tag)
             }
-        }
-    } else {
-        let full = format!("{} · built {}", semver(), build_info);
-        if full.chars().count() <= w {
-            full
         } else {
             semver().to_string()
-        }
-    };
-    lines.push(
-        Line::from(Span::styled(version_text, Style::default().fg(dim_color()))).alignment(align),
-    );
-
-    if let Some(dir) = app.working_dir() {
-        let display_dir = abbreviate_home(&dir);
+        };
         lines.push(
-            Line::from(Span::styled(display_dir, Style::default().fg(dim_color())))
+            Line::from(Span::styled(version_text, Style::default().fg(dim_color())))
                 .alignment(align),
         );
     }
@@ -834,12 +773,12 @@ fn build_header_lines_with_auth(
     auth: &AuthStatus,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    let align = ratatui::layout::Alignment::Center;
+    let align = ratatui::layout::Alignment::Left;
     let w = width as usize;
 
-    let auth_line = build_auth_status_line(auth, w);
-    if !auth_line.spans.is_empty() {
-        lines.push(auth_line.alignment(align));
+    // Auths listed vertically, one configured provider per line.
+    for line in build_auth_status_lines(auth) {
+        lines.push(line.alignment(align));
     }
 
     if let Some(goal_badge) = crate::goal::header_badge(
@@ -897,60 +836,46 @@ fn build_header_lines_with_auth(
     }
 
     let mcps = app.mcp_servers();
-    let mcp_text = if mcps.is_empty() {
-        "mcp: (none)".to_string()
-    } else {
-        let full_parts: Vec<String> = mcps
+    if !mcps.is_empty() {
+        const MAX_MCPS: usize = 4;
+        let shown: Vec<String> = mcps
             .iter()
+            .take(MAX_MCPS)
             .map(|(name, count)| {
                 if *count > 0 {
                     format!("{} ({} tools)", name, count)
                 } else {
-                    format!("{} (...)", name)
+                    format!("{} (…)", name)
                 }
             })
             .collect();
-        let full = format!("mcp: {}", full_parts.join(", "));
-        if full.chars().count() <= w {
-            full
-        } else {
-            let short_parts: Vec<String> = mcps
-                .iter()
-                .map(|(name, count)| {
-                    if *count > 0 {
-                        format!("{}({})", name, count)
-                    } else {
-                        format!("{}(…)", name)
-                    }
-                })
-                .collect();
-            let short = format!("mcp: {}", short_parts.join(" "));
-            if short.chars().count() <= w {
-                short
-            } else {
-                format!("mcp: {} servers", mcps.len())
-            }
+        let mut mcp_text = format!("mcp: {}", shown.join(", "));
+        if mcps.len() > MAX_MCPS {
+            mcp_text.push_str(&format!(" +{} more", mcps.len() - MAX_MCPS));
         }
-    };
-    lines.push(
-        Line::from(Span::styled(mcp_text, Style::default().fg(dim_color()))).alignment(align),
-    );
+        if mcp_text.chars().count() > w {
+            mcp_text = format!("mcp: {} servers", mcps.len());
+        }
+        lines.push(
+            Line::from(Span::styled(mcp_text, Style::default().fg(dim_color()))).alignment(align),
+        );
+    }
 
     let skills = app.available_skills();
     if !skills.is_empty() {
-        let full = format!(
-            "skills: {}",
-            skills
-                .iter()
-                .map(|s| format!("/{}", s))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let skills_text = if full.chars().count() <= w {
-            full
-        } else {
-            format!("skills: {} loaded", skills.len())
-        };
+        const MAX_SKILLS: usize = 6;
+        let shown: Vec<String> = skills
+            .iter()
+            .take(MAX_SKILLS)
+            .map(|s| format!("/{}", s))
+            .collect();
+        let mut skills_text = format!("skills: {}", shown.join(" "));
+        if skills.len() > MAX_SKILLS {
+            skills_text.push_str(&format!(" +{} more", skills.len() - MAX_SKILLS));
+        }
+        if skills_text.chars().count() > w {
+            skills_text = format!("skills: {} loaded", skills.len());
+        }
         lines.push(
             Line::from(Span::styled(skills_text, Style::default().fg(dim_color())))
                 .alignment(align),
@@ -977,6 +902,14 @@ fn build_header_lines_with_auth(
                 Style::default().fg(dim_color()),
             ))
             .alignment(align),
+        );
+    }
+
+    if let Some(dir) = app.working_dir() {
+        let display_dir = abbreviate_home(&dir);
+        lines.push(
+            Line::from(Span::styled(display_dir, Style::default().fg(dim_color())))
+                .alignment(align),
         );
     }
 
@@ -1060,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn left_aligned_mode_keeps_persistent_header_centered() {
+    fn left_aligned_mode_keeps_persistent_header_left_aligned() {
         let mut app = create_test_app();
         app.set_centered(false);
 
@@ -1074,13 +1007,13 @@ mod tests {
         assert!(
             non_empty
                 .iter()
-                .all(|line| line.alignment == Some(Alignment::Center)),
-            "persistent header should remain centered in left-aligned mode: {non_empty:?}"
+                .all(|line| line.alignment == Some(Alignment::Left)),
+            "persistent header should be left aligned: {non_empty:?}"
         );
     }
 
     #[test]
-    fn left_aligned_mode_keeps_secondary_header_centered() {
+    fn left_aligned_mode_keeps_secondary_header_left_aligned() {
         let mut app = create_test_app();
         app.set_centered(false);
 
@@ -1094,8 +1027,8 @@ mod tests {
         assert!(
             non_empty
                 .iter()
-                .all(|line| line.alignment == Some(Alignment::Center)),
-            "header detail lines should remain centered in left-aligned mode: {non_empty:?}"
+                .all(|line| line.alignment == Some(Alignment::Left)),
+            "header detail lines should be left aligned: {non_empty:?}"
         );
     }
 
@@ -1597,12 +1530,12 @@ mod tests {
             ..AuthStatus::default()
         };
 
-        let line = build_auth_status_line(&auth, 120);
-        let rendered = line
-            .spans
+        let rendered = build_auth_status_lines(&auth)
             .iter()
+            .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
-            .collect::<String>();
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(
             rendered.contains("anthropic(oauth)"),
@@ -1615,9 +1548,9 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_line_is_empty_when_nothing_was_attempted() {
-        let line = build_auth_status_line(&AuthStatus::default(), 120);
-        assert!(line.spans.is_empty(), "line should be empty: {line:?}");
+    fn auth_status_lines_are_empty_when_nothing_was_attempted() {
+        let lines = build_auth_status_lines(&AuthStatus::default());
+        assert!(lines.is_empty(), "lines should be empty: {lines:?}");
     }
 
     #[test]
@@ -1639,9 +1572,9 @@ mod tests {
                 Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
                 None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
             }
-            build_auth_status_line(&auth, 120)
-                .spans
+            build_auth_status_lines(&auth)
                 .iter()
+                .flat_map(|line| line.spans.iter())
                 .map(|span| span.content.as_ref())
                 .collect::<String>()
         };
