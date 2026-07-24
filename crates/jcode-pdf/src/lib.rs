@@ -40,7 +40,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("malformed.pdf");
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(b"%PDF-1.7\nnot a real pdf body\n%%EOF\n").unwrap();
+        f.write_all(b"%PDF-1.7\nnot a real pdf body\n%%EOF\n")
+            .unwrap();
         drop(f);
 
         let err = extract_text(&path).err();
