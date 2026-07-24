@@ -59,13 +59,25 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         .filter(|s| !s.is_empty())
     {
         let display = home_relative_dir(dir);
-        lines.push(Line::from(vec![
+        let mut dir_spans = vec![
             Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
             Span::styled(
                 truncate_smart(&display, max_len.saturating_sub(2)),
                 Style::default().fg(rgb(140, 140, 150)),
             ),
-        ]));
+        ];
+        if let Some(branch) = data
+            .git_info
+            .as_ref()
+            .map(|g| g.branch.trim())
+            .filter(|b| !b.is_empty())
+        {
+            dir_spans.push(Span::styled(
+                format!("  {}", truncate_chars(branch, 24)),
+                Style::default().fg(rgb(150, 170, 140)),
+            ));
+        }
+        lines.push(Line::from(dir_spans));
     }
 
     if let Some(provider) = data

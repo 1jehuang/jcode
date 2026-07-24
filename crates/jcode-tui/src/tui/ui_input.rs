@@ -1886,13 +1886,20 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         spans.extend(overscroll_context_bar(used, limit, 10));
     }
 
-    // Working directory last, shown as a home-relative path.
+    // Working directory last, shown as a home-relative path, with the git
+    // branch alongside when available.
     if let Some(dir) = app.working_dir().and_then(|d| overscroll_dir_label(&d)) {
         if !spans.is_empty() {
             spans.push(sep());
         }
         spans.push(Span::styled(" ", Style::default().fg(rgb(140, 180, 255))));
         spans.push(Span::styled(dir, Style::default().fg(rgb(140, 140, 150))));
+        if let Some(branch) = overscroll_git_branch(&data) {
+            spans.push(Span::styled(
+                format!("  {branch}"),
+                Style::default().fg(rgb(150, 170, 140)),
+            ));
+        }
     }
 
     let total_width = area.width as usize;
@@ -2000,6 +2007,20 @@ fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec
 }
 
 /// Format a working dir path home-relative (~/foo/bar), keeping the last 2 segments.
+/// Compact git branch label for the status line and fact stack. Truncated so
+/// long branch names cannot crowd out the other facts.
+fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
+    let branch = data.git_info.as_ref()?.branch.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    let mut label: String = branch.chars().take(24).collect();
+    if branch.chars().count() > 24 {
+        label.push('…');
+    }
+    Some(label)
+}
+
 fn overscroll_dir_label(path: &str) -> Option<String> {
     session_facts::dir_label_short(path)
 }
@@ -2297,9 +2318,17 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
     if let Some(dir) = app
         .working_dir()
         .and_then(|path| overscroll_dir_label(&path))
-        && let Some(line) = RightFactLine::new(vec![Span::styled(dir, right_fact_neutral_style())])
     {
-        lines.push(line);
+        let mut spans = vec![Span::styled(dir, right_fact_neutral_style())];
+        if let Some(branch) = overscroll_git_branch(&data) {
+            spans.push(Span::styled(
+                format!("  {branch}"),
+                right_fact_neutral_style(),
+            ));
+        }
+        if let Some(line) = RightFactLine::new(spans) {
+            lines.push(line);
+        }
     }
 
     if let Some((used, limit)) = overscroll_context_usage(&data) {
