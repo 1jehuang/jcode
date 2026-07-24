@@ -1,0 +1,18 @@
+[package]
+name = "jcode-desktop2"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Greenfield jcode desktop app: winit + wgpu + Vello + Parley over the harness API"
+
+[dependencies]
+anyhow = "1"
+jcode-harness-api = { path = "../jcode-harness-api" }
+parley = "0.11"
+pollster = "0.3"
+vello = "0.9"
+winit = "0.30"
+
+[[bin]]
+name = "jcode-desktop2"
+path = "src/main.rs"
