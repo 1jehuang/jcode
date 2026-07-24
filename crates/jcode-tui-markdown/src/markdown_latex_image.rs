@@ -73,17 +73,23 @@ struct FailedRenderCache {
 static FAILED_RENDERS: LazyLock<Mutex<FailedRenderCache>> =
     LazyLock::new(|| Mutex::new(FailedRenderCache::default()));
 
-fn cached_render_failure(key: u64) -> Option<String> {
+/// Lock the failure cache, recovering from poisoning.
+///
+/// A panic while holding this lock leaves only cache bookkeeping inconsistent,
+/// never user data, so recovering the guard is strictly better than silently
+/// disabling the cache (which would restore the #563 respawn loop).
+fn failed_renders() -> std::sync::MutexGuard<'static, FailedRenderCache> {
     FAILED_RENDERS
         .lock()
-        .ok()
-        .and_then(|cache| cache.entries.get(&key).cloned())
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cached_render_failure(key: u64) -> Option<String> {
+    failed_renders().entries.get(&key).cloned()
 }
 
 fn remember_render_failure(key: u64, error: &str) {
-    let Ok(mut cache) = FAILED_RENDERS.lock() else {
-        return;
-    };
+    let mut cache = failed_renders();
     if cache.entries.insert(key, error.to_string()).is_none() {
         cache.order.push_back(key);
     }
@@ -97,10 +103,9 @@ fn remember_render_failure(key: u64, error: &str) {
 /// Test hook: forget remembered failures so a retry actually re-renders.
 #[cfg(test)]
 pub(super) fn reset_failed_render_cache() {
-    if let Ok(mut cache) = FAILED_RENDERS.lock() {
-        cache.entries.clear();
-        cache.order.clear();
-    }
+    let mut cache = failed_renders();
+    cache.entries.clear();
+    cache.order.clear();
 }
 
 #[cfg(test)]
@@ -861,7 +866,7 @@ mod tests {
         for i in 0..(FAILED_RENDER_CACHE_LIMIT + 50) {
             remember_render_failure(i as u64, "boom");
         }
-        let len = FAILED_RENDERS.lock().unwrap().entries.len();
+        let len = failed_renders().entries.len();
         assert!(len <= FAILED_RENDER_CACHE_LIMIT, "cache grew to {len}");
         reset_failed_render_cache();
     }
