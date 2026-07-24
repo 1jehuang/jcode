@@ -860,6 +860,68 @@ mod tests {
         assert_eq!(cached_render_failure(key), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_snippet_spawns_the_toolchain_only_once_across_many_redraws() {
+        // #563: the real symptom was a chain of latex/pdflatex processes, one per
+        // redraw. Count actual spawns via a stub that appends to a log file, and
+        // assert repeated render attempts do not re-spawn it.
+        use std::os::unix::fs::PermissionsExt;
+
+        reset_failed_render_cache();
+        let root = tempfile::tempdir().unwrap();
+        let spawn_log = root.path().join("spawns.log");
+        let failing = root.path().join("latex-fail");
+        fs::write(
+            &failing,
+            format!(
+                "#!/bin/sh\necho spawn >> '{}'\nexit 1\n",
+                spawn_log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+        let toolchain = Toolchain {
+            latex: failing.clone(),
+            dvipng: failing.clone(),
+            pdflatex: failing.clone(),
+            pdftocairo: failing,
+        };
+        let cache = root.path().join("cache");
+        let source = "unique_spawn_count_probe_2026_563";
+        let key = cache_key(source, true, 240);
+
+        // First attempt runs the toolchain and records the failure.
+        let first = render_artifact_in(source, true, 240, &toolchain, &cache);
+        assert!(first.is_err(), "stub toolchain must fail");
+        remember_render_failure(key, &first.unwrap_err());
+        let spawns_after_first = fs::read_to_string(&spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert!(
+            spawns_after_first > 0,
+            "first render should spawn the toolchain"
+        );
+
+        // Every later "redraw" must short-circuit on the cached failure.
+        for _ in 0..50 {
+            assert!(
+                cached_render_failure(key).is_some(),
+                "cached failure must short-circuit the redraw"
+            );
+        }
+        let spawns_after_redraws = fs::read_to_string(&spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            spawns_after_first, spawns_after_redraws,
+            "50 redraws must not spawn the toolchain again"
+        );
+        reset_failed_render_cache();
+    }
+
     #[test]
     fn failed_render_cache_is_bounded() {
         reset_failed_render_cache();
