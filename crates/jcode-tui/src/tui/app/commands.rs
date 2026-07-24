@@ -3076,8 +3076,7 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
 
     let Some(mode) = crate::config::ReasoningDisplayMode::parse(rest) else {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /thinking-display (show), then off, full, or current"
-                .to_string(),
+            "Usage: /thinking-display (show), then off, full, or current".to_string(),
         ));
         return true;
     };

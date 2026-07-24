@@ -70,11 +70,12 @@ impl RenderState {
             // Skip this frame; the next resize/redraw will recover.
             _ => return Ok(()),
         };
-        let mut encoder = device_handle
-            .device
-            .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                label: Some("desktop2 blit"),
-            });
+        let mut encoder =
+            device_handle
+                .device
+                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
+                    label: Some("desktop2 blit"),
+                });
         self.surface.blitter.copy(
             &device_handle.device,
             &mut encoder,

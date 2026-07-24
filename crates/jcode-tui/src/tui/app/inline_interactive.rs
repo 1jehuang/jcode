@@ -607,10 +607,9 @@ impl App {
         // Jcode subscription routes are a complete, server-managed catalog.
         // Do not mix in locally configured Anthropic/OpenAI credentials merely
         // because a curated model also belongs to one of those upstreams.
-        let provider_is_jcode_subscription =
-            remote_provider_name.is_some_and(|name| {
-                name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-            });
+        let provider_is_jcode_subscription = remote_provider_name.is_some_and(|name| {
+            name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
+        });
         if provider_is_jcode_subscription {
             routes.clear();
             Self::append_jcode_subscription_routes_static(
@@ -688,10 +687,9 @@ impl App {
                     )
                 })
                 .collect();
-            for route in crate::provider::remote_model_routes_fallback(
-                remote_provider_name,
-                &missing,
-            ) {
+            for route in
+                crate::provider::remote_model_routes_fallback(remote_provider_name, &missing)
+            {
                 if !existing.contains(&(
                     route.model.clone(),
                     route.provider.clone(),

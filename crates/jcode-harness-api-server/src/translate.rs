@@ -51,14 +51,15 @@ impl BridgeState {
                 let id = self.legacy_id();
                 let state_id = self.legacy_id();
                 self.pending_attach_id = Some((state_id, api_id));
-                let working_dir = request["working_dir"]
-                    .as_str()
-                    .map(str::to_string)
-                    .or_else(|| {
-                        std::env::current_dir()
-                            .ok()
-                            .map(|d| d.display().to_string())
-                    });
+                let working_dir =
+                    request["working_dir"]
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            std::env::current_dir()
+                                .ok()
+                                .map(|d| d.display().to_string())
+                        });
                 let mut subscribe = json!({
                     "type": "subscribe",
                     "id": id,

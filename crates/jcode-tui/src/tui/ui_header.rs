@@ -1,8 +1,7 @@
 use super::box_utils::render_rounded_box;
 use super::changelog::get_unseen_changelog_entries;
 use super::{
-    TuiState, dim_color, header_name_color, is_running_stable_release, semver,
-    shorten_model_name,
+    TuiState, dim_color, header_name_color, is_running_stable_release, semver, shorten_model_name,
 };
 use crate::auth::{AuthState, AuthStatus};
 use crate::tui::color_support::rgb;
@@ -783,8 +782,11 @@ fn build_header_lines_with_auth(
     let auth_lines = build_auth_status_lines(auth);
     let login_heading = "/login to add provider".to_string();
     lines.push(
-        Line::from(Span::styled(login_heading, Style::default().fg(dim_color())))
-            .alignment(align),
+        Line::from(Span::styled(
+            login_heading,
+            Style::default().fg(dim_color()),
+        ))
+        .alignment(align),
     );
     for line in auth_lines {
         lines.push(line.alignment(align));
@@ -847,8 +849,7 @@ fn build_header_lines_with_auth(
             }
         }
         lines.push(
-            Line::from(Span::styled(text, Style::default().fg(dim_color())))
-                .alignment(align),
+            Line::from(Span::styled(text, Style::default().fg(dim_color()))).alignment(align),
         );
     }
 
@@ -1545,7 +1546,10 @@ mod tests {
     #[test]
     fn auth_status_lines_list_all_providers_when_nothing_configured() {
         let lines = build_auth_status_lines(&AuthStatus::default());
-        assert!(!lines.is_empty(), "all providers should be listed: {lines:?}");
+        assert!(
+            !lines.is_empty(),
+            "all providers should be listed: {lines:?}"
+        );
     }
 
     #[test]

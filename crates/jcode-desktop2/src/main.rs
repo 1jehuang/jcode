@@ -8,8 +8,8 @@ mod capture;
 mod harness;
 mod render;
 mod states;
-mod theme;
 mod text;
+mod theme;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -29,7 +29,11 @@ fn main() -> Result<()> {
         return run_capture(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--e2e") {
-        return run_e2e(args.get(1).map(String::as_str).unwrap_or("Reply with exactly the word: pong"));
+        return run_e2e(
+            args.get(1)
+                .map(String::as_str)
+                .unwrap_or("Reply with exactly the word: pong"),
+        );
     }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -113,7 +117,10 @@ fn run_capture(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let Some(model) = states::by_name(node) else {
-        anyhow::bail!("unknown node '{node}'; available: {}", states::names().join(", "));
+        anyhow::bail!(
+            "unknown node '{node}'; available: {}",
+            states::names().join(", ")
+        );
     };
     let out = std::path::PathBuf::from(
         args.get(1)

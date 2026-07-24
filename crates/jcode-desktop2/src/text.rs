@@ -9,7 +9,8 @@ use vello::peniko::{Brush, Color, Fill};
 
 /// Design-language font stack: JetBrains Mono everywhere (see
 /// ~/jcode-website/STYLE.md), monospace fallback.
-const FONT_STACK: &str = "JetBrains Mono, JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace";
+const FONT_STACK: &str =
+    "JetBrains Mono, JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace";
 
 /// Owns the font and layout contexts (both are expensive; reuse them).
 pub struct TextSystem {
@@ -60,7 +61,9 @@ impl TextSystem {
         max_width: f32,
         style: ParagraphStyle,
     ) -> f64 {
-        let mut builder = self.layouts.ranged_builder(&mut self.fonts, text, 1.0, true);
+        let mut builder = self
+            .layouts
+            .ranged_builder(&mut self.fonts, text, 1.0, true);
         builder.push_default(StyleProperty::FontFamily(parley::FontFamily::Source(
             std::borrow::Cow::Borrowed(FONT_STACK),
         )));
@@ -89,7 +92,6 @@ impl TextSystem {
         }
         f64::from(layout.height())
     }
-
 }
 
 fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f64, f64)) {
