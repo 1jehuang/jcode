@@ -1805,9 +1805,7 @@ impl OpenRouterProvider {
         // `[providers.<name>]` block in config.toml, so its
         // `[[providers.<name>.models]]` entries must survive background
         // `/models` catalog refreshes (issue #579).
-        self.supports_provider_features
-            || self.profile_id.is_none()
-            || self.is_user_named_profile()
+        self.supports_provider_features || self.profile_id.is_none() || self.is_user_named_profile()
     }
 
     pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
