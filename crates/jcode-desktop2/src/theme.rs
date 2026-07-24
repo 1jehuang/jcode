@@ -9,5 +9,6 @@ pub const INK: Color = Color::from_rgb8(0x11, 0x11, 0x11);
 pub const MUTED: Color = Color::from_rgb8(0x66, 0x66, 0x66);
 pub const FAINT: Color = Color::from_rgb8(0x99, 0x99, 0x99);
 pub const RULE: Color = Color::from_rgb8(0xcc, 0xcc, 0xcc);
+#[allow(dead_code)] // reserved for code-block backgrounds
 pub const WASH: Color = Color::from_rgb8(0xf4, 0xf4, 0xf4);
 pub const PAPER: Color = Color::from_rgb8(0xff, 0xff, 0xff);

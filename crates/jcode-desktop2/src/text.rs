@@ -90,28 +90,6 @@ impl TextSystem {
         f64::from(layout.height())
     }
 
-    /// Back-compat simple call.
-    pub fn draw_paragraph(
-        &mut self,
-        scene: &mut Scene,
-        text: &str,
-        origin: (f64, f64),
-        max_width: f32,
-        font_size: f32,
-        color: Color,
-    ) {
-        self.draw_paragraph_styled(
-            scene,
-            text,
-            origin,
-            max_width,
-            ParagraphStyle {
-                font_size,
-                color,
-                ..Default::default()
-            },
-        );
-    }
 }
 
 fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f64, f64)) {
