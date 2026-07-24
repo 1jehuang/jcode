@@ -41,7 +41,7 @@ impl Default for ParagraphStyle {
     fn default() -> Self {
         Self {
             font_size: 15.0,
-            color: crate::theme::INK,
+            color: vello::peniko::Color::from_rgb8(0x11, 0x11, 0x11),
             bold: false,
             letter_spacing_em: 0.0,
             line_height: 1.65,

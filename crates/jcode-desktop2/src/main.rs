@@ -133,6 +133,7 @@ struct App {
 
 /// UI model: what the frame is built from.
 pub struct Model {
+    pub theme: theme::Theme,
     pub status: String,
     pub session_id: Option<String>,
     pub transcript: String,
@@ -143,6 +144,7 @@ pub struct Model {
 impl Default for Model {
     fn default() -> Self {
         Self {
+            theme: theme::Theme::from_env(),
             status: "starting...".into(),
             session_id: None,
             transcript: String::new(),
@@ -269,6 +271,7 @@ impl ApplicationHandler for App {
 
 fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, size: (u32, u32)) {
     use text::ParagraphStyle;
+    let theme = &model.theme;
     let (width, height) = (size.0 as f64, size.1 as f64);
     let fill = |scene: &mut Scene, color: Color, shape: &vello::kurbo::Rect| {
         scene.fill(
@@ -282,7 +285,7 @@ fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, si
     let hairline = |scene: &mut Scene, y: f64, x0: f64, x1: f64| {
         fill(
             scene,
-            theme::RULE,
+            theme.rule,
             &vello::kurbo::Rect::new(x0, y, x1, y + 1.0),
         );
     };
@@ -290,7 +293,7 @@ fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, si
     // Paper.
     fill(
         scene,
-        theme::PAPER,
+        theme.background,
         &vello::kurbo::Rect::new(0.0, 0.0, width, height),
     );
 
@@ -306,6 +309,7 @@ fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, si
         ParagraphStyle {
             font_size: 17.0,
             bold: true,
+            color: theme.text,
             ..Default::default()
         },
     );
@@ -317,9 +321,9 @@ fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, si
         ParagraphStyle {
             font_size: 11.0,
             color: if model.session_id.is_some() {
-                theme::MUTED
+                theme.muted
             } else {
-                theme::FAINT
+                theme.faint
             },
             letter_spacing_em: 0.12,
             ..Default::default()
@@ -335,9 +339,9 @@ fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, si
         &model.transcript
     };
     let transcript_color = if model.transcript.is_empty() {
-        theme::FAINT
+        theme.faint
     } else {
-        theme::INK
+        theme.text
     };
     let line_height_px = 14.0 * 1.65;
     let visible_lines = ((input_rule_y - 96.0) / line_height_px) as usize;
@@ -365,9 +369,9 @@ fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, si
     // Input: a single hairline above the prompt, like a form rule on paper.
     hairline(scene, input_rule_y, margin, right);
     let (prompt, prompt_color) = if model.busy {
-        ("working...".to_string(), theme::MUTED)
+        ("working...".to_string(), theme.muted)
     } else {
-        (format!("> {}_", model.input), theme::INK)
+        (format!("> {}_", model.input), theme.text)
     };
     text.draw_paragraph_styled(
         scene,

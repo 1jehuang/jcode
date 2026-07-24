@@ -32,6 +32,7 @@ pub fn names() -> Vec<&'static str> {
 
 fn connecting() -> Model {
     Model {
+        theme: crate::theme::Theme::from_env(),
         status: "connecting to ~/.jcode/jcode-api.sock...".into(),
         session_id: None,
         transcript: String::new(),
@@ -42,6 +43,7 @@ fn connecting() -> Model {
 
 fn attached_empty() -> Model {
     Model {
+        theme: crate::theme::Theme::from_env(),
         status: "attached: session_demo_0000".into(),
         session_id: Some("session_demo_0000".into()),
         transcript: String::new(),
