@@ -27,8 +27,25 @@ Each sponsor is scored over the applicable checks (skips are excluded):
 | `cli_flow_attributable` | If setup is CLI-first, attribution must not depend solely on a browser cookie: either the setup routes account creation through the marked URL, or the sponsor declares a non-cookie mechanism. |
 | `live_url_resolves` | (`--live-web`) The marked URL responds and redirects do not drop the marker. |
 
-Score = 100 x passed / applicable. The run exits non-zero when any sponsor
-scores below `--min-score` (default 100).
+`cli_flow_attributable` is the **primary check**. Nearly every jcode-driven
+signup happens inside an agent CLI flow, so a sponsor whose attribution only
+works when a human clicks a browser link is effectively unattributed for us.
+Accordingly:
+
+- it is weighted `CRITICAL_CHECK_WEIGHT` (3x) in the score;
+- every run prints an explicit per-sponsor CLI-attribution verdict
+  (`attributed` / `NOT-ATTRIBUTED` / `unknown`) plus an
+  `N/M sponsors credit agent-driven CLI signups to jcode` summary line;
+- the report JSON carries `primary_check`, a top-level `cli_attribution` map,
+  and per-sponsor `cli_attribution` + `cli_attribution_detail`;
+- a `NOT-ATTRIBUTED` verdict fails the run regardless of `--min-score`.
+
+A `skip` is surfaced as `unknown` rather than as a pass, because missing setup
+text means CLI attribution was never verified.
+
+Score = 100 x weighted passed / weighted applicable. The run exits non-zero
+when any sponsor scores below `--min-score` (default 100) or when any
+CLI-attribution verdict is not `attributed`.
 
 ## Sponsor expectations
 

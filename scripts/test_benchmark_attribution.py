@@ -74,6 +74,7 @@ class CheckSponsorTests(unittest.TestCase):
         report = self.run_checks(entry)
         self.assertEqual(report.score, 100)
         self.assertEqual(self.status(report, "cli_flow_attributable"), "pass")
+        self.assertEqual(report.cli_verdict, "attributed")
 
     def test_missing_entry_fails(self):
         report = self.run_checks(None)
@@ -123,6 +124,45 @@ class CheckSponsorTests(unittest.TestCase):
         }
         report = self.run_checks(entry)
         self.assertEqual(self.status(report, "setup_preserves_marker"), "pass")
+
+
+class CliAttributionPrimacyTests(unittest.TestCase):
+    """CLI-flow attribution is the headline signal and must dominate scoring."""
+
+    def report_for(self, setup, spec=None):
+        entry = {"url": f"https://example.com/?{MARKER}", "setup": setup}
+        return ba.check_sponsor(spec or sponsor(), entry, live_web=False, timeout=1.0)
+
+    def test_cli_failure_verdict_is_not_attributed(self):
+        report = self.report_for("Run `npx -y example-mcp@1.0.0` and paste your API key.")
+        self.assertEqual(report.cli_verdict, "NOT-ATTRIBUTED")
+        self.assertIn("not be attributed", report.cli_detail)
+
+    def test_cli_skip_is_reported_as_unknown(self):
+        report = self.report_for(f"Open https://example.com/dashboard?{MARKER}.")
+        self.assertEqual(report.cli_verdict, "unknown")
+
+    def test_missing_cli_check_is_unknown_not_crash(self):
+        report = ba.SponsorReport(tool="x", category="y", mechanism="referral-link")
+        self.assertEqual(report.cli_verdict, "unknown")
+
+    def test_cli_failure_is_weighted_below_a_single_other_failure(self):
+        cli_fail = self.report_for("Run `npx -y example-mcp@1.0.0` and paste your API key.")
+        other_fail = ba.check_sponsor(
+            sponsor(),
+            {
+                "url": "https://example.com/",
+                "setup": f"Sign up at https://example.com/signup?{MARKER} then run `npx -y x`.",
+            },
+            live_web=False,
+            timeout=1.0,
+        )
+        self.assertEqual(other_fail.cli_verdict, "attributed")
+        self.assertLess(
+            cli_fail.score,
+            other_fail.score,
+            "a CLI-attribution failure must cost more than one ordinary check",
+        )
 
 
 class CatalogLoadingTests(unittest.TestCase):
