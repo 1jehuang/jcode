@@ -1,5 +1,5 @@
 {
-  "total": 43,
+  "total": 61,
   "tracked_files": {
     "crates/jcode-app-core/src/session_launch.rs": 1,
     "crates/jcode-app-core/src/tool/communicate.rs": 1,
@@ -7,6 +7,8 @@
     "crates/jcode-base/src/auth/oauth.rs": 3,
     "crates/jcode-base/src/hooks.rs": 1,
     "crates/jcode-desktop/src/single_session_render/wrapping.rs": 1,
+    "crates/jcode-desktop2/src/main.rs": 3,
+    "crates/jcode-harness-api/examples/harness_repl.rs": 15,
     "crates/jcode-plan/src/dag/ops.rs": 1,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 2,
     "crates/jcode-render-core/src/math.rs": 4,
