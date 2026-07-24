@@ -106,10 +106,11 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Show/toggle dimmed technical details on tool rows with an intent",
     ),
     RegisteredCommand::public(
-        "/thinking",
-        "Show/hide the model's thinking text (off/full/current); use /effort for reasoning effort",
+        "/thinking-display",
+        "Show/hide the model's thinking text (off/full/current)",
     ),
-    RegisteredCommand::hidden("/reasoning", "Alias for /thinking"),
+    RegisteredCommand::hidden("/thinking", "Alias for /thinking-display"),
+    RegisteredCommand::hidden("/reasoning", "Alias for /thinking-display"),
     RegisteredCommand::public("/cancel", "Cancel the current prompt or operation"),
     RegisteredCommand::public("/clear", "Clear conversation history"),
     RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
@@ -1547,6 +1548,7 @@ impl App {
                 | "/show-agentgrep-output"
                 | "/reasoning"
                 | "/thinking"
+                | "/thinking-display"
                 | "/config"
                 | "/save"
                 | "/rename"

@@ -3047,12 +3047,15 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
         && !trimmed.starts_with("/reasoning ")
         && trimmed != "/thinking"
         && !trimmed.starts_with("/thinking ")
+        && trimmed != "/thinking-display"
+        && !trimmed.starts_with("/thinking-display ")
     {
         return false;
     }
 
     let rest = trimmed
-        .strip_prefix("/reasoning")
+        .strip_prefix("/thinking-display")
+        .or_else(|| trimmed.strip_prefix("/reasoning"))
         .or_else(|| trimmed.strip_prefix("/thinking"))
         .unwrap_or_default()
         .trim();
@@ -3065,7 +3068,7 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
              • off - never show thinking text\n\
              • full - keep every thinking trace in the transcript\n\
              • current - show only the live thinking, then collapse it once a tool runs or the answer commits\n\n\
-             Use /thinking <off|full|current> to change it. To change how hard the model thinks, use /effort.",
+             Use /thinking-display <off|full|current> to change it. To change how hard the model thinks, use /effort.",
             current.label()
         )));
         return true;
@@ -3073,7 +3076,7 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
 
     let Some(mode) = crate::config::ReasoningDisplayMode::parse(rest) else {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /thinking (show), /thinking off, /thinking full, or /thinking current"
+            "Usage: /thinking-display (show), then off, full, or current"
                 .to_string(),
         ));
         return true;

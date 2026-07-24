@@ -88,3 +88,9 @@ impl RenderState {
         Ok(())
     }
 }
+
+impl RenderState {
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+}
