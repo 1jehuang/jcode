@@ -781,19 +781,6 @@ fn build_header_lines_with_auth(
         lines.push(line.alignment(align));
     }
 
-    if let Some(goal_badge) = crate::goal::header_badge(
-        app.working_dir().as_deref().map(std::path::Path::new),
-        app.side_panel(),
-    ) {
-        lines.push(
-            Line::from(Span::styled(
-                goal_badge,
-                Style::default().fg(rgb(170, 200, 120)),
-            ))
-            .alignment(align),
-        );
-    }
-
     let new_entries = unseen_changelog_entries();
     if !new_entries.is_empty() && w > 20 {
         const MAX_LINES: usize = 8;
