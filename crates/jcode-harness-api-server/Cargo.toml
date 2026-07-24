@@ -1,0 +1,17 @@
+[package]
+name = "jcode-harness-api-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Harness API endpoint: bridges versioned API clients onto the internal jcode protocol"
+
+[dependencies]
+anyhow = "1"
+jcode-harness-api = { path = "../jcode-harness-api" }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "sync"] }
+
+[[bin]]
+name = "jcode-harness-api-bridge"
+path = "src/bin/bridge.rs"
