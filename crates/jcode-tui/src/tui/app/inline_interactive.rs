@@ -537,8 +537,8 @@ impl App {
     /// auth method: an older session may have baked an OAuth-only fallback
     /// route into the cache, which would otherwise permanently hide the
     /// API-key route for that model.
-    fn append_jcode_subscription_routes(
-        &self,
+    fn append_jcode_subscription_routes_static(
+        remote_available_entries: &[String],
         routes: &mut Vec<crate::provider::ModelRoute>,
         require_credentials: bool,
         require_remote_advertisement: bool,
@@ -563,7 +563,7 @@ impl App {
                 tier.allows(model.min_tier)
                     && !existing.contains(model.id)
                     && (!require_remote_advertisement
-                        || self.remote_available_entries.iter().any(|available| {
+                        || remote_available_entries.iter().any(|available| {
                             crate::subscription_catalog::canonical_model_id(available)
                                 == Some(model.id)
                         }))
@@ -584,19 +584,41 @@ impl App {
         &self,
         routes: &mut Vec<crate::provider::ModelRoute>,
     ) {
-        if !self.is_remote || self.remote_available_entries.is_empty() {
+        if !self.is_remote {
+            return;
+        }
+        Self::extend_remote_routes_for_uncovered_models_static(
+            self.remote_provider_name.as_deref(),
+            &self.remote_available_entries,
+            routes,
+        );
+    }
+
+    /// Self-free variant of the route extension so the background picker
+    /// loader can run it off the UI thread with cloned catalog state.
+    fn extend_remote_routes_for_uncovered_models_static(
+        remote_provider_name: Option<&str>,
+        remote_available_entries: &[String],
+        routes: &mut Vec<crate::provider::ModelRoute>,
+    ) {
+        if remote_available_entries.is_empty() {
             return;
         }
         // Jcode subscription routes are a complete, server-managed catalog.
         // Do not mix in locally configured Anthropic/OpenAI credentials merely
         // because a curated model also belongs to one of those upstreams.
         let provider_is_jcode_subscription =
-            self.remote_provider_name.as_deref().is_some_and(|name| {
+            remote_provider_name.is_some_and(|name| {
                 name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
             });
         if provider_is_jcode_subscription {
             routes.clear();
-            self.append_jcode_subscription_routes(routes, false, false);
+            Self::append_jcode_subscription_routes_static(
+                remote_available_entries,
+                routes,
+                false,
+                false,
+            );
             return;
         }
         let poisoned_by_jcode_subscription = !routes.is_empty()
@@ -611,10 +633,15 @@ impl App {
             // routes from the names catalog, then append only the current tier's
             // actual subscription entitlements.
             *routes = crate::provider::remote_model_routes_fallback(
-                self.remote_provider_name.as_deref(),
-                &self.remote_available_entries,
+                remote_provider_name,
+                remote_available_entries,
             );
-            self.append_jcode_subscription_routes(routes, false, true);
+            Self::append_jcode_subscription_routes_static(
+                remote_available_entries,
+                routes,
+                false,
+                true,
+            );
             return;
         }
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =
@@ -628,8 +655,7 @@ impl App {
         let auth = crate::auth::AuthStatus::check_fast();
         let bedrock_available = auth.bedrock != crate::auth::AuthState::NotConfigured
             || crate::provider::bedrock::BedrockProvider::has_credentials();
-        let missing: Vec<String> = self
-            .remote_available_entries
+        let missing: Vec<String> = remote_available_entries
             .iter()
             .filter(|model| match methods_by_model.get(model.as_str()) {
                 None => true,
@@ -663,7 +689,7 @@ impl App {
                 })
                 .collect();
             for route in crate::provider::remote_model_routes_fallback(
-                self.remote_provider_name.as_deref(),
+                remote_provider_name,
                 &missing,
             ) {
                 if !existing.contains(&(
@@ -681,7 +707,12 @@ impl App {
         // The curated client catalog is versioned with the backend and is the
         // authority for managed subscription entitlements. Do not hide newly
         // launched subscription models behind a stale remote names snapshot.
-        self.append_jcode_subscription_routes(routes, true, false);
+        Self::append_jcode_subscription_routes_static(
+            remote_available_entries,
+            routes,
+            true,
+            false,
+        );
     }
 
     fn hydrate_remote_model_catalog_snapshot(
@@ -1027,11 +1058,51 @@ impl App {
             }
             // Names-only remote catalog: synthesize properly classified
             // provider routes (Comtegra/Copilot/Bedrock/Gemini/OpenRouter/…)
-            // rather than a generic "remote-catalog" placeholder. This is the
-            // final route set for this open (there is no async upgrade after
-            // it), and the full fallback only reads local config/disk caches,
-            // so it is cheap enough for the cold-open path.
-            self.build_remote_model_routes_fallback()
+            // rather than a generic "remote-catalog" placeholder. The full
+            // fallback reads per-model disk caches and auth state, which can
+            // take seconds on a large catalog, so for big catalogs open
+            // instantly with lightweight names-only routes and upgrade in the
+            // background. Small catalogs stay synchronous so the first paint
+            // already has effort-expanded, provider-classified rows.
+            const SYNC_REMOTE_FALLBACK_MAX_MODELS: usize = 64;
+            if self.remote_available_entries.len() <= SYNC_REMOTE_FALLBACK_MAX_MODELS {
+                self.build_remote_model_routes_fallback()
+            } else {
+                let routes = self.build_remote_model_routes_lightweight_fallback(&current_model);
+                let routes_ms = routes_started.elapsed().as_millis();
+                self.open_model_picker_with_routes(
+                    cache_signature.clone(),
+                    picker_started,
+                    routes,
+                    routes_ms,
+                    preserve_input,
+                    false,
+                );
+                if self.inline_interactive_state.is_some() {
+                    self.set_status_notice("Updating model routes…");
+                } else {
+                    self.open_loading_model_picker(&current_model);
+                }
+                let remote_provider_name = self.remote_provider_name.clone();
+                let remote_available_entries = self.remote_available_entries.clone();
+                self.start_model_picker_route_load_with(
+                    cache_signature,
+                    picker_started,
+                    move || {
+                        let mut routes = crate::provider::remote_model_routes_fallback(
+                            remote_provider_name.as_deref(),
+                            &remote_available_entries,
+                        );
+                        Self::extend_remote_routes_for_uncovered_models_static(
+                            remote_provider_name.as_deref(),
+                            &remote_available_entries,
+                            &mut routes,
+                        );
+                        routes
+                    },
+                );
+                return;
+            }
         } else {
             self.simplified_model_routes_for_picker(&current_model)
         };
@@ -1091,13 +1162,26 @@ impl App {
         signature: ModelPickerCacheSignature,
         picker_started: std::time::Instant,
     ) {
+        let provider = self.provider.clone();
+        self.start_model_picker_route_load_with(signature, picker_started, move || {
+            provider.model_routes()
+        });
+    }
+
+    /// Run an arbitrary route builder off the UI thread and deliver the result
+    /// through the pending-load channel polled by `poll_model_picker_load`.
+    fn start_model_picker_route_load_with(
+        &mut self,
+        signature: ModelPickerCacheSignature,
+        picker_started: std::time::Instant,
+        build_routes: impl FnOnce() -> Vec<crate::provider::ModelRoute> + Send + 'static,
+    ) {
         self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
         let request_id = self.model_picker_load_request_id;
-        let provider = self.provider.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let build = move || {
             let routes_started = std::time::Instant::now();
-            let routes = provider.model_routes();
+            let routes = build_routes();
             let routes_ms = routes_started.elapsed().as_millis();
             let _ = tx.send(Ok(ModelPickerRoutesResult { routes, routes_ms }));
         };
@@ -3330,13 +3414,16 @@ impl App {
             picker.filtered = (0..picker.entries.len()).collect();
         } else {
             let query = picker.filter.trim();
+            // Prepare the query once per keystroke instead of re-parsing and
+            // re-lowercasing it for every entry.
+            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
             let mut scored: Vec<(usize, bool, i32)> = picker
                 .entries
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
                     let filter_text = picker.filter_text(m);
-                    Self::picker_fuzzy_score(&picker.filter, &filter_text).map(|s| {
+                    prepared.score(&filter_text).map(|s| {
                         let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;
                         let bonus = usage_bonus + if m.recommended { 5 } else { 0 };
                         (
