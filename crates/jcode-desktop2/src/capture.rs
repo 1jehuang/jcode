@@ -4,9 +4,8 @@
 
 use anyhow::{Result, anyhow};
 use vello::wgpu::{
-    self, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d,
-    TexelCopyBufferInfo, TexelCopyBufferLayout, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages,
+    self, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
+    TexelCopyBufferLayout, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
 
@@ -92,7 +91,10 @@ pub fn capture_scene_to_png(
         let _ = tx.send(result);
     });
     device
-        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
         .map_err(|error| anyhow!("device poll: {error:?}"))?;
     rx.recv()??;
 

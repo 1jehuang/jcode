@@ -531,7 +531,6 @@ struct ScoreScratch {
 impl PreparedTokenQuery {
     pub fn new(needle: &str) -> Self {
         let words = needle
-            .trim()
             .split_whitespace()
             .map(|word| {
                 let chars: Vec<char> = word.chars().flat_map(char::to_lowercase).collect();
@@ -570,7 +569,11 @@ impl PreparedTokenQuery {
 
 /// Score-only matcher equivalent to `fuzzy_score(word, token)` but with the
 /// pattern pre-lowered and DP scratch buffers reused across calls.
-fn score_prepared_word(word: &PreparedWord, token: &str, scratch: &mut ScoreScratch) -> Option<i32> {
+fn score_prepared_word(
+    word: &PreparedWord,
+    token: &str,
+    scratch: &mut ScoreScratch,
+) -> Option<i32> {
     if word.meaningful == 0 {
         return Some(0);
     }

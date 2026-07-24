@@ -139,8 +139,7 @@ fn error_routes_to_pending_request() {
         panic!("expected legacy outbound");
     };
     let legacy_id = clear["id"].as_u64().unwrap();
-    let frames = state.legacy_event_to_api(
-        &json!({"type": "error", "id": legacy_id, "message": "nope"}),
-    );
+    let frames =
+        state.legacy_event_to_api(&json!({"type": "error", "id": legacy_id, "message": "nope"}));
     assert_eq!(frames[0].reply_to, Some(7));
 }

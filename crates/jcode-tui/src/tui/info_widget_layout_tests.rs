@@ -197,13 +197,8 @@ fn degenerate_sizes_with_full_contention_never_panic_or_escape() {
     // left + right widths never exceed the area width; the synthetic margins
     // here respect that invariant (40 + 40 <= 100).
     let healthy_area = Rect::new(2, 1, 100, 12);
-    let healthy = calculate_placements_anchored(
-        healthy_area,
-        &margins_for(40, 12, false),
-        &data,
-        true,
-        &[],
-    );
+    let healthy =
+        calculate_placements_anchored(healthy_area, &margins_for(40, 12, false), &data, true, &[]);
     assert!(
         !healthy.visible.is_empty(),
         "healthy frame should place at least one widget"
@@ -258,8 +253,7 @@ fn todo_and_background_contention_prioritizes_todos_without_overlap() {
     // One pocket of 6 rows: Overview (min 8 + borders) can't fit; todos
     // (height 5) wins the pocket and background is dropped.
     let area = Rect::new(0, 0, 80, 6);
-    let outcome =
-        calculate_placements_anchored(area, &margins_for(40, 6, false), &data, true, &[]);
+    let outcome = calculate_placements_anchored(area, &margins_for(40, 6, false), &data, true, &[]);
     assert_placements_sane("short pocket", area, &outcome.visible);
     let kinds: Vec<WidgetKind> = outcome.visible.iter().map(|p| p.kind).collect();
     assert_eq!(
@@ -377,13 +371,8 @@ fn margin_profile_longer_than_area_cannot_place_below_viewport() {
     // with the oversized profile: Phase 1 must not keep a placement whose rows
     // exist in the profile but not in the area.
     let tall_area = Rect::new(0, 0, 100, 40);
-    let tall = calculate_placements_anchored(
-        tall_area,
-        &margins_for(40, 40, false),
-        &data,
-        true,
-        &[],
-    );
+    let tall =
+        calculate_placements_anchored(tall_area, &margins_for(40, 40, false), &data, true, &[]);
     let shrunk = calculate_placements_anchored(area, &margins, &data, true, &tall.anchors);
     assert_placements_sane("long profile (stale anchors)", area, &shrunk.visible);
 }
@@ -396,8 +385,7 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     let data = contended_data();
 
     let area0 = Rect::new(0, 0, 80, 20);
-    let first =
-        calculate_placements_anchored(area0, &margins_for(40, 20, false), &data, true, &[]);
+    let first = calculate_placements_anchored(area0, &margins_for(40, 20, false), &data, true, &[]);
     assert!(!first.visible.is_empty());
     assert!(
         first.visible.iter().any(|p| p.rect.y < 5),

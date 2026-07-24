@@ -23,10 +23,7 @@ fn main() {
         run_demo();
         return;
     }
-    let socket = args
-        .first()
-        .cloned()
-        .unwrap_or_else(default_socket_path);
+    let socket = args.first().cloned().unwrap_or_else(default_socket_path);
     let message = args
         .get(1)
         .cloned()

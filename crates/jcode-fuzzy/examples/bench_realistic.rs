@@ -8,12 +8,24 @@ fn main() {
             )
         })
         .collect();
-    for q in ["g", "gp", "gpt", "gpt-5", "claud", "claude sonnet", "opsu", "codxe", "openrouter"] {
+    for q in [
+        "g",
+        "gp",
+        "gpt",
+        "gpt-5",
+        "claud",
+        "claude sonnet",
+        "opsu",
+        "codxe",
+        "openrouter",
+    ] {
         let prepared = jcode_fuzzy::PreparedTokenQuery::new(q);
         let start = std::time::Instant::now();
         let mut n = 0;
         for name in &names {
-            if prepared.score(name).is_some() { n += 1; }
+            if prepared.score(name).is_some() {
+                n += 1;
+            }
         }
         println!("{q:>14}: {:?} ({n} matches)", start.elapsed());
     }
