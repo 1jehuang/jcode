@@ -657,7 +657,7 @@ fn build_persistent_header_with_auth(
         };
         let mut spans = vec![Span::styled(
             server_text.clone(),
-            Style::default().fg(header_name_color()),
+            Style::default().fg(dim_color()),
         )];
         if let Some(version) = server_version_label.as_deref() {
             let suffix = format!(" · {}", version);
@@ -675,7 +675,7 @@ fn build_persistent_header_with_auth(
         };
         let mut spans = vec![Span::styled(
             client_text.clone(),
-            Style::default().fg(header_name_color()),
+            Style::default().fg(dim_color()),
         )];
         if let Some(version) = client_version_label.as_deref() {
             let suffix = format!(" · {}", version);
