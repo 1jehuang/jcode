@@ -97,6 +97,50 @@ pub fn anthropic_is_1m_model(model: &str) -> bool {
     model.ends_with("[1m]")
 }
 
+/// Maximum output tokens Anthropic's synchronous Messages API accepts for a
+/// model, per the published model comparison table.
+///
+/// This matters more than it looks. Adaptive-thinking models spend their output
+/// budget on thinking *and* the visible tool call, so a budget that is too
+/// small truncates mid-tool-call and silently ends an agent turn. jcode used a
+/// flat 32K default for every Claude model, which cut long agentic turns on
+/// models that actually allow 128K.
+pub fn anthropic_max_output_tokens(model: &str) -> u32 {
+    let base = anthropic_strip_1m_suffix(model.trim()).to_ascii_lowercase();
+
+    // Opus 5, Opus 4.6-4.8, Sonnet 5, Sonnet 4.6, and Fable/Mythos 5 all
+    // advertise 128K max output on the synchronous Messages API.
+    const LARGE_OUTPUT_PREFIXES: &[&str] = &[
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4.8",
+        "claude-opus-4-7",
+        "claude-opus-4.7",
+        "claude-opus-4-6",
+        "claude-opus-4.6",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4.6",
+        "claude-fable-5",
+        "claude-fable",
+        "claude-mythos",
+    ];
+    if LARGE_OUTPUT_PREFIXES
+        .iter()
+        .any(|prefix| base.starts_with(prefix))
+    {
+        return 128_000;
+    }
+
+    // Haiku 4.5 tops out at 64K.
+    if base.starts_with("claude-haiku-4-5") || base.starts_with("claude-haiku-4.5") {
+        return 64_000;
+    }
+
+    // Older/unknown generations keep the conservative 32K jcode has always used.
+    32_768
+}
+
 /// Check if a model explicitly requests 1M context via the `[1m]` suffix.
 pub fn anthropic_effectively_1m(model: &str) -> bool {
     anthropic_is_1m_model(model)
@@ -326,6 +370,7 @@ pub fn anthropic_stainless_os() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ALL_CLAUDE_MODELS;
 
     #[test]
     fn model_suffix_helpers_require_explicit_1m_suffix() {
@@ -421,6 +466,62 @@ mod tests {
             assert!(
                 !anthropic_reasoning_caps(model).supports_reasoning_effort(),
                 "{model} should not support effort"
+            );
+        }
+    }
+
+    #[test]
+    fn max_output_tokens_match_published_model_limits() {
+        // 128K-output generations, including dotted and [1m]/dated aliases.
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4.8",
+            "claude-opus-4-7",
+            "claude-opus-4-6[1m]",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-fable-5",
+            "Claude-Opus-5-20260724",
+        ] {
+            assert_eq!(
+                anthropic_max_output_tokens(model),
+                128_000,
+                "{model} should allow 128K output"
+            );
+        }
+
+        // Haiku 4.5 is a 64K-output model.
+        assert_eq!(anthropic_max_output_tokens("claude-haiku-4-5"), 64_000);
+        assert_eq!(
+            anthropic_max_output_tokens("claude-haiku-4-5-20251001"),
+            64_000
+        );
+
+        // Older generations keep the conservative legacy budget.
+        for model in [
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-20250514",
+            "claude-instant",
+        ] {
+            assert_eq!(
+                anthropic_max_output_tokens(model),
+                32_768,
+                "{model} should keep the conservative default"
+            );
+        }
+    }
+
+    #[test]
+    fn max_output_tokens_never_undercut_the_legacy_default() {
+        // Regression guard: a per-model budget must never be *smaller* than the
+        // flat 32K default jcode shipped before, or turns that used to fit would
+        // start truncating.
+        for model in ALL_CLAUDE_MODELS {
+            assert!(
+                anthropic_max_output_tokens(model) >= 32_768,
+                "{model} regressed below the legacy 32K output budget"
             );
         }
     }
