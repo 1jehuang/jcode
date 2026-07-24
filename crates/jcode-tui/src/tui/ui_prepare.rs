@@ -851,16 +851,10 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
             }
         }
 
-        let content_height = wrapped_lines.len();
-        let input_reserve = 4;
-        let available = (height as usize).saturating_sub(input_reserve);
-        let pad_top = available.saturating_sub(content_height) / 2;
-        let mut centered = Vec::with_capacity(pad_top + content_height);
-        for _ in 0..pad_top {
-            centered.push(Line::from(""));
-        }
-        centered.extend(wrapped_lines);
-        let wrapped_lines = centered;
+        // Keep the header top-anchored on the initial empty screen. It used
+        // to be vertically centered, which made the whole screen jump up as
+        // soon as the first prompt arrived and the padding disappeared.
+        let _ = height;
         let wrapped_line_count = wrapped_lines.len();
         let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
         let prepared = Arc::new(PreparedMessages {

@@ -29,6 +29,7 @@ members = [
     "crates/jcode-fuzzy",
     "crates/jcode-harness-api",
     "crates/jcode-harness-api-server",
+    "crates/jcode-desktop2",
     "crates/jcode-memory-types",
     "crates/jcode-message-types",
     "crates/jcode-overnight-core",
