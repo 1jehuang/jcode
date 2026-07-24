@@ -336,6 +336,16 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
+    // --- Moonshot/Kimi K3 family: 1M context (bare `k3` is Kimi Code's id) ---
+    // Checked before the broader `kimi` (K2) match so the newer family wins, and
+    // the 256K variant is checked before the 1M default for the family.
+    if m.ends_with("k3-256k") {
+        return Some(262_144);
+    }
+    if m == "k3" || m.contains("kimi-k3") || m.ends_with("/k3") {
+        return Some(1_048_576);
+    }
+
     // --- Moonshot Kimi K2 family: 256K context ---
     if m.contains("kimi") {
         return Some(262_144);
@@ -440,6 +450,28 @@ mod tests {
         assert_eq!(
             ALL_OPENAI_MODELS.first().copied(),
             Some(DEFAULT_OPENAI_MODEL)
+        );
+    }
+
+    #[test]
+    fn bare_k3_resolves_globally_to_one_million_context() {
+        // Global resolution path used by the TUI meter and compaction budget (#577).
+        assert_eq!(context_limit_for_model("k3"), Some(1_048_576));
+    }
+
+    #[test]
+    fn kimi_k3_family_resolves_to_one_million_context() {
+        // Kimi Code serves K3 under the bare id `k3` (see #577).
+        assert_eq!(open_weight_family_context_limit("k3"), Some(1_048_576));
+        assert_eq!(
+            open_weight_family_context_limit("moonshotai/kimi-k3"),
+            Some(1_048_576)
+        );
+        assert_eq!(open_weight_family_context_limit("k3-256k"), Some(262_144));
+        // The K2 family keeps its 256K window.
+        assert_eq!(
+            open_weight_family_context_limit("moonshotai/kimi-k2"),
+            Some(262_144)
         );
     }
 
