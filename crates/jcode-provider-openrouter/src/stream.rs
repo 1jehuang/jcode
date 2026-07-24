@@ -15,6 +15,25 @@ fn truncated_stream_payload_context(data: &str) -> String {
     jcode_core::util::truncate_str(&data.trim().replace('\n', "\\n"), 240).to_string()
 }
 
+/// Pop the next complete SSE event off the front of `buffer`.
+///
+/// Accepts both `\n\n` and `\r\n\r\n` event delimiters. Only handling `\n\n`
+/// meant CRLF streams accumulated many events into one blob (see #565).
+/// Draining in place avoids the O(buffer^2) copy of reassigning the buffer.
+fn take_sse_event(buffer: &mut String) -> Option<String> {
+    let crlf = buffer.find("\r\n\r\n");
+    let lf = buffer.find("\n\n");
+    let (pos, sep_len) = match (crlf, lf) {
+        (Some(c), Some(l)) if c <= l => (c, 4),
+        (Some(c), None) => (c, 4),
+        (_, Some(l)) => (l, 2),
+        (None, None) => return None,
+    };
+    let event = buffer[..pos].to_string();
+    buffer.drain(..pos + sep_len);
+    Some(event)
+}
+
 pub struct OpenRouterStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
@@ -193,32 +212,47 @@ impl OpenRouterStream {
             return Some(event);
         }
 
-        while let Some(pos) = self.buffer.find("\n\n") {
-            // Extract this event and remove it (plus the "\n\n" separator) in
-            // place. Reassigning `self.buffer = self.buffer[pos + 2..].to_string()`
-            // copied and reallocated the entire remaining buffer on every event,
-            // which is O(buffer^2) when one network chunk batches many SSE
-            // events. `drain` removes the consumed prefix without reallocating.
-            let event_str = self.buffer[..pos].to_string();
-            self.buffer.drain(..pos + 2);
-
-            // Parse SSE event
-            let mut data = None;
+        while let Some(event_str) = take_sse_event(&mut self.buffer) {
+            // Collect every `data:` line in the event. Keeping only the last one
+            // silently dropped content whenever multiple events landed in a
+            // single parsed chunk (see #565).
+            let mut data_lines = Vec::new();
+            let mut saw_done = false;
             for line in event_str.lines() {
-                if let Some(d) = jcode_core::util::sse_data_line(line) {
-                    data = Some(d);
+                if let Some(d) = jcode_core::util::sse_data_line(line.trim_end_matches('\r')) {
+                    if d.trim() == "[DONE]" {
+                        saw_done = true;
+                    } else {
+                        data_lines.push(d);
+                    }
                 }
             }
 
-            let data = match data {
-                Some(d) => d,
-                None => continue,
-            };
-
-            if data == "[DONE]" {
-                self.queue_message_end();
-                return self.pending.pop_front();
+            if data_lines.is_empty() {
+                if saw_done {
+                    self.queue_message_end();
+                    return self.pending.pop_front();
+                }
+                continue;
             }
+
+            // Each `data:` line is its own JSON payload here. Push the extras
+            // back onto the front of the buffer as standalone events so none of
+            // them is dropped, then handle the first one now.
+            let data = data_lines[0].to_string();
+            let mut requeued = String::new();
+            for extra in &data_lines[1..] {
+                requeued.push_str("data: ");
+                requeued.push_str(extra);
+                requeued.push_str("\n\n");
+            }
+            if saw_done {
+                requeued.push_str("data: [DONE]\n\n");
+            }
+            if !requeued.is_empty() {
+                self.buffer.insert_str(0, &requeued);
+            }
+            let data = data.as_str();
 
             let parsed: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
@@ -428,6 +462,63 @@ impl Stream for OpenRouterStream {
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    fn drain_text(stream: &mut OpenRouterStream) -> String {
+        let mut text = String::new();
+        while let Some(event) = stream.parse_next_event() {
+            match event {
+                StreamEvent::TextDelta(delta) => text.push_str(&delta),
+                StreamEvent::MessageEnd { .. } => break,
+                _ => {}
+            }
+        }
+        text
+    }
+
+    fn test_stream() -> OpenRouterStream {
+        OpenRouterStream::new(
+            futures::stream::empty(),
+            "test-model".to_string(),
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+    }
+
+    #[test]
+    fn take_sse_event_splits_crlf_delimited_events() {
+        let mut buffer = "data: a\r\n\r\ndata: b\r\n\r\n".to_string();
+        assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: a"));
+        assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: b"));
+        assert_eq!(take_sse_event(&mut buffer), None);
+    }
+
+    #[test]
+    fn parse_next_event_keeps_all_content_across_crlf_batched_events() {
+        let mut stream = test_stream();
+        stream.buffer = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}",
+            "data: [DONE]",
+            "",
+        ]
+        .join("\r\n\r\n");
+
+        assert_eq!(drain_text(&mut stream), "hello world!");
+    }
+
+    #[test]
+    fn parse_next_event_keeps_all_data_lines_within_one_event() {
+        // Several data: lines inside one \n\n-delimited block must all be kept.
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"foo\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"bar\"}}]}\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+
+        assert_eq!(drain_text(&mut stream), "foobar");
+    }
 
     #[test]
     fn parse_next_event_ignores_malformed_json_chunks() {
