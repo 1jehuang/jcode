@@ -1780,34 +1780,6 @@ impl OpenRouterProvider {
             .unwrap_or(true)
     }
 
-    /// True when this instance was built from a user-declared
-    /// `[providers.<name>]` profile in config.toml rather than a built-in
-    /// OpenAI-compatible profile (Cerebras, NVIDIA NIM, ...).
-    pub(crate) fn is_user_named_profile(&self) -> bool {
-        self.profile_id
-            .as_deref()
-            .is_some_and(|id| openai_compatible_profile_by_id(id).is_none())
-    }
-
-    pub(crate) fn should_merge_static_models_with_live_catalog(&self) -> bool {
-        // Built-in OpenAI-compatible provider profiles use `static_models` as a
-        // startup/pre-catalog fallback so `/model` is useful immediately after
-        // login. Once a live `/models` catalog has been fetched, the live catalog
-        // is more authoritative for access control. Keeping built-in fallback
-        // entries after a successful fetch can advertise preview/stale models that
-        // the provider rejects at chat time, which is especially confusing for
-        // direct providers such as Cerebras.
-        //
-        // Preserve static models for OpenRouter itself and for custom/named
-        // profiles, where the user supplied the list explicitly and there may be
-        // no provider-side catalog contract. A profile id that is not in the
-        // built-in OpenAI-compatible catalog comes from a user-declared
-        // `[providers.<name>]` block in config.toml, so its
-        // `[[providers.<name>.models]]` entries must survive background
-        // `/models` catalog refreshes (issue #579).
-        self.supports_provider_features || self.profile_id.is_none() || self.is_user_named_profile()
-    }
-
     pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
         let Some(profile_id) = self.profile_id.as_deref() else {
             return models;
