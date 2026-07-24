@@ -372,84 +372,86 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
         let curated: Vec<(&[&str], ApiTool)> = vec![
             (
                 &["subagent"],
-            ApiTool {
-                name: "Agent".to_string(),
-                description: "Launch a new agent to handle complex, multi-step tasks.".to_string(),
-                input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Agent".to_string(),
+                    description: "Launch a new agent to handle complex, multi-step tasks."
+                        .to_string(),
+                    input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["bash"],
-            ApiTool {
-                name: "Bash".to_string(),
-                description: "Executes a given bash command and returns its output.".to_string(),
-                input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"}},"required":["command"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Bash".to_string(),
+                    description: "Executes a given bash command and returns its output."
+                        .to_string(),
+                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"}},"required":["command"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["edit"],
-            ApiTool {
-                name: "Edit".to_string(),
-                description: "Performs exact string replacements in files.".to_string(),
-                input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Edit".to_string(),
+                    description: "Performs exact string replacements in files.".to_string(),
+                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["glob"],
-            ApiTool {
-                name: "Glob".to_string(),
-                description: "Fast file pattern matching tool.".to_string(),
-                input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Glob".to_string(),
+                    description: "Fast file pattern matching tool.".to_string(),
+                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["grep"],
-            ApiTool {
-                name: "Grep".to_string(),
-                description: "A powerful search tool built on ripgrep.".to_string(),
-                input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Grep".to_string(),
+                    description: "A powerful search tool built on ripgrep.".to_string(),
+                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["read"],
-            ApiTool {
-                name: "Read".to_string(),
-                description: "Reads a file from the local filesystem.".to_string(),
-                input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Read".to_string(),
+                    description: "Reads a file from the local filesystem.".to_string(),
+                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["schedule"],
-            ApiTool {
-                name: "ScheduleWakeup".to_string(),
-                description: "Schedule when to resume work in /loop dynamic mode.".to_string(),
-                input_schema: json!({"type":"object","properties":{"delaySeconds":{"type":"number"},"reason":{"type":"string"},"prompt":{"type":"string"}},"required":["delaySeconds","reason","prompt"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "ScheduleWakeup".to_string(),
+                    description: "Schedule when to resume work in /loop dynamic mode.".to_string(),
+                    input_schema: json!({"type":"object","properties":{"delaySeconds":{"type":"number"},"reason":{"type":"string"},"prompt":{"type":"string"}},"required":["delaySeconds","reason","prompt"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["skill_manage"],
-            ApiTool {
-                name: "Skill".to_string(),
-                description: "Execute a skill within the main conversation".to_string(),
-                input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Skill".to_string(),
+                    description: "Execute a skill within the main conversation".to_string(),
+                    input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
             (
                 &["write"],
-            ApiTool {
-                name: "Write".to_string(),
-                description: "Writes a file to the local filesystem.".to_string(),
-                input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
-                cache_control: None,
-            },
+                ApiTool {
+                    name: "Write".to_string(),
+                    description: "Writes a file to the local filesystem.".to_string(),
+                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
+                    cache_control: None,
+                },
             ),
         ];
         let mut out: Vec<ApiTool> = curated
@@ -1087,10 +1089,7 @@ mod cache_prefix_invariant_tests {
             );
         }
         for present in ["Bash", "Read", "Write", "Edit", "agentgrep"] {
-            assert!(
-                names.contains(&present),
-                "missing {present} in {names:?}"
-            );
+            assert!(names.contains(&present), "missing {present} in {names:?}");
         }
     }
 
