@@ -28,11 +28,65 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("--capture") {
         return run_capture(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("--e2e") {
+        return run_e2e(args.get(1).map(String::as_str).unwrap_or("Reply with exactly the word: pong"));
+    }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// `--e2e [message]`: headless validation of the app's own harness wiring.
+/// Uses the same worker (`harness::spawn`) and model updates as the windowed
+/// app: connect, attach, send one message, stream the reply, exit 0 on
+/// `TurnDone`. Also renders the final model offscreen to prove the full
+/// model -> scene path.
+fn run_e2e(message: &str) -> Result<()> {
+    let (updates, outgoing) = harness::spawn(|| {});
+    let mut model = Model::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut sent = false;
+    while std::time::Instant::now() < deadline {
+        let Ok(update) = updates.recv_timeout(std::time::Duration::from_secs(1)) else {
+            continue;
+        };
+        match update {
+            harness::HarnessUpdate::Status(status) => {
+                println!("[e2e] status: {status}");
+                if status.starts_with("disconnected") || status.starts_with("error") {
+                    anyhow::bail!("harness failure: {status}");
+                }
+                model.status = status;
+            }
+            harness::HarnessUpdate::Attached { session_id } => {
+                println!("[e2e] attached: {session_id}");
+                model.status = format!("attached: {session_id}");
+                model.session_id = Some(session_id);
+                model.transcript.push_str(&format!("\n> {message}\n\n"));
+                outgoing.send(message.to_string())?;
+                sent = true;
+            }
+            harness::HarnessUpdate::Text(text) => {
+                print!("{text}");
+                model.transcript.push_str(&text);
+            }
+            harness::HarnessUpdate::TurnDone if sent => {
+                println!("\n[e2e] turn done");
+                let out = std::env::temp_dir().join("jcode-desktop2-e2e.png");
+                let mut text_system = text::TextSystem::default();
+                let mut scene = Scene::new();
+                build_scene(&mut scene, &mut text_system, &model, (1100, 720));
+                capture::capture_scene_to_png(&scene, 1100, 720, &out)?;
+                println!("[e2e] final frame -> {}", out.display());
+                println!("[e2e] OK");
+                return Ok(());
+            }
+            harness::HarnessUpdate::TurnDone => {}
+        }
+    }
+    anyhow::bail!("e2e timed out")
 }
 
 /// `--capture <node|all> [out.png|out_dir]`: render state-space nodes
