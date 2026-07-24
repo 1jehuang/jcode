@@ -936,6 +936,22 @@ impl App {
         self.open_model_picker_inner(true);
     }
 
+    /// Rebuild an already-open `/model` picker after a fresh catalog arrives.
+    ///
+    /// Catalog updates only invalidate the picker cache, so a picker opened on
+    /// placeholder ("remote-catalog") rows would keep showing them until the
+    /// user closed and reopened it. Reopen in place instead, preserving the
+    /// typed filter.
+    pub(super) fn refresh_open_model_picker_after_catalog_update(&mut self) {
+        let picker_open = self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(picker_is_runtime_model_picker);
+        if picker_open && !self.auth_catalog_refresh_pending {
+            self.open_model_picker_preserving_input();
+        }
+    }
+
     /// Apply a completed auth-driven catalog refresh to an already-open picker.
     /// Login/import can finish while `/model` is visible, so merely invalidating
     /// its cache would leave the stale pre-login entries on screen until the user

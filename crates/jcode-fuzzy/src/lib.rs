@@ -531,7 +531,6 @@ struct ScoreScratch {
 impl PreparedTokenQuery {
     pub fn new(needle: &str) -> Self {
         let words = needle
-            .trim()
             .split_whitespace()
             .map(|word| {
                 let chars: Vec<char> = word.chars().flat_map(char::to_lowercase).collect();
