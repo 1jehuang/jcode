@@ -125,6 +125,40 @@ fn score_floor(meaningful_len: usize) -> i32 {
 /// present in the haystack at all. This avoids running the DP for the vast
 /// majority of non-matching entries.
 fn prefilter(pat: &[char], hay: &[char], max_err: u8) -> bool {
+    // Stage 1: ASCII presence bitmask. This ignores multiplicity (a pattern
+    // with repeated chars can pass with a single haystack occurrence), so it
+    // is a strictly weaker test than the counting stage below, but it rejects
+    // most non-matching entries without touching a 128-slot count table.
+    let mut hay_mask = 0u128;
+    let mut hay_has_non_ascii = false;
+    for &c in hay {
+        let idx = c as usize;
+        if idx < 128 {
+            hay_mask |= 1u128 << idx;
+        } else {
+            hay_has_non_ascii = true;
+        }
+    }
+    let mut missing = 0u8;
+    for &c in pat {
+        if c.is_whitespace() {
+            continue;
+        }
+        let idx = c as usize;
+        let maybe_present = if idx < 128 {
+            hay_mask & (1u128 << idx) != 0
+        } else {
+            hay_has_non_ascii
+        };
+        if !maybe_present {
+            missing += 1;
+            if missing > max_err {
+                return false;
+            }
+        }
+    }
+
+    // Stage 2: multiplicity-aware counting for candidates that passed.
     let mut ascii = [0u16; 128];
     let mut other: Vec<char> = Vec::new();
     for &c in hay {
@@ -166,48 +200,27 @@ fn prefilter(pat: &[char], hay: &[char], max_err: u8) -> bool {
     true
 }
 
-fn fuzzy_match_impl<P: PositionTracker>(
-    needle: &str,
-    haystack: &str,
-    anchor_first_true_match: bool,
-    strip_leading_slash: bool,
+/// Core DP over pre-lowered pattern/haystack chars. Rows are caller-provided
+/// so hot per-keystroke callers can reuse their allocations; they are resized
+/// and cleared here. Returns the best final-row cell honoring
+/// `require_true_tail`.
+fn run_dp<P: PositionTracker>(
+    pat: &[char],
+    hay: &[char],
+    max_err: u8,
+    row_prev2: &mut Vec<Option<Cell<P>>>,
+    row_prev: &mut Vec<Option<Cell<P>>>,
+    row_cur: &mut Vec<Option<Cell<P>>>,
     require_true_tail: bool,
-) -> Option<(i32, P, usize)> {
-    let (hay_offset, hay_src) = if strip_leading_slash {
-        match haystack.strip_prefix('/') {
-            Some(rest) => (1usize, rest),
-            None => (0usize, haystack),
-        }
-    } else {
-        (0usize, haystack)
-    };
-    let needle_src = if strip_leading_slash {
-        needle.strip_prefix('/').unwrap_or(needle)
-    } else {
-        needle
-    };
-
-    let pat: Vec<char> = needle_src.chars().flat_map(char::to_lowercase).collect();
-    let hay: Vec<char> = hay_src.chars().flat_map(char::to_lowercase).collect();
-
-    if pat.iter().all(|c| c.is_whitespace()) {
-        return Some((0, P::default(), hay_offset));
-    }
-    if hay.is_empty() {
-        return None;
-    }
-
+) -> Option<Cell<P>> {
     let m = pat.len();
     let n = hay.len();
-    let meaningful = pat.iter().filter(|c| !c.is_whitespace()).count();
-    let max_err = error_budget(meaningful);
-    if !prefilter(&pat, &hay, max_err) {
-        return None;
-    }
-    // Rolling DP rows: the recurrence only reads rows i-1 and i-2.
-    let mut row_prev2: Vec<Option<Cell<P>>> = vec![None; n + 1];
-    let mut row_prev: Vec<Option<Cell<P>>> = vec![None; n + 1];
-    let mut row_cur: Vec<Option<Cell<P>>> = vec![None; n + 1];
+    row_prev2.clear();
+    row_prev.clear();
+    row_cur.clear();
+    row_prev2.resize(n + 1, None);
+    row_prev.resize(n + 1, None);
+    row_cur.resize(n + 1, None);
     row_prev[0] = Some(Cell {
         score: 0,
         errors: 0,
@@ -341,18 +354,83 @@ fn fuzzy_match_impl<P: PositionTracker>(
 
             row_cur[j] = best;
         }
-        std::mem::swap(&mut row_prev2, &mut row_prev);
-        std::mem::swap(&mut row_prev, &mut row_cur);
+        std::mem::swap(row_prev2, row_prev);
+        std::mem::swap(row_prev, row_cur);
     }
 
     let mut answer = None;
-    for row in &row_prev {
+    for row in row_prev.iter() {
         if let Some(cell) = row.clone()
             && (!require_true_tail || cell.tail_true)
         {
             keep_best(&mut answer, cell);
         }
     }
+    answer
+}
+
+fn fuzzy_match_impl<P: PositionTracker>(
+    needle: &str,
+    haystack: &str,
+    anchor_first_true_match: bool,
+    strip_leading_slash: bool,
+    require_true_tail: bool,
+) -> Option<(i32, P, usize)> {
+    let (hay_offset, hay_src) = if strip_leading_slash {
+        match haystack.strip_prefix('/') {
+            Some(rest) => (1usize, rest),
+            None => (0usize, haystack),
+        }
+    } else {
+        (0usize, haystack)
+    };
+    let needle_src = if strip_leading_slash {
+        needle.strip_prefix('/').unwrap_or(needle)
+    } else {
+        needle
+    };
+
+    let pat: Vec<char> = needle_src.chars().flat_map(char::to_lowercase).collect();
+
+    if pat.iter().all(|c| c.is_whitespace()) {
+        return Some((0, P::default(), hay_offset));
+    }
+
+    let meaningful = pat.iter().filter(|c| !c.is_whitespace()).count();
+    let max_err = error_budget(meaningful);
+
+    // Cheap length gate before lowercasing the haystack: every meaningful
+    // pattern char beyond the error budget must consume a haystack char, and
+    // a haystack's char count never exceeds its byte length (lowercasing only
+    // expands). Skipping short tokens here avoids most DP work per keystroke.
+    if hay_src.len() + (max_err as usize) < meaningful {
+        return None;
+    }
+
+    let hay: Vec<char> = hay_src.chars().flat_map(char::to_lowercase).collect();
+    if hay.is_empty() {
+        return None;
+    }
+
+    let n = hay.len();
+    if n + (max_err as usize) < meaningful {
+        return None;
+    }
+    if !prefilter(&pat, &hay, max_err) {
+        return None;
+    }
+    let mut row_prev2: Vec<Option<Cell<P>>> = Vec::new();
+    let mut row_prev: Vec<Option<Cell<P>>> = Vec::new();
+    let mut row_cur: Vec<Option<Cell<P>>> = Vec::new();
+    let answer = run_dp(
+        &pat,
+        &hay,
+        max_err,
+        &mut row_prev2,
+        &mut row_prev,
+        &mut row_cur,
+        require_true_tail,
+    );
 
     let cell = answer?;
     if anchor_first_true_match && cell.positions.first_pos() != Some(0) {
@@ -421,19 +499,116 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
 /// Multi-word query scores are the sum of the best per-word field scores, and
 /// every word must match somewhere for the entry to match at all.
 pub fn fuzzy_score_tokens(needle: &str, haystack: &str) -> Option<i32> {
-    let needle = needle.trim();
-    if needle.is_empty() {
+    PreparedTokenQuery::new(needle).score(haystack)
+}
+
+/// A parsed multi-word query prepared once and scored against many entries.
+///
+/// Picker filters call the matcher once per entry per keystroke, so the
+/// pattern lowercase/error-budget work and the DP scratch rows are prepared
+/// here once and reused across every entry instead of being reallocated for
+/// each token of each entry.
+pub struct PreparedTokenQuery {
+    words: Vec<PreparedWord>,
+    scratch: std::cell::RefCell<ScoreScratch>,
+}
+
+struct PreparedWord {
+    chars: Vec<char>,
+    meaningful: usize,
+    max_err: u8,
+    floor: i32,
+}
+
+#[derive(Default)]
+struct ScoreScratch {
+    hay: Vec<char>,
+    row_prev2: Vec<Option<Cell<PositionSummary>>>,
+    row_prev: Vec<Option<Cell<PositionSummary>>>,
+    row_cur: Vec<Option<Cell<PositionSummary>>>,
+}
+
+impl PreparedTokenQuery {
+    pub fn new(needle: &str) -> Self {
+        let words = needle
+            .trim()
+            .split_whitespace()
+            .map(|word| {
+                let chars: Vec<char> = word.chars().flat_map(char::to_lowercase).collect();
+                let meaningful = chars.iter().filter(|c| !c.is_whitespace()).count();
+                PreparedWord {
+                    max_err: error_budget(meaningful),
+                    floor: score_floor(meaningful),
+                    meaningful,
+                    chars,
+                }
+            })
+            .collect();
+        Self {
+            words,
+            scratch: std::cell::RefCell::new(ScoreScratch::default()),
+        }
+    }
+
+    /// Equivalent to [`fuzzy_score_tokens`] for this query.
+    pub fn score(&self, haystack: &str) -> Option<i32> {
+        if self.words.is_empty() {
+            return Some(0);
+        }
+        let mut scratch = self.scratch.borrow_mut();
+        let mut total = 0i32;
+        for word in &self.words {
+            let best = haystack
+                .split_whitespace()
+                .filter_map(|token| score_prepared_word(word, token, &mut scratch))
+                .max()?;
+            total = total.saturating_add(best);
+        }
+        Some(total)
+    }
+}
+
+/// Score-only matcher equivalent to `fuzzy_score(word, token)` but with the
+/// pattern pre-lowered and DP scratch buffers reused across calls.
+fn score_prepared_word(word: &PreparedWord, token: &str, scratch: &mut ScoreScratch) -> Option<i32> {
+    if word.meaningful == 0 {
         return Some(0);
     }
-    let mut total = 0i32;
-    for word in needle.split_whitespace() {
-        let best = haystack
-            .split_whitespace()
-            .filter_map(|token| fuzzy_score(word, token))
-            .max()?;
-        total = total.saturating_add(best);
+    // Byte length is an upper bound on char count; lowercasing only expands.
+    if token.len() + (word.max_err as usize) < word.meaningful {
+        return None;
     }
-    Some(total)
+
+    scratch.hay.clear();
+    scratch
+        .hay
+        .extend(token.chars().flat_map(char::to_lowercase));
+    if scratch.hay.is_empty() {
+        return None;
+    }
+    let n = scratch.hay.len();
+    if n + (word.max_err as usize) < word.meaningful {
+        return None;
+    }
+    if !prefilter(&word.chars, &scratch.hay, word.max_err) {
+        return None;
+    }
+
+    let cell = run_dp(
+        &word.chars,
+        &scratch.hay,
+        word.max_err,
+        &mut scratch.row_prev2,
+        &mut scratch.row_prev,
+        &mut scratch.row_cur,
+        false,
+    )?;
+    let exact = word.chars == scratch.hay;
+    let score = cell.score + if exact { EXACT } else { 0 };
+    if !exact && score < word.floor {
+        return None;
+    }
+    Some(score)
 }
 
 /// Return matched positions for free-form picker highlighting.
