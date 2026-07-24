@@ -869,29 +869,6 @@ fn build_header_lines_with_auth(
         );
     }
 
-    let client_count = app.connected_clients().unwrap_or(0);
-    let session_count = app.server_sessions().len();
-    if client_count > 0 || session_count > 1 {
-        let mut parts = Vec::new();
-        if client_count > 0 {
-            parts.push(format!(
-                "{} client{}",
-                client_count,
-                if client_count == 1 { "" } else { "s" }
-            ));
-        }
-        if session_count > 1 {
-            parts.push(format!("{} sessions", session_count));
-        }
-        lines.push(
-            Line::from(Span::styled(
-                format!("server: {}", parts.join(", ")),
-                Style::default().fg(dim_color()),
-            ))
-            .alignment(align),
-        );
-    }
-
     if let Some(dir) = app.working_dir() {
         let display_dir = abbreviate_home(&dir);
         lines.push(
