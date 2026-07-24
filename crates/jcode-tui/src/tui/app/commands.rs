@@ -3060,12 +3060,12 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     if rest.is_empty() || matches!(rest, "show" | "status") {
         let current = crate::config::config().display.reasoning_display();
         app.push_display_message(DisplayMessage::system(format!(
-            "Reasoning display is currently {}.\n\n\
+            "Thinking display is currently {}.\n\n\
              Modes:\n\
-             • off - never show reasoning\n\
-             • full - keep every reasoning trace in the transcript\n\
-             • current - show only the live reasoning, then collapse it once a tool runs or the answer commits\n\n\
-             Use /reasoning <off|full|current> to change it.",
+             • off - never show thinking text\n\
+             • full - keep every thinking trace in the transcript\n\
+             • current - show only the live thinking, then collapse it once a tool runs or the answer commits\n\n\
+             Use /thinking <off|full|current> to change it. To change how hard the model thinks, use /effort.",
             current.label()
         )));
         return true;
@@ -3073,20 +3073,20 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
 
     let Some(mode) = crate::config::ReasoningDisplayMode::parse(rest) else {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /reasoning (show), /reasoning off, /reasoning full, or /reasoning current"
+            "Usage: /thinking (show), /thinking off, /thinking full, or /thinking current"
                 .to_string(),
         ));
         return true;
     };
 
-    app.set_status_notice(format!("Reasoning display: {}", mode.label()));
+    app.set_status_notice(format!("Thinking display: {}", mode.label()));
     match crate::config::Config::set_reasoning_display(mode) {
         Ok(()) => app.push_display_message(DisplayMessage::system(format!(
-            "Saved reasoning display: {}. Applied to this session immediately.",
+            "Saved thinking display: {}. Applied to this session immediately.",
             mode.label()
         ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Applied reasoning display {} for this session, but failed to save it as the default: {}",
+            "Applied thinking display {} for this session, but failed to save it as the default: {}",
             mode.label(),
             error
         ))),
