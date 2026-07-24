@@ -3593,6 +3593,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-harness-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jcode-import-core"
 version = "0.1.0"
 dependencies = [
