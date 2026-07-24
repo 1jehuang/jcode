@@ -1738,7 +1738,7 @@ async fn stream_response(
 
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
-            phase: ConnectionPhase::Connecting,
+            phase: ConnectionPhase::SendingRequest,
         }))
         .await;
 

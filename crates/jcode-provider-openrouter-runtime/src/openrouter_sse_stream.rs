@@ -163,7 +163,7 @@ async fn stream_response(
     use jcode_message_types::ConnectionPhase;
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
-            phase: ConnectionPhase::Connecting,
+            phase: ConnectionPhase::SendingRequest,
         }))
         .await;
     let connect_start = std::time::Instant::now();

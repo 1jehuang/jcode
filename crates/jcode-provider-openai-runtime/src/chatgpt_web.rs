@@ -119,7 +119,7 @@ impl ChatGptWebState {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }
 
-            send_phase(tx, jcode_message_types::ConnectionPhase::Connecting).await?;
+            send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
             if tx.is_closed() {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
             }

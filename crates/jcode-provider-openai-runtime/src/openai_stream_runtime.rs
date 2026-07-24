@@ -118,7 +118,7 @@ pub(super) async fn stream_response(
         }
     }
 
-    emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
+    emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
 
     let response = builder
@@ -749,6 +749,7 @@ pub(super) async fn try_persistent_ws_continuation(
 
     // Send the continuation request on the existing WebSocket
     let send_started_at = Instant::now();
+    emit_connection_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await;
     if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
@@ -1165,6 +1166,7 @@ pub(super) async fn stream_response_websocket_persistent(
         ))
     })?;
     let request_send_started_at = Instant::now();
+    emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     ws_stream
         .send(WsMessage::Text(request_text))
         .await

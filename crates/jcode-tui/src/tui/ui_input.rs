@@ -519,6 +519,7 @@ fn connection_phase_label(phase: &ConnectionPhase) -> String {
     match phase {
         ConnectionPhase::Authenticating => "refreshing auth".to_string(),
         ConnectionPhase::Connecting => "connecting".to_string(),
+        ConnectionPhase::SendingRequest => "sending context".to_string(),
         ConnectionPhase::WaitingForResponse => "waiting for response".to_string(),
         ConnectionPhase::Streaming => "streaming".to_string(),
         ConnectionPhase::Retrying { attempt, max } => format!("retrying {}/{}", attempt, max),
@@ -760,6 +761,9 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                         rgb(255, 193, 7)
                     }
                     crate::message::ConnectionPhase::Connecting if phase_elapsed > 10.0 => {
+                        rgb(255, 193, 7)
+                    }
+                    crate::message::ConnectionPhase::SendingRequest if phase_elapsed > 10.0 => {
                         rgb(255, 193, 7)
                     }
                     _ => dim_color(),

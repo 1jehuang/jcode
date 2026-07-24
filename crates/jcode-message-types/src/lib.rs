@@ -635,9 +635,11 @@ pub struct InputShellResult {
 pub enum ConnectionPhase {
     /// Refreshing OAuth token
     Authenticating,
-    /// TCP + TLS connection to API
+    /// TCP + TLS / websocket transport setup to the API
     Connecting,
-    /// HTTP request sent, waiting for first response byte
+    /// Uploading the request (context) and waiting for response headers
+    SendingRequest,
+    /// Request accepted, waiting for the model's first output byte
     WaitingForResponse,
     /// First byte received, stream is active
     Streaming,
@@ -650,6 +652,7 @@ impl std::fmt::Display for ConnectionPhase {
         match self {
             ConnectionPhase::Authenticating => write!(f, "authenticating"),
             ConnectionPhase::Connecting => write!(f, "connecting"),
+            ConnectionPhase::SendingRequest => write!(f, "sending request"),
             ConnectionPhase::WaitingForResponse => write!(f, "waiting for response"),
             ConnectionPhase::Streaming => write!(f, "streaming"),
             ConnectionPhase::Retrying { attempt, max } => {

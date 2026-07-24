@@ -930,6 +930,7 @@ pub(in crate::tui::app) fn handle_server_event(
             let cp = match phase.as_str() {
                 "authenticating" => crate::message::ConnectionPhase::Authenticating,
                 "connecting" => crate::message::ConnectionPhase::Connecting,
+                "sending request" => crate::message::ConnectionPhase::SendingRequest,
                 "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
                 "streaming" => crate::message::ConnectionPhase::Streaming,
                 _ if phase.starts_with("retrying (") && phase.ends_with(')') => {
