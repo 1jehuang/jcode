@@ -69,7 +69,7 @@ fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f
                 let glyph_x = x + glyph.x;
                 x += glyph.advance;
                 vello::Glyph {
-                    id: glyph.id as u32,
+                    id: glyph.id,
                     x: glyph_x,
                     y: y - glyph.y,
                 }
