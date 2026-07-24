@@ -728,6 +728,16 @@ pub(super) fn prepare_messages(
     prepared
 }
 
+/// Top padding used to vertically center the header on the initial empty
+/// screen. Derived only from the persistent header height (not suggestions)
+/// so the same value can be re-applied above the header once messages exist,
+/// keeping the header from jumping when the first prompt is sent.
+fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
+    let input_reserve = 4;
+    let available = (height as usize).saturating_sub(input_reserve);
+    available.saturating_sub(header_lines) / 2
+}
+
 fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> PreparedChatFrame {
     let header_start = Instant::now();
     let header_prepared = prepare_header_cached(app, width);
@@ -851,10 +861,19 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
             }
         }
 
-        // Keep the header top-anchored on the initial empty screen. It used
-        // to be vertically centered, which made the whole screen jump up as
-        // soon as the first prompt arrived and the padding disappeared.
-        let _ = height;
+        // Vertically center the initial empty screen, but compute the padding
+        // from the header height alone so the exact same padding can be
+        // re-applied above the header once the conversation starts. That keeps
+        // the header at the same screen position when the first prompt
+        // arrives; the padding then simply scrolls away as the transcript
+        // grows instead of vanishing in one jump.
+        let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+        let mut centered = Vec::with_capacity(pad_top + wrapped_lines.len());
+        for _ in 0..pad_top {
+            centered.push(Line::from(""));
+        }
+        centered.extend(wrapped_lines);
+        let wrapped_lines = centered;
         let wrapped_line_count = wrapped_lines.len();
         let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
         let prepared = Arc::new(PreparedMessages {
@@ -885,8 +904,39 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     }
 
     let compose_start = Instant::now();
+    // Re-apply the initial-screen centering pad above the header so the
+    // transition from the empty screen to the first message does not shift
+    // anything. The pad scrolls off naturally as the transcript grows.
+    let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+    let padded_header = if pad_top > 0 {
+        let mut lines = Vec::with_capacity(pad_top + header_prepared.wrapped_lines.len());
+        for _ in 0..pad_top {
+            lines.push(Line::from(""));
+        }
+        lines.extend(header_prepared.wrapped_lines.iter().cloned());
+        let count = lines.len();
+        let plain = Arc::new(lines.iter().map(ui::line_plain_text).collect());
+        Arc::new(PreparedMessages {
+            wrapped_lines: lines,
+            wrapped_plain_lines: plain,
+            wrapped_copy_offsets: Arc::new(vec![0; count]),
+            raw_plain_lines: Arc::new(Vec::new()),
+            wrapped_line_map: Arc::new(Vec::new()),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: Vec::new(),
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        })
+    } else {
+        header_prepared
+    };
     let frame = PreparedChatFrame::from_sections(vec![
-        (PreparedSectionKind::Header, header_prepared),
+        (PreparedSectionKind::Header, padded_header),
         (PreparedSectionKind::Body, body_prepared),
         (PreparedSectionKind::InlineImages, inline_images_prepared),
         (PreparedSectionKind::BatchProgress, batch_progress_prepared),
