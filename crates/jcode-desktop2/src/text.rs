@@ -7,6 +7,10 @@ use vello::Scene;
 use vello::kurbo::Affine;
 use vello::peniko::{Brush, Color, Fill};
 
+/// Design-language font stack: JetBrains Mono everywhere (see
+/// ~/jcode-website/STYLE.md), monospace fallback.
+const FONT_STACK: &str = "JetBrains Mono, JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace";
+
 /// Owns the font and layout contexts (both are expensive; reuse them).
 pub struct TextSystem {
     fonts: FontContext,
@@ -22,23 +26,57 @@ impl Default for TextSystem {
     }
 }
 
+/// Options for a paragraph. Defaults follow the style guide body copy.
+#[derive(Clone, Copy)]
+pub struct ParagraphStyle {
+    pub font_size: f32,
+    pub color: Color,
+    pub bold: bool,
+    /// Extra letterspacing in em (captions/hints use 0.12-0.2em).
+    pub letter_spacing_em: f32,
+    pub line_height: f32,
+}
+
+impl Default for ParagraphStyle {
+    fn default() -> Self {
+        Self {
+            font_size: 15.0,
+            color: crate::theme::INK,
+            bold: false,
+            letter_spacing_em: 0.0,
+            line_height: 1.65,
+        }
+    }
+}
+
 impl TextSystem {
-    /// Layout and draw a plain paragraph at `origin` wrapped to `max_width`.
-    pub fn draw_paragraph(
+    /// Layout and draw a paragraph at `origin` wrapped to `max_width`.
+    /// Returns the layout height in pixels.
+    pub fn draw_paragraph_styled(
         &mut self,
         scene: &mut Scene,
         text: &str,
         origin: (f64, f64),
         max_width: f32,
-        font_size: f32,
-        color: Color,
-    ) {
+        style: ParagraphStyle,
+    ) -> f64 {
         let mut builder = self.layouts.ranged_builder(&mut self.fonts, text, 1.0, true);
-        builder.push_default(StyleProperty::FontSize(font_size));
+        builder.push_default(StyleProperty::FontFamily(parley::FontFamily::Source(
+            std::borrow::Cow::Borrowed(FONT_STACK),
+        )));
+        builder.push_default(StyleProperty::FontSize(style.font_size));
+        if style.bold {
+            builder.push_default(StyleProperty::FontWeight(parley::FontWeight::BOLD));
+        }
+        if style.letter_spacing_em > 0.0 {
+            builder.push_default(StyleProperty::LetterSpacing(
+                style.letter_spacing_em * style.font_size,
+            ));
+        }
         builder.push_default(StyleProperty::LineHeight(
-            parley::LineHeight::FontSizeRelative(1.4),
+            parley::LineHeight::FontSizeRelative(style.line_height),
         ));
-        builder.push_default(StyleProperty::Brush(Brush::Solid(color)));
+        builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
         let mut layout: Layout<Brush> = builder.build(text);
         layout.break_all_lines(Some(max_width));
         layout.align(Alignment::Start, parley::AlignmentOptions::default());
@@ -49,6 +87,30 @@ impl TextSystem {
                 }
             }
         }
+        f64::from(layout.height())
+    }
+
+    /// Back-compat simple call.
+    pub fn draw_paragraph(
+        &mut self,
+        scene: &mut Scene,
+        text: &str,
+        origin: (f64, f64),
+        max_width: f32,
+        font_size: f32,
+        color: Color,
+    ) {
+        self.draw_paragraph_styled(
+            scene,
+            text,
+            origin,
+            max_width,
+            ParagraphStyle {
+                font_size,
+                color,
+                ..Default::default()
+            },
+        );
     }
 }
 

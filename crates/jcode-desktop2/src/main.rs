@@ -8,13 +8,14 @@ mod capture;
 mod harness;
 mod render;
 mod states;
+mod theme;
 mod text;
 
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use vello::Scene;
-use vello::kurbo::{Affine, Circle, RoundedRect};
+use vello::kurbo::Affine;
 use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -213,88 +214,116 @@ impl ApplicationHandler for App {
 }
 
 fn build_scene(scene: &mut Scene, text: &mut text::TextSystem, model: &Model, size: (u32, u32)) {
+    use text::ParagraphStyle;
     let (width, height) = (size.0 as f64, size.1 as f64);
-    let fill = |scene: &mut Scene, color: Color, shape: &RoundedRect| {
-        scene.fill(vello::peniko::Fill::NonZero, Affine::IDENTITY, color, None, shape);
+    let fill = |scene: &mut Scene, color: Color, shape: &vello::kurbo::Rect| {
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            Affine::IDENTITY,
+            color,
+            None,
+            shape,
+        );
+    };
+    let hairline = |scene: &mut Scene, y: f64, x0: f64, x1: f64| {
+        fill(
+            scene,
+            theme::RULE,
+            &vello::kurbo::Rect::new(x0, y, x1, y + 1.0),
+        );
     };
 
-    // Background.
+    // Paper.
     fill(
         scene,
-        Color::from_rgb8(0x14, 0x16, 0x1b),
-        &RoundedRect::new(0.0, 0.0, width, height, 0.0),
+        theme::PAPER,
+        &vello::kurbo::Rect::new(0.0, 0.0, width, height),
     );
 
-    // Status bar.
-    let status_color = if model.session_id.is_some() {
-        Color::from_rgb8(0x6f, 0xc2, 0x8f)
-    } else {
-        Color::from_rgb8(0xd7, 0xa6, 0x5f)
-    };
-    scene.fill(
-        vello::peniko::Fill::NonZero,
-        Affine::IDENTITY,
-        status_color,
-        None,
-        &Circle::new((28.0, 30.0), 6.0),
+    let margin = 48.0;
+    let right = width - margin;
+
+    // Masthead: product name (lowercase, bold) and status as a caption.
+    text.draw_paragraph_styled(
+        scene,
+        "jcode",
+        (margin, 30.0),
+        200.0,
+        ParagraphStyle {
+            font_size: 17.0,
+            bold: true,
+            ..Default::default()
+        },
     );
-    text.draw_paragraph(
+    text.draw_paragraph_styled(
         scene,
         &model.status,
-        (44.0, 20.0),
-        (width - 88.0) as f32,
-        13.0,
-        Color::from_rgb8(0x9a, 0xa0, 0xac),
+        (margin + 110.0, 35.0),
+        (right - margin - 110.0) as f32,
+        ParagraphStyle {
+            font_size: 11.0,
+            color: if model.session_id.is_some() {
+                theme::MUTED
+            } else {
+                theme::FAINT
+            },
+            letter_spacing_em: 0.12,
+            ..Default::default()
+        },
     );
+    hairline(scene, 64.0, margin, right);
 
-    // Transcript card.
-    let input_top = height - 92.0;
-    fill(
-        scene,
-        Color::from_rgb8(0x1a, 0x1d, 0x24),
-        &RoundedRect::new(20.0, 52.0, width - 20.0, input_top - 12.0, 12.0),
-    );
+    // Transcript: ink on paper, measure-limited like body copy.
+    let input_rule_y = height - 88.0;
     let transcript = if model.transcript.is_empty() {
-        "Type a message and press Enter."
+        "type a message and press enter."
     } else {
         &model.transcript
     };
-    // Show the tail of the transcript (no scrolling yet).
+    let transcript_color = if model.transcript.is_empty() {
+        theme::FAINT
+    } else {
+        theme::INK
+    };
+    let line_height_px = 14.0 * 1.65;
+    let visible_lines = ((input_rule_y - 96.0) / line_height_px) as usize;
     let tail: String = transcript
         .lines()
         .rev()
-        .take(((input_top - 90.0) / 22.0) as usize)
+        .take(visible_lines.max(1))
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
-    text.draw_paragraph(
+    text.draw_paragraph_styled(
         scene,
         &tail,
-        (36.0, 68.0),
-        (width - 72.0) as f32,
-        14.0,
-        Color::from_rgb8(0xe8, 0xea, 0xf0),
+        (margin, 84.0),
+        (right - margin).min(760.0) as f32,
+        ParagraphStyle {
+            font_size: 14.0,
+            color: transcript_color,
+            ..Default::default()
+        },
     );
 
-    // Input card.
-    fill(
-        scene,
-        Color::from_rgb8(0x22, 0x26, 0x2f),
-        &RoundedRect::new(20.0, input_top, width - 20.0, height - 20.0, 12.0),
-    );
-    let prompt = if model.busy {
-        "(working...)".to_string()
+    // Input: a single hairline above the prompt, like a form rule on paper.
+    hairline(scene, input_rule_y, margin, right);
+    let (prompt, prompt_color) = if model.busy {
+        ("working...".to_string(), theme::MUTED)
     } else {
-        format!("{}_", model.input)
+        (format!("> {}_", model.input), theme::INK)
     };
-    text.draw_paragraph(
+    text.draw_paragraph_styled(
         scene,
         &prompt,
-        (36.0, input_top + 16.0),
-        (width - 72.0) as f32,
-        15.0,
-        Color::from_rgb8(0xcf, 0xd4, 0xdd),
+        (margin, input_rule_y + 18.0),
+        (right - margin) as f32,
+        ParagraphStyle {
+            font_size: 14.0,
+            color: prompt_color,
+            ..Default::default()
+        },
     );
 }
