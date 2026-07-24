@@ -355,11 +355,6 @@ const MAX_RETRIES: u32 = 3;
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
-/// Default max output tokens for Anthropic models.
-/// Set to 32k to avoid truncating long tool calls (e.g. writing large files).
-/// Override with JCODE_ANTHROPIC_MAX_TOKENS env var.
-const DEFAULT_MAX_TOKENS: u32 = 32_768;
-
 /// Cached OAuth credentials
 #[derive(Clone)]
 struct CachedCredentials {
@@ -377,7 +372,10 @@ pub struct AnthropicProvider {
     /// Cached OAuth credentials (None if using API key)
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
-    max_tokens: u32,
+    /// Explicit `JCODE_ANTHROPIC_MAX_TOKENS` override. When unset, the output
+    /// budget is derived per model so newer generations are not clamped to the
+    /// legacy 32K default.
+    max_tokens_override: Option<u32>,
     oauth_session_id: String,
     oauth_preflight_done: Arc<AtomicBool>,
 }
@@ -461,10 +459,9 @@ impl AnthropicProvider {
             })
         });
 
-        let max_tokens = std::env::var("JCODE_ANTHROPIC_MAX_TOKENS")
+        let max_tokens_override = std::env::var("JCODE_ANTHROPIC_MAX_TOKENS")
             .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .unwrap_or(DEFAULT_MAX_TOKENS);
+            .and_then(|v| v.trim().parse::<u32>().ok());
         let reasoning_effort = jcode_base::config::config()
             .provider
             .anthropic_reasoning_effort
@@ -481,7 +478,7 @@ impl AnthropicProvider {
             credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env(
                 jcode_provider_core::DualAuthProvider::Anthropic,
             ))),
-            max_tokens,
+            max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
         }
@@ -660,6 +657,14 @@ impl AnthropicProvider {
         tier.filter(|_| Self::model_supports_priority_service_tier(model))
     }
 
+    /// Output-token budget for `model`: an explicit env override when set,
+    /// otherwise the model's published maximum. A flat default would clamp
+    /// 128K-output models to 32K and truncate long agentic turns mid-tool-call.
+    fn max_tokens_for(&self, model: &str) -> u32 {
+        self.max_tokens_override
+            .unwrap_or_else(|| jcode_provider_core::anthropic::anthropic_max_output_tokens(model))
+    }
+
     fn manual_thinking_budget(effort: &str, max_tokens: u32) -> Option<u32> {
         let desired = match effort {
             "low" => 1_024,
@@ -724,7 +729,7 @@ impl AnthropicProvider {
             // toggle is on.
             effort
                 .or(show_thinking.then_some("low"))
-                .and_then(|effort| Self::manual_thinking_budget(effort, self.max_tokens))
+                .and_then(|effort| Self::manual_thinking_budget(effort, self.max_tokens_for(model)))
                 .map(|budget_tokens| ApiThinking::Enabled { budget_tokens })
         } else {
             None
@@ -1012,7 +1017,7 @@ impl Provider for AnthropicProvider {
 
         let request = ApiRequest {
             model: api_model,
-            max_tokens: self.max_tokens,
+            max_tokens: self.max_tokens_for(&model),
             system: build_system_param(system, is_oauth),
             messages: format_messages_with_identity(api_messages, is_oauth),
             tools: if api_tools.is_empty() {
@@ -1317,7 +1322,7 @@ impl Provider for AnthropicProvider {
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
             credentials: Arc::new(RwLock::new(None)),
             credential_mode: Arc::clone(&self.credential_mode),
-            max_tokens: self.max_tokens,
+            max_tokens_override: self.max_tokens_override,
             oauth_session_id: self.oauth_session_id.clone(),
             oauth_preflight_done: Arc::new(AtomicBool::new(
                 self.oauth_preflight_done.load(Ordering::Relaxed),
@@ -1369,7 +1374,7 @@ impl Provider for AnthropicProvider {
 
         let request = ApiRequest {
             model: api_model,
-            max_tokens: self.max_tokens,
+            max_tokens: self.max_tokens_for(&model),
             system: build_system_param_split(system_static, system_dynamic, is_oauth),
             messages: format_messages_with_identity(api_messages, is_oauth),
             tools: if api_tools.is_empty() {
