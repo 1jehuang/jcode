@@ -2290,6 +2290,9 @@ pub(in crate::tui::app) fn handle_server_event(
             if provider_meta_changed {
                 app.update_terminal_title();
             }
+            // A picker opened before the catalog landed is showing placeholder
+            // rows; rebuild it in place now that real routes exist.
+            app.refresh_open_model_picker_after_catalog_update();
             // The catalog event can arrive while the client is otherwise idle.
             // Returning false here leaves the updated picker, refresh summary,
             // and status notice invisible until an unrelated input or periodic

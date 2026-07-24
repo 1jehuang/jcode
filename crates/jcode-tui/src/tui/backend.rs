@@ -602,6 +602,20 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server for the fully route-expanded model catalog.
+    ///
+    /// The bootstrap `History` payload deliberately ships model *names* only
+    /// (route expansion is expensive), and live bus catalog pushes are
+    /// downgraded to names-only above a size cap. Without this request a client
+    /// whose persisted catalog cache is missing or stale has nothing but
+    /// placeholder "remote-catalog" rows in `/model`.
+    pub async fn request_model_catalog(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetModelCatalog { id }).await?;
+        Ok(id)
+    }
+
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         let request = Request::ResumeSession {

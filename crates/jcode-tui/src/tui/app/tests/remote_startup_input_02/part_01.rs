@@ -1832,3 +1832,141 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
         "plain rows must not override the server's effort"
     );
 }
+
+#[test]
+fn test_model_switch_notice_omits_placeholder_route_details() {
+    // Selecting a model whose chosen row is a placeholder ("remote-catalog")
+    // must not advertise a bogus provider/method or the "refreshing route
+    // details…" text; those describe a catalog still being refreshed.
+    with_temp_jcode_home(|| {
+        let model = "placeholder-only-model";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("Some Server".to_string());
+        app.remote_provider_model = Some("other-model".to_string());
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "Some Server".to_string(),
+            api_method: "remote-catalog".to_string(),
+            available: true,
+            detail: "refreshing route details…".to_string(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+        // Placeholder-only entries also get real routes synthesized, so locate
+        // the entry/option pair that is still the placeholder and pick it.
+        let (entry_idx, option_idx) = {
+            let picker = app
+                .inline_interactive_state
+                .as_ref()
+                .expect("model picker should be open");
+            picker
+                .entries
+                .iter()
+                .enumerate()
+                .find_map(|(entry_idx, entry)| {
+                    entry
+                        .options
+                        .iter()
+                        .position(|route| route.api_method == "remote-catalog")
+                        .map(|option_idx| (entry_idx, option_idx))
+                })
+                .expect("a placeholder route option should be present")
+        };
+        let filtered_pos = app
+            .inline_interactive_state
+            .as_ref()
+            .unwrap()
+            .filtered
+            .iter()
+            .position(|&i| i == entry_idx)
+            .expect("placeholder entry should be in the filtered list");
+        {
+            let picker = app.inline_interactive_state.as_mut().unwrap();
+            picker.selected = filtered_pos;
+            picker.entries[entry_idx].selected_option = option_idx;
+        }
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        let notice = app
+            .status_notice
+            .as_ref()
+            .map(|(text, _)| text.clone())
+            .expect("a model switch notice should be set");
+        assert!(!notice.contains("remote-catalog"), "got {notice}");
+        assert!(
+            !notice.contains("refreshing route details"),
+            "got {notice}"
+        );
+        assert!(notice.starts_with("Model → "), "got {notice}");
+        assert!(!notice.contains(" via "), "got {notice}");
+    });
+}
+
+#[test]
+fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
+    // A picker opened while the catalog is still names-only shows placeholder
+    // rows. When the detailed catalog lands, the open picker must be rebuilt
+    // rather than left stale until the user reopens it.
+    with_temp_jcode_home(|| {
+        let model = "gpt-5.5";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_provider_model = Some(model.to_string());
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "remote-catalog".to_string(),
+            available: true,
+            detail: "refreshing route details…".to_string(),
+            cheapness: None,
+        }];
+
+        app.open_model_picker();
+        assert!(app.inline_interactive_state.is_some());
+
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-api".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }];
+        app.invalidate_model_picker_cache();
+        app.refresh_open_model_picker_after_catalog_update();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("picker should still be open after the catalog update");
+        assert!(
+            picker.entries.iter().any(|entry| entry.name.starts_with(model)),
+            "rebuilt picker should still list the model"
+        );
+        assert!(
+            picker.entries.iter().all(|entry| {
+                entry
+                    .options
+                    .iter()
+                    .all(|route| route.api_method != "remote-catalog")
+            }),
+            "rebuilt picker should not keep placeholder rows"
+        );
+        assert!(
+            picker.entries.iter().any(|entry| {
+                entry
+                    .options
+                    .iter()
+                    .any(|route| route.api_method == "openai-api")
+            }),
+            "rebuilt picker should expose the real route"
+        );
+    });
+}

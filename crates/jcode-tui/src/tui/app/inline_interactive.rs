@@ -607,10 +607,9 @@ impl App {
         // Jcode subscription routes are a complete, server-managed catalog.
         // Do not mix in locally configured Anthropic/OpenAI credentials merely
         // because a curated model also belongs to one of those upstreams.
-        let provider_is_jcode_subscription =
-            remote_provider_name.is_some_and(|name| {
-                name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
-            });
+        let provider_is_jcode_subscription = remote_provider_name.is_some_and(|name| {
+            name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
+        });
         if provider_is_jcode_subscription {
             routes.clear();
             Self::append_jcode_subscription_routes_static(
@@ -688,10 +687,9 @@ impl App {
                     )
                 })
                 .collect();
-            for route in crate::provider::remote_model_routes_fallback(
-                remote_provider_name,
-                &missing,
-            ) {
+            for route in
+                crate::provider::remote_model_routes_fallback(remote_provider_name, &missing)
+            {
                 if !existing.contains(&(
                     route.model.clone(),
                     route.provider.clone(),
@@ -936,6 +934,22 @@ impl App {
 
     fn open_model_picker_preserving_input(&mut self) {
         self.open_model_picker_inner(true);
+    }
+
+    /// Rebuild an already-open `/model` picker after a fresh catalog arrives.
+    ///
+    /// Catalog updates only invalidate the picker cache, so a picker opened on
+    /// placeholder ("remote-catalog") rows would keep showing them until the
+    /// user closed and reopened it. Reopen in place instead, preserving the
+    /// typed filter.
+    pub(super) fn refresh_open_model_picker_after_catalog_update(&mut self) {
+        let picker_open = self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(picker_is_runtime_model_picker);
+        if picker_open && !self.auth_catalog_refresh_pending {
+            self.open_model_picker_preserving_input();
+        }
     }
 
     /// Apply a completed auth-driven catalog refresh to an already-open picker.
