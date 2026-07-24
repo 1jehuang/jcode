@@ -352,13 +352,12 @@ fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
     ]
 }
 
-/// Vertical auth inventory: one line per configured provider (green/yellow).
-/// Unconfigured providers are listed inline on the `/login` heading instead so
-/// the header height stays stable as credentials are added.
+/// Vertical auth inventory: one line per provider. Configured providers get
+/// green/yellow dots; unconfigured ones get a dim hollow dot so they read as
+/// available-to-add without cluttering the `/login` heading.
 pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
     auth_full_specs(auth)
         .into_iter()
-        .filter(|(_, state)| *state != AuthState::NotConfigured)
         .map(|(label, state)| {
             Line::from(vec![
                 Span::styled(
@@ -368,16 +367,6 @@ pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
                 Span::styled(format!(" {}", label), Style::default().fg(dim_color())),
             ])
         })
-        .collect()
-}
-
-/// Bare names of providers with no configured credentials, for the `/login`
-/// heading's inline list.
-pub(super) fn unconfigured_auth_provider_names(auth: &AuthStatus) -> Vec<String> {
-    auth_full_specs(auth)
-        .into_iter()
-        .filter(|(_, state)| *state == AuthState::NotConfigured)
-        .map(|(label, _)| label)
         .collect()
 }
 
@@ -789,20 +778,10 @@ fn build_header_lines_with_auth(
     let align = ratatui::layout::Alignment::Left;
     let w = width as usize;
 
-    // Auth inventory: `/login` heading lists the providers that can still be
-    // added inline (so the header height stays stable), then one configured
-    // provider per line.
+    // Auth inventory: `/login` heading, then one provider per line (dim
+    // hollow dot for unconfigured providers).
     let auth_lines = build_auth_status_lines(auth);
-    let mut login_heading = "/login to add provider".to_string();
-    let missing = unconfigured_auth_provider_names(auth);
-    if !missing.is_empty() {
-        let inline = format!("/login to add provider: {}", missing.join(", "));
-        if inline.chars().count() <= w {
-            login_heading = inline;
-        } else {
-            login_heading = format!("/login to add provider: +{}", missing.len());
-        }
-    }
+    let login_heading = "/login to add provider".to_string();
     lines.push(
         Line::from(Span::styled(login_heading, Style::default().fg(dim_color())))
             .alignment(align),
@@ -1531,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_lines_show_configured_and_heading_lists_missing() {
+    fn auth_status_lines_show_all_providers_with_state_dots() {
         let auth = AuthStatus {
             anthropic: ProviderAuth {
                 state: AuthState::Expired,
@@ -1557,21 +1536,16 @@ mod tests {
             "rendered: {rendered}"
         );
         assert!(rendered.contains("openai(key)"), "rendered: {rendered}");
-        // Unconfigured providers move to the /login heading's inline list.
-        assert!(!rendered.contains("openrouter"), "rendered: {rendered}");
-        let missing = unconfigured_auth_provider_names(&auth);
-        assert!(missing.contains(&"openrouter".to_string()), "{missing:?}");
-        assert!(missing.contains(&"cursor".to_string()), "{missing:?}");
-        assert!(missing.contains(&"copilot".to_string()), "{missing:?}");
-        assert!(!missing.iter().any(|name| name.starts_with("anthropic")), "{missing:?}");
+        // Unconfigured providers get their own line with a hollow dot.
+        assert!(rendered.contains("openrouter"), "rendered: {rendered}");
+        assert!(rendered.contains("copilot"), "rendered: {rendered}");
+        assert!(rendered.contains("○"), "rendered: {rendered}");
     }
 
     #[test]
-    fn auth_status_lines_are_empty_when_nothing_configured() {
+    fn auth_status_lines_list_all_providers_when_nothing_configured() {
         let lines = build_auth_status_lines(&AuthStatus::default());
-        assert!(lines.is_empty(), "lines should be empty: {lines:?}");
-        let missing = unconfigured_auth_provider_names(&AuthStatus::default());
-        assert!(!missing.is_empty(), "all providers should be listed as missing: {missing:?}");
+        assert!(!lines.is_empty(), "all providers should be listed: {lines:?}");
     }
 
     #[test]
