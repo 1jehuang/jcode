@@ -7,8 +7,10 @@
 
 use crate::Model;
 
+type NodeBuilder = fn() -> Model;
+
 /// All named state-space nodes. Keep deterministic: no clocks, no randomness.
-pub const NODES: &[(&str, fn() -> Model)] = &[
+pub const NODES: &[(&str, NodeBuilder)] = &[
     ("connecting", connecting),
     ("attached_empty", attached_empty),
     ("mid_input", mid_input),
