@@ -56,6 +56,53 @@ struct HandtermNativeLatexCache {
 static HANDTERM_NATIVE_LATEX: LazyLock<Mutex<HandtermNativeLatexCache>> =
     LazyLock::new(|| Mutex::new(HandtermNativeLatexCache::default()));
 
+/// Negative cache for LaTeX snippets whose render already failed.
+///
+/// `render_latex_image` runs synchronously on the draw path, so without this a
+/// snippet that fails (or times out after `COMMAND_TIMEOUT`) respawns
+/// latex/pdflatex on every redraw, chaining hundreds of processes and freezing
+/// the TUI for minutes (see #563).
+const FAILED_RENDER_CACHE_LIMIT: usize = 4096;
+
+#[derive(Default)]
+struct FailedRenderCache {
+    entries: HashMap<u64, String>,
+    order: VecDeque<u64>,
+}
+
+static FAILED_RENDERS: LazyLock<Mutex<FailedRenderCache>> =
+    LazyLock::new(|| Mutex::new(FailedRenderCache::default()));
+
+fn cached_render_failure(key: u64) -> Option<String> {
+    FAILED_RENDERS
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&key).cloned())
+}
+
+fn remember_render_failure(key: u64, error: &str) {
+    let Ok(mut cache) = FAILED_RENDERS.lock() else {
+        return;
+    };
+    if cache.entries.insert(key, error.to_string()).is_none() {
+        cache.order.push_back(key);
+    }
+    while cache.order.len() > FAILED_RENDER_CACHE_LIMIT {
+        if let Some(oldest) = cache.order.pop_front() {
+            cache.entries.remove(&oldest);
+        }
+    }
+}
+
+/// Test hook: forget remembered failures so a retry actually re-renders.
+#[cfg(test)]
+pub(super) fn reset_failed_render_cache() {
+    if let Ok(mut cache) = FAILED_RENDERS.lock() {
+        cache.entries.clear();
+        cache.order.clear();
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_HANDTERM_NATIVE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -252,7 +299,19 @@ pub(super) fn render_latex_image(
         return Err("terminal image protocol unavailable".to_string());
     }
     let dpi = render_dpi(super::mermaid::get_font_size());
-    let artifact = render_artifact(source, display, dpi, &Toolchain::from_environment())?;
+    // Never re-run the toolchain for a snippet that already failed at this
+    // geometry: this function runs on the synchronous draw path (see #563).
+    let failure_key = cache_key(source, display, dpi);
+    if let Some(error) = cached_render_failure(failure_key) {
+        return Err(error);
+    }
+    let artifact = match render_artifact(source, display, dpi, &Toolchain::from_environment()) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            remember_render_failure(failure_key, &error);
+            return Err(error);
+        }
+    };
     let hash =
         super::mermaid::register_external_image(&artifact.path, artifact.width, artifact.height);
     register_copy_source(hash, source, display);
@@ -774,6 +833,37 @@ mod tests {
         assert!(with_handterm_native_latex_override(true, || {
             render_handterm_native_latex(r"\frac{a}{b}", true, Some(0)).is_none()
         }));
+    }
+
+    #[test]
+    fn failed_renders_are_remembered_so_the_toolchain_is_not_respawned() {
+        // #563: a failing snippet must not re-run latex/pdflatex on every redraw.
+        reset_failed_render_cache();
+        let key = cache_key("unique_failed_render_test_2026", true, 240);
+        assert_eq!(cached_render_failure(key), None);
+        remember_render_failure(key, "pdflatex timed out");
+        assert_eq!(
+            cached_render_failure(key).as_deref(),
+            Some("pdflatex timed out")
+        );
+        // A different snippet/geometry is unaffected.
+        assert_eq!(
+            cached_render_failure(cache_key("unique_failed_render_test_2026", false, 240)),
+            None
+        );
+        reset_failed_render_cache();
+        assert_eq!(cached_render_failure(key), None);
+    }
+
+    #[test]
+    fn failed_render_cache_is_bounded() {
+        reset_failed_render_cache();
+        for i in 0..(FAILED_RENDER_CACHE_LIMIT + 50) {
+            remember_render_failure(i as u64, "boom");
+        }
+        let len = FAILED_RENDERS.lock().unwrap().entries.len();
+        assert!(len <= FAILED_RENDER_CACHE_LIMIT, "cache grew to {len}");
+        reset_failed_render_cache();
     }
 
     #[test]
