@@ -673,9 +673,16 @@ mod truncation_tests {
 
     #[test]
     fn format_comm_context_history_does_not_panic_on_multibyte() {
+        // Craft content whose byte index 500 lands strictly inside a code point:
+        // 499 ASCII bytes then a 3-byte char occupying bytes 499..502.
+        let content = format!("{}{}", "a".repeat(499), "ủ".repeat(50));
+        assert!(
+            !content.is_char_boundary(500),
+            "probe must straddle a code point"
+        );
         let messages = vec![HistoryMessage {
             role: "user".to_string(),
-            content: "Xin chào thế giới ủ".repeat(100),
+            content,
             tool_calls: None,
             tool_data: None,
         }];
