@@ -64,21 +64,22 @@ fn rich_data() -> InfoWidgetData {
 
 #[test]
 fn flat_content_is_perfectly_stable() {
-    // Uniform narrow content: the negative-space shape never changes while scrolling,
-    // so a well-behaved widget should never move.
+    // Uniform narrow content: the negative-space shape never changes while scrolling.
+    // Residents ride the transcript, so their absolute `y` tracks the scroll, but
+    // relative to the content they must not drift at all, and they must not flicker.
     let content: Vec<u16> = vec![20; 200];
     let report = measure_scroll(&content, 100, 20, &sample_data());
     assert!(report.frames > 10, "expected many scroll frames");
     assert_eq!(
-        report.total_travel, 0,
-        "uniform content should produce zero widget travel, got {:#?}",
+        report.total_content_travel, 0,
+        "uniform content should produce zero content-relative travel, got {:#?}",
         report
     );
     assert_eq!(
         report.total_flicker, 0,
         "uniform content should not flicker"
     );
-    assert!(report.distraction_per_100_lines.abs() < f64::EPSILON);
+    assert_eq!(report.total_size_churn, 0, "widths must stay frozen");
 }
 
 #[test]
@@ -135,10 +136,10 @@ fn empty_input_is_safe() {
     assert!(report.widgets.is_empty());
 }
 
-/// Regression guard for the HUD-pinning fix: when content has occasional long
-/// lines (the common chat/markdown shape), widgets must hold their screen slot -
-/// i.e. *zero positional travel* - instead of jumping to a new pocket each frame.
-/// Before the fix this profile produced ~544 travel/100 lines; after it is 0.
+/// Regression guard for the resident model: when content has occasional long
+/// lines (the common chat/markdown shape), widgets must ride the transcript with
+/// *zero content-relative travel* - they belong to their pocket of negative space
+/// and never drift against the surrounding text or resize while placed.
 #[test]
 fn occasional_long_lines_do_not_move_widgets() {
     // Periods chosen so the gaps between long lines are tall enough to actually
@@ -153,9 +154,14 @@ fn occasional_long_lines_do_not_move_widgets() {
             "period {period}: expected a widget to be placed: {report:#?}"
         );
         assert_eq!(
-            report.total_travel, 0,
-            "period {period}: widgets should not slide/jump, got {} travel: {:#?}",
-            report.total_travel, report
+            report.total_content_travel, 0,
+            "period {period}: widgets should not drift against the transcript, got {} \
+             content travel: {:#?}",
+            report.total_content_travel, report
+        );
+        assert_eq!(
+            report.total_size_churn, 0,
+            "period {period}: resident widgets must not resize in place: {report:#?}"
         );
     }
 }

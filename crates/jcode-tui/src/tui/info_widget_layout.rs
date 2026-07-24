@@ -12,10 +12,15 @@ const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget.
 const MIN_WIDGET_HEIGHT: u16 = 5;
 /// How many consecutive frames a widget may stay hidden-in-place before its
-/// anchor is abandoned and Phase 2 is allowed to re-home it elsewhere. This keeps
-/// a momentary wide line from teleporting the widget, while still letting it find
-/// a new home if the user parks on a region that permanently covers its slot.
-const MAX_HIDDEN_FRAMES: u16 = 16;
+/// anchor is abandoned and Phase 2 is allowed to re-home it elsewhere.
+///
+/// Under the resident model a widget's rows are bound to transcript lines, so
+/// the content beneath it is normally invariant and hiding only happens when
+/// that content actively re-renders (streaming region, collapse/expand,
+/// markdown refresh). Residents wait that churn out rather than teleporting,
+/// so this is generous: it exists only as a backstop for content that
+/// permanently grew over the slot.
+const MAX_HIDDEN_FRAMES: u16 = 120;
 
 /// Persistent memory of where a widget lives, so it can hold a fixed screen slot
 /// across frames (HUD-style) instead of being re-solved from scratch each frame.
@@ -24,12 +29,10 @@ pub(crate) struct WidgetAnchor {
     pub placement: WidgetPlacement,
     /// Consecutive frames this anchor has been retained but not rendered.
     pub hidden_frames: u16,
-    /// Absolute transcript line the widget's top row is pinned to. When the user is
-    /// scrolling ([`Margins::content_anchored`]) the widget rides with this content
-    /// line instead of holding a fixed screen row, so it sticks to the same pocket
-    /// of negative space and scrolls along with the text. Refreshed every frame in
-    /// screen-anchored mode so a later switch into content-anchored mode hands off
-    /// seamlessly.
+    /// Absolute transcript line the widget's top row is pinned to. Residents
+    /// always ride with this content line, so they stick to the same pocket of
+    /// negative space and scroll along with the text. When the view is pinned at
+    /// the bottom and new lines append, the resident drifts up with its content.
     pub content_top: usize,
 }
 
@@ -61,10 +64,6 @@ pub struct Margins {
     /// placement engine translate a content-anchored widget by the scroll delta so
     /// it rides the transcript instead of holding a fixed screen row.
     pub scroll_top: usize,
-    /// When true (the user is actively scrolling), anchored widgets stick to their
-    /// transcript line and scroll with the content. When false (pinned at the
-    /// bottom / streaming) they hold a fixed screen row as before.
-    pub content_anchored: bool,
 }
 
 impl Margins {
@@ -248,7 +247,14 @@ pub(crate) fn calculate_placements_anchored(
         // row as before, and refresh `content_top` so a later switch into scrolling
         // hands off seamlessly.
         let height = prev.rect.height as usize;
-        let (row_start, target_y, content_top) = if margins.content_anchored {
+        // Resident model: every anchor is bound to a transcript line and rides
+        // with it, in both scrolling and pinned-at-bottom (streaming) modes. When
+        // new lines append while pinned, `scroll_top` advances and the widget
+        // drifts up with the content it belongs to instead of holding a screen
+        // row while text churns under it. If its content line has scrolled above
+        // the viewport the resident retires, and Phase 2 may house a fresh
+        // instance in newly settled space.
+        let (row_start, target_y, content_top) = {
             if anchor.content_top < margins.scroll_top {
                 continue;
             }
@@ -258,17 +264,6 @@ pub(crate) fn calculate_placements_anchored(
                 messages_area.y.saturating_add(row as u16),
                 anchor.content_top,
             )
-        } else {
-            if prev.rect.y < messages_area.y {
-                // The messages area shifted down since this anchor was recorded
-                // (e.g. a banner appeared above it), so the recorded slot now
-                // starts above the area. Rendering at the stale `prev.rect.y`
-                // would draw over whatever now occupies those rows, so drop the
-                // anchor and let Phase 2 re-home the widget inside the bounds.
-                continue;
-            }
-            let row = (prev.rect.y - messages_area.y) as usize;
-            (row, prev.rect.y, margins.scroll_top + row)
         };
         let row_end = row_start + height;
         let widths = match prev.side {
@@ -400,20 +395,11 @@ pub(crate) fn calculate_placements_anchored(
             continue;
         }
 
-        // Where inside the pocket to seat the widget.
-        //
-        // Content-anchored (scrolling): seat it at the *bottom* of the pocket so it
-        // has the maximum runway to ride upward with the transcript before scrolling
-        // off the top - otherwise a widget born at the pocket's top row would fall off
-        // and re-home every single frame (a constant recycle). The leftover free space
-        // is then the region above it.
-        //
-        // Screen-anchored: seat it at the top as before; it holds a fixed screen row.
-        let placed_top = if margins.content_anchored {
-            top + height.saturating_sub(widget_height)
-        } else {
-            top
-        };
+        // Seat the widget at the *bottom* of the pocket so it has the maximum
+        // runway to ride upward with the transcript before scrolling off the top -
+        // a widget born at the pocket's top row would fall off and re-home every
+        // frame (a constant recycle). The leftover free space is the region above.
+        let placed_top = top + height.saturating_sub(widget_height);
 
         let placement = WidgetPlacement {
             kind,
@@ -438,13 +424,8 @@ pub(crate) fn calculate_placements_anchored(
             continue;
         }
 
-        // The leftover pocket: below the widget when top-aligned, above it when the
-        // widget was seated at the bottom (content-anchored).
-        let new_top = if margins.content_anchored {
-            top
-        } else {
-            top + widget_height
-        };
+        // The leftover pocket is the region above the bottom-seated widget.
+        let new_top = top;
         all_rects[idx].1 = new_top;
         all_rects[idx].2 = remaining_height;
 

@@ -874,6 +874,13 @@ struct WidgetsState {
     placements: Vec<WidgetPlacement>,
     /// Persistent widget anchors (HUD slot memory, including hidden-in-place ones)
     anchors: Vec<super::info_widget_layout::WidgetAnchor>,
+    /// Settlement tracker: which transcript lines' negative space has stopped
+    /// changing and may therefore host a *new* resident widget.
+    settlement: super::info_widget_settle::SettlementTracker,
+    /// Content width the current anchors were computed at. A width change means
+    /// every transcript line re-wrapped, so anchors (keyed by absolute line) are
+    /// meaningless and must be flushed for one clean global re-layout.
+    anchors_area_width: u16,
     /// When the SwarmStatus dock was last engaged (placed or anchored). Lets the
     /// inline swarm strip keep standing down through brief dock dropouts instead
     /// of popping back for a few frames (which resizes the bottom chrome and
@@ -888,6 +895,8 @@ impl Default for WidgetsState {
             widget_states: HashMap::new(),
             placements: Vec::new(),
             anchors: Vec::new(),
+            settlement: super::info_widget_settle::SettlementTracker::default(),
+            anchors_area_width: 0,
             swarm_dock_last_engaged: None,
         }
     }
@@ -918,6 +927,42 @@ pub fn is_enabled() -> bool {
         .as_ref()
         .map(|s| s.enabled)
         .unwrap_or(true)
+}
+
+/// Intersect the dock-gating `reliable` margin profile with the settlement
+/// profile, so a *new* resident widget can only be placed next to transcript
+/// lines whose negative space has stopped changing (never the streaming tail or
+/// a re-rendering region). Also flushes all anchors when the content width
+/// changes: a re-wrap moves every transcript line, so line-keyed anchors are
+/// meaningless and one clean global re-layout is better than widgets drawn over
+/// reflowed text.
+pub fn apply_settlement(margins: &mut Margins, area_width: u16) {
+    let mut guard = get_or_init_state();
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    if state.anchors_area_width != area_width {
+        state.anchors.clear();
+        state.settlement.reset();
+        state.anchors_area_width = area_width;
+    }
+    let settled = state.settlement.observe(margins, area_width);
+    intersect_widths(&mut margins.right_reliable, &settled.right);
+    if margins.centered {
+        intersect_widths(&mut margins.left_reliable, &settled.left);
+    }
+}
+
+/// Per-row minimum of `dst` and `src`. If `dst` is empty (no look-ahead
+/// profile), it becomes `src` so settlement still gates docking on its own.
+fn intersect_widths(dst: &mut Vec<u16>, src: &[u16]) {
+    if dst.is_empty() {
+        *dst = src.to_vec();
+        return;
+    }
+    for (row, d) in dst.iter_mut().enumerate() {
+        *d = (*d).min(src.get(row).copied().unwrap_or(0));
+    }
 }
 
 /// Calculate widget placements for multiple widgets

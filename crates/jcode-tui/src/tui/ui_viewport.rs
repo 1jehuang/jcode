@@ -472,14 +472,13 @@ pub(super) fn draw_messages(
         right_widths: vec![0; prompt_preview_lines as usize],
         left_widths: vec![0; prompt_preview_lines as usize],
         centered: content_margins.centered,
-        // Bind row `r` of the margin to transcript line `scroll_top + r` so a
-        // content-anchored info widget rides the transcript while the user scrolls
-        // instead of churning against a fixed screen row. The prompt-preview band at
-        // the top is synthetic (not part of the scrolled transcript), so offset by it
-        // to keep the content rows aligned. While pinned at the bottom (auto-follow),
-        // widgets stay screen-anchored as before.
+        // Bind row `r` of the margin to transcript line `scroll_top + r` so info
+        // widgets are residents of the transcript: they ride with the content they
+        // were placed next to, whether the user is scrolling or new lines are
+        // appending while pinned at the bottom. The prompt-preview band at the top
+        // is synthetic (not part of the scrolled transcript), so offset by it to
+        // keep the content rows aligned.
         scroll_top: scroll.saturating_sub(prompt_preview_lines as usize),
-        content_anchored: app.auto_scroll_paused(),
         ..Default::default()
     };
     margins
@@ -1249,16 +1248,17 @@ pub(super) fn draw_messages(
         );
     }
 
-    // Derive the look-ahead "reliable" width profile that gates where *new* info
-    // widgets may dock, so a freshly placed widget won't be covered by a wide line
-    // one scroll line later. We use a small windowed minimum over the assembled
-    // per-row free widths (the rows already on screen above/below each candidate
-    // row), which keeps it cheap and needs no off-screen line materialization.
-    // Pinned widgets still size to the instantaneous widths for full coverage.
+    // Derive the dock-gating "reliable" width profile for *new* info widgets:
+    // the intersection of a small look-ahead windowed minimum (so a fresh widget
+    // won't be covered by a wide line one scroll line later) and the settlement
+    // profile (only transcript lines whose negative space has stopped changing
+    // may host a new widget - never the streaming tail or a re-rendering
+    // region). Pinned residents still size to the instantaneous widths.
     margins.right_reliable = windowed_min(&margins.right_widths, INFO_WIDGET_LOOKAHEAD_ROWS);
     if margins.centered {
         margins.left_reliable = windowed_min(&margins.left_widths, INFO_WIDGET_LOOKAHEAD_ROWS);
     }
+    info_widget::apply_settlement(&mut margins, content_area.width);
 
     margins
 }

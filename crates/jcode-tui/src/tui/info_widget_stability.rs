@@ -454,9 +454,9 @@ pub enum SimMode {
     /// Look-ahead sizing with NO anchor carry (re-solve each frame). Isolates how
     /// much stability comes from the smoothed profile alone vs the anchor logic.
     LookAheadFresh(u16),
-    /// Anchored carry PLUS content anchoring: widgets are pinned to a transcript line
-    /// and ride the scroll (the "stick to one negative-space spot" behaviour). This
-    /// is what the live renderer uses while the user is actively scrolling.
+    /// Anchored carry PLUS content anchoring. Since the resident model made
+    /// content anchoring unconditional, this is now identical to `Anchored` and
+    /// kept only so existing A/B benches keep compiling.
     ContentAnchored,
 }
 
@@ -518,7 +518,6 @@ pub fn simulate_scroll_mode(
         _ => 0,
     };
     let greedy = matches!(mode, SimMode::Greedy | SimMode::LookAheadFresh(_));
-    let content_anchored = matches!(mode, SimMode::ContentAnchored);
 
     // Carry anchors across frames exactly like the live renderer does, so the
     // HUD pinning / hide-in-place behaviour is exercised identically.
@@ -538,7 +537,6 @@ pub fn simulate_scroll_mode(
             right_reliable,
             left_reliable: Vec::new(),
             scroll_top: scroll,
-            content_anchored,
         };
         // Greedy mode forgets all anchors each frame, so every frame independently
         // maximizes coverage (the old "fill the biggest pocket now" philosophy).
