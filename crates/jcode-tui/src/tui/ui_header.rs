@@ -626,43 +626,6 @@ fn build_persistent_header_with_auth(
         .as_deref()
         .map(|version| header_version_label(version, include_hash));
 
-    // Unseen release notes render first, above the `jcode` line, in a rounded
-    // box that is only as wide as its content.
-    let new_entries = unseen_changelog_entries();
-    if !new_entries.is_empty() && w > 20 {
-        const MAX_LINES: usize = 8;
-        let available_width = w.saturating_sub(2);
-        let display_count = new_entries.len().min(MAX_LINES);
-        let has_more = new_entries.len() > MAX_LINES;
-
-        let mut content: Vec<Line> = Vec::new();
-        for entry in new_entries.iter().take(display_count) {
-            content.push(Line::from(Span::styled(
-                format!("• {}", entry),
-                Style::default().fg(dim_color()),
-            )));
-        }
-        if has_more {
-            content.push(Line::from(Span::styled(
-                format!(
-                    "  …{} more · /changelog to see all",
-                    new_entries.len() - MAX_LINES
-                ),
-                Style::default().fg(dim_color()),
-            )));
-        }
-
-        let boxed = render_rounded_box(
-            "Updates",
-            content,
-            available_width,
-            Style::default().fg(dim_color()),
-        );
-        for line in boxed {
-            lines.push(line.alignment(align));
-        }
-    }
-
     // First line: `jcode` (+ `self-dev` when running a dev/canary build),
     // followed by any remaining status badges rendered dimly.
     {
@@ -905,6 +868,61 @@ fn build_header_lines_with_auth(
 
     lines.push(Line::from(""));
     lines
+}
+
+/// Build the "Updates" rounded box (unseen release notes) so it can be
+/// rendered inside the top padding above the header. `max_lines` bounds the
+/// total height including the box borders; entries beyond the budget are
+/// collapsed into a "…N more" line. Returns an empty vec when there are no
+/// unseen entries or the budget/width is too small for a box.
+pub(super) fn build_updates_box_lines(width: u16, max_lines: usize) -> Vec<Line<'static>> {
+    let w = width as usize;
+    if w <= 20 || max_lines < 3 {
+        return Vec::new();
+    }
+    let new_entries = unseen_changelog_entries();
+    if new_entries.is_empty() {
+        return Vec::new();
+    }
+
+    // Budget for content lines inside the box (borders take 2 lines).
+    let content_budget = (max_lines - 2).min(8);
+    let has_more = new_entries.len() > content_budget;
+    let display_count = if has_more {
+        content_budget.saturating_sub(1)
+    } else {
+        new_entries.len()
+    };
+
+    let mut content: Vec<Line> = Vec::new();
+    for entry in new_entries.iter().take(display_count) {
+        content.push(Line::from(Span::styled(
+            format!("• {}", entry),
+            Style::default().fg(dim_color()),
+        )));
+    }
+    if has_more {
+        content.push(Line::from(Span::styled(
+            format!(
+                "  …{} more · /changelog to see all",
+                new_entries.len() - display_count
+            ),
+            Style::default().fg(dim_color()),
+        )));
+    }
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    render_rounded_box(
+        "Updates",
+        content,
+        w.saturating_sub(2),
+        Style::default().fg(dim_color()),
+    )
+    .into_iter()
+    .map(|line| line.alignment(Alignment::Left))
+    .collect()
 }
 
 /// Build both header sections from one authentication snapshot. Credential

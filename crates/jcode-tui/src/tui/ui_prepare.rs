@@ -738,6 +738,31 @@ fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
     available.saturating_sub(header_lines) / 2
 }
 
+/// Build the lines that fill the top padding above the header. Unseen release
+/// notes (the "Updates" box) render inside this padding, bottom-aligned so any
+/// leftover space stays at the top. With no unseen updates this is just blank
+/// padding. The returned vec is always exactly `pad_top` lines tall so the
+/// header position never shifts.
+fn build_top_pad_lines(width: u16, pad_top: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(pad_top);
+    if pad_top == 0 {
+        return lines;
+    }
+    // Leave one blank line between the box and the header.
+    let box_budget = pad_top.saturating_sub(1);
+    let boxed = header::build_updates_box_lines(width, box_budget);
+    let blanks = pad_top.saturating_sub(boxed.len() + usize::from(!boxed.is_empty()));
+    for _ in 0..blanks {
+        lines.push(Line::from(""));
+    }
+    if !boxed.is_empty() {
+        lines.extend(boxed);
+        lines.push(Line::from(""));
+    }
+    debug_assert_eq!(lines.len(), pad_top);
+    lines
+}
+
 fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> PreparedChatFrame {
     let header_start = Instant::now();
     let header_prepared = prepare_header_cached(app, width);
@@ -868,10 +893,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         // arrives; the padding then simply scrolls away as the transcript
         // grows instead of vanishing in one jump.
         let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
-        let mut centered = Vec::with_capacity(pad_top + wrapped_lines.len());
-        for _ in 0..pad_top {
-            centered.push(Line::from(""));
-        }
+        let mut centered = build_top_pad_lines(width, pad_top);
+        centered.reserve(wrapped_lines.len());
         centered.extend(wrapped_lines);
         let wrapped_lines = centered;
         let wrapped_line_count = wrapped_lines.len();
@@ -909,10 +932,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     // anything. The pad scrolls off naturally as the transcript grows.
     let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
     let padded_header = if pad_top > 0 {
-        let mut lines = Vec::with_capacity(pad_top + header_prepared.wrapped_lines.len());
-        for _ in 0..pad_top {
-            lines.push(Line::from(""));
-        }
+        let mut lines = build_top_pad_lines(width, pad_top);
+        lines.reserve(header_prepared.wrapped_lines.len());
         lines.extend(header_prepared.wrapped_lines.iter().cloned());
         let count = lines.len();
         let plain = Arc::new(lines.iter().map(ui::line_plain_text).collect());
