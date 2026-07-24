@@ -776,8 +776,17 @@ fn build_header_lines_with_auth(
     let align = ratatui::layout::Alignment::Left;
     let w = width as usize;
 
-    // Auths listed vertically, one configured provider per line.
-    for line in build_auth_status_lines(auth) {
+    // Auth inventory: `/login` hint as a heading, then one configured
+    // provider per line.
+    let auth_lines = build_auth_status_lines(auth);
+    lines.push(
+        Line::from(Span::styled(
+            "/login to add provider:".to_string(),
+            Style::default().fg(dim_color()),
+        ))
+        .alignment(align),
+    );
+    for line in auth_lines {
         lines.push(line.alignment(align));
     }
 
