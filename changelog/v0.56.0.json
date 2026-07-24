@@ -1,0 +1,22 @@
+{
+  "version": "0.56.0",
+  "date": "2026-07-24",
+  "title": "Redesigned header, faster pickers, and a harness API",
+  "highlights": [
+    "Redesigned TUI header: left-aligned, shows git branch beside the working directory, vertical auth list, and capped MCP/skills lines",
+    "Much faster fuzzy filtering in pickers, with instant /model open for large remote catalogs",
+    "New versioned harness API socket lets external apps drive jcode sessions"
+  ],
+  "improvements": [
+    "/thinking-display is now the primary command for thinking visibility",
+    "Unseen-updates box moved above the jcode line and renders inside startup padding",
+    "'/login to add provider:' heading lists unconfigured providers inline",
+    "Initial empty screen stays put so the first prompt no longer shifts content",
+    "Info widgets settle into stable placements instead of jumping around",
+    "Server/client header lines are dimmed for less visual noise"
+  ],
+  "fixes": [
+    "MCP servers owned by a session now run in that session's working directory and stay out of the shared pool",
+    "Copilot Sonnet 5 requests send the correct reasoning effort"
+  ]
+}
