@@ -518,14 +518,22 @@ pub fn format_comm_context_history(target: &str, messages: &[HistoryMessage]) ->
             messages.len()
         );
         for msg in messages {
-            let truncated = if msg.content.len() > 500 {
-                format!("{}...", &msg.content[..500])
-            } else {
-                msg.content.clone()
-            };
+            let truncated = truncate_history_content(&msg.content, 500);
             output.push_str(&format!("[{}] {}\n\n", msg.role, truncated));
         }
         output
+    }
+}
+
+/// Truncate on a char boundary. Byte slicing panics when the cut lands inside a
+/// multibyte code point (see #573).
+fn truncate_history_content(content: &str, max_chars: usize) -> String {
+    let mut chars = content.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 
@@ -642,5 +650,36 @@ pub fn format_comm_channels(channels: &[SwarmChannelInfo]) -> String {
             ));
         }
         output
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    #[test]
+    fn history_truncation_handles_multibyte_boundaries() {
+        // 600 Vietnamese chars: byte index 500 lands inside a code point.
+        let content = "ủ".repeat(600);
+        let out = truncate_history_content(&content, 500);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.trim_end_matches('.').chars().count(), 500);
+    }
+
+    #[test]
+    fn history_truncation_keeps_short_content_verbatim() {
+        assert_eq!(truncate_history_content("hello ủ", 500), "hello ủ");
+    }
+
+    #[test]
+    fn format_comm_context_history_does_not_panic_on_multibyte() {
+        let messages = vec![HistoryMessage {
+            role: "user".to_string(),
+            content: "Xin chào thế giới ủ".repeat(100),
+            tool_calls: None,
+            tool_data: None,
+        }];
+        let out = format_comm_context_history("worker", &messages);
+        assert!(out.contains("[user]"));
     }
 }
