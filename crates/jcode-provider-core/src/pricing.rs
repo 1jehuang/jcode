@@ -69,9 +69,8 @@ pub fn anthropic_api_pricing_with_tier(
 
     match base {
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
-        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-5" => {
-            exact(5.0, 25.0, 0.5, "Anthropic API pricing")
-        }
+        "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
+        | "claude-opus-4-5" => exact(5.0, 25.0, 0.5, "Anthropic API pricing"),
         // Sonnet 5 introductory pricing ($2/$10) runs through 2026-08-31,
         // after which it moves to the standard Sonnet $3/$15 rates.
         "claude-sonnet-5" => exact(2.0, 10.0, 0.2, "Anthropic API introductory pricing"),

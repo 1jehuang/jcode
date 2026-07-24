@@ -65,10 +65,11 @@ impl AnthropicContextMode {
 pub fn anthropic_context_mode(model: &str) -> AnthropicContextMode {
     let base = anthropic_strip_1m_suffix(model.trim()).to_ascii_lowercase();
 
-    // Native 1M (default, no opt-in): Opus 4.8 and 4.7, Sonnet 5, Fable 5.
+    // Native 1M (default, no opt-in): Opus 5, Opus 4.8 and 4.7, Sonnet 5, Fable 5.
     // Sonnet 5 supports the 1M window by default (1M is both the default and
     // the maximum; there is no smaller context variant).
-    if base.starts_with("claude-opus-4-8")
+    if base.starts_with("claude-opus-5")
+        || base.starts_with("claude-opus-4-8")
         || base.starts_with("claude-opus-4.8")
         || base.starts_with("claude-opus-4-7")
         || base.starts_with("claude-opus-4.7")
@@ -372,10 +373,11 @@ mod tests {
     #[test]
     fn reasoning_caps_match_live_verified_generations() {
         // Full ladder: Fable 5 (live 2026-07-01), Sonnet 5 (live 2026-07-07),
-        // Opus 4.7/4.8.
+        // Opus 5 (live 2026-07-24), Opus 4.7/4.8.
         for model in [
             "claude-fable-5",
             "claude-sonnet-5",
+            "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
         ] {

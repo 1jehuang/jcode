@@ -72,6 +72,7 @@ pub fn apply_oauth_attribution_headers(
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-fable-5",
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-6",
     "claude-opus-4-6[1m]",

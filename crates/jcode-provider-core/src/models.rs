@@ -12,6 +12,7 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-sol";
 /// used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
     DEFAULT_CLAUDE_MODEL,
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-6",
     "claude-opus-4-6[1m]",
@@ -185,6 +186,7 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 /// covered, while unknown/future Claude ids fall through to the dynamic cache.
 fn base_is_known_claude_model(base: &str) -> bool {
     const KNOWN_CLAUDE_PREFIXES: &[&str] = &[
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4.8",
         "claude-opus-4-7",
@@ -456,6 +458,10 @@ mod tests {
     #[test]
     fn context_limit_classifies_claude_by_context_mode() {
         // Native-1M: 1M by default, suffix is a no-op.
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-opus-5", Some("claude")),
+            Some(1_000_000)
+        );
         assert_eq!(
             context_limit_for_model_with_provider("claude-opus-4-8", Some("claude")),
             Some(1_000_000)
