@@ -1300,6 +1300,15 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    /// Resolve the context window through the cache-aware lookup so a live
+    /// Anthropic catalog entry (e.g. a newly launched 1M model that the static
+    /// classifier does not know yet) reaches the TUI meter and the compaction
+    /// budget instead of silently falling back to 200K. See #578.
+    fn context_window(&self) -> usize {
+        jcode_base::provider::context_limit_for_model_with_provider(&self.model(), Some("claude"))
+            .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
+    }
+
     fn supports_image_input(&self) -> bool {
         true
     }

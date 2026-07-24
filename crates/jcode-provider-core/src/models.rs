@@ -612,6 +612,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_claude_model_prefers_catalog_limit_over_default() {
+        // A future Claude id absent from the static override table must take the
+        // live catalog's 1M value instead of falling back to 200K. See #578.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-opus-6",
+                Some("claude"),
+                |model| { (model == "claude-opus-6").then_some(1_000_000) }
+            ),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
     fn configured_context_window_overrides_gpt_family_fallback() {
         // Issue #541: a user-configured context_window for a GPT-named model
         // under a custom openai-compatible provider must beat the broad
