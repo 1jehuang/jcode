@@ -1860,6 +1860,10 @@ impl crate::tui::TuiState for App {
         self.session.working_dir.clone()
     }
 
+    fn git_branch(&self) -> Option<String> {
+        gather_git_info().map(|info| info.branch)
+    }
+
     fn now_millis(&self) -> u64 {
         self.app_started.elapsed().as_millis() as u64
     }
