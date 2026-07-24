@@ -4,8 +4,10 @@
 //! Vello vector rendering, Parley text layout, and a live harness API
 //! connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
+mod capture;
 mod harness;
 mod render;
+mod states;
 mod text;
 
 use anyhow::Result;
@@ -21,11 +23,49 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--capture") {
+        return run_capture(&args[1..]);
+    }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// `--capture <node|all> [out.png|out_dir]`: render state-space nodes
+/// offscreen to PNG for visual verification without a window or compositor.
+fn run_capture(args: &[String]) -> Result<()> {
+    const WIDTH: u32 = 1100;
+    const HEIGHT: u32 = 720;
+    let node = args.first().map(String::as_str).unwrap_or("all");
+    let mut text = text::TextSystem::default();
+    let mut render_node = |name: &str, model: &Model, path: &std::path::Path| -> Result<()> {
+        let mut scene = Scene::new();
+        build_scene(&mut scene, &mut text, model, (WIDTH, HEIGHT));
+        capture::capture_scene_to_png(&scene, WIDTH, HEIGHT, path)?;
+        println!("captured {name} -> {}", path.display());
+        Ok(())
+    };
+    if node == "all" {
+        let dir = std::path::PathBuf::from(args.get(1).map(String::as_str).unwrap_or("captures"));
+        std::fs::create_dir_all(&dir)?;
+        for name in states::names() {
+            let model = states::by_name(name).expect("listed node");
+            render_node(name, &model, &dir.join(format!("{name}.png")))?;
+        }
+        return Ok(());
+    }
+    let Some(model) = states::by_name(node) else {
+        anyhow::bail!("unknown node '{node}'; available: {}", states::names().join(", "));
+    };
+    let out = std::path::PathBuf::from(
+        args.get(1)
+            .cloned()
+            .unwrap_or_else(|| format!("{node}.png")),
+    );
+    render_node(node, &model, &out)
 }
 
 #[derive(Default)]
@@ -37,12 +77,12 @@ struct App {
 }
 
 /// UI model: what the frame is built from.
-struct Model {
-    status: String,
-    session_id: Option<String>,
-    transcript: String,
-    input: String,
-    busy: bool,
+pub struct Model {
+    pub status: String,
+    pub session_id: Option<String>,
+    pub transcript: String,
+    pub input: String,
+    pub busy: bool,
 }
 
 impl Default for Model {
