@@ -2,7 +2,9 @@ use crate::storage;
 use anyhow::Result;
 use std::path::PathBuf;
 
-pub use jcode_task_types::{TodoGoal, TodoGoalChange, TodoGoalField, TodoItem};
+pub use jcode_task_types::{
+    TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+};
 
 /// Minimum passing score for 0-100 quality assessments. Scores below this do
 /// not provide enough evidence to clear their respective quality gate.
@@ -14,13 +16,17 @@ pub const QUALITY_GATE_THRESHOLD: u8 = 96;
 /// quantifiable and verifiable.
 pub const LOW_HILL_CLIMBABILITY: u8 = QUALITY_GATE_THRESHOLD;
 
-/// Goals below this score do not yet have an objective and feedback loop that
-/// comprehensively represent the user's intention.
-pub const LOW_ALIGNMENT_SCORE: u8 = QUALITY_GATE_THRESHOLD;
+/// Below this score the agent does not yet understand the user's intent well
+/// enough to work confidently against it.
+pub const LOW_INTENT_UNDERSTANDING: u8 = QUALITY_GATE_THRESHOLD;
 
-/// Model-facing continuation for the private alignment check. It explains the
-/// two representation links without disclosing the score or threshold.
-pub const TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. Build a requirement inventory from the user's request, including outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Revise the objective to represent every material item. Then map each item to an explicit observation or check in the feedback loop. Generic instructions to run tests, verify, or review count only for requirements those checks actually enforce; add separate checks for non-testable requirements. Reassess the weaker link before continuing the task.";
+/// Pre-plan-intent-rewrite alignment continuation. Kept only so persisted
+/// transcripts still classify it as a synthetic gate message, not a user turn.
+const LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. Build a requirement inventory from the user's request, including outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Revise the plan and its stated user intention to represent every material item. Then map each item to an explicit observation or check in a feedback loop. Generic instructions to run tests, verify, or review count only for requirements those checks actually enforce; add separate checks for non-testable requirements. Reassess the weaker link before continuing the task.";
+
+/// Model-facing continuation for the private intent-understanding check.
+/// Deliberately small: think more about the user's intent, do not ask the user.
+pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Your understanding of the user's intent is not high enough. Re-read the request and think harder about what the user actually wants and left implicit, using the conversation and codebase as evidence. Do not ask the user; resolve the ambiguity yourself, then update the plan's user intention and understands_user_intent.";
 
 /// Model-facing continuation for the private hill-climbability check. Names the
 /// assessment category without disclosing the score or threshold.
@@ -142,7 +148,8 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         && trimmed.contains(" incomplete todo")
         && trimmed.ends_with("update the todo tool."))
         || trimmed.starts_with(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
-        || trimmed.starts_with(TODO_ALIGNMENT_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
@@ -188,8 +195,8 @@ pub fn load_goals(session_id: &str) -> Result<Vec<TodoGoal>> {
 ///
 /// Todo groups are intended to name coherent goals, so the group containing the
 /// current (or latest incomplete) item is the strongest signal. Ungrouped plans
-/// fall back to their measurable objective, user intention, then item text.
-pub fn derive_session_title(todos: &[TodoItem], goals: &[TodoGoal]) -> Option<String> {
+/// fall back to the plan's user intention, then item text.
+pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<String> {
     fn non_empty(value: Option<&str>) -> Option<String> {
         value
             .map(str::trim)
@@ -214,39 +221,21 @@ pub fn derive_session_title(todos: &[TodoItem], goals: &[TodoGoal]) -> Option<St
             return Some(group);
         }
 
-        if let Some(objective) = goals
-            .iter()
-            .rev()
-            .find(|goal| goal.group.is_none())
-            .and_then(|goal| non_empty(goal.objective.as_deref()))
-        {
-            return Some(objective);
-        }
-
-        if let Some(user_intention) = goals
-            .iter()
-            .rev()
-            .find(|goal| goal.group.is_none())
-            .and_then(|goal| non_empty(goal.user_intention.as_deref()))
-        {
+        if let Some(user_intention) = non_empty(plan.user_intention.as_deref()) {
             return Some(user_intention);
         }
 
         return non_empty(Some(&todo.content));
     }
 
-    goals.iter().rev().find_map(|goal| {
-        non_empty(goal.group.as_deref())
-            .or_else(|| non_empty(goal.objective.as_deref()))
-            .or_else(|| non_empty(goal.user_intention.as_deref()))
-    })
+    non_empty(plan.user_intention.as_deref())
 }
 
 /// Load todo state for a session and derive its best title hint.
 pub fn load_session_title(session_id: &str) -> Option<String> {
     let todos = load_todos(session_id).ok()?;
-    let goals = load_goals(session_id).unwrap_or_default();
-    derive_session_title(&todos, &goals)
+    let plan = load_plan(session_id).unwrap_or_default();
+    derive_session_title(&todos, &plan)
 }
 
 pub fn save_goals(session_id: &str, goals: &[TodoGoal]) -> Result<()> {
@@ -261,6 +250,26 @@ fn goals_path(session_id: &str) -> Result<PathBuf> {
         .join(format!("{}-goals.json", session_id)))
 }
 
+/// The plan-level intent assessment lives in its own file beside the todo list
+/// and per-group goals, so each format stays independently readable.
+pub fn load_plan(session_id: &str) -> Result<TodoPlan> {
+    let path = plan_path(session_id)?;
+    if !path.exists() {
+        return Ok(TodoPlan::default());
+    }
+    storage::read_json(&path).or_else(|_| Ok(TodoPlan::default()))
+}
+
+pub fn save_plan(session_id: &str, plan: &TodoPlan) -> Result<()> {
+    let path = plan_path(session_id)?;
+    storage::write_json_fast(&path, plan)
+}
+
+fn plan_path(session_id: &str) -> Result<PathBuf> {
+    let base = storage::jcode_dir()?;
+    Ok(base.join("todos").join(format!("{}-plan.json", session_id)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,7 +281,12 @@ mod tests {
         assert!(is_auto_poke_message(
             TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE
         ));
-        assert!(is_auto_poke_message(TODO_ALIGNMENT_CONTINUATION_MESSAGE));
+        assert!(is_auto_poke_message(
+            LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE
+        ));
+        assert!(is_auto_poke_message(
+            TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
+        ));
         assert!(is_auto_poke_message(TODO_OWNERSHIP_CONTINUATION_MESSAGE));
         assert!(is_auto_poke_message(TODO_COMPLETION_CONTINUATION_MESSAGE));
         assert!(is_auto_poke_message(
@@ -288,7 +302,10 @@ mod tests {
                 TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
                 "hill-climbability",
             ),
-            (TODO_ALIGNMENT_CONTINUATION_MESSAGE, "alignment score"),
+            (
+                TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
+                "understanding of the user's intent",
+            ),
             (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "end-to-end ownership"),
             (
                 TODO_COMPLETION_CONTINUATION_MESSAGE,
@@ -320,12 +337,12 @@ mod tests {
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("First, improve"));
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("call the todo tool again"));
         assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("before continuing the task"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("requirement inventory"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("every material item"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("explicit observation or check"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("Generic instructions to run tests"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("non-testable requirements"));
-        assert!(TODO_ALIGNMENT_CONTINUATION_MESSAGE.contains("weaker link"));
+        // Deliberately terse: think harder about intent, never block on the user.
+        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("think harder"));
+        assert!(
+            TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("what the user actually wants")
+        );
+        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("Do not ask the user"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("full user outcome"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("complete workflow"));
         assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("necessary follow-through"));
@@ -475,7 +492,7 @@ mod tests {
         ];
 
         assert_eq!(
-            derive_session_title(&todos, &[]).as_deref(),
+            derive_session_title(&todos, &TodoPlan::default()).as_deref(),
             Some("Fix resume names")
         );
     }
@@ -488,71 +505,50 @@ mod tests {
         ];
 
         assert_eq!(
-            derive_session_title(&todos, &[]).as_deref(),
+            derive_session_title(&todos, &TodoPlan::default()).as_deref(),
             Some("Current goal")
         );
     }
 
     #[test]
-    fn ungrouped_session_title_prefers_goal_objective_then_item_content() {
+    fn ungrouped_session_title_prefers_plan_intention_then_item_content() {
         let todos = vec![todo("Run targeted tests", "in_progress", None)];
-        let goals = vec![TodoGoal {
-            group: None,
-            hill_climbability: Some(90),
-            objective: Some("All resume naming tests pass".to_string()),
-            ..Default::default()
-        }];
+        let plan = TodoPlan {
+            user_intention: Some("Keep resumed work easy to identify".to_string()),
+            understands_user_intent: Some(97),
+        };
 
         assert_eq!(
-            derive_session_title(&todos, &goals).as_deref(),
-            Some("All resume naming tests pass")
+            derive_session_title(&todos, &plan).as_deref(),
+            Some("Keep resumed work easy to identify")
         );
         assert_eq!(
-            derive_session_title(&todos, &[]).as_deref(),
+            derive_session_title(&todos, &TodoPlan::default()).as_deref(),
             Some("Run targeted tests")
         );
     }
 
     #[test]
-    fn ungrouped_session_title_uses_user_intention_without_objective() {
-        let todos = vec![todo("Run targeted tests", "in_progress", None)];
-        let goals = vec![TodoGoal {
-            user_intention: Some("Keep resumed work easy to identify".to_string()),
-            ..Default::default()
-        }];
-
-        assert_eq!(
-            derive_session_title(&todos, &goals).as_deref(),
-            Some("Keep resumed work easy to identify")
-        );
-    }
-
-    #[test]
-    fn goal_alignment_fields_round_trip_through_storage() {
+    fn plan_intent_fields_round_trip_through_storage() {
         let _guard = crate::storage::lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
         let dir = tempfile::TempDir::new().expect("tempdir");
         crate::env::set_var("JCODE_HOME", dir.path());
 
-        let goals = vec![TodoGoal {
-            group: Some("todo user intention".to_string()),
+        let plan = TodoPlan {
             user_intention: Some("Preserve why the user requested the work".to_string()),
-            alignment_score: Some(97),
-            ..Default::default()
-        }];
-        save_goals("user-intention-round-trip", &goals).expect("save goals");
-        let stored = std::fs::read_to_string(
-            goals_path("user-intention-round-trip").expect("goal storage path"),
-        )
-        .expect("read stored goals");
-        assert!(stored.contains("\"alignment_score\""));
+            understands_user_intent: Some(97),
+        };
+        save_plan("user-intention-round-trip", &plan).expect("save plan");
+        let stored =
+            std::fs::read_to_string(plan_path("user-intention-round-trip").expect("plan path"))
+                .expect("read stored plan");
+        assert!(stored.contains("\"understands_user_intent\""));
+        assert!(!stored.contains("\"alignment_score\""));
         assert!(!stored.contains("\"user_intention_alignment\""));
-        let loaded = load_goals("user-intention-round-trip").expect("load goals");
 
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].group, goals[0].group);
-        assert_eq!(loaded[0].user_intention, goals[0].user_intention);
-        assert_eq!(loaded[0].alignment_score, goals[0].alignment_score);
+        let loaded = load_plan("user-intention-round-trip").expect("load plan");
+        assert_eq!(loaded, plan);
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),

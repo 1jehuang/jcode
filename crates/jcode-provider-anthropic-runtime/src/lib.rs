@@ -45,7 +45,7 @@ use jcode_provider_core::{
     anthropic_strip_1m_suffix as strip_1m_suffix,
 };
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1305,6 +1305,10 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn context_window(&self) -> usize {
+        context_window::resolve(&self.model())
+    }
+
     fn supports_image_input(&self) -> bool {
         true
     }
@@ -2350,93 +2354,13 @@ fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
     jcode_provider_anthropic::add_message_cache_breakpoint(messages, is_cache_ttl_1h())
 }
 
-// Response types for SSE parsing
+mod sse_types;
+use sse_types::{
+    ApiContentBlockStart, ApiDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
+    MessageDeltaEvent, MessageStartEvent,
+};
 
-#[derive(Deserialize)]
-struct MessageStartEvent {
-    message: MessageStartMessage,
-}
-
-#[derive(Deserialize)]
-struct MessageStartMessage {
-    #[serde(default)]
-    model: Option<String>,
-    usage: Option<UsageInfo>,
-}
-
-#[derive(Deserialize)]
-struct ContentBlockStartEvent {
-    #[serde(rename = "index")]
-    _index: u32,
-    content_block: ApiContentBlockStart,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum ApiContentBlockStart {
-    #[serde(rename = "text")]
-    Text {
-        #[serde(rename = "text")]
-        _text: String,
-    },
-    #[serde(rename = "thinking")]
-    Thinking {
-        #[serde(default, rename = "thinking")]
-        _thinking: String,
-        #[serde(default, rename = "signature")]
-        _signature: Option<String>,
-    },
-    #[serde(rename = "redacted_thinking")]
-    RedactedThinking {
-        #[serde(default, rename = "data")]
-        _data: String,
-    },
-    #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String },
-}
-
-#[derive(Deserialize)]
-struct ContentBlockDeltaEvent {
-    #[serde(rename = "index")]
-    _index: u32,
-    delta: ApiDelta,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum ApiDelta {
-    #[serde(rename = "text_delta")]
-    Text { text: String },
-    #[serde(rename = "input_json_delta")]
-    InputJson { partial_json: String },
-    #[serde(rename = "thinking_delta")]
-    Thinking { thinking: String },
-    #[serde(rename = "signature_delta")]
-    Signature {
-        #[serde(rename = "signature")]
-        signature: String,
-    },
-}
-
-#[derive(Deserialize)]
-struct MessageDeltaEvent {
-    delta: MessageDeltaDelta,
-    usage: Option<UsageInfo>,
-}
-
-#[derive(Deserialize)]
-struct MessageDeltaDelta {
-    stop_reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UsageInfo {
-    input_tokens: Option<u32>,
-    output_tokens: Option<u32>,
-    cache_read_input_tokens: Option<u32>,
-    cache_creation_input_tokens: Option<u32>,
-    service_tier: Option<String>,
-}
+mod context_window;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
