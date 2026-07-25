@@ -120,7 +120,8 @@ fn pretty_known_model_family(model: &str) -> Option<String> {
         return None;
     }
     let lower = core.to_ascii_lowercase();
-    if !(lower.starts_with("gpt-") || lower.starts_with("claude-") || lower.starts_with("gemini-")) {
+    if !(lower.starts_with("gpt-") || lower.starts_with("claude-") || lower.starts_with("gemini-"))
+    {
         return None;
     }
     Some(crate::tui::app::helpers::pretty_model_display_name(model))
