@@ -31,7 +31,7 @@ impl UpdateState {
     }
 }
 
-/// Masthead metadata for one frame.
+/// Build identity for one frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meta {
     /// Human-readable version, e.g. `v0.58.51-dev (b25eaa7de)`.
@@ -62,8 +62,26 @@ impl Meta {
         }
     }
 
-    /// The caption row, assembled with a separator. Empty parts are dropped so
-    /// the row never shows a dangling separator.
+    /// The one thing about this build worth interrupting the user for, or
+    /// `None` when everything is normal.
+    ///
+    /// The app used to print version, update state, and account on every
+    /// frame. Nearly always that row said "up to date, signed in", which is
+    /// exactly what the user assumes, so it was pure clutter. Only the two
+    /// states that need an action survive here.
+    pub fn alert(&self) -> Option<String> {
+        if self.account.is_none() {
+            return Some("not signed in: run `jcode` and use /login".into());
+        }
+        if self.update == UpdateState::Available {
+            return Some("update ready: restart to apply".into());
+        }
+        None
+    }
+
+    /// The full caption row, kept for `--capture`-style diagnostics and any
+    /// future about panel. Not drawn on the main surface.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn caption(&self) -> String {
         let mut parts = vec![self.version.clone()];
         if let Some(update) = self.update.caption() {
@@ -256,5 +274,58 @@ mod tests {
     fn detect_never_panics_and_always_reports_a_version() {
         let meta = Meta::detect();
         assert!(!meta.version.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::*;
+
+    /// The normal case must be silent, or the alert is just the old
+    /// always-on clutter with a new name.
+    #[test]
+    fn a_healthy_current_build_says_nothing() {
+        let meta = Meta {
+            version: "v1.2.3".into(),
+            update: UpdateState::Current,
+            account: Some("someone@example.dev (anthropic)".into()),
+        };
+        assert_eq!(meta.alert(), None);
+    }
+
+    /// An unknown update state is not actionable either: the app could not
+    /// tell, and guessing would nag the user for nothing.
+    #[test]
+    fn an_unknown_update_state_is_not_an_alert() {
+        let meta = Meta {
+            version: "v1.2.3".into(),
+            update: UpdateState::Unknown,
+            account: Some("someone@example.dev (anthropic)".into()),
+        };
+        assert_eq!(meta.alert(), None);
+    }
+
+    #[test]
+    fn a_pending_update_is_reported() {
+        let meta = Meta {
+            version: "v1.2.3".into(),
+            update: UpdateState::Available,
+            account: Some("someone@example.dev (anthropic)".into()),
+        };
+        assert!(meta.alert().is_some_and(|line| line.contains("update")));
+    }
+
+    /// Being signed out blocks every turn, so it outranks a pending update.
+    #[test]
+    fn being_signed_out_outranks_a_pending_update() {
+        let meta = Meta {
+            version: "v1.2.3".into(),
+            update: UpdateState::Available,
+            account: None,
+        };
+        assert!(
+            meta.alert().is_some_and(|line| line.contains("signed in")),
+            "a signed-out app reported the update instead of the blocker"
+        );
     }
 }

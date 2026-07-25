@@ -69,6 +69,9 @@ fn connecting() -> Model {
         notice: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
+        // Captures pin the hint, so the ghost line is a tested state rather
+        // than whatever the clock happened to pick.
+        hint: 0,
     }
 }
 
@@ -114,6 +117,9 @@ fn attached_empty() -> Model {
         notice: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
+        // Captures pin the hint, so the ghost line is a tested state rather
+        // than whatever the clock happened to pick.
+        hint: 0,
     }
 }
 

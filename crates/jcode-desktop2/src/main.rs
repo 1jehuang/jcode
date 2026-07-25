@@ -10,6 +10,7 @@ mod clipboard;
 mod donut;
 mod editor;
 mod harness;
+mod hints;
 mod input;
 mod keymap;
 mod layout;
@@ -42,6 +43,9 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("--keys") {
         print_keys();
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("--bench-donut") {
+        return bench_donut();
     }
     if args.first().map(String::as_str) == Some("--capture") {
         return run_capture(&args[1..]);
@@ -170,6 +174,46 @@ fn run_e2e(message: &str) -> Result<()> {
     anyhow::bail!("e2e timed out")
 }
 
+/// `--bench-donut`: measure the donut's per-frame CPU cost, split between the
+/// SDF raymarch (the luminance field) and building the halftone path. The
+/// website's budget is under 9ms of main-thread time per frame; this prints the
+/// same number so a regression is a measurement, not an impression.
+fn bench_donut() -> Result<()> {
+    const FRAMES: u32 = 120;
+    let mut field = donut::Donut::new(DONUT_GRID);
+    let frame = layout::Frame::new((2200, 1440), 2.0);
+    let Some(hero) = frame.hero() else {
+        anyhow::bail!("no hero block at the bench window size");
+    };
+
+    let start = std::time::Instant::now();
+    for i in 0..FRAMES {
+        field.render(i as f32 / 60.0, 0.0);
+    }
+    let march = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
+
+    let mut text_system = text::TextSystem::default();
+    let model = Model::default();
+    let start = std::time::Instant::now();
+    for i in 0..FRAMES {
+        field.render(i as f32 / 60.0, 0.0);
+        let mut scene = Scene::new();
+        build_scene(&mut scene, &mut text_system, &model, (2200, 1440), 2.0);
+    }
+    let full = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
+
+    println!("donut grid       : {DONUT_GRID}x{DONUT_GRID}");
+    println!("halftone box     : {:.0}pt square", hero.donut.width());
+    println!("sdf raymarch     : {march:.3} ms/frame");
+    println!("full scene build : {full:.3} ms/frame");
+    println!("scene minus march: {:.3} ms/frame", full - march);
+    println!("budget           : 9.000 ms/frame (website's main-thread budget)");
+    if full > 9.0 {
+        anyhow::bail!("donut frame cost {full:.3}ms exceeds the 9ms budget");
+    }
+    Ok(())
+}
+
 /// `--capture <node|all> [out.png|out_dir]`: render state-space nodes
 /// offscreen to PNG for visual verification without a window or compositor.
 fn run_capture(args: &[String]) -> Result<()> {
@@ -293,6 +337,9 @@ pub struct Model {
     pub donut: Option<donut::Donut>,
     /// The donut's animation clock and drag momentum.
     pub spin: donut::Spin,
+    /// Which ghost hint the empty composer shows. An index rather than a
+    /// string, so the model stays trivially comparable and captures can pin it.
+    pub hint: usize,
 }
 
 impl Default for Model {
@@ -311,15 +358,17 @@ impl Default for Model {
             notice: None,
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
+            hint: hints::arbitrary_index(),
         }
     }
 }
 
-/// Luminance grid resolution for the donut. The website adapts this to
-/// measured frame cost; on the desktop the field is raymarched on the CPU once
-/// per frame at a fixed, comfortably cheap size, and the halftone screen (the
-/// part the eye reads) is resolution-independent vector output.
-pub const DONUT_GRID: usize = 96;
+/// Luminance grid resolution for the donut: twice the halftone dot count, so
+/// every dot integrates a 2x2 neighbourhood of the field (built-in spatial AA).
+/// This is the website's top quality step; the desktop can hold it because the
+/// march is parallel and the halftone screen is vector output rather than a
+/// per-pixel canvas fill.
+pub const DONUT_GRID: usize = 152;
 
 /// Escape hatch: `JCODE_DESKTOP2_DONUT=0` turns the animation off for users who
 /// do not want motion, and for benchmarking the rest of the frame.
@@ -369,6 +418,21 @@ impl Model {
         }
         Some(status.to_string())
     }
+
+    /// The footnote line for this frame, in priority order.
+    ///
+    /// One row, one message: a transient notice beats a scrollback indicator,
+    /// which beats a connection problem, which beats a build alert. Choosing
+    /// here rather than in the renderer keeps the decision testable.
+    pub fn footnote(&self) -> Option<String> {
+        if let Some(notice) = &self.notice {
+            return Some(notice.clone());
+        }
+        if self.scroll > 0 {
+            return Some(format!("scrolled back {} lines", self.scroll));
+        }
+        self.status_footnote().or_else(|| self.meta.alert())
+    }
 }
 
 impl App {
@@ -401,6 +465,9 @@ impl App {
             return;
         }
         let content = self.model.editor.take_for_submit();
+        // Move to the next hint, so the set is discovered across turns instead
+        // of one line being the whole of the user's experience of it.
+        self.model.hint = self.model.hint.wrapping_add(1);
         self.model
             .transcript
             .push_str(&format!("\n> {content}\n\n"));

@@ -862,7 +862,7 @@ mod donut {
 
     /// Logical centre of the donut in the current frame.
     fn donut_centre(app: &App) -> (f64, f64) {
-        let box_ = app.frame.donut_box();
+        let box_ = app.frame.hero().expect("a hero in the test frame").donut;
         ((box_.x0 + box_.x1) / 2.0, (box_.y0 + box_.y1) / 2.0)
     }
 

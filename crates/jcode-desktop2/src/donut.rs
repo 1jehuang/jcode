@@ -45,43 +45,34 @@ impl Donut {
     /// Fill the luminance field for `t` seconds of animation plus `spin`
     /// radians of user drag. Drag only affects the yaw, so dragging never
     /// changes the flattering tilt.
+    ///
+    /// Rows are independent, so the march is split across worker threads: the
+    /// result is bit-identical to the serial version (no accumulation across
+    /// rows, no reduction order to change), which is what makes it safe to
+    /// parallelise a function that captures and tests compare exactly.
     pub fn render(&mut self, t: f32, spin: f32) {
         let grid = self.grid;
-        let k1 = (grid as f32 * K2 * 3.0) / (8.0 * (R1 + R2));
-        let cc = K2 * K2 - BOUND * BOUND;
-
-        let a = 1.0 + (t * 0.4).sin() * 0.25;
-        let b = t * 0.7 + spin;
-        let (sa, ca) = a.sin_cos();
-        let (sb, cb) = b.sin_cos();
-
-        // Rotation local<-world: the transpose of donut.c's world<-local
-        // matrix, so orientation and lighting match the original exactly.
-        let (m00, m01) = (cb, sb);
-        let (m10, m11, m12) = (sa * sb, -sa * cb, ca);
-        let (m20, m21, m22) = (-ca * sb, ca * cb, sa);
-
-        // Eye at the world origin, torus centred at (0,0,K2): transform the
-        // eye into torus-local space once per frame.
-        let oy = -ca * K2;
-        let oz = -sa * K2;
-
-        let half = grid as f32 / 2.0;
-        for yc in 0..grid {
-            let pyw = -(yc as f32 + 0.5 - half) / k1;
-            for xc in 0..grid {
-                let pxw = (xc as f32 + 0.5 - half) / k1;
-                let inv = 1.0 / (pxw * pxw + pyw * pyw + 1.0).sqrt();
-                let (dwx, dwy, dwz) = (pxw * inv, pyw * inv, inv);
-
-                let dx = m00 * dwx + m01 * dwy;
-                let dy = m10 * dwx + m11 * dwy + m12 * dwz;
-                let dz = m20 * dwx + m21 * dwy + m22 * dwz;
-
-                self.lum[xc + yc * grid] =
-                    trace(dx, dy, dz, oy, oz, cc, k1, m01, m11, m12, m21, m22);
-            }
+        let view = View::new(grid, t, spin);
+        let threads = worker_count(grid);
+        if threads <= 1 {
+            march_rows(&mut self.lum, 0, grid, &view);
+            return;
         }
+        // Split into contiguous row bands, one per worker. Bands rather than
+        // interleaved rows so each thread writes one cache-contiguous slice.
+        let rows_per = grid.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest = self.lum.as_mut_slice();
+            let mut row = 0;
+            while row < grid {
+                let take = rows_per.min(grid - row);
+                let (band, tail) = rest.split_at_mut(take * grid);
+                rest = tail;
+                let view = &view;
+                scope.spawn(move || march_rows(band, row, row + take, view));
+                row += take;
+            }
+        });
     }
 
     /// Bilinear sample of the field at grid coordinates, so each halftone dot
@@ -101,6 +92,86 @@ impl Donut {
     }
 }
 
+/// Per-frame camera and orientation constants. Computed once per frame and
+/// shared by every worker, so the trig is not repeated per row (which is what
+/// made the original donut.c inner loop the expensive part).
+struct View {
+    grid: usize,
+    k1: f32,
+    cc: f32,
+    oy: f32,
+    oz: f32,
+    m00: f32,
+    m01: f32,
+    m10: f32,
+    m11: f32,
+    m12: f32,
+    m20: f32,
+    m21: f32,
+    m22: f32,
+}
+
+impl View {
+    fn new(grid: usize, t: f32, spin: f32) -> Self {
+        let a = 1.0 + (t * 0.4).sin() * 0.25;
+        let b = t * 0.7 + spin;
+        let (sa, ca) = a.sin_cos();
+        let (sb, cb) = b.sin_cos();
+        Self {
+            grid,
+            k1: (grid as f32 * K2 * 3.0) / (8.0 * (R1 + R2)),
+            cc: K2 * K2 - BOUND * BOUND,
+            // Eye at the world origin, torus centred at (0,0,K2): the eye in
+            // torus-local space.
+            oy: -ca * K2,
+            oz: -sa * K2,
+            // Rotation local<-world: the transpose of donut.c's world<-local
+            // matrix, so orientation and lighting match the original exactly.
+            m00: cb,
+            m01: sb,
+            m10: sa * sb,
+            m11: -sa * cb,
+            m12: ca,
+            m20: -ca * sb,
+            m21: ca * cb,
+            m22: sa,
+        }
+    }
+}
+
+/// March rows `[from, to)` of the field into `out`, which is exactly those rows.
+fn march_rows(out: &mut [f32], from: usize, to: usize, view: &View) {
+    let grid = view.grid;
+    let half = grid as f32 / 2.0;
+    for yc in from..to {
+        let pyw = -(yc as f32 + 0.5 - half) / view.k1;
+        let row = (yc - from) * grid;
+        for xc in 0..grid {
+            let pxw = (xc as f32 + 0.5 - half) / view.k1;
+            let inv = 1.0 / (pxw * pxw + pyw * pyw + 1.0).sqrt();
+            let (dwx, dwy, dwz) = (pxw * inv, pyw * inv, inv);
+            let dx = view.m00 * dwx + view.m01 * dwy;
+            let dy = view.m10 * dwx + view.m11 * dwy + view.m12 * dwz;
+            let dz = view.m20 * dwx + view.m21 * dwy + view.m22 * dwz;
+            out[row + xc] = trace(dx, dy, dz, view);
+        }
+    }
+}
+
+/// Workers to march a `grid`-square field with. Small fields are not worth the
+/// spawn cost, and the count is capped so a decorative animation never takes
+/// the whole machine.
+fn worker_count(grid: usize) -> usize {
+    if grid < 48 {
+        return 1;
+    }
+    let cpus = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    // Leave a core for the UI thread's own work (text layout, path building).
+    cpus.saturating_sub(1).clamp(1, 8)
+}
+
 /// Signed distance to the torus in local space.
 #[inline]
 fn sdf(px: f32, py: f32, pz: f32) -> f32 {
@@ -109,21 +180,19 @@ fn sdf(px: f32, py: f32, pz: f32) -> f32 {
 }
 
 /// Sphere-trace one ray and return its lit luminance in `0..=1`.
-#[allow(clippy::too_many_arguments)]
-fn trace(
-    dx: f32,
-    dy: f32,
-    dz: f32,
-    oy: f32,
-    oz: f32,
-    cc: f32,
-    k1: f32,
-    m01: f32,
-    m11: f32,
-    m12: f32,
-    m21: f32,
-    m22: f32,
-) -> f32 {
+fn trace(dx: f32, dy: f32, dz: f32, view: &View) -> f32 {
+    let View {
+        k1,
+        cc,
+        oy,
+        oz,
+        m01,
+        m11,
+        m12,
+        m21,
+        m22,
+        ..
+    } = *view;
     // Analytic bounding-sphere gate: skip empty cells instantly and bound the
     // march to [entry, exit].
     let b = oy * dy + oz * dz;
