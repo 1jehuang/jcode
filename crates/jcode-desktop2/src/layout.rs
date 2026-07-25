@@ -54,10 +54,11 @@ pub const HERO_TAGLINE_SIZE: f32 = 12.5;
 /// this tilt does not reach the corners or the top and bottom edges, so laying
 /// the stack out on the raw square leaves a gap that looks like a mistake; the
 /// wordmark and tagline are spaced against the *visible* disc instead.
-pub const DONUT_INK_FRACTION: f64 = 0.95;
-/// Below this the halftone screen has too few dots to read as a donut, so it is
-/// not drawn at all rather than degrading into speckle on a cramped window.
-pub const DONUT_MIN_SIDE: f64 = 120.0;
+pub const DONUT_INK_FRACTION: f64 = 0.82;
+/// Below this the halftone screen has too few dots across (at [`DOT_PITCH`]) to
+/// read as a donut, so the hero is dropped entirely rather than degrading into
+/// speckle on a cramped window.
+pub const DONUT_MIN_SIDE: f64 = 100.0;
 /// Vertical breathing room between regions.
 pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
 /// Fraction of the page height the input box is centred on. 0.5 puts the

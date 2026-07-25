@@ -16,6 +16,8 @@ use vello::peniko::Color;
 /// smaller donut simply shows fewer of them. Matches the website's hero, which
 /// screens a 360px canvas at 76 dots across.
 const DOT_PITCH: f64 = 360.0 / 76.0;
+// Referenced by `layout::DONUT_MIN_SIDE`'s doc comment: the two together decide
+// how few dots a hero may be drawn with.
 /// Classic 45-degree halftone screen angle.
 const SCREEN_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
 /// Dot radius as a fraction of the dot pitch at full luminance.
@@ -218,10 +220,8 @@ pub fn build_scene(
     // donut from the website lives there: the same halftone torus, and
     // draggable in the same way. It stands down the moment there is real
     // content, so it can never compete with the transcript.
-    if placeholder {
-        if let Some(hero) = frame.hero() {
-            draw_hero(scene, text, model, hero, &frame, scale);
-        }
+    if let Some(hero) = frame.hero().filter(|_| placeholder) {
+        draw_hero(scene, text, model, hero, &frame, scale);
     }
 
     // On an empty session the hero says everything, so there is no filler
