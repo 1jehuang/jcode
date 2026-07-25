@@ -259,6 +259,19 @@ fn scroll_render_test_lock() -> std::sync::MutexGuard<'static, ()> {
     crate::tui::ui::render_state_test_lock()
 }
 
+/// Whether wall-clock performance budgets should be asserted rather than merely
+/// reported.
+///
+/// Latency budgets (e.g. a 60fps frame budget) measure the host scheduler as
+/// much as jcode. On a loaded developer machine or a shared CI runner they fail
+/// for reasons unrelated to the code under test, which trains everyone to
+/// ignore the suite. Correctness assertions stay always-on; opt into the timing
+/// ones with `JCODE_TEST_PERF_ASSERTIONS=1` on an idle machine (refs #592).
+fn perf_assertions_enabled() -> bool {
+    std::env::var("JCODE_TEST_PERF_ASSERTIONS")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+}
+
 /// Render app to TestBackend and return the buffer text.
 fn render_and_snap(
     app: &App,
