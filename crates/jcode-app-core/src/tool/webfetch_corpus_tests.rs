@@ -318,3 +318,25 @@ fn corpus_script_matches_test_expectations() {
         );
     }
 }
+
+/// Writes post-extraction output for each corpus page to `WEBFETCH_DUMP`, so
+/// external tooling (e.g. a tokenizer) can measure real context cost.
+#[test]
+#[ignore = "dump harness; run manually"]
+fn dump_outputs() {
+    let Some(out_dir) = std::env::var("WEBFETCH_DUMP").ok() else {
+        eprintln!("set WEBFETCH_DUMP");
+        return;
+    };
+    std::fs::create_dir_all(&out_dir).unwrap();
+    for page in load_corpus() {
+        let md = if is_html(&page.html) {
+            html_to_markdown(&page.html)
+        } else {
+            page.html.clone()
+        };
+        let (capped, _) = super::truncate_output(md.clone());
+        std::fs::write(format!("{out_dir}/{}.uncapped", page.name), &md).unwrap();
+        std::fs::write(format!("{out_dir}/{}.capped", page.name), &capped).unwrap();
+    }
+}
