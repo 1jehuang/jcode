@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Run every gate in CI's "Quality Guardrails" + "Format" jobs, locally.
+#
+# Why this exists: the guardrail steps live only in .github/workflows/ci.yml, so
+# the usual way to discover one is to push and watch master go red. That is slow
+# and, with several agents pushing in parallel, it means whoever pushes next
+# inherits someone else's red build. Run this before pushing instead.
+#
+# Usage:
+#   scripts/check_guardrails.sh              # check only, non-zero on failure
+#   scripts/check_guardrails.sh --fix        # rustfmt + rebaseline ratchets
+#   scripts/check_guardrails.sh --skip-slow  # skip cargo check/clippy/machete
+#
+# Note: CI tracks the `stable` toolchain. If your local stable is behind, clippy
+# can pass here and fail in CI on a newly added lint, so this warns when the two
+# are likely to disagree. Run `rustup update stable` to align them.
+
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+FIX=false
+SKIP_SLOW=false
+for arg in "$@"; do
+    case "$arg" in
+        --fix) FIX=true ;;
+        --skip-slow) SKIP_SLOW=true ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+FAILED=()
+JOBS="${CARGO_BUILD_JOBS:-2}"
+
+run_gate() {
+    local label=$1
+    shift
+    printf '▸ %s' "$label"
+    local output
+    if output=$("$@" 2>&1); then
+        printf '\r✅ %s\n' "$label"
+        return 0
+    fi
+    printf '\r❌ %s\n' "$label"
+    printf '%s\n' "$output" | tail -20 | sed 's/^/    /'
+    FAILED+=("$label")
+    return 1
+}
+
+# Ratchet scripts share a --update flag to accept intentional growth.
+run_ratchet() {
+    local label=$1 script=$2
+    if $FIX; then
+        python3 "scripts/$script" --update >/dev/null 2>&1
+    fi
+    run_gate "$label" python3 "scripts/$script"
+}
+
+echo "=== Format ==="
+if $FIX; then
+    cargo fmt --all
+fi
+run_gate "cargo fmt --all --check" cargo fmt --all --check
+
+echo ""
+echo "=== Quality Guardrails ==="
+if $SKIP_SLOW; then
+    echo "⏭  cargo check / clippy / machete (--skip-slow)"
+else
+    run_gate "cargo check --all-targets --all-features" \
+        cargo check --all-targets --all-features -j "$JOBS"
+    run_gate "cargo clippy -- -D warnings" \
+        cargo clippy --all-targets --all-features -j "$JOBS" -- -D warnings
+fi
+
+run_gate "warning budget" bash scripts/check_warning_budget.sh
+run_ratchet "oversized-file ratchet" check_code_size_budget.py
+run_ratchet "oversized-test ratchet" check_test_size_budget.py
+run_ratchet "panic-prone usage ratchet" check_panic_budget.py
+run_ratchet "swallowed-error usage ratchet" check_swallowed_error_budget.py
+run_gate "crate dependency boundaries" python3 scripts/check_dependency_boundaries.py
+run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_budget.py
+
+if $SKIP_SLOW; then
+    :
+elif command -v cargo-machete >/dev/null 2>&1; then
+    run_gate "unused dependencies (cargo machete)" cargo machete
+else
+    echo "⏭  cargo machete (not installed: cargo install cargo-machete --locked)"
+fi
+
+echo ""
+# CI installs the current `stable`; a stale local toolchain hides new lints.
+if command -v rustup >/dev/null 2>&1; then
+    installed="$(rustup run stable rustc --version 2>/dev/null | awk '{print $2}')"
+    if [[ -n "$installed" ]]; then
+        echo "toolchain: stable = $installed (CI uses whatever \`stable\` is today)"
+    fi
+fi
+
+if (( ${#FAILED[@]} )); then
+    echo ""
+    echo "❌ ${#FAILED[@]} gate(s) failed:"
+    for f in "${FAILED[@]}"; do
+        echo "   - $f"
+    done
+    if ! $FIX; then
+        echo ""
+        echo "For formatting and intentional ratchet growth: scripts/check_guardrails.sh --fix"
+    fi
+    exit 1
+fi
+
+echo "✅ All guardrail gates pass."
