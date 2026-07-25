@@ -19,6 +19,9 @@ pub const CAPTION_SIZE: f32 = 10.5;
 pub const WORDMARK_SIZE: f32 = 15.0;
 /// Space reserved for the wordmark before the status caption starts.
 pub const WORDMARK_ADVANCE: f64 = 72.0;
+/// Rows in the masthead: the wordmark row, then a caption row carrying the
+/// version, update state, and signed-in account.
+pub const MASTHEAD_ROW_HEIGHT: f64 = 15.0;
 /// Composer well height for a single line, and the inner padding.
 pub const COMPOSER_HEIGHT: f64 = 44.0;
 /// Extra height per additional composer line.
@@ -41,6 +44,10 @@ pub const FOOTNOTE_GAP: f64 = 6.0;
 /// Vertical breathing room between regions.
 pub const SPACE_AFTER_RULE: f64 = 22.0;
 pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
+/// Fraction of the page height the input box is centred on. 0.5 puts the
+/// composer in the exact middle of the window; it only leaves that line when
+/// the page is too short to keep a transcript line above it.
+pub const COMPOSER_CENTER: f64 = 0.5;
 
 /// Resolved geometry for one frame. All fields are logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,6 +61,8 @@ pub struct Frame {
     pub right: f64,
     /// Baseline origin of the wordmark.
     pub masthead_top: f64,
+    /// Caption row under the wordmark: version, updates, auth.
+    pub masthead_meta: f64,
     /// Hairline under the masthead.
     pub masthead_rule: f64,
     /// Top of the transcript region.
@@ -95,19 +104,30 @@ impl Frame {
         let right = left + column;
 
         let masthead_top = (height * 0.05).clamp(24.0, 44.0);
-        let masthead_rule = masthead_top + 28.0;
+        let masthead_meta = masthead_top + 24.0;
+        let masthead_rule = masthead_meta + MASTHEAD_ROW_HEIGHT + 8.0;
 
         let bottom_margin = (height * 0.05).clamp(20.0, 40.0);
-        let footnote_bottom = height - bottom_margin;
-        let footnote_top = footnote_bottom - FOOTNOTE_HEIGHT;
-        let composer_bottom = footnote_top - FOOTNOTE_GAP;
-        let extra_lines = lines.clamp(1, COMPOSER_MAX_LINES) - 1;
-        let composer_height = COMPOSER_HEIGHT + extra_lines as f64 * COMPOSER_LINE_HEIGHT;
-        // Never let the composer squeeze the transcript below a usable size.
-        let available = (composer_bottom - masthead_rule - SPACE_AFTER_RULE) * 0.6;
-        let composer_top = composer_bottom - composer_height.min(available.max(COMPOSER_HEIGHT));
-
         let body_top = masthead_rule + SPACE_AFTER_RULE;
+        // Hard floor: the composer must leave room for its own caption row
+        // above the bottom margin.
+        let slot_bottom = height - bottom_margin - FOOTNOTE_HEIGHT - FOOTNOTE_GAP;
+        // Soft floor: keep at least one transcript line visible above the well.
+        let min_top = body_top + SPACE_BEFORE_COMPOSER + f64::from(BODY_SIZE) * BODY_LEADING;
+
+        let extra_lines = lines.clamp(1, COMPOSER_MAX_LINES) - 1;
+        let wanted = COMPOSER_HEIGHT + extra_lines as f64 * COMPOSER_LINE_HEIGHT;
+        let composer_height = wanted.min((slot_bottom - min_top).max(COMPOSER_HEIGHT));
+        // The input box sits on the middle of the page and grows symmetrically
+        // about that line as the text wraps, clamped so it never crosses the
+        // masthead rule or its own caption row.
+        let centred = height * COMPOSER_CENTER - composer_height * 0.5;
+        let ceiling = (slot_bottom - composer_height).max(body_top);
+        let composer_top = centred.clamp(min_top.min(ceiling), ceiling);
+        let composer_bottom = composer_top + composer_height;
+        let footnote_top = composer_bottom + FOOTNOTE_GAP;
+        let footnote_bottom = footnote_top + FOOTNOTE_HEIGHT;
+
         let body_bottom = (composer_top - SPACE_BEFORE_COMPOSER).max(body_top);
 
         Self {
@@ -117,6 +137,7 @@ impl Frame {
             left,
             right,
             masthead_top,
+            masthead_meta,
             masthead_rule,
             body_top,
             body_bottom,
@@ -289,14 +310,72 @@ mod tests {
             three.composer_top < one.composer_top,
             "the composer did not grow for more lines"
         );
-        assert_eq!(
-            three.composer_bottom, one.composer_bottom,
-            "the composer must grow upward, staying anchored to the bottom"
+        assert!(
+            three.composer_bottom > one.composer_bottom,
+            "the composer must grow downward too, staying centred"
+        );
+        let one_center = (one.composer_top + one.composer_bottom) / 2.0;
+        let three_center = (three.composer_top + three.composer_bottom) / 2.0;
+        assert!(
+            (one_center - three_center).abs() < 0.001,
+            "growth moved the composer off its centre line: {one_center} vs {three_center}"
         );
         assert!(
             three.body_bottom < one.body_bottom,
             "the transcript did not yield space to the composer"
         );
+    }
+
+    #[test]
+    fn the_composer_sits_on_the_middle_of_the_page() {
+        // On any window with room for it, the input box is centred vertically:
+        // this is the whole point of the layout.
+        for &size in SIZES {
+            for &scale in SCALES {
+                for lines in [1usize, 2, 4, COMPOSER_MAX_LINES] {
+                    let frame = Frame::with_composer_lines(size, scale, lines);
+                    let center = (frame.composer_top + frame.composer_bottom) / 2.0;
+                    let page = frame.height * COMPOSER_CENTER;
+                    // Either the well is centred, or the page was too short and
+                    // it was clamped against the transcript above or the caption
+                    // row below. Nothing else is allowed to move it.
+                    // Pushed down to keep one transcript line visible.
+                    let clamped_low =
+                        frame.body_bottom - frame.body_top <= frame.body_line_height() + 0.001;
+                    let clamped_high = frame.footnote_bottom >= frame.height - 40.0 - 0.001;
+                    assert!(
+                        (center - page).abs() < 0.001 || clamped_low || clamped_high,
+                        "composer centre {center} left the page middle {page} unclamped at {}x{}",
+                        frame.width,
+                        frame.height
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_roomy_page_centres_the_composer_exactly() {
+        for &size in &[(1100u32, 720u32), (1440, 900), (1920, 1080), (2560, 1440)] {
+            let frame = Frame::with_composer_lines(size, 1.0, 1);
+            let center = (frame.composer_top + frame.composer_bottom) / 2.0;
+            assert!(
+                (center - frame.height / 2.0).abs() < 0.001,
+                "composer was not centred at {}x{}: {center}",
+                frame.width,
+                frame.height
+            );
+        }
+    }
+
+    #[test]
+    fn the_footnote_row_follows_the_composer() {
+        sweep(|frame| {
+            assert!(
+                (frame.footnote_top - (frame.composer_bottom + FOOTNOTE_GAP)).abs() < 0.001,
+                "the caption row detached from the composer"
+            );
+        });
     }
 
     #[test]

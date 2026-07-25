@@ -11,6 +11,7 @@ mod editor;
 mod harness;
 mod keymap;
 mod layout;
+mod meta;
 mod render;
 mod scene;
 mod states;
@@ -262,6 +263,8 @@ const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// UI model: what the frame is built from.
 pub struct Model {
     pub theme: theme::Theme,
+    /// Build identity shown in the masthead: version, updates, account.
+    pub meta: meta::Meta,
     pub status: String,
     pub session_id: Option<String>,
     pub transcript: String,
@@ -280,6 +283,7 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             theme: theme::Theme::from_env(),
+            meta: meta::Meta::detect(),
             status: "starting...".into(),
             session_id: None,
             transcript: String::new(),
