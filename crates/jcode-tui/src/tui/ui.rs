@@ -1393,6 +1393,22 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
     }
 }
 
+/// The one lock guarding process-global render state in tests.
+///
+/// Render snapshots, scroll metrics, flicker history, and prompt positions all
+/// live in process globals, so *every* test that renders must serialize on the
+/// same mutex. Two separate helpers previously each defined their own private
+/// lock, which serialized nothing between them and produced failures that
+/// appeared only under parallelism (same root cause as issue #593). Both now
+/// delegate here.
+#[cfg(test)]
+pub(crate) fn render_state_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 pub(crate) fn clear_test_render_state_for_tests() {
     set_last_max_scroll(0);
