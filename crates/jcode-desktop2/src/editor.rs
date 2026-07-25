@@ -160,7 +160,13 @@ impl Editor {
     // --- editing ---
 
     pub fn insert_str(&mut self, s: &str) {
-        let s: String = s.chars().filter(|c| !c.is_control()).collect();
+        // Newlines are content in a multi-line composer; other control
+        // characters are not. Normalize CRLF so pasted text behaves.
+        let s: String = s
+            .replace("\r\n", "\n")
+            .chars()
+            .filter(|c| *c == '\n' || !c.is_control())
+            .collect();
         if s.is_empty() {
             return;
         }
@@ -172,7 +178,7 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        if c.is_control() {
+        if c.is_control() && c != '\n' {
             return;
         }
         self.delete_selection();
@@ -229,27 +235,29 @@ impl Editor {
         self.text.drain(self.cursor..end);
     }
 
-    /// Ctrl+U: delete from the cursor to the start of the line.
+    /// Ctrl+U: delete from the cursor to the start of the current line.
     /// Returns the removed text so it can go to the clipboard.
     pub fn kill_to_start(&mut self) -> String {
-        if self.cursor == 0 {
+        let start = self.line_start(self.cursor);
+        if start == self.cursor {
             return String::new();
         }
         self.snapshot();
-        let killed: String = self.text.drain(..self.cursor).collect();
-        self.cursor = 0;
+        let killed: String = self.text.drain(start..self.cursor).collect();
+        self.cursor = start;
         self.anchor = None;
         killed
     }
 
-    /// Ctrl+K: delete from the cursor to the end of the line.
+    /// Ctrl+K: delete from the cursor to the end of the current line.
     pub fn kill_to_end(&mut self) -> String {
-        if self.cursor >= self.text.len() {
+        let end = self.line_end(self.cursor);
+        if end == self.cursor {
             return String::new();
         }
         self.snapshot();
         self.anchor = None;
-        self.text.split_off(self.cursor)
+        self.text.drain(self.cursor..end).collect()
     }
 
     /// Ctrl+X: cut the whole line.
@@ -318,12 +326,12 @@ impl Editor {
 
     pub fn extend_home(&mut self) {
         self.anchor_selection();
-        self.cursor = 0;
+        self.cursor = self.line_start(self.cursor);
     }
 
     pub fn extend_end(&mut self) {
         self.anchor_selection();
-        self.cursor = self.text.len();
+        self.cursor = self.line_end(self.cursor);
     }
 
     /// Word range containing `offset`, for double-click selection.
@@ -370,14 +378,75 @@ impl Editor {
         self.anchor = None;
     }
 
+    /// Home goes to the start of the *visual line*, like any multi-line
+    /// editor, not the start of the buffer.
     pub fn move_home(&mut self) {
-        self.cursor = 0;
+        self.cursor = self.line_start(self.cursor);
         self.anchor = None;
     }
 
     pub fn move_end(&mut self) {
-        self.cursor = self.text.len();
+        self.cursor = self.line_end(self.cursor);
         self.anchor = None;
+    }
+
+    /// Byte offset of the start of the line containing `at`.
+    pub fn line_start(&self, at: usize) -> usize {
+        self.text[..at.min(self.text.len())]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    }
+
+    /// Byte offset of the end of the line containing `at`.
+    pub fn line_end(&self, at: usize) -> usize {
+        let at = at.min(self.text.len());
+        self.text[at..]
+            .find('\n')
+            .map(|i| at + i)
+            .unwrap_or(self.text.len())
+    }
+
+    /// Lines in the buffer. Always at least one, so the composer never
+    /// collapses to zero height.
+    pub fn line_count(&self) -> usize {
+        self.text.matches('\n').count() + 1
+    }
+
+    /// The cursor's line index and byte column within that line.
+    pub fn cursor_line_col(&self) -> (usize, usize) {
+        let start = self.line_start(self.cursor);
+        let line = self.text[..start].matches('\n').count();
+        (line, self.cursor - start)
+    }
+
+    /// Move the cursor up or down a line, preserving the column where
+    /// possible. Returns false when there is no line in that direction, so
+    /// callers can fall back to history recall.
+    pub fn move_line(&mut self, delta: isize) -> bool {
+        let (line, col) = self.cursor_line_col();
+        let target = match delta {
+            d if d < 0 => {
+                if line == 0 {
+                    return false;
+                }
+                line - 1
+            }
+            _ => {
+                if line + 1 >= self.line_count() {
+                    return false;
+                }
+                line + 1
+            }
+        };
+        let mut start = 0usize;
+        for _ in 0..target {
+            start = self.line_end(start) + 1;
+        }
+        let end = self.line_end(start);
+        self.cursor = self.snap((start + col).min(end));
+        self.anchor = None;
+        true
     }
 
     pub fn move_word_left(&mut self) {
@@ -526,10 +595,19 @@ mod tests {
     }
 
     #[test]
-    fn control_characters_are_never_inserted() {
+    fn control_characters_are_stripped_but_newlines_are_kept() {
+        // The composer is multi-line, so a newline is content. Other control
+        // characters (tabs, DEL, escapes) would corrupt layout.
         let mut editor = Editor::default();
-        editor.insert_str("a\u{7f}\tb\n");
-        assert_eq!(editor.text(), "ab");
+        editor.insert_str("a\u{7f}\tb\nc\u{1b}");
+        assert_eq!(editor.text(), "ab\nc");
+    }
+
+    #[test]
+    fn pasted_crlf_is_normalized() {
+        let mut editor = Editor::default();
+        editor.insert_str("one\r\ntwo");
+        assert_eq!(editor.text(), "one\ntwo");
     }
 
     #[test]
@@ -948,5 +1026,142 @@ mod selection_tests {
         editor.select_all();
         editor.history_prev();
         assert_eq!(editor.selection(), None, "stale selection after recall");
+    }
+}
+
+#[cfg(test)]
+mod multiline_tests {
+    use super::*;
+
+    #[test]
+    fn shift_enter_inserts_a_real_newline() {
+        let mut editor = Editor::with_text("first");
+        editor.insert_char('\n');
+        editor.insert_str("second");
+        assert_eq!(editor.text(), "first\nsecond");
+        assert_eq!(editor.line_count(), 2);
+    }
+
+    #[test]
+    fn an_empty_buffer_still_has_one_line() {
+        // The composer must never collapse to zero height.
+        assert_eq!(Editor::default().line_count(), 1);
+    }
+
+    #[test]
+    fn a_trailing_newline_opens_a_new_line() {
+        let editor = Editor::with_text("one\n");
+        assert_eq!(editor.line_count(), 2);
+    }
+
+    #[test]
+    fn home_and_end_work_on_the_current_line_not_the_buffer() {
+        let mut editor = Editor::with_text("alpha\nbeta gamma");
+        editor.set_cursor(11); // inside "gamma"
+        editor.move_home();
+        assert_eq!(&editor.text()[editor.cursor()..], "beta gamma");
+        editor.move_end();
+        assert_eq!(editor.cursor(), editor.text().len());
+
+        // On the first line, End must stop at the newline.
+        editor.set_cursor(2);
+        editor.move_end();
+        assert_eq!(&editor.text()[editor.cursor()..], "\nbeta gamma");
+    }
+
+    #[test]
+    fn kill_to_end_stops_at_the_line_break() {
+        let mut editor = Editor::with_text("alpha\nbeta");
+        editor.set_cursor(2);
+        assert_eq!(editor.kill_to_end(), "pha");
+        assert_eq!(
+            editor.text(),
+            "al\nbeta",
+            "Ctrl+K ate the rest of the buffer"
+        );
+    }
+
+    #[test]
+    fn kill_to_start_stops_at_the_line_break() {
+        let mut editor = Editor::with_text("alpha\nbeta");
+        editor.move_end();
+        assert_eq!(editor.kill_to_start(), "beta");
+        assert_eq!(editor.text(), "alpha\n");
+    }
+
+    #[test]
+    fn cursor_line_col_tracks_position() {
+        let mut editor = Editor::with_text("ab\ncde");
+        editor.set_cursor(0);
+        assert_eq!(editor.cursor_line_col(), (0, 0));
+        editor.set_cursor(2);
+        assert_eq!(editor.cursor_line_col(), (0, 2));
+        editor.set_cursor(4);
+        assert_eq!(editor.cursor_line_col(), (1, 1));
+    }
+
+    #[test]
+    fn moving_between_lines_preserves_the_column() {
+        let mut editor = Editor::with_text("alpha\nbravo");
+        editor.set_cursor(3); // column 3 of line 0
+        assert!(editor.move_line(1));
+        assert_eq!(editor.cursor_line_col(), (1, 3));
+        assert!(editor.move_line(-1));
+        assert_eq!(editor.cursor_line_col(), (0, 3));
+    }
+
+    #[test]
+    fn moving_to_a_shorter_line_clamps_to_its_end() {
+        let mut editor = Editor::with_text("alphabet\nhi");
+        editor.set_cursor(7);
+        assert!(editor.move_line(1));
+        assert_eq!(
+            editor.cursor(),
+            editor.text().len(),
+            "column was not clamped"
+        );
+    }
+
+    #[test]
+    fn line_motion_reports_when_there_is_nowhere_to_go() {
+        // This is what lets Up/Down fall back to history recall.
+        let mut editor = Editor::with_text("only line");
+        assert!(!editor.move_line(-1));
+        assert!(!editor.move_line(1));
+
+        let mut editor = Editor::with_text("one\ntwo");
+        editor.set_cursor(0);
+        assert!(!editor.move_line(-1), "moved above the first line");
+        assert!(editor.move_line(1));
+        assert!(!editor.move_line(1), "moved below the last line");
+    }
+
+    #[test]
+    fn line_motion_stays_on_char_boundaries() {
+        let mut editor = Editor::with_text("héllo\nwörld");
+        editor.set_cursor(3);
+        editor.move_line(1);
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+        editor.move_line(-1);
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    #[test]
+    fn selection_can_span_lines() {
+        let mut editor = Editor::with_text("alpha\nbravo");
+        editor.place_cursor(3);
+        editor.extend_to(8);
+        assert_eq!(editor.selected_text(), Some("ha\nbr"));
+    }
+
+    #[test]
+    fn word_motion_crosses_line_breaks() {
+        let mut editor = Editor::with_text("alpha\nbravo");
+        editor.set_cursor(0);
+        editor.move_word_right();
+        // A newline is whitespace, so forward motion lands on the next word.
+        assert_eq!(&editor.text()[editor.cursor()..], "bravo");
+        editor.move_word_left();
+        assert_eq!(&editor.text()[editor.cursor()..], "alpha\nbravo");
     }
 }

@@ -19,8 +19,12 @@ pub const CAPTION_SIZE: f32 = 10.5;
 pub const WORDMARK_SIZE: f32 = 15.0;
 /// Space reserved for the wordmark before the status caption starts.
 pub const WORDMARK_ADVANCE: f64 = 72.0;
-/// Composer well height and inner padding.
+/// Composer well height for a single line, and the inner padding.
 pub const COMPOSER_HEIGHT: f64 = 44.0;
+/// Extra height per additional composer line.
+pub const COMPOSER_LINE_HEIGHT: f64 = 20.0;
+/// Composer lines shown before it stops growing and scrolls internally.
+pub const COMPOSER_MAX_LINES: usize = 8;
 pub const COMPOSER_PAD_X: f64 = 14.0;
 pub const COMPOSER_RADIUS: f64 = 6.0;
 /// Baseline offset of the prompt text inside the composer well.
@@ -62,8 +66,17 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// Resolve geometry for a surface of `size` physical pixels at `scale`.
+    /// Resolve geometry for a surface of `size` physical pixels at `scale`,
+    /// with a single-line composer.
     pub fn new(size: (u32, u32), scale: f64) -> Self {
+        Self::with_composer_lines(size, scale, 1)
+    }
+
+    /// Resolve geometry with a composer sized for `lines` of input. The
+    /// composer grows upward so the transcript shrinks instead of the input
+    /// being clipped, and stops growing at [`COMPOSER_MAX_LINES`] so a long
+    /// paste can never push the transcript off the page.
+    pub fn with_composer_lines(size: (u32, u32), scale: f64, lines: usize) -> Self {
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
@@ -85,7 +98,11 @@ impl Frame {
         let footnote_bottom = height - bottom_margin;
         let footnote_top = footnote_bottom - FOOTNOTE_HEIGHT;
         let composer_bottom = footnote_top - FOOTNOTE_GAP;
-        let composer_top = composer_bottom - COMPOSER_HEIGHT;
+        let extra_lines = lines.clamp(1, COMPOSER_MAX_LINES) - 1;
+        let composer_height = COMPOSER_HEIGHT + extra_lines as f64 * COMPOSER_LINE_HEIGHT;
+        // Never let the composer squeeze the transcript below a usable size.
+        let available = (composer_bottom - masthead_rule - SPACE_AFTER_RULE) * 0.6;
+        let composer_top = composer_bottom - composer_height.min(available.max(COMPOSER_HEIGHT));
 
         let body_top = masthead_rule + SPACE_AFTER_RULE;
         let body_bottom = (composer_top - SPACE_BEFORE_COMPOSER).max(body_top);
@@ -132,6 +149,12 @@ impl Frame {
         (((self.body_bottom - self.body_top) / self.body_line_height()) as usize).max(1)
     }
 
+    /// Composer lines this frame was built for.
+    pub fn composer_lines(&self) -> usize {
+        let extra = (self.composer_bottom - self.composer_top - COMPOSER_HEIGHT).max(0.0);
+        1 + (extra / COMPOSER_LINE_HEIGHT).round() as usize
+    }
+
     /// The caret must stay inside the composer well at any size.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn caret_fits_in_composer(&self) -> bool {
@@ -166,7 +189,11 @@ mod tests {
     fn sweep(mut check: impl FnMut(Frame)) {
         for &size in SIZES {
             for &scale in SCALES {
-                check(Frame::new(size, scale));
+                // Every invariant must hold for a composer of any height, not
+                // just a single line.
+                for lines in [1usize, 2, 4, COMPOSER_MAX_LINES, COMPOSER_MAX_LINES + 20] {
+                    check(Frame::with_composer_lines(size, scale, lines));
+                }
             }
         }
     }
@@ -239,6 +266,58 @@ mod tests {
             assert!(frame.status_left() > frame.left);
             assert!(frame.status_width() >= 80.0);
         });
+    }
+
+    #[test]
+    fn the_composer_grows_with_its_line_count() {
+        let one = Frame::with_composer_lines((1100, 720), 1.0, 1);
+        let three = Frame::with_composer_lines((1100, 720), 1.0, 3);
+        assert!(
+            three.composer_top < one.composer_top,
+            "the composer did not grow for more lines"
+        );
+        assert_eq!(
+            three.composer_bottom, one.composer_bottom,
+            "the composer must grow upward, staying anchored to the bottom"
+        );
+        assert!(
+            three.body_bottom < one.body_bottom,
+            "the transcript did not yield space to the composer"
+        );
+    }
+
+    #[test]
+    fn the_composer_stops_growing_at_the_line_cap() {
+        let capped = Frame::with_composer_lines((1100, 720), 1.0, COMPOSER_MAX_LINES);
+        let over = Frame::with_composer_lines((1100, 720), 1.0, COMPOSER_MAX_LINES + 50);
+        assert_eq!(
+            capped.composer_top, over.composer_top,
+            "a huge paste grew the composer past its cap"
+        );
+    }
+
+    #[test]
+    fn a_tall_composer_never_eats_the_whole_page() {
+        // On a short window, a multi-line composer must still leave a readable
+        // transcript rather than covering it.
+        for &size in SIZES {
+            let frame = Frame::with_composer_lines(size, 1.75, COMPOSER_MAX_LINES);
+            assert!(
+                frame.body_bottom > frame.body_top,
+                "the transcript collapsed at {}x{}",
+                frame.width,
+                frame.height
+            );
+            assert!(frame.composer_top > frame.masthead_rule);
+        }
+    }
+
+    #[test]
+    fn composer_lines_round_trips() {
+        for lines in 1..=COMPOSER_MAX_LINES {
+            let frame = Frame::with_composer_lines((1400, 1000), 1.0, lines);
+            assert_eq!(frame.composer_lines(), lines);
+        }
     }
 
     #[test]
