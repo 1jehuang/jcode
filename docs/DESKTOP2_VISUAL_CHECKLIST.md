@@ -11,6 +11,19 @@ test that catches each one.
 Every enforced row below has been mutation-tested: the rule was deliberately
 broken and the named test failed. Rows marked `manual` are honest gaps.
 
+## Running it
+
+```sh
+# build (selfdev routes crates/jcode-desktop2/ changes here automatically)
+selfdev build target=desktop2
+
+# launch: ~/.local/bin/jcode-desktop2 prefers an installed binary, then the
+# self-dev build, so a rebuild is picked up without reinstalling.
+jcode-desktop2
+```
+
+Bound to `Alt+Shift+I` in niri, alongside `Alt+I` for the original desktop app.
+
 ## How to check
 
 ```sh
