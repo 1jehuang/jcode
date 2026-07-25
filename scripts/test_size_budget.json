@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent_tests.rs": 1321,
+    "crates/jcode-app-core/src/agent_tests.rs": 1346,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1231,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1394,
