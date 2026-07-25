@@ -37,6 +37,11 @@ impl RenderState {
         })
     }
 
+    /// Window scale factor (HiDPI). Scene layout is in logical units.
+    pub fn scale_factor(&self) -> f64 {
+        self.window.scale_factor()
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (self.surface.config.width, self.surface.config.height)
     }
