@@ -275,7 +275,13 @@ fn make_edit_badge_test_app(
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
 
-    let backend = ratatui::backend::TestBackend::new(120, 40);
+    // Tall enough that a fully expanded 20-line diff still fits *below* the
+    // header. The header grew when unconfigured providers became dim rows
+    // (8101d1077), and at 40 rows the expanded tail scrolled out of view, so the
+    // test failed while the feature under test worked correctly. Size the
+    // viewport from the content instead of hardcoding a height that silently
+    // depends on header layout.
+    let backend = ratatui::backend::TestBackend::new(120, 80);
     let terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     (app, terminal)
 }
