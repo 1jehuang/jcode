@@ -62,39 +62,85 @@ impl AnthropicContextMode {
 /// Classify how a Claude model exposes long context. Accepts both canonical
 /// (`claude-opus-4-8`) and dotted (`claude-opus-4.8`) forms, with or without a
 /// trailing `[1m]` suffix.
+///
+/// Known generations are pinned to behavior verified against the live API.
+/// Unknown *future* generations are classified by parsed family/version rather
+/// than a hardcoded prefix list, and default optimistically to `Native1M` from
+/// version 5 on. Failing closed at 200K is the worse error: it silently
+/// under-reports the context meter and shrinks compaction budgets ~5x with no
+/// diagnostic (issues #450, #577, #578).
 pub fn anthropic_context_mode(model: &str) -> AnthropicContextMode {
-    let base = anthropic_strip_1m_suffix(model.trim()).to_ascii_lowercase();
-
-    // Native 1M (default, no opt-in): Opus 5, Opus 4.8 and 4.7, Sonnet 5, Fable 5.
-    // Sonnet 5 supports the 1M window by default (1M is both the default and
-    // the maximum; there is no smaller context variant).
-    if base.starts_with("claude-opus-5")
-        || base.starts_with("claude-opus-4-8")
-        || base.starts_with("claude-opus-4.8")
-        || base.starts_with("claude-opus-4-7")
-        || base.starts_with("claude-opus-4.7")
-        || base.starts_with("claude-sonnet-5")
-        || base.starts_with("claude-fable-5")
-    {
-        return AnthropicContextMode::Native1M;
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude") {
+        return AnthropicContextMode::Standard;
     }
+    let (family, version) = parse_claude_family_version(&base);
+    let Some(version) = version else {
+        return AnthropicContextMode::Standard;
+    };
 
-    // Opt-in 1M via the context-1m beta: Opus 4.6 and Sonnet 4.6.
-    if base.starts_with("claude-opus-4-6")
-        || base.starts_with("claude-opus-4.6")
-        || base.starts_with("claude-sonnet-4-6")
-        || base.starts_with("claude-sonnet-4.6")
-    {
-        return AnthropicContextMode::OptIn1M;
+    match family {
+        // Opus/Sonnet: 4.7+ and 5+ are native 1M; 4.6 opts in via the
+        // context-1m beta; 4.5 and older are hard-capped at 200K.
+        Some("opus") | Some("sonnet") => {
+            if version >= (4, 7) {
+                AnthropicContextMode::Native1M
+            } else if version == (4, 6) {
+                AnthropicContextMode::OptIn1M
+            } else {
+                AnthropicContextMode::Standard
+            }
+        }
+        // Haiku 4.5 is 200K. Newer small models are covered by the
+        // version-5 optimistic default below.
+        Some("haiku") if version < (5, 0) => AnthropicContextMode::Standard,
+        // Optimistic default for new generations (Fable 5, Haiku 5, future
+        // families): assume native 1M from version 5 on.
+        _ => {
+            if version >= (5, 0) {
+                AnthropicContextMode::Native1M
+            } else {
+                AnthropicContextMode::Standard
+            }
+        }
     }
-
-    AnthropicContextMode::Standard
 }
 
 /// Check if a model name explicitly requests 1M context via suffix
 /// (for example `claude-opus-4-6[1m]`).
 pub fn anthropic_is_1m_model(model: &str) -> bool {
     model.ends_with("[1m]")
+}
+
+/// Whether `model` looks like a Claude id with a parseable family/version, i.e.
+/// one [`anthropic_context_mode`] can classify rather than guess about.
+pub fn claude_id_has_parseable_version(model: &str) -> bool {
+    let base = normalized_claude_caps_key(model);
+    base.starts_with("claude") && parse_claude_family_version(&base).1.is_some()
+}
+
+/// Whether [`anthropic_context_mode`]'s answer for `model` comes from a
+/// generation whose long-context behavior was verified against the live
+/// Anthropic API, as opposed to the optimistic default for new generations.
+///
+/// Callers use this to decide precedence: a verified classification beats the
+/// live catalog (whose `max_input_tokens` over-advertises 1M for 200K-capped
+/// models), while an unverified one should yield to catalog/config data and be
+/// used only as a last resort instead of the 200K default.
+pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
+    let base = normalized_claude_caps_key(model);
+    let (family, version) = parse_claude_family_version(&base);
+    let Some(version) = version else {
+        return false;
+    };
+    match family {
+        // Opus/Sonnet 3.x-4.8 and Sonnet 5 were probed with raw long-context
+        // requests on a live subscription.
+        Some("opus") => version <= (4, 8),
+        Some("sonnet") => version <= (5, 0),
+        Some("haiku") => version <= (4, 5),
+        _ => false,
+    }
 }
 
 /// Maximum output tokens Anthropic's synchronous Messages API accepts for a
