@@ -75,6 +75,31 @@ impl Donut {
         });
     }
 
+    /// Fraction of the field's square actually inked, as (horizontal,
+    /// vertical) extents in `0..=1`. The torus at this tilt never reaches the
+    /// square's edges, so layout spaces the hero text against these instead of
+    /// the raw box, which is what stops the gap under the donut looking like a
+    /// mistake.
+    pub fn ink_extent(&self) -> (f32, f32) {
+        let grid = self.grid;
+        let (mut x0, mut x1, mut y0, mut y1) = (grid, 0usize, grid, 0usize);
+        for y in 0..grid {
+            for x in 0..grid {
+                if self.lum[x + y * grid] > 0.04 {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        if x1 < x0 || y1 < y0 {
+            return (0.0, 0.0);
+        }
+        let n = grid as f32;
+        ((x1 - x0 + 1) as f32 / n, (y1 - y0 + 1) as f32 / n)
+    }
+
     /// Bilinear sample of the field at grid coordinates, so each halftone dot
     /// integrates its neighbourhood instead of point-sampling one cell.
     pub fn sample(&self, gx: f32, gy: f32) -> f32 {
@@ -389,6 +414,30 @@ mod tests {
         // The hole: the field centre is unlit at this tilt.
         let grid = 48;
         assert_eq!(lum[grid / 2 + (grid / 2) * grid], 0.0);
+    }
+
+    /// The tilt wobbles, so the inked extent must stay in a narrow band: this
+    /// is the number `layout::DONUT_INK_FRACTION` encodes, so a change to the
+    /// pose that invalidates the hero's spacing fails here rather than looking
+    /// subtly wrong.
+    #[test]
+    fn ink_extent_is_stable_across_the_wobble() {
+        let mut donut = Donut::new(96);
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for step in 0..40 {
+            donut.render(step as f32 * 0.4, 0.0);
+            let (w, h) = donut.ink_extent();
+            lo = lo.min(w.min(h));
+            hi = hi.max(w.max(h));
+        }
+        assert!(lo > 0.6, "the donut shrank out of its box: {lo}");
+        assert!(hi <= 1.0, "the donut overflowed its box: {hi}");
+        assert!(
+            (crate::layout::DONUT_INK_FRACTION as f32) <= hi
+                && (crate::layout::DONUT_INK_FRACTION as f32) >= lo,
+            "DONUT_INK_FRACTION {} is outside the measured {lo}..{hi}",
+            crate::layout::DONUT_INK_FRACTION
+        );
     }
 
     #[test]
