@@ -321,7 +321,7 @@ fn test_build_response_request_for_gpt_5_4_1m_uses_base_model_without_extra_flag
     assert!(request.get("prompt_cache_retention").is_none());
     assert_eq!(
         request["reasoning"],
-        serde_json::json!({ "effort": "xhigh" })
+        serde_json::json!({ "effort": "xhigh", "summary": "auto" })
     );
     assert_eq!(request["service_tier"], serde_json::json!("unused"));
     assert!(

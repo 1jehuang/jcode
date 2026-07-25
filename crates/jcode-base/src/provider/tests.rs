@@ -1067,3 +1067,67 @@ include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
+
+#[test]
+fn stream_idle_timeout_multiplier_scales_with_reasoning_effort() {
+    // Ordinary efforts keep the base budget; the model emits tokens promptly.
+    for effort in [
+        None,
+        Some("none"),
+        Some("minimal"),
+        Some("low"),
+        Some("medium"),
+    ] {
+        assert_eq!(
+            stream_idle_timeout_multiplier_for_effort(effort),
+            1,
+            "unexpected multiplier for {effort:?}"
+        );
+    }
+
+    // High efforts think silently for minutes, so they need more headroom.
+    assert_eq!(stream_idle_timeout_multiplier_for_effort(Some("high")), 2);
+    assert_eq!(stream_idle_timeout_multiplier_for_effort(Some("xhigh")), 3);
+    assert_eq!(stream_idle_timeout_multiplier_for_effort(Some("max")), 4);
+
+    // Swarm sentinels resolve to the top wire effort upstream.
+    assert_eq!(stream_idle_timeout_multiplier_for_effort(Some("swarm")), 4);
+    assert_eq!(
+        stream_idle_timeout_multiplier_for_effort(Some("swarm-deep")),
+        4
+    );
+
+    // Casing and padding come from config/CLI input, so normalize both.
+    assert_eq!(stream_idle_timeout_multiplier_for_effort(Some("  MAX ")), 4);
+
+    // No effort ever exceeds the documented ceiling clients budget against.
+    for effort in [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "swarm",
+        "swarm-deep",
+    ] {
+        assert!(
+            stream_idle_timeout_multiplier_for_effort(Some(effort))
+                <= MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER,
+            "{effort} exceeds MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER"
+        );
+    }
+}
+
+#[test]
+fn stream_idle_timeout_for_effort_never_shrinks_the_base_budget() {
+    let base = stream_idle_timeout();
+    assert_eq!(stream_idle_timeout_for_effort(None), base);
+    assert!(stream_idle_timeout_for_effort(Some("max")) > base);
+    assert_eq!(
+        max_stream_idle_timeout(),
+        base * MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER
+    );
+    assert!(max_stream_idle_timeout() >= stream_idle_timeout_for_effort(Some("max")));
+}

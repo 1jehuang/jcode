@@ -86,7 +86,10 @@ fn test_websocket_payload_preserves_required_fields() {
     assert!(request["input"].is_array());
     assert!(request["tools"].is_array());
     assert_eq!(request["max_output_tokens"], serde_json::json!(16384));
-    assert_eq!(request["reasoning"], serde_json::json!({"effort": "high"}));
+    assert_eq!(
+        request["reasoning"],
+        serde_json::json!({"effort": "high", "summary": "auto"})
+    );
     assert_eq!(request["tool_choice"], "auto");
 }
 
@@ -250,4 +253,5 @@ fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
         None,
     );
     assert_eq!(request["reasoning"]["effort"], serde_json::json!("max"));
+    assert_eq!(request["reasoning"]["summary"], serde_json::json!("auto"));
 }

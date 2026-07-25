@@ -335,6 +335,8 @@ cross_provider_failover = "countdown"
 # Applies to every streaming provider path (OpenAI native, Anthropic, Copilot,
 # OpenRouter/OpenAI-compatible). The TUI's client-side stall guard also extends
 # to match this value. Also overridable per-launch via JCODE_STREAM_IDLE_TIMEOUT_SECS.
+# This is the base budget: high reasoning efforts scale it up automatically
+# (high 2x, xhigh 3x, max/swarm 4x) since they think silently for much longer.
 # stream_idle_timeout_secs = 600
 
 [agents]

@@ -1314,6 +1314,10 @@ pub struct ProviderConfig {
     /// no data received. Raise this for slow reasoning models (e.g. DeepSeek)
     /// that think silently for minutes before emitting tokens. Default: 180.
     /// Overridable per-launch via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
+    ///
+    /// This is the base budget. High reasoning efforts scale it automatically
+    /// (see `jcode_base::provider::stream_idle_timeout_for_effort`) because
+    /// they can think silently for many minutes before emitting anything.
     pub stream_idle_timeout_secs: u64,
 }
 
