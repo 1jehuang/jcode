@@ -1085,3 +1085,49 @@ fn migrate_legacy_swarm_spawn_mode_noops_without_visible_value() {
 
     restore_env_var("JCODE_HOME", prev_home);
 }
+
+#[test]
+fn frozen_machine_written_sponsors_optout_is_repaired() {
+    let raw = "[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n";
+    let mut config: Config = toml::from_str(raw).expect("parse");
+    assert!(!config.sponsors.enabled);
+    config.repair_frozen_sponsors_optout(raw);
+    assert!(
+        config.sponsors.enabled,
+        "a whole-struct config save must not permanently disable discovery"
+    );
+}
+
+#[test]
+fn legacy_endpoint_optout_is_also_repaired() {
+    let raw =
+        "[sponsors]\nenabled = false\nendpoint = \"https://api.solosystems.dev/v1/discovery\"\n";
+    let mut config: Config = toml::from_str(raw).expect("parse");
+    config.repair_frozen_sponsors_optout(raw);
+    assert!(config.sponsors.enabled);
+}
+
+#[test]
+fn hand_written_sponsors_optout_is_respected() {
+    for raw in [
+        "[sponsors]\nenabled = false\n",
+        "[sponsors]\nenabled = false\nendpoint = \"https://discovery.internal/v1\"\n",
+    ] {
+        let mut config: Config = toml::from_str(raw).expect("parse");
+        config.repair_frozen_sponsors_optout(raw);
+        assert!(
+            !config.sponsors.enabled,
+            "explicit user opt-out must survive: {raw}"
+        );
+    }
+}
+
+#[test]
+fn default_sponsors_section_is_not_written_back() {
+    let config = Config::default();
+    let rendered = toml::to_string_pretty(&config).expect("serialize");
+    assert!(
+        !rendered.contains("[sponsors]"),
+        "default discovery settings must not be baked into config.toml"
+    );
+}
