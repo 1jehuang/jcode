@@ -355,7 +355,21 @@ fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
 /// green/yellow dots; unconfigured ones get a dim hollow dot so they read as
 /// available-to-add without cluttering the `/login` heading.
 pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
-    auth_full_specs(auth)
+    let specs = auth_full_specs(auth);
+    // Only list providers the user actually has credentials for. When nothing
+    // is configured at all, fall back to the full list so the `/login` heading
+    // still shows what can be added.
+    let configured: Vec<_> = specs
+        .iter()
+        .filter(|(_, state)| *state != AuthState::NotConfigured)
+        .cloned()
+        .collect();
+    let shown = if configured.is_empty() {
+        specs
+    } else {
+        configured
+    };
+    shown
         .into_iter()
         .map(|(label, state)| {
             Line::from(vec![
@@ -1537,10 +1551,10 @@ mod tests {
             "rendered: {rendered}"
         );
         assert!(rendered.contains("openai(key)"), "rendered: {rendered}");
-        // Unconfigured providers get their own line with a hollow dot.
-        assert!(rendered.contains("openrouter"), "rendered: {rendered}");
-        assert!(rendered.contains("copilot"), "rendered: {rendered}");
-        assert!(rendered.contains("○"), "rendered: {rendered}");
+        // Providers the user has no credentials for stay out of the header.
+        assert!(!rendered.contains("openrouter"), "rendered: {rendered}");
+        assert!(!rendered.contains("copilot"), "rendered: {rendered}");
+        assert!(!rendered.contains("○"), "rendered: {rendered}");
     }
 
     #[test]
