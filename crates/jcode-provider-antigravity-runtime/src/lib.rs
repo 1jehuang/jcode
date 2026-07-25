@@ -239,6 +239,7 @@ impl AntigravityProvider {
         system: &str,
         resume_session_id: Option<&str>,
         force_function_call: bool,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
     ) -> Result<CodeAssistGenerateResponse> {
         let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
         let project = match tokens
@@ -276,7 +277,10 @@ impl AntigravityProvider {
             project,
             user_prompt_id: Uuid::new_v4().to_string(),
             request: VertexGenerateContentRequest {
-                contents: jcode_provider_gemini::build_contents(messages),
+                contents: jcode_provider_gemini::build_contents_with_signature_policy(
+                    messages,
+                    signature_policy,
+                ),
                 system_instruction: jcode_provider_gemini::build_system_instruction_with_tool_guard(
                     system,
                     !tools_is_empty,
@@ -416,6 +420,17 @@ impl Provider for AntigravityProvider {
                     phase: ConnectionPhase::WaitingForResponse,
                 }))
                 .await;
+            // Gemini-3 function calls carry an opaque `thoughtSignature` that the
+            // Cloud Code backend requires on replay. `build_contents` carries the
+            // most recent real signature forward, but a history where *nothing*
+            // was ever signed (imported/pre-signature sessions, or synthesized
+            // calls from a route that never emits signatures) has none to carry,
+            // and 400s on every single turn with no way out (issues #482, #518).
+            // Self-heal the way the Anthropic runtime does for rejected reasoning
+            // fields: on that specific error, retry once with tool calls
+            // downgraded to plain text. Content is preserved, the turn completes,
+            // and the model re-signs its new calls.
+            let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
             let response = match provider
                 .generate_content(
                     &model,
@@ -424,13 +439,40 @@ impl Provider for AntigravityProvider {
                     &system,
                     resume_session_id.as_deref(),
                     false,
+                    signature_policy,
                 )
                 .await
             {
                 Ok(response) => response,
                 Err(err) => {
-                    let _ = tx.send(Err(err)).await;
-                    return;
+                    if !jcode_provider_gemini::is_missing_thought_signature_error(&err.to_string())
+                    {
+                        let _ = tx.send(Err(err)).await;
+                        return;
+                    }
+                    jcode_base::logging::warn(
+                        "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
+                    );
+                    signature_policy =
+                        jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
+                    match provider
+                        .generate_content(
+                            &model,
+                            &messages,
+                            &tools,
+                            &system,
+                            resume_session_id.as_deref(),
+                            false,
+                            signature_policy,
+                        )
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(retry_err) => {
+                            let _ = tx.send(Err(retry_err)).await;
+                            return;
+                        }
+                    }
                 }
             };
             // Gemini-3 thinking models intermittently return an empty
@@ -453,6 +495,7 @@ impl Provider for AntigravityProvider {
                         &system,
                         resume_session_id.as_deref(),
                         true,
+                        signature_policy,
                     )
                     .await
                 {

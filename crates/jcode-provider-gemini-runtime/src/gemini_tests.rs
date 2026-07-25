@@ -722,3 +722,105 @@ fn system_instruction_tool_guard_with_empty_system_still_emits_guidance() {
     // Empty system and no tools yields no instruction at all.
     assert!(super::build_system_instruction_with_tool_guard("", false).is_none());
 }
+
+/// Issues #482 / #518: carrying a signature forward only works if the history
+/// contains at least one real signature. A conversation where *nothing* was ever
+/// signed has none to carry, so every turn 400s with no way out. The recovery
+/// policy must downgrade tool calls to text so the turn can complete.
+#[test]
+fn fully_unsigned_history_has_no_signature_to_replay() {
+    let messages = unsigned_tool_history();
+    let contents = jcode_provider_gemini::build_contents(&messages);
+    let signed_calls = contents
+        .iter()
+        .flat_map(|content| content.parts.iter())
+        .filter(|part| part.function_call.is_some() && part.thought_signature.is_some())
+        .count();
+    assert_eq!(
+        signed_calls, 0,
+        "a fully unsigned history cannot produce a signed call; this is the \
+         dead-end the downgrade policy exists to escape"
+    );
+}
+
+#[test]
+fn downgrade_policy_removes_every_function_call_part() {
+    let messages = unsigned_tool_history();
+    let contents = jcode_provider_gemini::build_contents_with_signature_policy(
+        &messages,
+        jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText,
+    );
+    let parts: Vec<_> = contents
+        .iter()
+        .flat_map(|content| content.parts.iter())
+        .collect();
+    assert!(
+        parts
+            .iter()
+            .all(|part| part.function_call.is_none() && part.function_response.is_none()),
+        "downgrade must leave no functionCall/functionResponse part for the \
+         backend to reject"
+    );
+    // The content must survive as text, otherwise the retry loses the whole
+    // conversation and the model repeats work.
+    let text = parts
+        .iter()
+        .filter_map(|part| part.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("bash"), "tool name should survive: {text}");
+    assert!(text.contains("ls"), "tool args should survive: {text}");
+    assert!(
+        text.contains("total 0"),
+        "tool result should survive: {text}"
+    );
+}
+
+#[test]
+fn missing_thought_signature_errors_are_recognized_from_backend_bodies() {
+    // Exact bodies reported in #482 and #518.
+    assert!(jcode_provider_gemini::is_missing_thought_signature_error(
+        "Antigravity generateContent failed (HTTP 400 Bad Request): {\"error\": {\"code\": 400, \
+         \"message\": \"Function call is missing a thought_signature in functionCall parts. This \
+         is required for tools to work correctly, and missing thought_signature may lead to \
+         degraded model performance. Additional data, function call [default_api:bash], position \
+         7.\", \"status\": \"INVALID_ARGUMENT\"}}"
+    ));
+    assert!(jcode_provider_gemini::is_missing_thought_signature_error(
+        "missing a thoughtSignature"
+    ));
+    // Unrelated failures must not trigger the lossy downgrade retry.
+    assert!(!jcode_provider_gemini::is_missing_thought_signature_error(
+        "Antigravity generateContent failed (HTTP 429): rate limit exceeded"
+    ));
+    assert!(!jcode_provider_gemini::is_missing_thought_signature_error(
+        "MALFORMED_FUNCTION_CALL"
+    ));
+}
+
+/// An assistant tool call plus its result, with no thought signature anywhere.
+fn unsigned_tool_history() -> Vec<Message> {
+    vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call1".to_string(),
+                name: "bash".to_string(),
+                input: json!({ "command": "ls" }),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call1".to_string(),
+                content: "total 0".to_string(),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ]
+}
