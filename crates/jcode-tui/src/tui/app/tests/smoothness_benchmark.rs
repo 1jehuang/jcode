@@ -50,13 +50,24 @@ fn observe_smoothness_frame_text(
 #[test]
 fn smoothness_benchmark_simulated_streaming_turn_stays_within_budget() {
     let _render_lock = scroll_render_test_lock();
+    // The budgets below describe a turn that streams *visible* reasoning and then
+    // releases the retained trace at answer-commit. Reasoning display defaults to
+    // `Off` for new users (166e4444f), so pin `current` mode or the benchmark
+    // measures a different turn shape than the one its budgets were written for.
+    with_reasoning_current_home(|| {
     let mut app = create_test_app();
     app.session.short_name = Some("test".to_string());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    let backend = ratatui::backend::TestBackend::new(100, 32);
+    // 60 rows, not 32: the header grew when unconfigured providers became dim
+    // rows (8101d1077), and at 32 rows the streamed turn no longer fit, so each
+    // late frame had to reflow the whole screen. That produced a
+    // `mass_reflow_events: 1` failure describing the viewport being too small
+    // rather than any streaming regression. Give the benchmark room for the turn
+    // it is actually measuring.
+    let backend = ratatui::backend::TestBackend::new(100, 60);
     let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
     let mut recorder = jcode_tui_core::anchor_stability::AnchorStabilityRecorder::new();
 
@@ -181,8 +192,8 @@ fn smoothness_benchmark_simulated_streaming_turn_stays_within_budget() {
         "at most the commit boundaries may pop, got {}: {report:?}",
         report.big_pop_events
     );
+    });
 }
-
 #[test]
 fn smoothness_plain_text_commit_preserves_the_live_viewport() {
     let _render_lock = scroll_render_test_lock();
