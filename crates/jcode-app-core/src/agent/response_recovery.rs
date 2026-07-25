@@ -100,7 +100,7 @@ impl Agent {
         true
     }
 
-    pub(super) fn should_continue_after_stop_reason(stop_reason: &str) -> bool {
+    pub(crate) fn should_continue_after_stop_reason(stop_reason: &str) -> bool {
         let reason = stop_reason.trim().to_ascii_lowercase();
         if reason.is_empty() {
             return false;
