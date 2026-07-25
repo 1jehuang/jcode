@@ -855,3 +855,108 @@ fn every_ported_chord_dispatches_without_panicking() {
         app.apply(row.action, Some("x"));
     }
 }
+
+/// The donut's interaction, driven through the real pointer handlers.
+mod donut {
+    use super::*;
+
+    /// Logical centre of the donut in the current frame.
+    fn donut_centre(app: &App) -> (f64, f64) {
+        let box_ = app.frame.donut_box();
+        ((box_.x0 + box_.x1) / 2.0, (box_.y0 + box_.y1) / 2.0)
+    }
+
+    fn app_on_empty_session() -> App {
+        let mut app = App::default();
+        app.model.session_id = Some("session_test".into());
+        app
+    }
+
+    #[test]
+    fn dragging_the_donut_spins_it_and_coasts_to_rest() {
+        let mut app = app_on_empty_session();
+        let (cx, cy) = donut_centre(&app);
+        app.pointer = (cx, cy);
+        app.on_pointer_pressed();
+        assert!(
+            app.model.spin.dragging,
+            "press on the donut must start a drag"
+        );
+        app.pointer = (cx + 60.0, cy);
+        app.on_pointer_moved();
+        assert!(app.model.spin.velocity > 0.0, "drag must impart spin");
+        app.model.spin.release();
+        for _ in 0..500 {
+            app.model.spin.advance(1.0 / 60.0);
+        }
+        assert_eq!(app.model.spin.velocity, 0.0, "spin must come to rest");
+        assert!(app.model.spin.offset > 0.0);
+    }
+
+    #[test]
+    fn dragging_the_donut_never_touches_the_composer() {
+        let mut app = app_on_empty_session();
+        app.apply(Action::Insert, Some("keep me"));
+        let cursor = app.model.editor.cursor();
+        let (cx, cy) = donut_centre(&app);
+        app.pointer = (cx, cy);
+        app.on_pointer_pressed();
+        app.pointer = (cx + 40.0, cy);
+        app.on_pointer_moved();
+        assert_eq!(app.model.editor.text(), "keep me");
+        assert_eq!(app.model.editor.cursor(), cursor);
+        assert!(app.model.editor.selection().is_none());
+    }
+
+    #[test]
+    fn a_click_in_the_composer_does_not_spin_the_donut() {
+        let mut app = app_on_empty_session();
+        app.apply(Action::Insert, Some("hello"));
+        let x = app.frame.left + 20.0;
+        click(&mut app, x);
+        assert!(!app.model.spin.dragging);
+        assert_eq!(app.model.spin.velocity, 0.0);
+    }
+
+    #[test]
+    fn the_donut_stands_down_once_there_is_a_transcript() {
+        let mut app = app_on_empty_session();
+        assert!(app.donut_visible());
+        app.model.transcript.push_str("\n> hi\n\nhello\n");
+        assert!(!app.donut_visible(), "content must take the donut's space");
+        // And a press where the donut was is inert, not a hidden hit target.
+        let (cx, cy) = donut_centre(&app);
+        app.pointer = (cx, cy);
+        app.on_pointer_pressed();
+        assert!(!app.model.spin.dragging);
+    }
+
+    #[test]
+    fn an_unfocused_or_hidden_donut_does_not_animate() {
+        let mut app = app_on_empty_session();
+        assert!(app.donut_animating());
+        app.model.focused = false;
+        assert!(
+            !app.donut_animating(),
+            "decorative motion must idle when unfocused"
+        );
+        app.model.focused = true;
+        app.model.donut = None;
+        assert!(!app.donut_animating());
+        // And animating is then a no-op rather than advancing a clock nobody sees.
+        let before = app.model.spin.time;
+        app.animate_donut();
+        assert_eq!(app.model.spin.time, before);
+    }
+
+    #[test]
+    fn animation_advances_the_clock_and_the_field() {
+        let mut app = app_on_empty_session();
+        app.animate_donut();
+        let first = app.model.spin.time;
+        assert!(first > 0.0, "the clock must advance");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.animate_donut();
+        assert!(app.model.spin.time > first);
+    }
+}

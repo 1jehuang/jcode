@@ -24,13 +24,7 @@ const DOT_GAMMA: f32 = 0.85;
 /// Draw the halftone donut into `box_`, sampling `field` as a luminance image.
 /// The dot lattice is in logical units so the screen density is identical on
 /// 1x and HiDPI, exactly like the website's CSS-pixel lattice.
-fn draw_donut(
-    scene: &mut Scene,
-    field: &donut::Donut,
-    box_: Rect,
-    ink: Color,
-    scale: f64,
-) {
+fn draw_donut(scene: &mut Scene, field: &donut::Donut, box_: Rect, ink: Color, scale: f64) {
     let side = box_.width().min(box_.height());
     if side < layout::DONUT_MIN_SIDE {
         return;
@@ -124,7 +118,6 @@ pub fn build_scene(
         theme.background,
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
-
 
     // Composer: a real input field. Paper fill plus a hairline border, rather
     // than a grey slab: a filled block reads as disabled or as a code block,

@@ -75,7 +75,9 @@ fn ensure_runtime(send: &impl Fn(HarnessUpdate)) -> Result<(), Box<dyn std::erro
         wait_for_socket(&legacy, "jcode runtime")?;
     }
 
-    send(HarnessUpdate::Status("starting harness API bridge...".into()));
+    send(HarnessUpdate::Status(
+        "starting harness API bridge...".into(),
+    ));
     std::process::Command::new(sibling_exe("jcode-harness-api-bridge"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
