@@ -336,6 +336,74 @@ fn a_long_line_wraps_inside_the_composer_well() {
     }
 }
 
+/// The caret must sit on the row that owns the cursor. Drawing it on the first
+/// row would look plausible on short input and be wrong on every wrapped line.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_caret_sits_on_the_cursor_row_when_wrapped() {
+    let mut model = states::by_name("wrapped_long_line").expect("node");
+    model.caret = crate::caret::Caret::pinned(true);
+    // Cursor at the end: the caret belongs on the last visible row.
+    model.editor.move_end();
+    let Some(r) = Rendered::new(&model) else {
+        return;
+    };
+    let f = r.frame;
+    let rows = f.composer_lines();
+    assert!(rows > 1, "node did not wrap");
+
+    // A caret is a full-height bar, so its row has ink spanning the sampled
+    // band. Find which row carries a bar past the end of that row's text.
+    let s = f.scale;
+    let row_band = |row: usize| {
+        let top = f.composer_top
+            + crate::layout::COMPOSER_TEXT_OFFSET
+            + row as f64 * crate::layout::COMPOSER_LINE_HEIGHT;
+        let y0 = ((top + 2.0) * s) as u32;
+        let y1 = ((top + 12.0) * s) as u32;
+        (y0, y1)
+    };
+    let bar_columns = |row: usize| {
+        let (y0, y1) = row_band(row);
+        (((f.left + crate::layout::COMPOSER_PAD_X) * s) as u32..((f.right - 2.0) * s) as u32)
+            .filter(|&x| (y0..=y1).all(|y| r.luma(x, y) < 0.5))
+            .count()
+    };
+    let last = rows - 1;
+    assert!(
+        bar_columns(last) > 0,
+        "no caret bar on the last row, where the cursor is"
+    );
+
+    // Now put the cursor on the first row and confirm the bar moves there.
+    let mut first_row_model = states::by_name("wrapped_long_line").expect("node");
+    first_row_model.caret = crate::caret::Caret::pinned(true);
+    first_row_model.editor.place_cursor(3);
+    let Some(r2) = Rendered::new(&first_row_model) else {
+        return;
+    };
+    let caret_y_of = |rendered: &Rendered| {
+        let f = rendered.frame;
+        let s = f.scale;
+        // The topmost inked row inside the well that has a full-height bar.
+        (0..f.composer_lines()).find(|&row| {
+            let top = f.composer_top
+                + crate::layout::COMPOSER_TEXT_OFFSET
+                + row as f64 * crate::layout::COMPOSER_LINE_HEIGHT;
+            let y0 = ((top + 2.0) * s) as u32;
+            let y1 = ((top + 12.0) * s) as u32;
+            (((f.left + crate::layout::COMPOSER_PAD_X) * s) as u32..((f.right - 2.0) * s) as u32)
+                .any(|x| (y0..=y1).all(|y| rendered.luma(x, y) < 0.5))
+        })
+    };
+    let first_caret_row = caret_y_of(&r2);
+    assert_eq!(
+        first_caret_row,
+        Some(0),
+        "a cursor on the first row did not draw its caret there"
+    );
+}
+
 /// A node must render identically no matter when it is rendered, or every
 /// pixel test becomes timing-dependent and flaky.
 #[test]
