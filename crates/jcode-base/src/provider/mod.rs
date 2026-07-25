@@ -851,6 +851,48 @@ impl MultiProvider {
         Some((profile, rest))
     }
 
+    /// Find the configured OpenAI-compatible profile that serves a bare model
+    /// id, using the live route catalog as the source of truth.
+    ///
+    /// Route specs from the picker carry a `<profile>:<model>` prefix, but
+    /// hand-typed `/model <id>` and saved sessions can carry the bare id. The
+    /// active profile wins when several profiles serve the same id, so a
+    /// re-select of the current model never silently hops endpoints.
+    fn openai_compatible_profile_owning_model(
+        &self,
+        model: &str,
+    ) -> Option<crate::provider_catalog::OpenAiCompatibleProfile> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+
+        let active_profile_id = ProviderRegistry::new(self).active_compatible_profile_id();
+        let mut fallback: Option<String> = None;
+        for route in self.fresh_routes_memo_entry().routes {
+            if !route.available || route.model != model {
+                continue;
+            }
+            let Some(profile_id) = route
+                .api_method
+                .strip_prefix("openai-compatible:")
+                .map(str::trim)
+                .filter(|profile_id| !profile_id.is_empty())
+            else {
+                continue;
+            };
+            if active_profile_id.as_deref() == Some(profile_id) {
+                fallback = Some(profile_id.to_string());
+                break;
+            }
+            if fallback.is_none() {
+                fallback = Some(profile_id.to_string());
+            }
+        }
+
+        crate::provider_catalog::openai_compatible_profile_by_id(&fallback?)
+    }
+
     /// Parse a `<name>:<model>` spec whose prefix is a user-defined named
     /// provider profile from config (`[providers.<name>]`). Built-in provider
     /// prefixes and catalog profile ids take precedence and never reach here.
@@ -1851,6 +1893,13 @@ impl Provider for MultiProvider {
             && let Some(target) = provider_from_model_key(target_provider)
         {
             self.set_model_on_provider(target, model)
+        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
+            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
+            // `mimo-v2.5`, ...) match none of the built-in model-name
+            // heuristics. Without this, `/model <bare-id>` fell through to
+            // whichever provider happened to be active and failed with a
+            // misleading "not supported by <active provider>" error.
+            self.set_model_on_openai_compatible_profile(profile, model)
         } else {
             // Unknown model - try current provider.
             self.set_model_on_provider(self.active_provider(), model)

@@ -27,7 +27,7 @@
     "crates/jcode-base/src/memory.rs": 2065,
     "crates/jcode-base/src/memory_agent.rs": 1901,
     "crates/jcode-base/src/provider/catalog_routes.rs": 1438,
-    "crates/jcode-base/src/provider/mod.rs": 2737,
+    "crates/jcode-base/src/provider/mod.rs": 2786,
     "crates/jcode-base/src/session.rs": 1621,
     "crates/jcode-base/src/sidecar.rs": 1319,
     "crates/jcode-base/src/skill.rs": 1431,
