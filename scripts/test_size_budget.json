@@ -34,7 +34,7 @@
     "crates/jcode-tui/src/tui/info_widget_tests.rs": 1814,
     "crates/jcode-tui/src/tui/session_picker/loading_tests.rs": 1268,
     "crates/jcode-tui/src/tui/session_picker_tests.rs": 2453,
-    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2809,
+    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2836,
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1285,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1352,
     "tests/e2e/test_support/mod.rs": 1424
