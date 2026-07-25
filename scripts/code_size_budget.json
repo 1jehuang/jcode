@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1692,
+    "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1694,
     "crates/jcode-app-core/src/overnight.rs": 1275,
     "crates/jcode-app-core/src/server.rs": 2375,
     "crates/jcode-app-core/src/server/client_lifecycle.rs": 3171,
@@ -46,8 +46,8 @@
     "crates/jcode-desktop/src/workspace.rs": 1612,
     "crates/jcode-import-core/src/lib.rs": 1645,
     "crates/jcode-plan/src/lib.rs": 1201,
-    "crates/jcode-protocol/src/wire.rs": 1439,
-    "crates/jcode-provider-anthropic-runtime/src/lib.rs": 2439,
+    "crates/jcode-protocol/src/wire.rs": 1448,
+    "crates/jcode-provider-anthropic-runtime/src/lib.rs": 2444,
     "crates/jcode-provider-bedrock/src/lib.rs": 1979,
     "crates/jcode-provider-core/src/lib.rs": 1642,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 1974,
@@ -70,7 +70,7 @@
     "crates/jcode-tui/src/tui/app/commands.rs": 3436,
     "crates/jcode-tui/src/tui/app/debug_bench.rs": 1281,
     "crates/jcode-tui/src/tui/app/helpers.rs": 1518,
-    "crates/jcode-tui/src/tui/app/inline_interactive.rs": 4047,
+    "crates/jcode-tui/src/tui/app/inline_interactive.rs": 4063,
     "crates/jcode-tui/src/tui/app/input.rs": 3742,
     "crates/jcode-tui/src/tui/app/model_context.rs": 1956,
     "crates/jcode-tui/src/tui/app/navigation.rs": 1835,
@@ -101,7 +101,7 @@
     "crates/jcode-tui/src/tui/ui_viewport.rs": 1439,
     "src/bin/memory_recall_bench.rs": 2667,
     "src/bin/tui_bench.rs": 1763,
-    "src/cli/commands.rs": 3300,
+    "src/cli/commands.rs": 3301,
     "src/cli/dispatch.rs": 1393,
     "src/cli/login.rs": 1401,
     "src/cli/provider_init.rs": 1823
