@@ -419,7 +419,14 @@ fn build_scene(
     } else {
         (frame.body_bottom - tail_height).max(frame.body_top)
     };
-    text.draw_paragraph_scaled(scene, &tail, (frame.left, origin_y), column, body_style, scale);
+    text.draw_paragraph_scaled(
+        scene,
+        &tail,
+        (frame.left, origin_y),
+        column,
+        body_style,
+        scale,
+    );
 
     // Prompt line inside the well.
     let (prompt, prompt_color) = if model.busy {
