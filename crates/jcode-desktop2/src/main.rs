@@ -9,6 +9,7 @@ mod caret;
 mod clipboard;
 mod editor;
 mod harness;
+mod input;
 mod keymap;
 mod layout;
 mod meta;
@@ -20,7 +21,6 @@ mod tests;
 mod text;
 mod theme;
 mod window_state;
-mod wrap;
 
 use anyhow::Result;
 use scene::build_scene;
@@ -297,12 +297,6 @@ impl Default for Model {
 }
 
 impl Model {
-    /// Visual rows of the composer for a character budget, so layout sizing,
-    /// rendering, and hit-testing all wrap identically.
-    fn composer_rows(&self, max_chars: usize) -> Vec<wrap::Row> {
-        wrap::wrap(self.editor.text(), max_chars)
-    }
-
     /// Total transcript lines, used to clamp scrolling.
     fn transcript_lines(&self) -> usize {
         self.transcript.lines().count()
@@ -371,12 +365,32 @@ impl App {
     /// the wrong place after a resize.
     /// Geometry for the current model: the composer is sized to the input's
     /// line count, so a multi-line message is fully visible.
+    ///
+    /// The line count comes from a real Parley layout rather than a character
+    /// budget, so the well is sized by where the text actually wraps.
     fn frame_for_model(size: (u32, u32), scale: f64, model: &Model) -> layout::Frame {
-        // Size from *wrapped* rows: a single long line still needs the room it
-        // occupies on screen, or it would spill outside the well.
+        let mut text = text::TextSystem::default();
+        Self::frame_for_model_with(size, scale, model, &mut text)
+    }
+
+    /// As [`Self::frame_for_model`], reusing an existing text system. Font and
+    /// layout contexts are expensive, so the render path passes its own.
+    fn frame_for_model_with(
+        size: (u32, u32),
+        scale: f64,
+        model: &Model,
+        text: &mut text::TextSystem,
+    ) -> layout::Frame {
         let probe = layout::Frame::new(size, scale);
-        let rows = model.composer_rows(probe.composer_char_budget());
-        layout::Frame::with_composer_lines(size, scale, rows.len())
+        let lines = crate::input::InputLayout::new(
+            text,
+            model.editor.text(),
+            probe.composer_text_width(),
+            scene::composer_text_style(model),
+            probe.scale,
+        )
+        .line_count();
+        layout::Frame::with_composer_lines(size, scale, lines)
     }
 
     /// Byte offset in the composer text under a logical x position, or `None`
@@ -391,26 +405,20 @@ impl App {
         if x < frame.left || x > frame.right {
             return None;
         }
-        let scale = frame.scale;
-        let text_x = (x - (frame.left + layout::COMPOSER_PAD_X)).max(0.0);
-        let style = text::ParagraphStyle {
-            font_size: layout::BODY_SIZE,
-            ..Default::default()
-        };
-        // Pick the visual row from y, then the column within it, so clicking a
-        // wrapped row lands where the user aimed.
+        // Hit-test against the same Parley layout the renderer draws, so a
+        // click lands on the glyph under the pointer even with proportional
+        // fonts, clusters, or bidi text.
         let source = self.model.editor.text().to_string();
-        let rows = crate::wrap::wrap(&source, frame.composer_char_budget());
-        let shown = frame.composer_lines().min(rows.len());
-        let first = rows.len() - shown;
-        let text_top = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
-        let offset_row = ((y - text_top) / layout::COMPOSER_LINE_HEIGHT).floor();
-        let offset_row = (offset_row.max(0.0) as usize).min(shown.saturating_sub(1));
-        let row = rows[first + offset_row];
-        let column = self
-            .text
-            .offset_at_x(row.text(&source), text_x, style, scale);
-        Some(row.start + column)
+        let input = crate::input::InputLayout::new(
+            &mut self.text,
+            &source,
+            frame.composer_text_width(),
+            scene::composer_text_style(&self.model),
+            frame.scale,
+        );
+        let origin_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET
+            - input.scroll_offset(self.model.editor.cursor(), frame.composer_lines());
+        Some(input.offset_at_point(x - (frame.left + layout::COMPOSER_PAD_X), y - origin_y))
     }
 
     fn on_pointer_pressed(&mut self) {
