@@ -447,13 +447,16 @@ pub(super) fn effort_display_label(effort: &str) -> &str {
     }
 }
 
-/// Turn a raw model id into a friendlier display name for onboarding copy.
+/// Turn a raw model id into a friendlier display name.
 ///
 /// Examples:
-///   `gpt-5.5`            -> `GPT-5.5`
-///   `claude-opus-4-8`    -> `Claude Opus 4.8`
-///   `claude-opus-4-6[1m]`-> `Claude Opus 4.6 (1M)`
-///   `gemini-2.5-pro`     -> `Gemini 2.5 Pro`
+///   `gpt-5.5`                   -> `GPT-5.5`
+///   `gpt-5.1-codex-max`         -> `GPT-5.1 Codex Max`
+///   `gpt-5.6-pro[web]`          -> `GPT-5.6 Pro (web)`
+///   `claude-opus-4-8`           -> `Claude Opus 4.8`
+///   `claude-opus-4-6[1m]`       -> `Claude Opus 4.6 (1M)`
+///   `claude-haiku-4-5-20251001` -> `Claude Haiku 4.5 (2025-10-01)`
+///   `gemini-2.5-pro`            -> `Gemini 2.5 Pro`
 /// Unknown shapes are returned mostly as-is so we never hide the real id.
 pub(crate) fn pretty_model_display_name(model: &str) -> String {
     let model = model.trim();
@@ -461,16 +464,18 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
         return "your default model".to_string();
     }
 
-    // Preserve and re-attach a `[1m]` long-context suffix as " (1M)".
-    let (core, long_context) = match model.strip_suffix("[1m]") {
-        Some(stripped) => (stripped, true),
-        None => (model, false),
-    };
+    // Preserve bracketed route suffixes (`[1m]`, `[web]`) and re-attach them as
+    // a parenthetical, since they are jcode-side route markers rather than part
+    // of the upstream family/version name.
+    let (core, bracket_suffix) = split_bracket_suffix(model);
+    // Dated snapshots (`-20251001`) stay visible so a snapshot row is never
+    // confused with its floating alias, but read as a date instead of being
+    // glued onto the version number.
+    let (core, snapshot_date) = split_snapshot_date(core);
 
     let lower = core.to_ascii_lowercase();
-    let mut pretty = if let Some(rest) = lower.strip_prefix("gpt-") {
-        // OpenAI: keep the dotted version, just upcase the family.
-        format!("GPT-{}", rest)
+    let mut pretty = if lower.starts_with("gpt-") {
+        prettify_versioned_family("GPT", core)
     } else if lower.starts_with("claude-") {
         // Anthropic: claude-opus-4-8 -> Claude Opus 4.8. Convert the trailing
         // `-<major>-<minor>` version into `<major>.<minor>` and title-case the
@@ -481,10 +486,74 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
         title_case_dashed(core)
     };
 
-    if long_context {
-        pretty.push_str(" (1M)");
+    // Merge the date/route markers into one parenthetical so a dated 1M row
+    // reads `Claude Sonnet 4.5 (2025-09-29, 1M)` rather than stacking two
+    // separate groups.
+    let markers: Vec<String> = snapshot_date.into_iter().chain(bracket_suffix).collect();
+    if !markers.is_empty() {
+        pretty.push_str(&format!(" ({})", markers.join(", ")));
     }
     pretty
+}
+
+/// Split a trailing bracketed route marker, normalizing `[1m]` to `1M`.
+fn split_bracket_suffix(model: &str) -> (&str, Option<String>) {
+    let Some(open) = model.rfind('[') else {
+        return (model, None);
+    };
+    if !model.ends_with(']') {
+        return (model, None);
+    }
+    let inner = &model[open + 1..model.len() - 1];
+    if inner.is_empty() {
+        return (model, None);
+    }
+    let normalized = if inner.eq_ignore_ascii_case("1m") {
+        "1M".to_string()
+    } else {
+        inner.to_string()
+    };
+    (&model[..open], Some(normalized))
+}
+
+/// Split a trailing `-YYYYMMDD` snapshot date into a `YYYY-MM-DD` label.
+fn split_snapshot_date(model: &str) -> (&str, Option<String>) {
+    let Some((head, tail)) = model.rsplit_once('-') else {
+        return (model, None);
+    };
+    if head.is_empty() || tail.len() != 8 || !tail.chars().all(|c| c.is_ascii_digit()) {
+        return (model, None);
+    }
+    (
+        head,
+        Some(format!("{}-{}-{}", &tail[..4], &tail[4..6], &tail[6..])),
+    )
+}
+
+/// Render a `<family>-<version>[-<qualifier>...]` id such as `gpt-5.1-codex-max`
+/// as `GPT-5.1 Codex Max`: the family keeps its canonical casing, the version
+/// stays attached to it, and the trailing qualifier words are title-cased so the
+/// name does not trail off into raw lowercase slug text.
+fn prettify_versioned_family(family_label: &str, core: &str) -> String {
+    let rest = match core.split_once('-') {
+        Some((_, rest)) => rest,
+        None => return family_label.to_string(),
+    };
+    let mut parts = rest.split('-');
+    let Some(version) = parts.next() else {
+        return family_label.to_string();
+    };
+    // `gpt-oss-120b` and friends have no version: fall back to title-casing so
+    // the caller still gets a readable label instead of `GPT-oss-120b`.
+    if !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return title_case_dashed(core);
+    }
+    let mut out = format!("{family_label}-{version}");
+    for part in parts {
+        out.push(' ');
+        out.push_str(&title_case_word(part));
+    }
+    out
 }
 
 /// Prettify only recognized model families (`gpt-*`, `claude-*`, `gemini-*`),
@@ -493,7 +562,7 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
 /// `/model` picker, where hiding the real id would break copy-paste and
 /// provider-specific naming.
 pub(crate) fn pretty_known_model_family(model: &str) -> Option<String> {
-    let core = model.strip_suffix("[1m]").unwrap_or(model);
+    let (core, _) = split_bracket_suffix(model);
     if core.contains('/') || core.contains(':') {
         return None;
     }
