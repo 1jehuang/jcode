@@ -16,6 +16,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("mid_input", mid_input),
     ("mid_input_caret_inside", mid_input_caret_inside),
     ("caret_hidden", caret_hidden),
+    ("selection", selection),
+    ("selection_all", selection_all),
     ("streaming", streaming),
     ("turn_done", turn_done),
     ("scrolled_back", scrolled_back),
@@ -98,6 +100,27 @@ fn caret_hidden() -> Model {
     Model {
         editor: editor_with("blink off phase", None),
         caret: crate::caret::Caret::pinned(false),
+        ..attached_empty()
+    }
+}
+
+/// A mouse or shift-arrow selection: proves the band renders and that text on
+/// top of it stays readable.
+fn selection() -> Model {
+    let mut editor = editor_with("select this middle part", None);
+    editor.place_cursor(7);
+    editor.extend_to(11);
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+fn selection_all() -> Model {
+    let mut editor = editor_with("everything is selected", None);
+    editor.select_all();
+    Model {
+        editor,
         ..attached_empty()
     }
 }
