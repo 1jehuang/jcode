@@ -153,15 +153,31 @@ deliberately skipped, with the reason.
 | 4.6 | Selected text stays readable against the selection band, in both themes. | `theme::tests::selected_text_stays_readable` |
 | 5.9 | The mouse wheel scrolls the transcript and clamps. | `action_tests::the_wheel_scrolls_and_clamps_like_the_keyboard` |
 
+### Multi-line composer
+
+| # | Rule | Enforced by |
+|---|------|-------------|
+| 6.36 | Shift+Enter inserts a real newline; Enter still submits. | `action_tests::shift_enter_makes_a_new_line_and_enter_still_submits`, `multiline_tests::shift_enter_inserts_a_real_newline` |
+| 6.37 | Newlines are content; other control characters are stripped and CRLF is normalized. | `tests::control_characters_are_stripped_but_newlines_are_kept`, `tests::pasted_crlf_is_normalized` |
+| 6.38 | The composer grows upward with its line count, and the transcript yields space. | `layout::tests::the_composer_grows_with_its_line_count`, `action_tests::the_composer_frame_follows_the_input_line_count` |
+| 6.39 | Growth is capped, so a long paste never eats the page. | `tests::the_composer_stops_growing_at_the_line_cap`, `tests::a_tall_composer_never_eats_the_whole_page` |
+| 6.40 | Home/End and Ctrl+U/K act on the current line, not the whole buffer. | `multiline_tests::home_and_end_work_on_the_current_line_not_the_buffer`, `multiline_tests::kill_to_end_stops_at_the_line_break`, `multiline_tests::kill_to_start_stops_at_the_line_break` |
+| 6.41 | Up/Down move between lines, falling through to history only at the edges. | `action_tests::up_moves_between_lines_before_recalling_history`, `action_tests::down_moves_between_lines_before_returning_from_history`, `multiline_tests::line_motion_reports_when_there_is_nowhere_to_go` |
+| 6.42 | Vertical motion preserves the column and clamps on shorter lines. | `multiline_tests::moving_between_lines_preserves_the_column`, `multiline_tests::moving_to_a_shorter_line_clamps_to_its_end` |
+| 6.43 | Every line renders on its own row, with the caret on the cursor line. | `visual_tests::a_multiline_message_renders_on_multiple_rows` |
+| 6.44 | Clicking a lower line places the caret on that line. | `action_tests::clicking_a_lower_line_lands_on_that_line` |
+| 6.45 | A selection spanning a line break highlights every line it covers. | `visual_tests::a_selection_across_lines_highlights_every_line`, `multiline_tests::selection_can_span_lines` |
+| 6.46 | Line motion and multi-line offsets stay on char boundaries. | `multiline_tests::line_motion_stays_on_char_boundaries` |
+
 Remaining interaction gaps, honestly:
 
 | # | Rule | Status |
 |---|------|--------|
-| 6.36 | Multi-line composer (Shift+Enter currently inserts a space). | **gap** |
-| 6.37 | Window remembers its size and position. | **gap** |
-| 6.38 | Slash-command autocomplete, queue mode, stash (see `NOT_PORTED`). | **gap** |
-| 6.39 | Selecting text in the *transcript* (only the composer is selectable). | **gap** |
-| 6.40 | Text-cursor mouse pointer shape over the composer. | **gap** |
+| 6.47 | Window remembers its size and position. | **gap** |
+| 6.48 | Slash-command autocomplete, queue mode, stash (see `NOT_PORTED`). | **gap** |
+| 6.49 | Selecting text in the *transcript* (only the composer is selectable). | **gap** |
+| 6.50 | Text-cursor mouse pointer shape over the composer. | **gap** |
+| 6.51 | Soft wrapping of one long line in the composer (it scrolls instead). | **gap** |
 
 ## 7. Performance and correctness
 

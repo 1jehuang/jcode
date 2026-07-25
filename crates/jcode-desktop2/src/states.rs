@@ -17,6 +17,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("mid_input_caret_inside", mid_input_caret_inside),
     ("caret_hidden", caret_hidden),
     ("selection", selection),
+    ("multiline", multiline),
+    ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
     ("turn_done", turn_done),
@@ -119,6 +121,29 @@ fn selection() -> Model {
 fn selection_all() -> Model {
     let mut editor = editor_with("everything is selected", None);
     editor.select_all();
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// A multi-line message: the composer grows and the caret sits on the last
+/// line, not the first.
+fn multiline() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str("first line\nsecond line\nthird line");
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// A selection spanning a line break.
+fn multiline_selection() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str("alpha beta\ngamma delta");
+    editor.place_cursor(6);
+    editor.extend_to(16);
     Model {
         editor,
         ..attached_empty()

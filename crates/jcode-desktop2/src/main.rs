@@ -345,8 +345,10 @@ impl App {
     /// Geometry for a surface. The single source of truth shared by the
     /// renderer and pointer hit-testing: if these ever diverge, clicks land in
     /// the wrong place after a resize.
-    fn frame_for(size: (u32, u32), scale: f64) -> layout::Frame {
-        layout::Frame::new(size, scale)
+    /// Geometry for the current model: the composer is sized to the input's
+    /// line count, so a multi-line message is fully visible.
+    fn frame_for_model(size: (u32, u32), scale: f64, model: &Model) -> layout::Frame {
+        layout::Frame::with_composer_lines(size, scale, model.editor.line_count())
     }
 
     /// Byte offset in the composer text under a logical x position, or `None`
@@ -367,8 +369,20 @@ impl App {
             font_size: layout::BODY_SIZE,
             ..Default::default()
         };
+        // Pick the line from y, then the column within it, so clicking in a
+        // multi-line composer lands on the line the user aimed at.
         let editor_text = self.model.editor.text().to_string();
-        Some(self.text.offset_at_x(&editor_text, text_x, style, scale))
+        let lines: Vec<&str> = editor_text.split('\n').collect();
+        let shown = frame.composer_lines().min(lines.len());
+        let first = lines.len() - shown;
+        let text_top = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
+        let row = ((y - text_top) / layout::COMPOSER_LINE_HEIGHT).floor();
+        let row = (row.max(0.0) as usize).min(shown.saturating_sub(1));
+        let index = first + row;
+        let line = lines.get(index).copied().unwrap_or("");
+        let line_start: usize = lines[..index].iter().map(|l| l.len() + 1).sum();
+        let column = self.text.offset_at_x(line, text_x, style, scale);
+        Some(line_start + column)
     }
 
     fn on_pointer_pressed(&mut self) {
@@ -454,7 +468,7 @@ impl App {
                 }
             }
             Action::Submit => self.submit_input(),
-            Action::InsertNewline => self.model.editor.insert_char(' '),
+            Action::InsertNewline => self.model.editor.insert_char('\n'),
 
             Action::MoveLeft => self.model.editor.move_left(),
             Action::MoveRight => self.model.editor.move_right(),
@@ -512,13 +526,18 @@ impl App {
                 None => self.model.set_notice("clipboard is empty"),
             },
 
+            // In a multi-line input, Up/Down move between lines first and only
+            // fall through to history recall at the edges, like a normal
+            // multi-line composer.
             Action::HistoryPrev => {
-                if !self.model.editor.history_prev() {
+                if !self.model.editor.move_line(-1) && !self.model.editor.history_prev() {
                     self.model.set_notice("no earlier input");
                 }
             }
             Action::HistoryNext => {
-                self.model.editor.history_next();
+                if !self.model.editor.move_line(1) {
+                    self.model.editor.history_next();
+                }
             }
 
             Action::ScrollUp => self.model.scroll_up(1, self.visible_lines()),
@@ -668,7 +687,7 @@ impl ApplicationHandler for App {
                     let size = state.size();
                     // Record the geometry the frame was built with, so pointer
                     // hit-testing uses exactly what the user sees.
-                    self.frame = Self::frame_for(size, scale);
+                    self.frame = Self::frame_for_model(size, scale, &self.model);
                     build_scene(&mut scene, &mut self.text, &self.model, size, scale);
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");
@@ -703,7 +722,7 @@ fn build_scene(
     use vello::kurbo::{Rect, RoundedRect};
 
     let theme = &model.theme;
-    let frame = Frame::new(size, scale);
+    let frame = Frame::with_composer_lines(size, scale, model.editor.line_count());
     let scale = frame.scale;
     let column = frame.column() as f32;
 
@@ -865,24 +884,61 @@ fn build_scene(
             scale,
         );
     } else {
-        // Selection band, drawn under the text so glyphs stay legible.
-        if let Some((start, end)) = model.editor.selection() {
-            let x0 =
-                prompt_x + text.measure_width(&model.editor.text()[..start], prompt_style, scale);
-            let x1 =
-                prompt_x + text.measure_width(&model.editor.text()[..end], prompt_style, scale);
-            let top = prompt_y - 1.0;
-            fill(
-                scene,
-                theme.selection,
-                &Rect::new(
-                    x0.min(frame.right),
-                    top,
-                    x1.min(frame.right - layout::COMPOSER_PAD_X * 0.5),
-                    top + layout::CARET_HEIGHT,
-                ),
-            );
+        let line_height = layout::COMPOSER_LINE_HEIGHT;
+        let lines: Vec<&str> = model.editor.text().split('\n').collect();
+        // Show the tail of a long input, so the caret stays visible while
+        // typing past the composer's line cap.
+        let shown = frame.composer_lines().min(lines.len());
+        let first = lines.len() - shown;
+        let line_y = |line: usize| prompt_y + (line.saturating_sub(first)) as f64 * line_height;
+        // Byte offset of the start of each line, for selection and the caret.
+        let mut line_starts = Vec::with_capacity(lines.len());
+        let mut at = 0usize;
+        for line in &lines {
+            line_starts.push(at);
+            at += line.len() + 1;
         }
+
+        // Selection band, drawn under the text so glyphs stay legible. A
+        // selection can span lines, so each visible line gets its own band.
+        if let Some((sel_start, sel_end)) = model.editor.selection() {
+            for (index, line) in lines.iter().enumerate().skip(first) {
+                let line_start = line_starts[index];
+                let line_end = line_start + line.len();
+                let from = sel_start.max(line_start);
+                let to = sel_end.min(line_end);
+                if from >= to && !(sel_start <= line_end && sel_end > line_end) {
+                    continue;
+                }
+                let from = from.min(line_end);
+                let to = to.max(from);
+                let x0 =
+                    prompt_x + text.measure_width(&line[..from - line_start], prompt_style, scale);
+                let x1 =
+                    prompt_x + text.measure_width(&line[..to - line_start], prompt_style, scale);
+                // A selection continuing past this line highlights the break.
+                let x1 = if sel_end > line_end {
+                    x1 + f64::from(layout::BODY_SIZE) * 0.5
+                } else {
+                    x1
+                };
+                if x1 <= x0 {
+                    continue;
+                }
+                let top = line_y(index) - 1.0;
+                fill(
+                    scene,
+                    theme.selection,
+                    &Rect::new(
+                        x0.min(frame.right),
+                        top,
+                        x1.min(frame.right - layout::COMPOSER_PAD_X * 0.5),
+                        top + layout::CARET_HEIGHT,
+                    ),
+                );
+            }
+        }
+
         if model.editor.is_empty() {
             text.draw_paragraph_scaled(
                 scene,
@@ -896,19 +952,29 @@ fn build_scene(
                 scale,
             );
         } else {
-            text.draw_paragraph_scaled(
-                scene,
-                model.editor.text(),
-                (prompt_x, prompt_y),
-                prompt_width,
-                prompt_style,
-                scale,
-            );
+            // Draw line by line so each sits on the composer's line grid
+            // rather than relying on paragraph wrapping.
+            for (index, line) in lines.iter().enumerate().skip(first) {
+                if line.is_empty() {
+                    continue;
+                }
+                text.draw_paragraph_scaled(
+                    scene,
+                    line,
+                    (prompt_x, line_y(index)),
+                    prompt_width,
+                    prompt_style,
+                    scale,
+                );
+            }
         }
+
         if model.caret.visible() {
-            let offset = text.measure_width(model.editor.before_cursor(), prompt_style, scale);
+            let (line, col) = model.editor.cursor_line_col();
+            let prefix = &lines[line][..col.min(lines[line].len())];
+            let offset = text.measure_width(prefix, prompt_style, scale);
             let caret_x = (prompt_x + offset).min(frame.right - layout::COMPOSER_PAD_X);
-            let top = prompt_y - 1.0;
+            let top = line_y(line.max(first)) - 1.0;
             let bottom = top + layout::CARET_HEIGHT;
             fill(
                 scene,
@@ -990,7 +1056,7 @@ mod tests {
 #[cfg(test)]
 mod action_tests {
     use super::keymap::Action;
-    use super::{App, DOUBLE_CLICK, keymap};
+    use super::{App, DOUBLE_CLICK, Model, keymap};
     use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 
     fn app_with(text: &str) -> App {
@@ -1459,7 +1525,7 @@ mod action_tests {
             ((2400, 1400), 1.75),
             ((800, 600), 2.0),
         ] {
-            let recorded = App::frame_for(size, scale);
+            let recorded = App::frame_for_model(size, scale, &Model::default());
             let rendered = super::layout::Frame::new(size, scale);
             assert_eq!(
                 recorded, rendered,
@@ -1472,8 +1538,8 @@ mod action_tests {
     #[test]
     fn resizing_moves_the_hit_test_with_the_layout() {
         let mut app = app_with("alpha beta");
-        let narrow = App::frame_for((700, 600), 1.0);
-        let wide = App::frame_for((2000, 1200), 1.0);
+        let narrow = App::frame_for_model((700, 600), 1.0, &Model::default());
+        let wide = App::frame_for_model((2000, 1200), 1.0, &Model::default());
         assert_ne!(
             narrow.left, wide.left,
             "test needs two frames with different columns"
@@ -1495,6 +1561,81 @@ mod action_tests {
             app.model.editor.cursor(),
             5,
             "hit-testing did not follow the resized layout"
+        );
+    }
+
+    #[test]
+    fn clicking_a_lower_line_lands_on_that_line() {
+        let mut app = app_with("first line\nsecond line\nthird line");
+        app.frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+        let text_top = app.frame.composer_top + super::layout::COMPOSER_TEXT_OFFSET;
+        for (row, expected_line) in [(0usize, 0usize), (1, 1), (2, 2)] {
+            let y = text_top + row as f64 * super::layout::COMPOSER_LINE_HEIGHT + 4.0;
+            app.pointer = (app.frame.left + super::layout::COMPOSER_PAD_X + 1.0, y);
+            app.last_click = None;
+            app.on_pointer_pressed();
+            app.dragging = false;
+            assert_eq!(
+                app.model.editor.cursor_line_col().0,
+                expected_line,
+                "clicking row {row} landed on the wrong line"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_enter_makes_a_new_line_and_enter_still_submits() {
+        let mut app = app_with("first");
+        app.apply(Action::InsertNewline, None);
+        app.apply(Action::Insert, Some("second"));
+        assert_eq!(app.model.editor.text(), "first\nsecond");
+        app.apply(Action::Submit, None);
+        assert!(
+            app.model.editor.is_empty(),
+            "Enter did not submit a multi-line message"
+        );
+        assert!(app.model.transcript.contains("first\nsecond"));
+    }
+
+    #[test]
+    fn up_moves_between_lines_before_recalling_history() {
+        let mut app = app_with("one");
+        app.apply(Action::Submit, None);
+        app.apply(Action::Insert, Some("line a"));
+        app.apply(Action::InsertNewline, None);
+        app.apply(Action::Insert, Some("line b"));
+        // Cursor is on line 1: Up moves to line 0, not into history.
+        app.apply(Action::HistoryPrev, None);
+        assert_eq!(app.model.editor.cursor_line_col().0, 0);
+        assert_eq!(app.model.editor.text(), "line a\nline b");
+        // Another Up is at the top edge, so now history recall takes over.
+        app.apply(Action::HistoryPrev, None);
+        assert_eq!(app.model.editor.text(), "one");
+    }
+
+    #[test]
+    fn down_moves_between_lines_before_returning_from_history() {
+        let mut app = app_with("alpha\nbeta");
+        app.apply(Action::MoveHome, None);
+        app.apply(Action::HistoryPrev, None); // already at top, no history
+        app.apply(Action::HistoryNext, None);
+        assert_eq!(
+            app.model.editor.cursor_line_col().0,
+            1,
+            "Down did not move to the next line"
+        );
+    }
+
+    #[test]
+    fn the_composer_frame_follows_the_input_line_count() {
+        let mut app = app_with("one");
+        let single = App::frame_for_model((1400, 900), 1.0, &app.model);
+        app.apply(Action::InsertNewline, None);
+        app.apply(Action::Insert, Some("two"));
+        let double = App::frame_for_model((1400, 900), 1.0, &app.model);
+        assert!(
+            double.composer_top < single.composer_top,
+            "the composer did not grow when a line was added"
         );
     }
 
@@ -1666,7 +1807,13 @@ mod visual_tests {
                 pixels,
                 width,
                 height,
-                frame: Frame::new((width, height), scale),
+                // Must match the frame `build_scene` used, which sizes the
+                // composer to the model's line count.
+                frame: Frame::with_composer_lines(
+                    (width, height),
+                    scale,
+                    model.editor.line_count(),
+                ),
             })
         }
 
@@ -1855,6 +2002,62 @@ mod visual_tests {
             band_pixels < 10,
             "a selection band appeared without a selection ({band_pixels} px)"
         );
+    }
+
+    /// A multi-line message must actually render on multiple rows, with the
+    /// caret on the last line rather than the first.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn a_multiline_message_renders_on_multiple_rows() {
+        let model = states::by_name("multiline").expect("node");
+        assert!(model.editor.line_count() > 1);
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        assert!(
+            f.composer_lines() >= model.editor.line_count(),
+            "the composer did not grow to fit the input"
+        );
+        // Each line's row must contain ink.
+        let s = f.scale;
+        for line in 0..model.editor.line_count() {
+            let y = f.composer_top
+                + super::layout::COMPOSER_TEXT_OFFSET
+                + line as f64 * super::layout::COMPOSER_LINE_HEIGHT
+                + 6.0;
+            let row = (y * s) as u32;
+            let inked = ((f.left * s) as u32..(f.right * s) as u32)
+                .filter(|&x| r.luma(x, row) < 0.5)
+                .count();
+            assert!(inked > 0, "composer line {line} rendered nothing");
+        }
+    }
+
+    /// A selection spanning a line break must highlight both lines.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn a_selection_across_lines_highlights_every_line() {
+        let model = states::by_name("multiline_selection").expect("node");
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let s = f.scale;
+        for line in 0..2 {
+            let y = f.composer_top
+                + super::layout::COMPOSER_TEXT_OFFSET
+                + line as f64 * super::layout::COMPOSER_LINE_HEIGHT
+                + 2.0;
+            let row = (y * s) as u32;
+            let band = ((f.left * s) as u32..(f.right * s) as u32)
+                .filter(|&x| (0.55..0.95).contains(&r.luma(x, row)))
+                .count();
+            assert!(
+                band > 4,
+                "line {line} of a multi-line selection was not highlighted"
+            );
+        }
     }
 
     /// A node must render identically no matter when it is rendered, or every
