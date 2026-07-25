@@ -884,10 +884,40 @@ pub struct LoginImportPrompt {
     /// `false` = the default summary screen (detected logins listed read-only,
     /// with Continue / Choose pills). `true` = the per-login checkbox list.
     pub choosing: bool,
+    /// Which summary pill is focused (only meaningful when `choosing` is false).
+    pub summary_pill: ImportSummaryPill,
+    /// `Some` while the telemetry settings sub-page is open, holding the
+    /// highlighted choice.
+    pub telemetry: Option<TelemetryChoice>,
+    /// Whether the environment (JCODE_NO_TELEMETRY / DO_NOT_TRACK) already
+    /// forces telemetry off, so the sub-page should say so.
+    pub telemetry_env_forced_off: bool,
     /// How many rows are currently checked for import.
     pub checked_count: usize,
     /// Seconds left before the screen auto-imports all checked logins.
     pub seconds_left: u64,
+}
+
+/// The three actions on the import summary screen, left to right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSummaryPill {
+    /// Import everything we detected (default).
+    Continue,
+    /// Open the per-login checkbox list to import fewer logins.
+    ImportLess,
+    /// Open the telemetry settings sub-page.
+    Telemetry,
+}
+
+/// The highlighted option on the telemetry settings sub-page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryChoice {
+    /// Usage stats plus prompt/transcript content.
+    Everything,
+    /// Usage stats and crash reports only.
+    NoContent,
+    /// Nothing at all.
+    Nothing,
 }
 
 /// One row in the login-import checkbox list.

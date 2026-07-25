@@ -1028,12 +1028,22 @@ pub struct App {
     /// to target the agent repair brief (`jcode auth-test --provider X`). `None`
     /// when unknown.
     onboarding_import_failed_provider: Option<String>,
+    /// Whether the user explicitly committed a choice on the onboarding
+    /// "Telemetry settings" page. When true, the post-login default write is
+    /// skipped so it cannot clobber an explicit "send everything" opt-in.
+    onboarding_telemetry_choice_made: bool,
     /// Pending first-run model-validation request for the new-session screen.
     /// In remote/client mode the live default model is reported by the server
     /// asynchronously, so we record that a validation is wanted and let the
     /// onboarding tick fire it once a concrete model id (not "unknown") is
     /// known. `None` means no validation is pending.
     onboarding_pending_model_validation: Option<onboarding_flow::OnboardingPendingValidation>,
+    /// Prefetched result of the onboarding recent-project lookup. `None` means no
+    /// prefetch was started; `Some(slot)` holds `None` while the background scan
+    /// runs and `Some(result)` once it finished. Keeps the first-run "find bugs"
+    /// action from blocking on a cold session-list disk scan.
+    onboarding_recent_project_prefetch:
+        Option<std::sync::Arc<std::sync::Mutex<Option<Option<std::path::PathBuf>>>>>,
     // Inline UI state for copy badges ([Alt] [⇧] [S])
     copy_badge_ui: CopyBadgeUiState,
     // Modal in-app selection/copy state for the chat viewport.

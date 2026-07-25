@@ -3411,6 +3411,7 @@ impl App {
             || super::commands::handle_usage_command(self, trimmed)
             || super::productivity::handle_productivity_command(self, trimmed)
             || super::commands::handle_feedback_command(self, trimmed)
+            || super::commands::handle_telemetry_command(self, trimmed)
             || super::support::handle_support_command(self, trimmed)
             || super::state_ui::handle_info_command(self, trimmed)
             || super::auth::handle_auth_command(self, trimmed)

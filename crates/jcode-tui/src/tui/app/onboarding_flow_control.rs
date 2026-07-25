@@ -6,6 +6,7 @@
 
 use super::onboarding_flow::{
     ExternalCli, ImportReview, OnboardingFlow, OnboardingPendingValidation, OnboardingPhase,
+    SummaryPill,
 };
 use super::{App, DisplayMessage, SessionPickerMode};
 use crate::import::repo_ranking::{self, SessionLocation};
@@ -13,6 +14,7 @@ use crate::tui::session_picker::{SessionPicker, load_sessions};
 use crossterm::event::KeyCode;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 impl App {
@@ -250,10 +252,10 @@ impl App {
         self.set_status_notice("Login: opening OpenAI sign-in (or type /login for others)");
     }
 
-    /// Advance out of a login phase once credentials are available. We no longer
-    /// ask the user about prompt/transcript telemetry here: content sharing
-    /// stays off by default (the separate anonymous-usage telemetry is still
-    /// disclosed on the welcome screen). Advance straight to model selection.
+    /// Advance out of a login phase once credentials are available. Prompt and
+    /// transcript content sharing stays off unless the user explicitly opted in
+    /// on the "Telemetry settings" page, so we only write the default when no
+    /// choice has been recorded. Advance straight to model selection.
     /// No-op unless the flow is in a login phase.
     pub(super) fn onboarding_after_login(&mut self) {
         if !matches!(
@@ -265,9 +267,11 @@ impl App {
         // The import (if any) has resolved; leave the progress state.
         self.onboarding_import_in_progress = None;
         self.onboarding_import_error = None;
-        // Prompt/transcript content sharing is opt-in and off by default; we
-        // intentionally don't prompt for it during onboarding.
-        crate::telemetry::set_content_sharing_enabled(false);
+        // Content sharing is opt-in and off by default. Respect an explicit
+        // choice from the telemetry settings page instead of overwriting it.
+        if !self.onboarding_telemetry_choice_made {
+            crate::telemetry::set_content_sharing_enabled(false);
+        }
         if let Some(flow) = self.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::ModelSelect;
         }
@@ -361,6 +365,9 @@ impl App {
         // overlay (picker / sign-in) is open we let Esc close that first.
         if code == KeyCode::Esc
             && self.inline_interactive_state.is_none()
+            // The telemetry settings sub-page owns Esc (it means "go back to the
+            // import screen"), so the global bail-out does not apply there.
+            && !self.onboarding_telemetry_page_open()
             && self.session_picker_overlay.is_none()
             && self.login_picker_overlay.is_none()
             && self.account_picker_overlay.is_none()
@@ -519,39 +526,58 @@ impl App {
         // `finished` means the user committed the import (so we kick it off
         // outside the borrow).
         let mut finished = false;
+        // Set when the user committed a telemetry level, so we persist it
+        // outside the review borrow.
+        let mut telemetry_choice = None;
         {
             let Some(review) = self.onboarding_import_review_mut() else {
                 return false;
             };
-            if !review.choosing {
-                // Summary mode: two pills, "Continue" (preselected) and
-                // "Choose what to import". Any directional key moves between
-                // them; Enter/Space commit the focused one.
+            if let Some(level) = review.telemetry {
+                // Telemetry settings sub-page: three stacked options, most
+                // sharing first. Up/Down move, Enter commits and returns,
+                // Esc returns without changing anything.
                 match code {
-                    KeyCode::Up
-                    | KeyCode::Down
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Tab
-                    | KeyCode::BackTab
-                    | KeyCode::Char('k')
-                    | KeyCode::Char('j')
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('l') => {
-                        review.continue_focused = !review.continue_focused;
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                        review.telemetry_step(false)
                     }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                        review.telemetry_step(true)
+                    }
+                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => review.close_telemetry(),
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        telemetry_choice = Some(level);
+                        review.close_telemetry();
+                    }
+                    _ => return false,
+                }
+            } else if !review.choosing {
+                // Summary mode: three pills, "Continue" (preselected),
+                // "Import less", and "Telemetry settings". Left/Right (and
+                // Tab) move between them; Enter/Space commit the focused one.
+                match code {
+                    KeyCode::Left
+                    | KeyCode::Up
+                    | KeyCode::BackTab
+                    | KeyCode::Char('h')
+                    | KeyCode::Char('k') => review.summary_step(false),
+                    KeyCode::Right
+                    | KeyCode::Down
+                    | KeyCode::Tab
+                    | KeyCode::Char('j')
+                    | KeyCode::Char('l') => review.summary_step(true),
                     // c is a direct shortcut into choose mode.
                     KeyCode::Char('c') | KeyCode::Char('C') => review.enter_choose_mode(),
+                    // t jumps straight to the telemetry settings page.
+                    KeyCode::Char('t') | KeyCode::Char('T') => review.open_telemetry(),
                     // y = "yes, import everything" regardless of pill focus, so
                     // the timeout is never a forced wait.
                     KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        if review.continue_focused {
-                            finished = true;
-                        } else {
-                            review.enter_choose_mode();
-                        }
-                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
+                        SummaryPill::Continue => finished = true,
+                        SummaryPill::ImportLess => review.enter_choose_mode(),
+                        SummaryPill::Telemetry => review.open_telemetry(),
+                    },
                     _ => return false,
                 }
             } else {
@@ -574,6 +600,12 @@ impl App {
                     _ => return false,
                 }
             }
+        }
+        if let Some(level) = telemetry_choice {
+            level.persist();
+            self.onboarding_telemetry_choice_made = true;
+            self.set_status_notice(level.status_label().to_string());
+            return true;
         }
         if finished {
             self.onboarding_finish_import_review();
@@ -693,6 +725,18 @@ impl App {
         }
     }
 
+    /// Whether the import screen's telemetry settings sub-page is currently
+    /// showing. Used so Esc means "go back" there rather than "leave
+    /// onboarding", and so the import countdown pauses while it is open.
+    pub(super) fn onboarding_telemetry_page_open(&self) -> bool {
+        matches!(
+            self.onboarding_phase(),
+            Some(OnboardingPhase::Login {
+                import: Some(review)
+            }) if review.telemetry.is_some()
+        )
+    }
+
     /// Refresh the status notice to reflect the current import-list selection.
     fn update_onboarding_import_review_status(&mut self) {
         if let Some(review) = self.onboarding_import_review_mut() {
@@ -700,10 +744,14 @@ impl App {
             let total = review.total();
             let secs = review.seconds_remaining();
             let notice = if !review.choosing {
-                format!(
-                    "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Choose what to import\"",
-                    if total == 1 { "" } else { "s" },
-                )
+                if review.telemetry.is_some() {
+                    "Telemetry settings - arrows move, Enter chooses, Esc goes back".to_string()
+                } else {
+                    format!(
+                        "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",
+                        if total == 1 { "" } else { "s" },
+                    )
+                }
             } else {
                 format!(
                     "Import {checked} of {total} login{} - Space toggles, arrows move, Enter imports (auto in {secs}s)",
@@ -824,6 +872,7 @@ impl App {
                 shown_at: Instant::now(),
             };
         }
+        self.onboarding_prefetch_recent_project();
         self.set_status_notice("Choose a suggested review or start a new session (↑↓, Enter)");
     }
 
@@ -842,6 +891,32 @@ impl App {
                 Style::default().fg(Color::White),
             )]),
         ]
+    }
+
+    /// Warm the recent-project lookup while the user is still reading the start
+    /// choice screen.
+    ///
+    /// Resolving the newest known Git repository requires a full session-list
+    /// scan, which is a cold multi-hundred-millisecond disk walk on machines
+    /// with a large `~/.jcode/sessions` directory. Doing it inline on Enter made
+    /// the "Find bugs in what I've been working on" action feel laggy, so run it
+    /// off-thread as soon as the choice is displayed and have the key handler
+    /// consume the cached answer.
+    fn onboarding_prefetch_recent_project(&mut self) {
+        if self.is_remote || self.onboarding_recent_project_prefetch.is_some() {
+            return;
+        }
+        let slot: Arc<Mutex<Option<Option<PathBuf>>>> = Arc::new(Mutex::new(None));
+        self.onboarding_recent_project_prefetch = Some(slot.clone());
+        let session_id = self.session.id.clone();
+        // A plain OS thread (not `tokio::spawn`) keeps this blocking filesystem
+        // scan off the async runtime and works in tests without a reactor.
+        std::thread::spawn(move || {
+            let resolved = Self::recent_project_path_from_sessions(&session_id);
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some(resolved);
+            }
+        });
     }
 
     /// Resolve the project to review before the agent turn starts. The active
@@ -875,11 +950,28 @@ impl App {
             return None;
         }
 
+        // Prefer the prefetched answer so the action responds immediately.
+        if let Some(prefetched) = self
+            .onboarding_recent_project_prefetch
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|slot| slot.clone()))
+        {
+            return prefetched;
+        }
+
+        Self::recent_project_path_from_sessions(&self.session.id)
+    }
+
+    /// Newest known Git repository across recorded sessions, excluding the
+    /// current session and the bare home directory. Blocking: this walks the
+    /// session list on disk.
+    fn recent_project_path_from_sessions(current_session_id: &str) -> Option<PathBuf> {
+        let excluded: Vec<PathBuf> = dirs::home_dir().into_iter().collect();
         let sessions = load_sessions().unwrap_or_default();
         let locations: Vec<SessionLocation> = sessions
             .into_iter()
             .filter(|session| {
-                session.id != self.session.id && !session.is_debug && !session.is_canary
+                session.id != current_session_id && !session.is_debug && !session.is_canary
             })
             .filter_map(|session| {
                 let working_dir = session.working_dir?;
