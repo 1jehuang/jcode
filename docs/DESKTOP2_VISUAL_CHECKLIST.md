@@ -74,6 +74,8 @@ The single highest-value category: this is where the first cut actually broke.
 | 2.1 | Body copy is confined to a **measure column** (<= 720px); long lines are unreadable. | `layout::tests::column_never_exceeds_measure` |
 | 2.2 | The column is centered with balanced gutters that shrink gracefully on narrow windows. | `column_is_horizontally_balanced`, `column_stays_inside_the_window` |
 | 2.3 | Regions have a strict vertical order and **never overlap**. | `regions_are_ordered_and_never_overlap`, `visual_tests::nothing_draws_in_the_gap_above_the_composer` |
+| 2.8 | The input box sits on the **middle of the page** and grows symmetrically about that line; it only leaves the centre when the window is too short. | `layout::tests::the_composer_sits_on_the_middle_of_the_page`, `a_roomy_page_centres_the_composer_exactly`, `visual_tests::the_composer_well_is_drawn_on_the_middle_of_the_window` |
+| 2.9 | The masthead carries the build identity: version, update state, and signed-in account. | `meta::tests::the_caption_lists_version_update_and_account`, `visual_tests::the_masthead_meta_row_is_drawn_and_legible` |
 | 2.4 | Nothing is drawn in the margins or off-paper; text wraps rather than clipping at the window edge. | `visual_tests::margins_stay_empty` |
 | 2.7 | The footnote row is reserved even when empty, so a notice never shifts the composer. | `regions_are_ordered_and_never_overlap`, `layout_is_scale_independent_in_logical_units` |
 | 2.5 | Degenerate windows (0-sized, extreme aspect ratios) never panic or invert geometry. | `degenerate_sizes_do_not_panic_or_invert` |
@@ -172,7 +174,7 @@ deliberately skipped, with the reason.
 |---|------|-------------|
 | 6.36 | Shift+Enter inserts a real newline; Enter still submits. | `action_tests::shift_enter_makes_a_new_line_and_enter_still_submits`, `multiline_tests::shift_enter_inserts_a_real_newline` |
 | 6.37 | Newlines are content; other control characters are stripped and CRLF is normalized. | `tests::control_characters_are_stripped_but_newlines_are_kept`, `tests::pasted_crlf_is_normalized` |
-| 6.38 | The composer grows upward with its line count, and the transcript yields space. | `layout::tests::the_composer_grows_with_its_line_count`, `action_tests::the_composer_frame_follows_the_input_line_count` |
+| 6.38 | The composer grows about its centre line as lines are added, and the transcript yields space. | `layout::tests::the_composer_grows_with_its_line_count`, `action_tests::the_composer_frame_follows_the_input_line_count` |
 | 6.39 | Growth is capped, so a long paste never eats the page. | `tests::the_composer_stops_growing_at_the_line_cap`, `tests::a_tall_composer_never_eats_the_whole_page` |
 | 6.40 | Home/End and Ctrl+U/K act on the current line, not the whole buffer. | `multiline_tests::home_and_end_work_on_the_current_line_not_the_buffer`, `multiline_tests::kill_to_end_stops_at_the_line_break`, `multiline_tests::kill_to_start_stops_at_the_line_break` |
 | 6.41 | Up/Down move between lines, falling through to history only at the edges. | `action_tests::up_moves_between_lines_before_recalling_history`, `action_tests::down_moves_between_lines_before_returning_from_history`, `multiline_tests::line_motion_reports_when_there_is_nowhere_to_go` |
