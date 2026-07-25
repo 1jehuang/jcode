@@ -252,6 +252,35 @@ pub fn build_system_instruction_with_tool_guard(
 }
 
 pub fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
+    build_contents_with_signature_policy(messages, SignaturePolicy::ReplayCarriedForward)
+}
+
+/// How [`build_contents_with_signature_policy`] handles Gemini-3 function-call
+/// `thoughtSignature` replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignaturePolicy {
+    /// Normal path: replay each call's own signature, carrying the most recent
+    /// real signature forward onto calls that lack one.
+    ReplayCarriedForward,
+    /// Recovery path for a `missing a thought_signature` 400. The backend has
+    /// told us it will not accept this history's function-call parts, so
+    /// downgrade every tool call and tool result to plain text. This loses the
+    /// structured form but keeps the conversation's *content*, turning a hard
+    /// dead-end into a turn that completes.
+    DowngradeToolCallsToText,
+}
+
+/// Whether a provider error body is the Cloud Code / Antigravity backend
+/// rejecting a turn because its function calls lack a usable thought signature.
+pub fn is_missing_thought_signature_error(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("thought_signature") || lowered.contains("thoughtsignature")
+}
+
+pub fn build_contents_with_signature_policy(
+    messages: &[Message],
+    policy: SignaturePolicy,
+) -> Vec<GeminiContent> {
     // Gemini-3 attaches an opaque `thoughtSignature` to function-call parts, and
     // the Cloud Code / Antigravity backend rejects an assistant turn whose
     // function calls are ALL unsigned with `Function call is missing a
@@ -297,6 +326,19 @@ pub fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
                         input,
                         thought_signature,
                     } => {
+                        if policy == SignaturePolicy::DowngradeToolCallsToText {
+                            // The backend rejected this history's function-call
+                            // parts. Preserve the call as readable text so the
+                            // model keeps its context instead of 400ing forever.
+                            parts.push(GeminiPart {
+                                text: Some(format!(
+                                    "[previous tool call] {name}({})",
+                                    ToolCall::input_as_object(input)
+                                )),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                         let own_signature = thought_signature
                             .as_ref()
                             .filter(|sig| !sig.is_empty())
@@ -320,6 +362,23 @@ pub fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
                         content,
                         is_error,
                     } => {
+                        if policy == SignaturePolicy::DowngradeToolCallsToText {
+                            // A `functionResponse` with no matching signed
+                            // `functionCall` is also rejected, so downgrade it too.
+                            let label = if is_error.unwrap_or(false) {
+                                "previous tool error"
+                            } else {
+                                "previous tool result"
+                            };
+                            parts.push(GeminiPart {
+                                text: Some(format!(
+                                    "[{label}] {}: {content}",
+                                    tool_name_from_tool_result(tool_use_id, messages)
+                                )),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                         parts.push(GeminiPart {
                             function_response: Some(GeminiFunctionResponse {
                                 name: tool_name_from_tool_result(tool_use_id, messages),
