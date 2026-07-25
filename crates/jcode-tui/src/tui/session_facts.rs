@@ -15,7 +15,7 @@
 /// fact already says Claude/Anthropic, so the model reads as `Fable 5` or
 /// `Sonnet 4.5` rather than `Claude Fable 5`.
 pub(crate) fn pretty_model(model: &str) -> String {
-    let pretty = crate::tui::app::helpers::pretty_model_display_name(model);
+    let pretty = crate::tui::app::helpers::model_names::pretty_model_display_name(model);
     match pretty.strip_prefix("Claude ") {
         Some(rest) if !rest.trim().is_empty() => rest.to_string(),
         _ => pretty,
