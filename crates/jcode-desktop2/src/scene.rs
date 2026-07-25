@@ -26,7 +26,10 @@ pub fn build_scene(
     use layout::Frame;
 
     let theme = &model.theme;
-    let frame = Frame::with_composer_lines(size, scale, model.editor.line_count());
+    // Size the composer from wrapped rows so the well always contains its text.
+    let probe = Frame::new(size, scale);
+    let row_count = crate::wrap::wrap(model.editor.text(), probe.composer_char_budget()).len();
+    let frame = Frame::with_composer_lines(size, scale, row_count);
     let scale = frame.scale;
     let column = frame.column() as f32;
 
@@ -189,47 +192,40 @@ pub fn build_scene(
         );
     } else {
         let line_height = layout::COMPOSER_LINE_HEIGHT;
-        let lines: Vec<&str> = model.editor.text().split('\n').collect();
-        // Show the tail of a long input, so the caret stays visible while
-        // typing past the composer's line cap.
-        let shown = frame.composer_lines().min(lines.len());
-        let first = lines.len() - shown;
-        let line_y = |line: usize| prompt_y + (line.saturating_sub(first)) as f64 * line_height;
-        // Byte offset of the start of each line, for selection and the caret.
-        let mut line_starts = Vec::with_capacity(lines.len());
-        let mut at = 0usize;
-        for line in &lines {
-            line_starts.push(at);
-            at += line.len() + 1;
-        }
+        let source = model.editor.text();
+        // Visual rows, so a long line wraps inside the well instead of
+        // spilling past its right edge.
+        let rows = crate::wrap::wrap(source, frame.composer_char_budget());
+        // Show the tail when the input is taller than the well, so the caret
+        // stays visible while typing.
+        let shown = frame.composer_lines().min(rows.len());
+        let first = rows.len() - shown;
+        let row_y = |row: usize| prompt_y + (row.saturating_sub(first)) as f64 * line_height;
 
         // Selection band, drawn under the text so glyphs stay legible. A
-        // selection can span lines, so each visible line gets its own band.
+        // selection can span rows, so each visible row gets its own band.
         if let Some((sel_start, sel_end)) = model.editor.selection() {
-            for (index, line) in lines.iter().enumerate().skip(first) {
-                let line_start = line_starts[index];
-                let line_end = line_start + line.len();
-                let from = sel_start.max(line_start);
-                let to = sel_end.min(line_end);
-                if from >= to && !(sel_start <= line_end && sel_end > line_end) {
+            for (index, row) in rows.iter().enumerate().skip(first) {
+                let from = sel_start.max(row.start);
+                let to = sel_end.min(row.end);
+                let spans_break = sel_start <= row.end && sel_end > row.end;
+                if from >= to && !spans_break {
                     continue;
                 }
-                let from = from.min(line_end);
+                let from = from.min(row.end);
                 let to = to.max(from);
                 let x0 =
-                    prompt_x + text.measure_width(&line[..from - line_start], prompt_style, scale);
-                let x1 =
-                    prompt_x + text.measure_width(&line[..to - line_start], prompt_style, scale);
-                // A selection continuing past this line highlights the break.
-                let x1 = if sel_end > line_end {
-                    x1 + f64::from(layout::BODY_SIZE) * 0.5
-                } else {
-                    x1
-                };
+                    prompt_x + text.measure_width(&source[row.start..from], prompt_style, scale);
+                let mut x1 =
+                    prompt_x + text.measure_width(&source[row.start..to], prompt_style, scale);
+                // A selection continuing past this row highlights the break.
+                if spans_break {
+                    x1 += f64::from(layout::BODY_SIZE) * 0.5;
+                }
                 if x1 <= x0 {
                     continue;
                 }
-                let top = line_y(index) - 1.0;
+                let top = row_y(index) - 1.0;
                 fill(
                     scene,
                     theme.selection,
@@ -256,16 +252,17 @@ pub fn build_scene(
                 scale,
             );
         } else {
-            // Draw line by line so each sits on the composer's line grid
-            // rather than relying on paragraph wrapping.
-            for (index, line) in lines.iter().enumerate().skip(first) {
+            // Draw row by row so each sits on the composer's line grid and
+            // wrapping matches what hit-testing assumes.
+            for (index, row) in rows.iter().enumerate().skip(first) {
+                let line = row.text(source);
                 if line.is_empty() {
                     continue;
                 }
                 text.draw_paragraph_scaled(
                     scene,
                     line,
-                    (prompt_x, line_y(index)),
+                    (prompt_x, row_y(index)),
                     prompt_width,
                     prompt_style,
                     scale,
@@ -274,11 +271,12 @@ pub fn build_scene(
         }
 
         if model.caret.visible() {
-            let (line, col) = model.editor.cursor_line_col();
-            let prefix = &lines[line][..col.min(lines[line].len())];
+            let (row, _) = crate::wrap::row_col_at(&rows, source, model.editor.cursor());
+            let row_start = rows.get(row).map(|r| r.start).unwrap_or(0);
+            let prefix = &source[row_start..model.editor.cursor().max(row_start)];
             let offset = text.measure_width(prefix, prompt_style, scale);
             let caret_x = (prompt_x + offset).min(frame.right - layout::COMPOSER_PAD_X);
-            let top = line_y(line.max(first)) - 1.0;
+            let top = row_y(row.max(first)) - 1.0;
             let bottom = top + layout::CARET_HEIGHT;
             fill(
                 scene,

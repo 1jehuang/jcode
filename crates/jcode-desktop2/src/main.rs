@@ -19,6 +19,7 @@ mod tests;
 mod text;
 mod theme;
 mod window_state;
+mod wrap;
 
 use anyhow::Result;
 use scene::build_scene;
@@ -292,6 +293,12 @@ impl Default for Model {
 }
 
 impl Model {
+    /// Visual rows of the composer for a character budget, so layout sizing,
+    /// rendering, and hit-testing all wrap identically.
+    fn composer_rows(&self, max_chars: usize) -> Vec<wrap::Row> {
+        wrap::wrap(self.editor.text(), max_chars)
+    }
+
     /// Total transcript lines, used to clamp scrolling.
     fn transcript_lines(&self) -> usize {
         self.transcript.lines().count()
@@ -361,7 +368,11 @@ impl App {
     /// Geometry for the current model: the composer is sized to the input's
     /// line count, so a multi-line message is fully visible.
     fn frame_for_model(size: (u32, u32), scale: f64, model: &Model) -> layout::Frame {
-        layout::Frame::with_composer_lines(size, scale, model.editor.line_count())
+        // Size from *wrapped* rows: a single long line still needs the room it
+        // occupies on screen, or it would spill outside the well.
+        let probe = layout::Frame::new(size, scale);
+        let rows = model.composer_rows(probe.composer_char_budget());
+        layout::Frame::with_composer_lines(size, scale, rows.len())
     }
 
     /// Byte offset in the composer text under a logical x position, or `None`
@@ -382,20 +393,20 @@ impl App {
             font_size: layout::BODY_SIZE,
             ..Default::default()
         };
-        // Pick the line from y, then the column within it, so clicking in a
-        // multi-line composer lands on the line the user aimed at.
-        let editor_text = self.model.editor.text().to_string();
-        let lines: Vec<&str> = editor_text.split('\n').collect();
-        let shown = frame.composer_lines().min(lines.len());
-        let first = lines.len() - shown;
+        // Pick the visual row from y, then the column within it, so clicking a
+        // wrapped row lands where the user aimed.
+        let source = self.model.editor.text().to_string();
+        let rows = crate::wrap::wrap(&source, frame.composer_char_budget());
+        let shown = frame.composer_lines().min(rows.len());
+        let first = rows.len() - shown;
         let text_top = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
-        let row = ((y - text_top) / layout::COMPOSER_LINE_HEIGHT).floor();
-        let row = (row.max(0.0) as usize).min(shown.saturating_sub(1));
-        let index = first + row;
-        let line = lines.get(index).copied().unwrap_or("");
-        let line_start: usize = lines[..index].iter().map(|l| l.len() + 1).sum();
-        let column = self.text.offset_at_x(line, text_x, style, scale);
-        Some(line_start + column)
+        let offset_row = ((y - text_top) / layout::COMPOSER_LINE_HEIGHT).floor();
+        let offset_row = (offset_row.max(0.0) as usize).min(shown.saturating_sub(1));
+        let row = rows[first + offset_row];
+        let column = self
+            .text
+            .offset_at_x(row.text(&source), text_x, style, scale);
+        Some(row.start + column)
     }
 
     fn on_pointer_pressed(&mut self) {
