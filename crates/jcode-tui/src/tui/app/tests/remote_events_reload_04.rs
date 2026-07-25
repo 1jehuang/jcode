@@ -2115,6 +2115,34 @@ fn test_remote_judge_shows_processing_until_split_response() {
 
 // ====================================================================
 
+/// Mirror the part of the remote tick loop that reveals paced stream text and
+/// replays a deferred `Done` (see `remote.rs`), so tests can settle a turn
+/// without spinning the real event loop.
+fn drain_paced_stream_and_replay_deferred_done(
+    app: &mut crate::tui::app::App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+) {
+    for _ in 0..2000 {
+        // The pacer reveals against wall-clock time, so a tight loop would spin
+        // without ever releasing a frame.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let backlog_was_empty = app.stream_buffer.is_empty();
+        let ops = app.stream_buffer.flush_smooth_frame();
+        app.apply_stream_ops(ops);
+        if backlog_was_empty
+            && app.stream_buffer.is_empty()
+            && let Some(id) = app.deferred_stream_done_id.take()
+        {
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id }, remote);
+            return;
+        }
+        if app.stream_buffer.is_empty() && app.deferred_stream_done_id.is_none() {
+            return;
+        }
+    }
+    panic!("paced stream backlog never drained");
+}
+
 #[test]
 fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
     // A swarm wake / background-task wake / scheduled task can start a turn in
@@ -2154,6 +2182,14 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
 
     app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
+
+    // Streaming text is revealed at a paced rate, so a `Done` that arrives with
+    // a backlog is deliberately deferred (`deferred_stream_done_id`) and replayed
+    // by the remote tick loop once the pacer drains. Drive that drain here rather
+    // than asserting mid-flight: without it the turn correctly stays in
+    // `Streaming`, and the assertion below would be testing the pacer rather than
+    // turn adoption.
+    drain_paced_stream_and_replay_deferred_done(&mut app, &mut remote);
 
     assert!(
         !app.is_processing,
