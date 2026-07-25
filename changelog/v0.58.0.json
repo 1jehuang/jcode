@@ -1,0 +1,26 @@
+{
+  "version": "0.58.0",
+  "date": "2026-07-25",
+  "title": "Max-effort reasoning streams, model context limits, and the /model picker",
+  "highlights": [
+    "OpenAI max-effort reasoning turns no longer time out mid-thought: requests ask for reasoning summaries and the idle budget scales with reasoning effort",
+    "The /model picker shows pretty model names and matches queries like \"opus 4.8\" against them",
+    "New and unrecognized models no longer silently fall back to a 200K context window"
+  ],
+  "improvements": [
+    "Streaming idle and websocket completion budgets scale with reasoning effort (high 2x, xhigh 3x, max 4x) so long silent thinks are not mistaken for dead connections",
+    "The client-side stall guard budgets against the largest effort-scaled server timeout, so the server's visible error always fires first",
+    "Update failure messages collapse to one short line instead of a wall of text",
+    "Update checks back off from GitHub API rate limits instead of retrying in a loop",
+    "Spawned swarm workers fail loudly when they cannot use their requested model"
+  ],
+  "fixes": [
+    "Config-declared models survive a live catalog refresh",
+    "Named profiles that point elsewhere are treated as user-declared rather than built-in",
+    "Antigravity self-heals the missing thought_signature dead-end instead of getting stuck",
+    "A home-directory subscribe no longer clobbers the working directory of a project session",
+    "Kimi ids with an explicit -256k suffix resolve to 256K instead of the family default",
+    "JCODE_TOOL_CALL_DETAILS now invalidates the cached config when it changes",
+    "Fuzzy matching no longer rejects late matches because of the positional penalty"
+  ]
+}
