@@ -122,14 +122,30 @@ impl Tool for BareSchemaTool {
     }
 }
 
+/// `to_definition` deliberately injects a required `intent` into every
+/// object-shaped tool schema (8505080a6), so a tool that omits `intent` from its
+/// own `parameters_schema` still advertises it. This pins that central
+/// behaviour: a bare schema gains `intent` as both a property and a requirement.
 #[test]
-fn tool_definitions_do_not_auto_inject_intent() {
+fn tool_definitions_auto_inject_required_intent() {
     let def = BareSchemaTool.to_definition();
-    assert!(def.input_schema["properties"]["intent"].is_null());
+    assert_eq!(def.input_schema["properties"]["intent"]["type"], "string");
+    let required = def.input_schema["required"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        required.iter().any(|value| value == "intent"),
+        "intent must be required after central injection: {required:?}"
+    );
+    assert!(
+        required.iter().any(|value| value == "command"),
+        "injection must preserve the tool's own required fields: {required:?}"
+    );
 }
 
 #[tokio::test]
-async fn first_party_tool_definitions_include_optional_intent_explicitly() {
+async fn first_party_tool_definitions_require_intent_with_display_only_docs() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     registry.register_ambient_tools().await;
@@ -159,8 +175,8 @@ async fn first_party_tool_definitions_include_optional_intent_explicitly() {
         );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
         assert!(
-            !required.iter().any(|value| value == "intent"),
-            "{} must not require intent",
+            required.iter().any(|value| value == "intent"),
+            "{} must require intent",
             def.name
         );
     }

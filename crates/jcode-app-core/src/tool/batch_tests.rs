@@ -132,7 +132,10 @@ fn test_schema_only_requires_tool() {
 
     assert_eq!(
         schema["properties"]["tool_calls"]["items"]["required"],
-        json!(["tool"])
+        // Nested batch entries require `intent` alongside `tool` so every
+        // fanned-out call carries a display label, matching the central
+        // intent requirement in `ensure_intent_in_schema` (8505080a6).
+        json!(["tool", "intent"])
     );
     assert_eq!(
         schema["properties"]["tool_calls"]["items"]["additionalProperties"],
