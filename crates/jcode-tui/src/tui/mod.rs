@@ -1054,7 +1054,10 @@ impl PickerKind {
                 // Include the pretty name so a query like "opus 4.8" matches
                 // the row even though the underlying id is `claude-opus-4-8`.
                 let pretty = crate::tui::app::helpers::pretty_model_display_name(&entry.name);
-                format!("{} {} {} {} {}", entry.name, pretty, provider, method, detail)
+                format!(
+                    "{} {} {} {} {}",
+                    entry.name, pretty, provider, method, detail
+                )
             }
         }
     }

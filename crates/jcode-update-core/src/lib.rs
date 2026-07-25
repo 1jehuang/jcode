@@ -266,7 +266,11 @@ pub fn summarize_update_error(error: &str) -> String {
         .unwrap_or(first_line)
         .trim_end_matches(['.', ':'])
         .trim();
-    let clause = if clause.is_empty() { first_line } else { clause };
+    let clause = if clause.is_empty() {
+        first_line
+    } else {
+        clause
+    };
 
     if clause.chars().count() <= UPDATE_ERROR_SUMMARY_MAX_CHARS {
         return clause.to_string();
