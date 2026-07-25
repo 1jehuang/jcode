@@ -23,10 +23,6 @@ pub const COMPOSER_LINE_HEIGHT: f64 = 20.0;
 pub const COMPOSER_MAX_LINES: usize = 8;
 pub const COMPOSER_PAD_X: f64 = 14.0;
 pub const COMPOSER_RADIUS: f64 = 6.0;
-/// Width reserved at the left of the well for the prompt marker. A field that
-/// is only a grey slab is ambiguous about where typing starts; the marker
-/// makes the text origin explicit and survives an empty composer.
-pub const COMPOSER_MARKER_ADVANCE: f64 = 20.0;
 /// Field border thickness, in logical units. Drawn as a stroke so the composer
 /// reads as an input field rather than a block of shaded paper.
 pub const COMPOSER_BORDER: f64 = 1.0;
@@ -41,8 +37,24 @@ pub const CARET_HEIGHT: f64 = 18.0;
 /// Caption row under the composer for notices and the scrollback indicator.
 pub const FOOTNOTE_HEIGHT: f64 = 16.0;
 pub const FOOTNOTE_GAP: f64 = 6.0;
-/// Largest the hero donut gets, in logical units.
-pub const DONUT_MAX_SIDE: f64 = 320.0;
+/// Largest the hero donut gets, in logical units. Matches the website's
+/// 360px hero canvas, so the halftone screen has the same density there.
+pub const DONUT_MAX_SIDE: f64 = 360.0;
+/// Hero wordmark over the donut, as on the website's landing section.
+pub const HERO_WORDMARK_SIZE: f32 = 34.0;
+/// Gap under the wordmark, and under the donut before the tagline.
+pub const HERO_GAP: f64 = 14.0;
+/// Line height for hero text. Tight, because the hero stacks single lines
+/// against a graphic: body leading would put invisible slack above each line
+/// and make the measured gaps disagree with the optical ones.
+pub const HERO_LINE_HEIGHT: f32 = 1.15;
+/// Tagline under the donut: the one line that says what this is.
+pub const HERO_TAGLINE_SIZE: f32 = 12.5;
+/// Fraction of the donut's square its silhouette actually inks. The torus at
+/// this tilt does not reach the corners or the top and bottom edges, so laying
+/// the stack out on the raw square leaves a gap that looks like a mistake; the
+/// wordmark and tagline are spaced against the *visible* disc instead.
+pub const DONUT_INK_FRACTION: f64 = 0.95;
 /// Below this the halftone screen has too few dots to read as a donut, so it is
 /// not drawn at all rather than degrading into speckle on a cramped window.
 pub const DONUT_MIN_SIDE: f64 = 120.0;
@@ -52,6 +64,18 @@ pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
 /// composer in the exact middle of the window; it only leaves that line when
 /// the page is too short to keep a transcript line above it.
 pub const COMPOSER_CENTER: f64 = 0.5;
+
+/// The hero block on an empty session: wordmark, donut, tagline. All fields are
+/// logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hero {
+    /// Baseline box top of the wordmark, centred in the column.
+    pub wordmark_top: f64,
+    /// The donut's square.
+    pub donut: vello::kurbo::Rect,
+    /// Top of the tagline line under the donut.
+    pub tagline_top: f64,
+}
 
 /// Resolved geometry for one frame. All fields are logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -166,11 +190,15 @@ impl Frame {
         (self.right - COMPOSER_PAD_X - self.composer_text_left()).max(1.0)
     }
 
-    /// Left edge of composer text: inside the padding and past the prompt
-    /// marker. The single source of truth for the text origin, so drawing,
-    /// caret geometry, and click hit-testing cannot drift apart.
+    /// Left edge of composer text: inside the well's padding. The single source
+    /// of truth for the text origin, so drawing, caret geometry, and click
+    /// hit-testing cannot drift apart.
+    ///
+    /// There is no prompt marker: the outlined field already says where typing
+    /// goes, so a `>` chevron was decoration that pushed the text off the
+    /// field's own optical left edge.
     pub fn composer_text_left(&self) -> f64 {
-        self.left + COMPOSER_PAD_X + COMPOSER_MARKER_ADVANCE
+        self.left + COMPOSER_PAD_X
     }
 
     /// Composer lines this frame was built for.
@@ -193,31 +221,48 @@ impl Frame {
         1.0 / self.scale
     }
 
-    /// Square box for the hero donut, centred in the transcript region under
-    /// the placeholder line. It is only drawn on an empty session, so it
-    /// borrows dead space rather than reserving any: nothing else in the frame
-    /// moves when it appears or stands down.
-    pub fn donut_box(&self) -> vello::kurbo::Rect {
-        let top = (self.body_top + self.body_line_height() * 2.0).min(self.body_bottom);
-        let available = (self.body_bottom - top).max(0.0);
-        // Capped so the donut stays a motif on tall windows rather than a
-        // poster, and so it never crowds the composer.
-        let side = available.min(self.column()).min(DONUT_MAX_SIDE);
-        let cx = (self.left + self.right) / 2.0;
-        let cy = top + available / 2.0;
-        vello::kurbo::Rect::new(
-            cx - side / 2.0,
-            cy - side / 2.0,
-            cx + side / 2.0,
-            cy + side / 2.0,
-        )
+    /// The hero block shown on an empty session: the wordmark, the donut, and
+    /// the tagline, stacked and centred exactly like the website's landing
+    /// section. Returns `None` when the window is too short to hold it, so a
+    /// cramped frame degrades to a plain composer instead of a squashed hero.
+    ///
+    /// The hero borrows the transcript's dead space and reserves nothing, so
+    /// nothing else in the frame moves when it appears or stands down.
+    pub fn hero(&self) -> Option<Hero> {
+        let available = self.body_bottom - self.body_top;
+        let wordmark_height = f64::from(HERO_WORDMARK_SIZE * HERO_LINE_HEIGHT);
+        let tagline_height = f64::from(HERO_TAGLINE_SIZE * HERO_LINE_HEIGHT);
+        let chrome = wordmark_height + tagline_height + HERO_GAP * 2.0;
+        let side = (available - chrome).min(self.column()).min(DONUT_MAX_SIDE);
+        if side < DONUT_MIN_SIDE {
+            return None;
+        }
+        // Space the text against the inked disc, not the square, then centre
+        // the whole stack in the region like the website's flexbox.
+        let bleed = side * (1.0 - DONUT_INK_FRACTION) / 2.0;
+        let total = side - bleed * 2.0 + chrome;
+        let top = self.body_top + (available - total) / 2.0;
+        let centre_x = (self.left + self.right) / 2.0;
+        let donut_top = top + wordmark_height + HERO_GAP - bleed;
+        Some(Hero {
+            wordmark_top: top,
+            donut: vello::kurbo::Rect::new(
+                centre_x - side / 2.0,
+                donut_top,
+                centre_x + side / 2.0,
+                donut_top + side,
+            ),
+            tagline_top: donut_top + side - bleed + HERO_GAP,
+        })
     }
 
     /// Whether a logical point is inside the donut, used for drag hit-testing.
     /// Circular, not the bounding box, so clicks in the corners still reach
     /// whatever is behind it.
     pub fn hits_donut(&self, x: f64, y: f64) -> bool {
-        let box_ = self.donut_box();
+        let Some(box_) = self.hero().map(|hero| hero.donut) else {
+            return false;
+        };
         let radius = box_.width().min(box_.height()) / 2.0;
         if radius < DONUT_MIN_SIDE / 2.0 {
             return false;
@@ -516,7 +561,12 @@ mod tests {
     #[test]
     fn donut_stays_inside_the_transcript_region() {
         sweep(|frame| {
-            let box_ = frame.donut_box();
+            // A window too small for the hero draws no donut at all, and an
+            // empty rect has no position to check. Asserting on it instead
+            // tested the placeholder rather than the layout.
+            let Some(box_) = frame.hero().map(|hero| hero.donut) else {
+                return;
+            };
             assert!(
                 box_.y0 >= frame.body_top - 0.001,
                 "donut crossed the top margin at {}x{}",
@@ -536,7 +586,9 @@ mod tests {
     #[test]
     fn donut_is_square_and_bounded() {
         sweep(|frame| {
-            let box_ = frame.donut_box();
+            let Some(box_) = frame.hero().map(|hero| hero.donut) else {
+                return;
+            };
             assert!(
                 (box_.width() - box_.height()).abs() < 1e-9,
                 "donut must be square"
@@ -548,17 +600,51 @@ mod tests {
 
     #[test]
     fn donut_is_centred_in_the_column() {
+        let mut checked = 0;
         sweep(|frame| {
-            let box_ = frame.donut_box();
+            let Some(box_) = frame.hero().map(|hero| hero.donut) else {
+                return;
+            };
             let centre = (box_.x0 + box_.x1) / 2.0;
-            assert!((centre - (frame.left + frame.right) / 2.0).abs() < 1e-9);
+            assert!(
+                (centre - (frame.left + frame.right) / 2.0).abs() < 1e-9,
+                "donut off-centre at {}x{} scale {}",
+                frame.width,
+                frame.height,
+                frame.scale
+            );
+            checked += 1;
         });
+        // Without this the test would pass vacuously if the hero stopped
+        // fitting at every size in the sweep.
+        assert!(checked > 0, "the sweep never produced a hero to check");
+    }
+
+    /// The hero is optional by design, but it must appear at ordinary desktop
+    /// window sizes: silently losing it everywhere would be invisible to the
+    /// tests above, which skip frames without one.
+    ///
+    /// Sizes here are *logical*, scaled up to physical per scale factor, so the
+    /// same window is tested on 1x and HiDPI rather than a 1x window being
+    /// shrunk by the scale factor.
+    #[test]
+    fn the_hero_fits_at_ordinary_window_sizes() {
+        for &(w, h) in &[(1100.0f64, 720.0f64), (1440.0, 900.0), (1920.0, 1080.0)] {
+            for &scale in SCALES {
+                let size = ((w * scale) as u32, (h * scale) as u32);
+                let frame = Frame::with_composer_lines(size, scale, 1);
+                assert!(
+                    frame.hero().is_some(),
+                    "no hero in a {w}x{h} logical window at scale {scale}"
+                );
+            }
+        }
     }
 
     #[test]
     fn donut_hit_test_matches_its_circle() {
         let frame = Frame::new((1100, 720), 1.0);
-        let box_ = frame.donut_box();
+        let box_ = frame.hero().expect("a hero at 1100x720").donut;
         let cx = (box_.x0 + box_.x1) / 2.0;
         let cy = (box_.y0 + box_.y1) / 2.0;
         let radius = box_.width() / 2.0;

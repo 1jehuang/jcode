@@ -36,6 +36,27 @@ pub struct ParagraphStyle {
     /// Extra letterspacing in em (captions/hints use 0.12-0.2em).
     pub letter_spacing_em: f32,
     pub line_height: f32,
+    /// Horizontal alignment within the wrap width. Start for body copy; the
+    /// hero block centres, like the website's landing section.
+    pub align: Align,
+}
+
+/// Horizontal alignment, kept as our own enum so scene code does not depend on
+/// Parley's type directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Start,
+    Center,
+}
+
+impl Align {
+    fn to_parley(self) -> Alignment {
+        match self {
+            Self::Start => Alignment::Start,
+            Self::Center => Alignment::Center,
+        }
+    }
 }
 
 impl Default for ParagraphStyle {
@@ -46,6 +67,7 @@ impl Default for ParagraphStyle {
             bold: false,
             letter_spacing_em: 0.0,
             line_height: 1.65,
+            align: Align::Start,
         }
     }
 }
@@ -62,7 +84,7 @@ impl TextSystem {
         if style.bold {
             builder.push_default(StyleProperty::FontWeight(parley::FontWeight::BOLD));
         }
-        if style.letter_spacing_em > 0.0 {
+        if style.letter_spacing_em != 0.0 {
             builder.push_default(StyleProperty::LetterSpacing(
                 style.letter_spacing_em * style.font_size,
             ));
@@ -103,7 +125,7 @@ impl TextSystem {
         Self::push_defaults(&mut builder, style);
         let mut layout: Layout<Brush> = builder.build(text);
         layout.break_all_lines(Some((max_width * scale32).max(1.0)));
-        layout.align(Alignment::Start, parley::AlignmentOptions::default());
+        layout.align(style.align.to_parley(), parley::AlignmentOptions::default());
         layout
     }
 

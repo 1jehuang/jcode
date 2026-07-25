@@ -7,11 +7,15 @@
 use crate::text::ParagraphStyle;
 use crate::{Model, donut, layout, text};
 use vello::Scene;
-use vello::kurbo::{Affine, Circle, Rect, RoundedRect};
+use vello::kurbo::{Affine, BezPath, Circle, Rect, RoundedRect, Shape};
 use vello::peniko::Color;
 
-/// Halftone dots across the donut box, matching the website's screen density.
-const HALFTONE_CELLS: f64 = 76.0;
+/// Halftone dot pitch in logical units. Fixed rather than a fraction of the
+/// box: a screen is a physical thing, so the dots stay the same size (and so
+/// the same optical ink density) whatever size the donut is drawn at, and a
+/// smaller donut simply shows fewer of them. Matches the website's hero, which
+/// screens a 360px canvas at 76 dots across.
+const DOT_PITCH: f64 = 360.0 / 76.0;
 /// Classic 45-degree halftone screen angle.
 const SCREEN_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
 /// Dot radius as a fraction of the dot pitch at full luminance.
@@ -20,48 +24,110 @@ const DOT_FILL: f64 = 0.62;
 const DOT_FLOOR: f32 = 0.04;
 /// Gamma applied to luminance before sizing a dot.
 const DOT_GAMMA: f32 = 0.85;
+/// Flattening tolerance for a dot, in logical units. Dots are at most a couple
+/// of units across, so a coarse tolerance is invisible and cuts the curve
+/// segments (and so the GPU work) well below the exact-circle default.
+const CIRCLE_TOLERANCE: f64 = 0.05;
 
 /// Draw the halftone donut into `box_`, sampling `field` as a luminance image.
-/// The dot lattice is in logical units so the screen density is identical on
-/// 1x and HiDPI, exactly like the website's CSS-pixel lattice.
+///
+/// The dot lattice is in logical units so the screen density is identical on 1x
+/// and HiDPI, exactly like the website's CSS-pixel lattice. Every dot is
+/// appended to one `BezPath` and filled in a single draw, which is the same
+/// trick the website uses with one canvas path: per-dot fills would mean
+/// thousands of separate Vello draw commands per frame.
 fn draw_donut(scene: &mut Scene, field: &donut::Donut, box_: Rect, ink: Color, scale: f64) {
     let side = box_.width().min(box_.height());
     if side < layout::DONUT_MIN_SIDE {
         return;
     }
-    let pitch = side / HALFTONE_CELLS;
+    let pitch = DOT_PITCH;
+    let cells = side / pitch;
     let (sin_a, cos_a) = SCREEN_ANGLE.sin_cos();
     let cx = box_.x0 + box_.width() / 2.0;
     let cy = box_.y0 + box_.height() / 2.0;
+    let (x0, y0) = (cx - side / 2.0, cy - side / 2.0);
     // A rotated lattice must cover the square, so extend it by sqrt(2).
-    let ext = (HALFTONE_CELLS * std::f64::consts::FRAC_1_SQRT_2).ceil() as i32 + 1;
+    let ext = (cells * std::f64::consts::FRAC_1_SQRT_2).ceil() as i32 + 1;
     let grid = field.grid() as f32;
+    let per_unit = grid / side as f32;
 
+    let mut dots = BezPath::new();
     for j in -ext..=ext {
         for i in -ext..=ext {
             let px = cx + (i as f64 * cos_a - j as f64 * sin_a) * pitch;
             let py = cy + (i as f64 * sin_a + j as f64 * cos_a) * pitch;
-            // Sample in the donut's own square, centred in the box.
-            let u = (px - (cx - side / 2.0)) / side;
-            let v = (py - (cy - side / 2.0)) / side;
-            if !(-0.02..1.02).contains(&u) || !(-0.02..1.02).contains(&v) {
+            // Reject dots outside the donut's square before sampling: on a
+            // 45-degree lattice that is ~1/3 of the candidates.
+            if px < x0 || px > x0 + side || py < y0 || py > y0 + side {
                 continue;
             }
-            let lum = field.sample(u as f32 * grid, v as f32 * grid);
+            let lum = field.sample((px - x0) as f32 * per_unit, (py - y0) as f32 * per_unit);
             if lum <= DOT_FLOOR {
                 continue;
             }
             let radius = f64::from(lum.powf(DOT_GAMMA)) * pitch * DOT_FILL;
-            scene.fill(
-                vello::peniko::Fill::NonZero,
-                Affine::scale(scale),
-                ink,
-                None,
-                &Circle::new((px, py), radius),
-            );
+            dots.extend(Circle::new((px, py), radius).path_elements(CIRCLE_TOLERANCE));
         }
     }
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        ink,
+        None,
+        &dots,
+    );
 }
+
+/// Draw the hero block shown on an empty session: the wordmark, the halftone
+/// donut, and one line of invitation, stacked and centred exactly like the
+/// website's landing section.
+fn draw_hero(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    hero: layout::Hero,
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    let column = frame.column() as f32;
+    // The wordmark: the same "jcode" that sits above the donut on the website.
+    text.draw_paragraph_scaled(
+        scene,
+        "jcode",
+        (frame.left, hero.wordmark_top),
+        column,
+        ParagraphStyle {
+            font_size: layout::HERO_WORDMARK_SIZE,
+            color: model.theme.text,
+            align: text::Align::Center,
+            letter_spacing_em: -0.02,
+            line_height: layout::HERO_LINE_HEIGHT,
+            ..Default::default()
+        },
+        scale,
+    );
+    if let Some(field) = model.donut.as_ref() {
+        draw_donut(scene, field, hero.donut, model.theme.text, scale);
+    }
+    text.draw_paragraph_scaled(
+        scene,
+        HERO_TAGLINE,
+        (frame.left, hero.tagline_top),
+        column,
+        ParagraphStyle {
+            font_size: layout::HERO_TAGLINE_SIZE,
+            color: model.theme.muted,
+            align: text::Align::Center,
+            line_height: layout::HERO_LINE_HEIGHT,
+            ..Default::default()
+        },
+        scale,
+    );
+}
+
+/// The tagline under the donut, matching the website's hero copy.
+const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
 /// The one style used for composer text. Wrapping, drawing, caret placement,
 /// and hit-testing must all use the same style or their geometry diverges, so
@@ -152,12 +218,17 @@ pub fn build_scene(
     // donut from the website lives there: the same halftone torus, and
     // draggable in the same way. It stands down the moment there is real
     // content, so it can never compete with the transcript.
-    if let Some(field) = model.donut.as_ref().filter(|_| placeholder) {
-        draw_donut(scene, field, frame.donut_box(), theme.text, scale);
+    if placeholder {
+        if let Some(hero) = frame.hero() {
+            draw_hero(scene, text, model, hero, &frame, scale);
+        }
     }
 
+    // On an empty session the hero says everything, so there is no filler
+    // transcript line: a "type a message" caption next to a field that already
+    // invites you to type was the same sentence twice.
     let transcript = if placeholder {
-        "type a message and press enter"
+        ""
     } else {
         model.transcript.trim_start_matches('\n')
     };
@@ -176,7 +247,9 @@ pub fn build_scene(
         .saturating_sub(model.scroll)
         .max(1)
         .min(lines.len().max(1));
-    let lines = &lines[..end];
+    // `end` is clamped to at least 1 for the scroll maths, so an empty
+    // transcript must not index past the (empty) slice.
+    let lines = &lines[..end.min(lines.len())];
     let mut first_line = lines.len().saturating_sub(frame.visible_body_lines());
     let mut tail = lines[first_line..].join("\n");
     let mut tail_height = text.measure_paragraph(&tail, column, body_style, scale);
@@ -206,22 +279,6 @@ pub fn build_scene(
     let prompt_x = frame.composer_text_left();
     let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
     let prompt_width = frame.composer_text_width() as f32;
-
-    // Prompt marker: a fixed origin for the text, so an empty field still
-    // shows where typing starts. It dims while busy instead of the field
-    // swapping to a "working..." label, which used to hide anything already
-    // typed for the next turn.
-    text.draw_paragraph_scaled(
-        scene,
-        ">",
-        (frame.left + layout::COMPOSER_PAD_X, prompt_y),
-        layout::COMPOSER_MARKER_ADVANCE as f32,
-        ParagraphStyle {
-            color: if model.busy { theme.faint } else { theme.muted },
-            ..prompt_style
-        },
-        scale,
-    );
 
     {
         // One Parley layout drives wrapping, the selection bands, the glyphs,
@@ -263,13 +320,18 @@ pub fn build_scene(
             }
         }
 
+        // An empty field carries a rotating invitation rather than a label:
+        // "message jcode" is a caption you stop seeing, while a prompt you
+        // could actually type teaches what the thing is for. While busy it says
+        // so instead, because "nothing is happening" and "working" must never
+        // look the same.
         if model.editor.is_empty() {
             text.draw_paragraph_scaled(
                 scene,
                 if model.busy {
                     "working... esc to interrupt"
                 } else {
-                    "message jcode"
+                    crate::hints::hint(model.hint)
                 },
                 (prompt_x, prompt_y),
                 prompt_width,
@@ -309,15 +371,11 @@ pub fn build_scene(
 
     // A transient notice, or a scrollback indicator, as a caption under the
     // well. Never covers content.
-    // Priority: a transient notice, then a scrollback indicator, then the
-    // connection status. Status lives here instead of a masthead so the top of
-    // the page stays clear, while a failure to attach is still visible.
-    let footnote = model
-        .notice
-        .clone()
-        .or_else(|| (model.scroll > 0).then(|| format!("scrolled back {} lines", model.scroll)))
-        .or_else(|| model.status_footnote());
-    let footnote = footnote.map(|line| {
+    // The model decides *what* to say (see `Model::footnote`); this only
+    // decides how wide it may be. Status and build alerts live here instead of
+    // a masthead, so the top of the page stays clear while a failure to attach
+    // is still visible.
+    let footnote = model.footnote().map(|line| {
         let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72)) as usize;
         elide(&line, chars.max(12))
     });
