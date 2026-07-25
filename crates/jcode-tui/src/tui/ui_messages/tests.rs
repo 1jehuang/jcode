@@ -2807,3 +2807,30 @@ fn render_swarm_message_preserves_inline_image_placeholder_lines() {
 
     crate::tui::markdown::set_center_code_blocks(saved);
 }
+
+#[test]
+fn render_empty_todo_tool_result_collapses_to_compact_line() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "[todo] []".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("0 todos".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_todo_empty".to_string(),
+            name: "todo".to_string(),
+            input: serde_json::json!({}),
+            intent: Some("Read the todo list".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!plain.contains("No tasks yet"), "{plain}");
+    assert!(plain.contains("no tasks"), "{plain}");
+}

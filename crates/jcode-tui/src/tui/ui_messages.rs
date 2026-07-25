@@ -3607,6 +3607,16 @@ pub(crate) fn render_tool_message(
         if !parsed.goal_updates.is_empty() {
             return render_todo_goal_updates(&parsed.goal_updates, width);
         }
+        // An empty todo read (the model probing the list before planning) has
+        // nothing to show. Rendering the "No tasks yet" placeholder card there
+        // just adds transcript noise, so collapse it to a compact line.
+        if parsed.todos.is_empty() && parsed.goals.is_empty() {
+            return vec![Line::from(vec![
+                Span::raw("  "),
+                Span::styled("todo", Style::default().fg(todo_meta_color())),
+                Span::styled("  no tasks", Style::default().fg(dim_color())),
+            ])];
+        }
         let payload =
             serde_json::json!({ "todos": parsed.todos, "goals": parsed.goals }).to_string();
         return render_todos_message(

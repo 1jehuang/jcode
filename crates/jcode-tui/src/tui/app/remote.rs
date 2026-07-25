@@ -1453,16 +1453,13 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 /// The server relays provider events over the local socket; when the upstream
 /// model reasons silently, no events cross the socket, so a hardcoded short
 /// watchdog cannot distinguish a dead connection from a healthy long think
-/// (issue #434). Derive the budget from the provider-agnostic
-/// `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
-/// setting plus grace time so the server-side idle timeout (which produces a
-/// visible error event) always fires first. Never below 2 minutes.
+/// (issue #434). Derive it from `[provider] stream_idle_timeout_secs`, scaled by
+/// the largest reasoning-effort multiplier because effort is invisible here,
+/// plus grace so the server-side idle timeout (which produces a visible error
+/// event) always fires first. Never below 2 minutes.
 fn stall_timeout() -> Duration {
     const MIN_STALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
     const GRACE: Duration = Duration::from_secs(30);
-    // The client cannot see the request's reasoning effort, so budget for the
-    // largest effort-scaled server timeout. Otherwise a max-effort silent think
-    // gets cancelled client-side before the server's visible timeout fires.
     let provider_idle = crate::provider::max_stream_idle_timeout();
     provider_idle.saturating_add(GRACE).max(MIN_STALL_TIMEOUT)
 }
@@ -1913,7 +1910,7 @@ mod stall_guard_tests {
             timeout >= Duration::from_secs(2 * 60),
             "stall timeout regressed below 2 minutes: {timeout:?}"
         );
-        // And it must exceed the provider idle timeout so a healthy silent
+        // And it must exceed the max provider idle budget so a healthy silent
         // reasoning stretch is cancelled server-side (visible error + retry)
         // rather than by the client watchdog (issue #434).
         let provider_idle = crate::provider::max_stream_idle_timeout();
