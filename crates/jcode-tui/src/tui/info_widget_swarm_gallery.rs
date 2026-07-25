@@ -8,6 +8,7 @@
 //! [`GalleryMember`] (label + body lines).
 
 use crate::protocol::SwarmMemberStatus;
+use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
     render_swarm_compact, render_swarm_dock, render_swarm_live_card, render_swarm_panel,
@@ -191,7 +192,13 @@ pub(crate) fn render_swarm_page_lines(
     ])];
     if max_height > 1 {
         out.push(Line::from(Span::styled(
-            "alt+n chat  ·  alt+↑/↓ select  ·  alt+o open  ·  alt+shift+p prompt  ·  esc chat",
+            format!(
+                "{} chat  ·  {} select  ·  {} open  ·  {} prompt  ·  esc chat",
+                alt_chord_lower("n"),
+                alt_chord_lower("↑/↓"),
+                alt_chord_lower("o"),
+                alt_chord_lower("shift+p"),
+            ),
             Style::default().fg(Color::Rgb(105, 105, 120)),
         )));
     }
@@ -506,19 +513,19 @@ pub(crate) fn render_swarm_strip_lines(
     // keeps flowing to the chat input while the panel is focused.
     let hints = vec![
         SwarmStripHint {
-            key: "alt+n".into(),
+            key: alt_chord_lower("n").into(),
             label: "page".into(),
         },
         SwarmStripHint {
-            key: "alt+↑/↓".into(),
+            key: alt_chord_lower("↑/↓").into(),
             label: "select".into(),
         },
         SwarmStripHint {
-            key: "alt+o".into(),
+            key: alt_chord_lower("o").into(),
             label: "open".into(),
         },
         SwarmStripHint {
-            key: "alt+shift+p".into(),
+            key: alt_chord_lower("shift+p").into(),
             label: "prompt".into(),
         },
         SwarmStripHint {
