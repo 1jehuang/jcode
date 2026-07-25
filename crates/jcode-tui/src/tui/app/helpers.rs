@@ -487,6 +487,28 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
     pretty
 }
 
+/// Prettify only recognized model families (`gpt-*`, `claude-*`, `gemini-*`),
+/// returning `None` for anything else so unfamiliar or namespaced ids
+/// (`vendor/model`, `profile:model`) keep their exact spelling. Used by the
+/// `/model` picker, where hiding the real id would break copy-paste and
+/// provider-specific naming.
+pub(crate) fn pretty_known_model_family(model: &str) -> Option<String> {
+    let core = model.strip_suffix("[1m]").unwrap_or(model);
+    if core.contains('/') || core.contains(':') {
+        return None;
+    }
+    let lower = core.to_ascii_lowercase();
+    // `gpt-` only counts when a version number follows (`gpt-5.5`), so
+    // open-weights ids like `gpt-oss-120b` are not mangled into `GPT-oss-…`.
+    let versioned_gpt = lower
+        .strip_prefix("gpt-")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    if !(versioned_gpt || lower.starts_with("claude-") || lower.starts_with("gemini-")) {
+        return None;
+    }
+    Some(pretty_model_display_name(model))
+}
+
 /// Render `claude-opus-4-8` as `Claude Opus 4.8`.
 fn prettify_claude(core: &str) -> String {
     let parts: Vec<&str> = core.split('-').collect();

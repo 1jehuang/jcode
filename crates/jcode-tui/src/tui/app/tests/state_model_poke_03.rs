@@ -1820,7 +1820,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         comtegra_text
     );
     assert!(
-        copilot_text.contains("claude-opus-4.6") && copilot_text.contains("Copilot"),
+        copilot_text.contains("Claude Opus 4.6") && copilot_text.contains("Copilot"),
         "Copilot route should be visible, got:\n{}",
         copilot_text
     );
