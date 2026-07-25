@@ -116,9 +116,22 @@ fn error_budget(meaningful_len: usize) -> u8 {
 /// this floor and are discarded instead of cluttering picker results.
 fn score_floor(meaningful_len: usize) -> i32 {
     // A clean boundary-anchored match earns at least MATCH per char plus
-    // bonuses. Requiring slightly more than half of the plain per-char MATCH
-    // total keeps typo matches while rejecting noise stitched across a token.
-    (meaningful_len as i32) * MATCH * 11 / 20
+    // bonuses. The floor is compared against a position-independent quality
+    // score (see [`floor_score`]), so it can demand most of the plain per-char
+    // MATCH total: typo and acronym matches clear it, while noise stitched
+    // across a token with long interior gaps does not.
+    (meaningful_len as i32) * MATCH * 15 / 20
+}
+
+/// Score used for the [`score_floor`] rejection test. Skipping haystack
+/// characters before the first match is penalized in the ranking score so
+/// earlier matches sort first, but that positional penalty must not decide
+/// whether an entry matches at all: otherwise a short query matching late in a
+/// long token (`5` in `claude-opus-4.5`) is rejected outright. Adding the
+/// leading penalty back makes the floor depend only on match quality.
+fn floor_score(score: i32, first_pos: Option<usize>) -> i32 {
+    let skipped = first_pos.unwrap_or(0) as i32;
+    score.saturating_sub(skipped.saturating_mul(LEADING_GAP))
 }
 
 /// Cheap rejection test: every pattern char (up to the error budget) must be
@@ -439,7 +452,7 @@ fn fuzzy_match_impl<P: PositionTracker>(
 
     let exact = pat == hay;
     let score = cell.score + if exact { EXACT } else { 0 };
-    if !exact && score < score_floor(meaningful) {
+    if !exact && floor_score(score, cell.positions.first_pos()) < score_floor(meaningful) {
         return None;
     }
     Some((score, cell.positions, hay_offset))
@@ -608,7 +621,7 @@ fn score_prepared_word(
     )?;
     let exact = word.chars == scratch.hay;
     let score = cell.score + if exact { EXACT } else { 0 };
-    if !exact && score < word.floor {
+    if !exact && floor_score(score, cell.positions.first_pos()) < word.floor {
         return None;
     }
     Some(score)
@@ -704,5 +717,29 @@ mod tests {
         // Clean subsequence and light typos still pass.
         assert!(fuzzy_score("gpt5", "gpt-5-codex").is_some());
         assert!(fuzzy_score("sonet", "claude-sonnet-4.5").is_some());
+    }
+
+    #[test]
+    fn short_queries_match_late_in_long_tokens() {
+        // Version fragments live near the end of long model ids; the leading
+        // positional penalty must not reject them.
+        assert!(fuzzy_score("5", "claude-opus-4.5").is_some());
+        assert!(fuzzy_score("46", "claude-opus-4.6").is_some());
+        assert!(
+            fuzzy_score_tokens("opus 5 api", "claude-opus-4.5 anthropic api premium").is_some()
+        );
+        assert!(
+            fuzzy_score_tokens("opus 5 api", "claude-opus-4-5-2025 anthropic-api responses")
+                .is_some()
+        );
+        // Unrelated models still do not match.
+        assert!(fuzzy_score_tokens("opus 5 api", "gpt-5.5 openai api").is_none());
+    }
+
+    #[test]
+    fn earlier_matches_still_outrank_later_ones() {
+        let early = fuzzy_score("5", "5-claude-opus").unwrap();
+        let late = fuzzy_score("5", "claude-opus-4.5").unwrap();
+        assert!(early > late);
     }
 }
