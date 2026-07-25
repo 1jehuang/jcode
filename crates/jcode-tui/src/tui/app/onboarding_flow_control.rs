@@ -1065,7 +1065,7 @@ impl App {
     /// onboarding new-session validation line.
     fn onboarding_default_model_label(&self) -> String {
         let model = self.onboarding_default_model_id();
-        let pretty = super::helpers::pretty_model_display_name(&model);
+        let pretty = super::model_names::pretty_model_display_name(&model);
         match self.provider.reasoning_effort() {
             Some(effort) if !effort.trim().is_empty() && effort != "none" => {
                 let effort_label = super::helpers::effort_display_label(&effort);
