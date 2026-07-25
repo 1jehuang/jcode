@@ -30,6 +30,9 @@ use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--script") {
+        return run_script(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("--keys") {
         print_keys();
         return Ok(());
@@ -48,6 +51,40 @@ fn main() -> Result<()> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
     event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+/// `--script <chord|text> ...`: drive the app with a keystroke script and
+/// print the resulting composer state. Verifies real chord sequences end to
+/// end without a compositor, which synthetic-input tools make unreliable.
+///
+///   jcode-desktop2 --script 'type:alpha beta' ctrl+a shift+right shift+right
+fn run_script(steps: &[String]) -> Result<()> {
+    let mut app = App::default();
+    app.model.session_id = Some("session_script".into());
+    for step in steps {
+        if let Some(text) = step.strip_prefix("type:") {
+            app.apply(keymap::Action::Insert, Some(text));
+            continue;
+        }
+        let (key, mods) =
+            keymap::parse_chord(step).ok_or_else(|| anyhow::anyhow!("unknown chord '{step}'"))?;
+        let action = keymap::resolve(&key, mods).unwrap_or(keymap::Action::Insert);
+        if !app.apply(action, None) {
+            println!("quit");
+            return Ok(());
+        }
+    }
+    let editor = &app.model.editor;
+    println!("text: {:?}", editor.text());
+    println!("cursor: {}", editor.cursor());
+    match editor.selected_text() {
+        Some(selected) => println!("selected: {selected:?}"),
+        None => println!("selected: none"),
+    }
+    if let Some(notice) = &app.model.notice {
+        println!("notice: {notice}");
+    }
     Ok(())
 }
 
@@ -166,7 +203,6 @@ fn run_capture(args: &[String]) -> Result<()> {
     render_node(node, &model, &out)
 }
 
-#[derive(Default)]
 struct App {
     state: Option<render::RenderState>,
     text: text::TextSystem,
@@ -175,7 +211,39 @@ struct App {
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
     clipboard: clipboard::Clipboard,
+    /// Pointer position in logical units, tracked for click and drag.
+    pointer: (f64, f64),
+    /// True while the primary button is held inside the composer.
+    dragging: bool,
+    /// Last click time and offset, for double-click word selection.
+    last_click: Option<(std::time::Instant, usize)>,
+    /// Geometry of the most recently built frame. Pointer hit-testing reads
+    /// this instead of the GPU state, so input handling is testable without a
+    /// window and can never disagree with what was actually drawn.
+    frame: layout::Frame,
 }
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            state: None,
+            text: text::TextSystem::default(),
+            model: Model::default(),
+            harness: None,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            clipboard: clipboard::Clipboard::default(),
+            pointer: (0.0, 0.0),
+            dragging: false,
+            last_click: None,
+            // A sensible frame until the first real one is built, so input
+            // before the first paint is still handled sanely.
+            frame: layout::Frame::new((1100, 720), 1.0),
+        }
+    }
+}
+
+/// Maximum gap between two clicks that still counts as a double click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// UI model: what the frame is built from.
 pub struct Model {
@@ -274,6 +342,95 @@ impl App {
         }
     }
 
+    /// Geometry for a surface. The single source of truth shared by the
+    /// renderer and pointer hit-testing: if these ever diverge, clicks land in
+    /// the wrong place after a resize.
+    fn frame_for(size: (u32, u32), scale: f64) -> layout::Frame {
+        layout::Frame::new(size, scale)
+    }
+
+    /// Byte offset in the composer text under a logical x position, or `None`
+    /// when the pointer is outside the composer well.
+    fn composer_offset_at(&mut self, x: f64, y: f64) -> Option<usize> {
+        let frame = self.frame;
+        // Generous vertical hit area: the whole well, so clicking anywhere in
+        // the box focuses the text like a normal input.
+        if y < frame.composer_top || y > frame.composer_bottom {
+            return None;
+        }
+        if x < frame.left || x > frame.right {
+            return None;
+        }
+        let scale = frame.scale;
+        let text_x = (x - (frame.left + layout::COMPOSER_PAD_X)).max(0.0);
+        let style = text::ParagraphStyle {
+            font_size: layout::BODY_SIZE,
+            ..Default::default()
+        };
+        let editor_text = self.model.editor.text().to_string();
+        Some(self.text.offset_at_x(&editor_text, text_x, style, scale))
+    }
+
+    fn on_pointer_pressed(&mut self) {
+        let (x, y) = self.pointer;
+        let hit = self.composer_offset_at(x, y);
+        if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
+            eprintln!(
+                "[input] press at ({x:.1}, {y:.1}) logical; composer y {:.1}..{:.1}; hit {hit:?}",
+                self.frame.composer_top, self.frame.composer_bottom
+            );
+        }
+        let Some(offset) = hit else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|(at, last)| now.duration_since(at) < DOUBLE_CLICK && last == offset);
+        if double {
+            // Double click selects the word under the pointer.
+            let (start, end) = self.model.editor.word_range_at(offset);
+            self.model.editor.place_cursor(start);
+            self.model.editor.extend_to(end);
+            self.last_click = None;
+        } else {
+            // Shift+click extends from the existing cursor, like normal fields.
+            if self.modifiers.shift_key() {
+                self.model.editor.extend_to(offset);
+            } else {
+                self.model.editor.place_cursor(offset);
+            }
+            self.dragging = true;
+            self.last_click = Some((now, offset));
+        }
+        self.model.caret.touch();
+        self.request_redraw();
+    }
+
+    fn on_pointer_moved(&mut self) {
+        if !self.dragging {
+            return;
+        }
+        let (x, y) = self.pointer;
+        // Clamp to the well vertically so dragging out of the box keeps
+        // extending rather than dropping the selection.
+        let y = y.clamp(
+            self.frame.composer_top + 1.0,
+            self.frame.composer_bottom - 1.0,
+        );
+        if let Some(offset) = self.composer_offset_at(x, y) {
+            self.model.editor.extend_to(offset);
+            self.model.caret.touch();
+            self.request_redraw();
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(state) = self.state.as_ref() {
+            state.request_redraw();
+        }
+    }
+
     /// Lines of transcript currently visible, needed to clamp scrolling.
     fn visible_lines(&self) -> usize {
         self.state
@@ -306,6 +463,14 @@ impl App {
             Action::MoveHome => self.model.editor.move_home(),
             Action::MoveEnd => self.model.editor.move_end(),
 
+            Action::ExtendLeft => self.model.editor.extend_left(),
+            Action::ExtendRight => self.model.editor.extend_right(),
+            Action::ExtendWordLeft => self.model.editor.extend_word_left(),
+            Action::ExtendWordRight => self.model.editor.extend_word_right(),
+            Action::ExtendHome => self.model.editor.extend_home(),
+            Action::ExtendEnd => self.model.editor.extend_end(),
+            Action::SelectAll => self.model.editor.select_all(),
+
             Action::DeleteBack => self.model.editor.delete_back(),
             Action::DeleteForward => self.model.editor.delete_forward(),
             Action::DeleteWordBack => self.model.editor.delete_word_back(),
@@ -319,7 +484,11 @@ impl App {
                 self.clipboard.set(&killed);
             }
             Action::CutLine => {
-                let cut = self.model.editor.cut_line();
+                // Cut the selection when there is one, matching normal fields.
+                let cut = match self.model.editor.delete_selection() {
+                    Some(selected) => selected,
+                    None => self.model.editor.cut_line(),
+                };
                 self.clipboard.set(&cut);
             }
 
@@ -328,7 +497,16 @@ impl App {
                     self.model.set_notice("nothing to undo");
                 }
             }
-            Action::Copy => self.clipboard.set(self.model.editor.text()),
+            Action::Copy => {
+                // Copy the selection when there is one, else the whole line.
+                let text = self
+                    .model
+                    .editor
+                    .selected_text()
+                    .unwrap_or_else(|| self.model.editor.text())
+                    .to_string();
+                self.clipboard.set(&text);
+            }
             Action::Paste => match self.clipboard.get() {
                 Some(text) => self.model.editor.insert_str(&text),
                 None => self.model.set_notice("clipboard is empty"),
@@ -419,6 +597,45 @@ impl ApplicationHandler for App {
                     state.resize(size.width, size.height);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self
+                    .state
+                    .as_ref()
+                    .map(|state| state.scale_factor())
+                    .unwrap_or(1.0);
+                self.pointer = (position.x / scale, position.y / scale);
+                if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
+                    eprintln!(
+                        "[input] move to ({:.1}, {:.1}) logical",
+                        self.pointer.0, self.pointer.1
+                    );
+                }
+                self.on_pointer_moved();
+            }
+            WindowEvent::MouseInput {
+                state: element_state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => match element_state {
+                ElementState::Pressed => self.on_pointer_pressed(),
+                ElementState::Released => self.dragging = false,
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Scrolling the transcript with the wheel, in line units.
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        pos.y / (layout::BODY_SIZE as f64 * layout::BODY_LEADING)
+                    }
+                };
+                let steps = lines.abs().round().max(1.0) as usize;
+                if lines > 0.0 {
+                    self.model.scroll_up(steps, self.visible_lines());
+                } else if lines < 0.0 {
+                    self.model.scroll_down(steps);
+                }
+                self.request_redraw();
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
@@ -448,7 +665,11 @@ impl ApplicationHandler for App {
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();
-                    build_scene(&mut scene, &mut self.text, &self.model, state.size(), scale);
+                    let size = state.size();
+                    // Record the geometry the frame was built with, so pointer
+                    // hit-testing uses exactly what the user sees.
+                    self.frame = Self::frame_for(size, scale);
+                    build_scene(&mut scene, &mut self.text, &self.model, size, scale);
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");
                     }
@@ -644,6 +865,24 @@ fn build_scene(
             scale,
         );
     } else {
+        // Selection band, drawn under the text so glyphs stay legible.
+        if let Some((start, end)) = model.editor.selection() {
+            let x0 =
+                prompt_x + text.measure_width(&model.editor.text()[..start], prompt_style, scale);
+            let x1 =
+                prompt_x + text.measure_width(&model.editor.text()[..end], prompt_style, scale);
+            let top = prompt_y - 1.0;
+            fill(
+                scene,
+                theme.selection,
+                &Rect::new(
+                    x0.min(frame.right),
+                    top,
+                    x1.min(frame.right - layout::COMPOSER_PAD_X * 0.5),
+                    top + layout::CARET_HEIGHT,
+                ),
+            );
+        }
         if model.editor.is_empty() {
             text.draw_paragraph_scaled(
                 scene,
@@ -751,7 +990,7 @@ mod tests {
 #[cfg(test)]
 mod action_tests {
     use super::keymap::Action;
-    use super::{App, keymap};
+    use super::{App, DOUBLE_CLICK, keymap};
     use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 
     fn app_with(text: &str) -> App {
@@ -977,6 +1216,370 @@ mod action_tests {
         assert!(app.model.notice.is_none(), "stale notice persisted");
     }
 
+    // --- mouse ---
+
+    /// A composer-relative x for the given byte offset, so mouse tests do not
+    /// hardcode font metrics.
+    fn x_for_offset(app: &mut App, offset: usize) -> f64 {
+        let frame = app.frame;
+        x_for_offset_in(app, offset, frame)
+    }
+
+    fn x_for_offset_in(app: &mut App, offset: usize, frame: super::layout::Frame) -> f64 {
+        let style = super::text::ParagraphStyle {
+            font_size: super::layout::BODY_SIZE,
+            ..Default::default()
+        };
+        let text = app.model.editor.text()[..offset].to_string();
+        frame.left
+            + super::layout::COMPOSER_PAD_X
+            + app.text.measure_width(&text, style, frame.scale)
+    }
+
+    /// Mouse tests need a laid-out window, which needs a GPU surface. Instead
+    /// of a real window, exercise the offset math and editor transitions
+    /// directly through the same helpers the events call.
+    #[test]
+    fn hit_testing_maps_x_to_the_nearest_character_gap() {
+        let mut app = app_with("alpha beta");
+        let style = super::text::ParagraphStyle {
+            font_size: super::layout::BODY_SIZE,
+            ..Default::default()
+        };
+        let text = app.model.editor.text().to_string();
+        // Clicking left of the text lands at 0; far right lands at the end.
+        assert_eq!(app.text.offset_at_x(&text, -50.0, style, 1.0), 0);
+        assert_eq!(
+            app.text.offset_at_x(&text, 10_000.0, style, 1.0),
+            text.len()
+        );
+        // Clicking at the measured width of a prefix lands on that boundary.
+        for offset in [0, 1, 5, 6, text.len()] {
+            let width = app.text.measure_width(&text[..offset], style, 1.0);
+            assert_eq!(
+                app.text.offset_at_x(&text, width, style, 1.0),
+                offset,
+                "click at the boundary of offset {offset} missed"
+            );
+        }
+    }
+
+    #[test]
+    fn hit_testing_never_splits_a_character() {
+        let mut app = app_with("héllo wörld 🌼");
+        let style = super::text::ParagraphStyle {
+            font_size: super::layout::BODY_SIZE,
+            ..Default::default()
+        };
+        let text = app.model.editor.text().to_string();
+        for step in 0..200 {
+            let offset = app.text.offset_at_x(&text, step as f64 * 3.0, style, 1.0);
+            assert!(
+                text.is_char_boundary(offset),
+                "hit test returned a mid-character offset"
+            );
+        }
+    }
+
+    /// Logical y in the middle of the composer well.
+    fn composer_y(app: &App) -> f64 {
+        (app.frame.composer_top + app.frame.composer_bottom) / 2.0
+    }
+
+    /// A full press/release at a logical x, through the real handlers.
+    fn click(app: &mut App, x: f64) {
+        let y = composer_y(app);
+        app.pointer = (x, y);
+        app.on_pointer_pressed();
+        app.dragging = false;
+    }
+
+    /// Press at `from`, drag to `to`, release: the real selection gesture.
+    fn drag(app: &mut App, from: f64, to: f64) {
+        let y = composer_y(app);
+        app.pointer = (from, y);
+        app.on_pointer_pressed();
+        app.pointer = (to, y);
+        app.on_pointer_moved();
+        app.dragging = false;
+    }
+
+    /// Clicking at a character's x must put the caret there, going through the
+    /// same measurement the renderer uses.
+    #[test]
+    fn clicking_places_the_caret_at_the_clicked_character() {
+        let mut app = app_with("alpha beta");
+        app.model.editor.select_all();
+        for offset in [0usize, 3, 6, 10] {
+            let x = x_for_offset(&mut app, offset);
+            click(&mut app, x);
+            assert_eq!(
+                app.model.editor.cursor(),
+                offset,
+                "clicking at offset {offset} placed the caret at {}",
+                app.model.editor.cursor()
+            );
+            assert_eq!(
+                app.model.editor.selection(),
+                None,
+                "a plain click left a selection behind"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_outside_the_composer_is_ignored() {
+        let mut app = app_with("alpha beta");
+        app.model.editor.place_cursor(2);
+        let x = x_for_offset(&mut app, 8);
+        // Well above the composer: in the transcript area.
+        app.pointer = (x, app.frame.body_top + 4.0);
+        app.on_pointer_pressed();
+        assert_eq!(
+            app.model.editor.cursor(),
+            2,
+            "a click in the transcript moved the composer caret"
+        );
+        assert!(!app.dragging, "a click outside the well started a drag");
+    }
+
+    #[test]
+    fn dragging_selects_the_text_between_press_and_release() {
+        let mut app = app_with("alpha beta");
+        let from = x_for_offset(&mut app, 0);
+        let to = x_for_offset(&mut app, 5);
+        drag(&mut app, from, to);
+        assert_eq!(app.model.editor.selected_text(), Some("alpha"));
+    }
+
+    #[test]
+    fn dragging_right_to_left_selects_the_same_range() {
+        let mut app = app_with("alpha beta");
+        let a = x_for_offset(&mut app, 6);
+        let b = x_for_offset(&mut app, 10);
+        drag(&mut app, b, a);
+        assert_eq!(app.model.editor.selected_text(), Some("beta"));
+    }
+
+    #[test]
+    fn dragging_above_or_below_the_well_keeps_extending() {
+        // Dragging out of the box must not drop the selection.
+        let mut app = app_with("alpha beta");
+        let from = x_for_offset(&mut app, 0);
+        let to = x_for_offset(&mut app, 5);
+        app.pointer = (from, composer_y(&app));
+        app.on_pointer_pressed();
+        let below = app.frame.composer_bottom + 200.0;
+        app.pointer = (to, below);
+        app.on_pointer_moved();
+        assert_eq!(app.model.editor.selected_text(), Some("alpha"));
+    }
+
+    #[test]
+    fn double_clicking_selects_the_word_under_the_pointer() {
+        let mut app = app_with("alpha beta gamma");
+        let x = x_for_offset(&mut app, 8);
+        click(&mut app, x);
+        // Second click at the same spot, within the double-click window.
+        app.pointer = (x, composer_y(&app));
+        app.on_pointer_pressed();
+        app.dragging = false;
+        assert_eq!(app.model.editor.selected_text(), Some("beta"));
+    }
+
+    #[test]
+    fn two_slow_clicks_are_not_a_double_click() {
+        let mut app = app_with("alpha beta gamma");
+        let x = x_for_offset(&mut app, 8);
+        click(&mut app, x);
+        // Simulate the gap expiring.
+        app.last_click = Some((std::time::Instant::now() - DOUBLE_CLICK * 2, 8));
+        app.pointer = (x, composer_y(&app));
+        app.on_pointer_pressed();
+        assert_eq!(
+            app.model.editor.selection(),
+            None,
+            "two slow clicks selected a word"
+        );
+    }
+
+    #[test]
+    fn shift_clicking_extends_from_the_existing_caret() {
+        let mut app = app_with("alpha beta");
+        let home = x_for_offset(&mut app, 0);
+        click(&mut app, home);
+        app.modifiers = ModifiersState::SHIFT;
+        let to = x_for_offset(&mut app, 5);
+        app.pointer = (to, composer_y(&app));
+        app.on_pointer_pressed();
+        assert_eq!(app.model.editor.selected_text(), Some("alpha"));
+    }
+
+    #[test]
+    fn a_pointer_move_without_a_press_changes_nothing() {
+        let mut app = app_with("alpha beta");
+        app.model.editor.place_cursor(3);
+        app.pointer = (x_for_offset(&mut app, 9), composer_y(&app));
+        app.on_pointer_moved();
+        assert_eq!(app.model.editor.cursor(), 3);
+        assert_eq!(app.model.editor.selection(), None);
+    }
+
+    #[test]
+    fn releasing_ends_the_drag_so_later_moves_do_not_select() {
+        let mut app = app_with("alpha beta");
+        let from = x_for_offset(&mut app, 0);
+        let to = x_for_offset(&mut app, 5);
+        drag(&mut app, from, to);
+        let selected = app.model.editor.selection();
+        app.pointer = (x_for_offset(&mut app, 10), composer_y(&app));
+        app.on_pointer_moved();
+        assert_eq!(
+            app.model.editor.selection(),
+            selected,
+            "selection changed after the button was released"
+        );
+    }
+
+    #[test]
+    fn clicking_keeps_the_caret_solid() {
+        let mut app = app_with("alpha");
+        let x = x_for_offset(&mut app, 2);
+        click(&mut app, x);
+        assert!(app.model.caret.visible(), "caret blinked out on click");
+    }
+
+    /// The frame used for input must be the frame the scene was built with.
+    /// Rendering records it; this asserts the recorded value matches what
+    /// `build_scene` would use for the same surface.
+    #[test]
+    fn the_recorded_frame_matches_the_rendered_geometry() {
+        for (size, scale) in [
+            ((1100u32, 720u32), 1.0f64),
+            ((2400, 1400), 1.75),
+            ((800, 600), 2.0),
+        ] {
+            let recorded = App::frame_for(size, scale);
+            let rendered = super::layout::Frame::new(size, scale);
+            assert_eq!(
+                recorded, rendered,
+                "input geometry diverged from the rendered frame at {size:?} @ {scale}"
+            );
+        }
+    }
+
+    /// A resize must be reflected in hit-testing, not just in drawing.
+    #[test]
+    fn resizing_moves_the_hit_test_with_the_layout() {
+        let mut app = app_with("alpha beta");
+        let narrow = App::frame_for((700, 600), 1.0);
+        let wide = App::frame_for((2000, 1200), 1.0);
+        assert_ne!(
+            narrow.left, wide.left,
+            "test needs two frames with different columns"
+        );
+        // The same logical x means different offsets in different layouts, so
+        // clicking the same character requires the current frame.
+        app.frame = wide;
+        let x = x_for_offset_in(&mut app, 5, wide);
+        click(&mut app, x);
+        assert_eq!(app.model.editor.cursor(), 5);
+
+        app.frame = narrow;
+        // Clear the click history: clicking the same offset twice in quick
+        // succession is legitimately a double click.
+        app.last_click = None;
+        let x = x_for_offset_in(&mut app, 5, narrow);
+        click(&mut app, x);
+        assert_eq!(
+            app.model.editor.cursor(),
+            5,
+            "hit-testing did not follow the resized layout"
+        );
+    }
+
+    #[test]
+    fn hit_testing_uses_the_frame_that_was_actually_drawn() {
+        // If input used a different frame than the renderer, clicks would land
+        // in the wrong place after a resize.
+        let mut app = app_with("alpha beta");
+        app.frame = super::layout::Frame::new((2400, 1400), 2.0);
+        let frame = app.frame;
+        let x = x_for_offset_in(&mut app, 5, frame);
+        click(&mut app, x);
+        assert_eq!(app.model.editor.cursor(), 5);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_clamps_like_the_keyboard() {
+        let mut app = App::default();
+        app.model.transcript = (1..=100)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let visible = app.visible_lines();
+        app.model.scroll_up(3, visible);
+        assert_eq!(app.model.scroll, 3);
+        app.model.scroll_down(99);
+        assert_eq!(app.model.scroll, 0, "wheel scrolled past the tail");
+    }
+
+    #[test]
+    fn copy_prefers_the_selection_over_the_whole_line() {
+        let mut app = app_with("alpha beta");
+        app.model.editor.place_cursor(0);
+        app.model.editor.extend_to(5);
+        app.apply(Action::Copy, None);
+        assert_eq!(app.clipboard.get().as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn cut_removes_only_the_selection_when_there_is_one() {
+        let mut app = app_with("alpha beta");
+        app.model.editor.place_cursor(0);
+        app.model.editor.extend_to(6);
+        app.apply(Action::CutLine, None);
+        assert_eq!(app.model.editor.text(), "beta");
+        assert_eq!(app.clipboard.get().as_deref(), Some("alpha "));
+    }
+
+    #[test]
+    fn shift_arrow_selection_then_typing_replaces_it() {
+        let mut app = app_with("alpha beta");
+        app.apply(Action::MoveHome, None);
+        for _ in 0..5 {
+            app.apply(Action::ExtendRight, None);
+        }
+        app.apply(Action::Insert, Some("omega"));
+        assert_eq!(app.model.editor.text(), "omega beta");
+    }
+
+    #[test]
+    fn select_all_then_delete_empties_the_composer() {
+        let mut app = app_with("throw this away");
+        app.apply(Action::SelectAll, None);
+        app.apply(Action::DeleteBack, None);
+        assert!(app.model.editor.is_empty());
+        app.apply(Action::Undo, None);
+        assert_eq!(app.model.editor.text(), "throw this away");
+    }
+
+    /// `--script` is the manual verification path; if the chord spellings it
+    /// accepts drift from the parity table, scripted checks silently stop
+    /// testing what they claim to.
+    #[test]
+    fn every_ported_chord_is_scriptable() {
+        for row in keymap::PORTED {
+            // The table documents some rows as alternatives (e.g. "ctrl+j / ...")
+            // only in NOT_PORTED; ported rows must all parse.
+            assert!(
+                keymap::parse_chord(row.chord).is_some(),
+                "ported chord '{}' cannot be scripted",
+                row.chord
+            );
+        }
+    }
+
     /// Every action must be dispatchable without panicking, including on an
     /// empty model: a crash on an edge key is worse than a no-op.
     #[test]
@@ -1193,6 +1796,64 @@ mod visual_tests {
         assert!(
             (1.7..=2.3).contains(&ratio),
             "text did not scale with DPI: {base} rows at 1x vs {scaled} at 2x (ratio {ratio:.2})"
+        );
+    }
+
+    /// A selection must be visible as a band, and the selected glyphs must
+    /// still be readable on top of it.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn a_selection_is_visible_and_text_on_it_stays_readable() {
+        let model = states::by_name("selection").expect("node");
+        let (start, end) = model.editor.selection().expect("node has a selection");
+        assert!(start < end);
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let band_y = f.composer_top + super::layout::COMPOSER_TEXT_OFFSET + 6.0;
+        // Somewhere in the selection there must be a mid-tone band pixel that
+        // is neither paper nor ink.
+        let s = f.scale;
+        let y = (band_y * s) as u32;
+        let mut band_pixels = 0;
+        let mut ink_pixels = 0;
+        for x in ((f.left * s) as u32)..((f.right * s) as u32) {
+            let luma = r.luma(x, y);
+            if (0.55..0.95).contains(&luma) {
+                band_pixels += 1;
+            }
+            if luma < 0.4 {
+                ink_pixels += 1;
+            }
+        }
+        assert!(band_pixels > 4, "no selection band was drawn");
+        assert!(
+            ink_pixels > 0,
+            "selected text was hidden by the band instead of drawn on top"
+        );
+    }
+
+    /// No selection means no band: otherwise the composer would always look
+    /// highlighted.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn no_band_is_drawn_without_a_selection() {
+        let model = states::by_name("mid_input").expect("node");
+        assert!(model.editor.selection().is_none());
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let s = f.scale;
+        // Sample a row above the glyph bodies where a band would still paint.
+        let y = ((f.composer_top + super::layout::COMPOSER_TEXT_OFFSET + 1.0) * s) as u32;
+        let band_pixels = (((f.left + 2.0) * s) as u32..((f.right - 2.0) * s) as u32)
+            .filter(|&x| (0.55..0.95).contains(&r.luma(x, y)))
+            .count();
+        assert!(
+            band_pixels < 10,
+            "a selection band appeared without a selection ({band_pixels} px)"
         );
     }
 

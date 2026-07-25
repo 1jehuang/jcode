@@ -13,6 +13,9 @@ pub struct Editor {
     text: String,
     /// Cursor as a byte offset, always on a char boundary.
     cursor: usize,
+    /// Selection anchor. `Some` means there is a selection between the anchor
+    /// and the cursor; the cursor is the moving end.
+    anchor: Option<usize>,
     /// Undo stack of (text, cursor) snapshots.
     undo: Vec<(String, usize)>,
     /// Submitted history, oldest first.
@@ -34,6 +37,67 @@ impl Editor {
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Selected byte range, normalized to (start, end). `None` when there is
+    /// no selection or it is empty.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        let (start, end) = if anchor <= self.cursor {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        };
+        (start != end).then_some((start, end))
+    }
+
+    /// The selected text, if any.
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection().map(|(start, end)| &self.text[start..end])
+    }
+
+    /// Begin or extend a selection anchored at the current cursor. Called
+    /// before a motion when Shift is held, or on mouse-down.
+    pub fn anchor_selection(&mut self) {
+        if self.anchor.is_none() {
+            self.anchor = Some(self.cursor);
+        }
+    }
+
+    /// Drop any selection, keeping the cursor where it is.
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Select everything (Ctrl+A style select-all is not bound, but mouse
+    /// double/triple click and callers may want it).
+    pub fn select_all(&mut self) {
+        self.anchor = Some(0);
+        self.cursor = self.text.len();
+    }
+
+    /// Place the cursor at a byte offset, collapsing any selection.
+    pub fn place_cursor(&mut self, offset: usize) {
+        self.set_cursor(offset);
+        self.anchor = None;
+    }
+
+    /// Extend the selection to a byte offset, anchoring first if needed.
+    pub fn extend_to(&mut self, offset: usize) {
+        self.anchor_selection();
+        self.set_cursor(offset);
+    }
+
+    /// Delete the selection if there is one. Returns the removed text so it
+    /// can feed the clipboard, and `None` when nothing was selected.
+    pub fn delete_selection(&mut self) -> Option<String> {
+        let (start, end) = self.selection()?;
+        self.snapshot();
+        let removed: String = self.text[start..end].to_string();
+        self.text.drain(start..end);
+        self.cursor = start;
+        self.anchor = None;
+        Some(removed)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -60,10 +124,17 @@ impl Editor {
     }
 
     fn set_cursor(&mut self, cursor: usize) {
-        self.cursor = cursor.min(self.text.len());
-        while !self.text.is_char_boundary(self.cursor) {
-            self.cursor -= 1;
+        self.cursor = self.snap(cursor);
+    }
+
+    /// Clamp a byte offset into the buffer and snap it to a char boundary, so
+    /// offsets from mouse hit-testing can never split a character.
+    fn snap(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.text.len());
+        while offset > 0 && !self.text.is_char_boundary(offset) {
+            offset -= 1;
         }
+        offset
     }
 
     fn snapshot(&mut self) {
@@ -93,6 +164,8 @@ impl Editor {
         if s.is_empty() {
             return;
         }
+        // Typing over a selection replaces it, like any normal input box.
+        self.delete_selection();
         self.snapshot();
         self.text.insert_str(self.cursor, &s);
         self.cursor += s.len();
@@ -102,6 +175,7 @@ impl Editor {
         if c.is_control() {
             return;
         }
+        self.delete_selection();
         self.snapshot();
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -109,6 +183,9 @@ impl Editor {
 
     /// Backspace: delete the char before the cursor.
     pub fn delete_back(&mut self) {
+        if self.delete_selection().is_some() {
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
@@ -120,6 +197,9 @@ impl Editor {
 
     /// Delete: remove the char after the cursor.
     pub fn delete_forward(&mut self) {
+        if self.delete_selection().is_some() {
+            return;
+        }
         if self.cursor >= self.text.len() {
             return;
         }
@@ -158,6 +238,7 @@ impl Editor {
         self.snapshot();
         let killed: String = self.text.drain(..self.cursor).collect();
         self.cursor = 0;
+        self.anchor = None;
         killed
     }
 
@@ -167,6 +248,7 @@ impl Editor {
             return String::new();
         }
         self.snapshot();
+        self.anchor = None;
         self.text.split_off(self.cursor)
     }
 
@@ -177,6 +259,7 @@ impl Editor {
         }
         self.snapshot();
         self.cursor = 0;
+        self.anchor = None;
         std::mem::take(&mut self.text)
     }
 
@@ -188,12 +271,14 @@ impl Editor {
         self.snapshot();
         self.text.clear();
         self.cursor = 0;
+        self.anchor = None;
     }
 
     /// Take the buffer for submission, recording it in history.
     pub fn take_for_submit(&mut self) -> String {
         let content = std::mem::take(&mut self.text);
         self.cursor = 0;
+        self.anchor = None;
         self.undo.clear();
         self.history_index = None;
         self.stashed = None;
@@ -207,26 +292,102 @@ impl Editor {
 
     pub fn move_left(&mut self) {
         self.cursor = self.prev_boundary(self.cursor);
+        self.anchor = None;
+    }
+
+    /// Motion while extending a selection: anchors first, then moves.
+    pub fn extend_left(&mut self) {
+        self.anchor_selection();
+        self.cursor = self.prev_boundary(self.cursor);
+    }
+
+    pub fn extend_right(&mut self) {
+        self.anchor_selection();
+        self.cursor = self.next_boundary(self.cursor);
+    }
+
+    pub fn extend_word_left(&mut self) {
+        self.anchor_selection();
+        self.cursor = self.word_back();
+    }
+
+    pub fn extend_word_right(&mut self) {
+        self.anchor_selection();
+        self.cursor = self.word_forward();
+    }
+
+    pub fn extend_home(&mut self) {
+        self.anchor_selection();
+        self.cursor = 0;
+    }
+
+    pub fn extend_end(&mut self) {
+        self.anchor_selection();
+        self.cursor = self.text.len();
+    }
+
+    /// Word range containing `offset`, for double-click selection.
+    pub fn word_range_at(&self, offset: usize) -> (usize, usize) {
+        let len = self.text.len();
+        if len == 0 {
+            return (0, 0);
+        }
+        // Snap into the buffer on a char boundary: a click can land anywhere,
+        // and slicing mid-char would panic.
+        let offset = self.snap(offset);
+        let is_word = |at: usize| {
+            self.text[at..]
+                .chars()
+                .next()
+                .map(|c| !c.is_whitespace())
+                .unwrap_or(false)
+        };
+        // Clicking in whitespace selects the whitespace run. At the very end
+        // of the buffer, classify by the character before it.
+        let probe = if offset < len {
+            offset
+        } else {
+            self.prev_boundary(len)
+        };
+        let target_is_word = is_word(probe);
+        let mut start = offset;
+        while start > 0 {
+            let prev = self.prev_boundary(start);
+            if is_word(prev) != target_is_word {
+                break;
+            }
+            start = prev;
+        }
+        let mut end = offset;
+        while end < len && is_word(end) == target_is_word {
+            end = self.next_boundary(end);
+        }
+        (start, end)
     }
 
     pub fn move_right(&mut self) {
         self.cursor = self.next_boundary(self.cursor);
+        self.anchor = None;
     }
 
     pub fn move_home(&mut self) {
         self.cursor = 0;
+        self.anchor = None;
     }
 
     pub fn move_end(&mut self) {
         self.cursor = self.text.len();
+        self.anchor = None;
     }
 
     pub fn move_word_left(&mut self) {
         self.cursor = self.word_back();
+        self.anchor = None;
     }
 
     pub fn move_word_right(&mut self) {
         self.cursor = self.word_forward();
+        self.anchor = None;
     }
 
     fn prev_boundary(&self, from: usize) -> usize {
@@ -314,6 +475,7 @@ impl Editor {
         self.history_index = Some(next);
         self.text = self.history[next].clone();
         self.cursor = self.text.len();
+        self.anchor = None;
         true
     }
 
@@ -330,6 +492,7 @@ impl Editor {
             self.text = self.stashed.take().unwrap_or_default();
         }
         self.cursor = self.text.len();
+        self.anchor = None;
         true
     }
 
@@ -594,5 +757,196 @@ mod tests {
         editor.take_for_submit();
         editor.history_prev();
         assert_eq!(editor.cursor(), editor.text().len());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn there_is_no_selection_by_default() {
+        let editor = Editor::with_text("hello");
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.selected_text(), None);
+    }
+
+    #[test]
+    fn shift_motion_extends_a_selection_from_the_cursor() {
+        let mut editor = Editor::with_text("hello");
+        editor.set_cursor(0);
+        editor.extend_right();
+        editor.extend_right();
+        assert_eq!(editor.selected_text(), Some("he"));
+    }
+
+    #[test]
+    fn a_selection_normalizes_regardless_of_drag_direction() {
+        // Selecting right-to-left must produce the same range as left-to-right.
+        let mut forward = Editor::with_text("hello");
+        forward.set_cursor(1);
+        forward.extend_to(4);
+        let mut backward = Editor::with_text("hello");
+        backward.set_cursor(4);
+        backward.extend_to(1);
+        assert_eq!(forward.selection(), backward.selection());
+        assert_eq!(backward.selected_text(), Some("ell"));
+    }
+
+    #[test]
+    fn plain_motion_collapses_the_selection() {
+        // Otherwise the highlight would linger after an arrow key.
+        let mut editor = Editor::with_text("hello");
+        editor.set_cursor(0);
+        editor.extend_right();
+        assert!(editor.selection().is_some());
+        editor.move_right();
+        assert_eq!(
+            editor.selection(),
+            None,
+            "selection survived a plain motion"
+        );
+    }
+
+    #[test]
+    fn typing_replaces_the_selection() {
+        let mut editor = Editor::with_text("hello world");
+        editor.set_cursor(0);
+        for _ in 0..5 {
+            editor.extend_right();
+        }
+        editor.insert_str("goodbye");
+        assert_eq!(editor.text(), "goodbye world");
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_the_selection_only() {
+        for delete_forward in [false, true] {
+            let mut editor = Editor::with_text("hello world");
+            editor.set_cursor(5);
+            editor.extend_to(0);
+            if delete_forward {
+                editor.delete_forward();
+            } else {
+                editor.delete_back();
+            }
+            assert_eq!(
+                editor.text(),
+                " world",
+                "selection delete removed the wrong range"
+            );
+            assert_eq!(editor.cursor(), 0);
+        }
+    }
+
+    #[test]
+    fn deleting_a_selection_is_undoable() {
+        let mut editor = Editor::with_text("hello world");
+        editor.select_all();
+        editor.delete_back();
+        assert!(editor.is_empty());
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "hello world");
+    }
+
+    #[test]
+    fn delete_selection_returns_the_removed_text_for_the_clipboard() {
+        let mut editor = Editor::with_text("cut this out");
+        editor.set_cursor(4);
+        editor.extend_to(8);
+        assert_eq!(editor.delete_selection().as_deref(), Some("this"));
+        assert_eq!(editor.text(), "cut  out");
+    }
+
+    #[test]
+    fn delete_selection_is_a_no_op_without_a_selection() {
+        let mut editor = Editor::with_text("keep");
+        assert_eq!(editor.delete_selection(), None);
+        assert_eq!(editor.text(), "keep");
+        assert!(!editor.undo(), "a no-op consumed an undo state");
+    }
+
+    #[test]
+    fn select_all_covers_the_whole_buffer() {
+        let mut editor = Editor::with_text("everything");
+        editor.select_all();
+        assert_eq!(editor.selected_text(), Some("everything"));
+    }
+
+    #[test]
+    fn an_empty_selection_reads_as_no_selection() {
+        // Anchoring without moving must not render a zero-width highlight.
+        let mut editor = Editor::with_text("hello");
+        editor.anchor_selection();
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn double_click_selects_the_word_under_the_offset() {
+        let editor = Editor::with_text("alpha beta gamma");
+        let (start, end) = editor.word_range_at(7);
+        assert_eq!(&editor.text()[start..end], "beta");
+    }
+
+    #[test]
+    fn double_click_at_a_word_edge_selects_that_word() {
+        let editor = Editor::with_text("alpha beta");
+        let (start, end) = editor.word_range_at(6);
+        assert_eq!(&editor.text()[start..end], "beta");
+        let (start, end) = editor.word_range_at(0);
+        assert_eq!(&editor.text()[start..end], "alpha");
+    }
+
+    #[test]
+    fn double_click_in_whitespace_selects_the_whitespace_run() {
+        let editor = Editor::with_text("alpha   beta");
+        let (start, end) = editor.word_range_at(6);
+        assert_eq!(&editor.text()[start..end], "   ");
+    }
+
+    #[test]
+    fn word_range_is_safe_on_empty_text_and_past_the_end() {
+        let editor = Editor::default();
+        assert_eq!(editor.word_range_at(0), (0, 0));
+        let editor = Editor::with_text("hi");
+        let (start, end) = editor.word_range_at(999);
+        assert!(start <= end && end <= editor.text().len());
+    }
+
+    #[test]
+    fn selection_offsets_stay_on_char_boundaries() {
+        let mut editor = Editor::with_text("héllo wörld");
+        editor.place_cursor(0);
+        for _ in 0..20 {
+            editor.extend_right();
+            let (start, end) = editor.selection().unwrap_or((0, 0));
+            assert!(editor.text().is_char_boundary(start));
+            assert!(editor.text().is_char_boundary(end));
+        }
+        let (start, end) = editor.word_range_at(2);
+        assert!(editor.text().is_char_boundary(start));
+        assert!(editor.text().is_char_boundary(end));
+    }
+
+    #[test]
+    fn place_cursor_snaps_into_the_buffer() {
+        let mut editor = Editor::with_text("héllo");
+        editor.place_cursor(2);
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+        editor.place_cursor(9999);
+        assert_eq!(editor.cursor(), editor.text().len());
+    }
+
+    #[test]
+    fn submitting_and_history_clear_the_selection() {
+        let mut editor = Editor::with_text("first");
+        editor.select_all();
+        editor.take_for_submit();
+        assert_eq!(editor.selection(), None);
+        editor.insert_str("draft");
+        editor.select_all();
+        editor.history_prev();
+        assert_eq!(editor.selection(), None, "stale selection after recall");
     }
 }

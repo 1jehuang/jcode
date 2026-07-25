@@ -27,6 +27,12 @@ cargo test -p jcode-desktop2 -- --ignored
 # list the keybindings ported from the TUI, and what was skipped
 ./target/selfdev/jcode-desktop2 --keys
 
+# drive a chord sequence and print the resulting composer state. Use this for
+# manual verification: synthetic input tools (wtype/ydotool) drop or remap
+# modifiers and pointer coordinates on Wayland, so they are not trustworthy
+# for keybinding checks.
+./target/selfdev/jcode-desktop2 --script 'type:alpha beta' ctrl+a shift+right shift+right
+
 # render every state-space node to PNGs for eyeballing / agent review
 cargo build --profile selfdev -p jcode-desktop2 --bin jcode-desktop2
 ./target/selfdev/jcode-desktop2 --capture all /tmp/d2caps
@@ -126,15 +132,36 @@ deliberately skipped, with the reason.
 | 6.20 | A no-op action explains itself instead of failing silently. | `action_tests::submitting_without_a_session_keeps_the_text_and_says_why` |
 | 6.21 | Tests never read or clobber the developer's real clipboard. | `clipboard::tests::tests_never_touch_the_real_system_clipboard` |
 
+### Selection and pointer
+
+| # | Rule | Enforced by |
+|---|------|-------------|
+| 6.22 | Clicking places the caret at the clicked character. | `action_tests::clicking_places_the_caret_at_the_clicked_character` |
+| 6.23 | Hit-testing uses the frame that was actually drawn, so clicks stay correct after a resize. | `the_recorded_frame_matches_the_rendered_geometry`, `resizing_moves_the_hit_test_with_the_layout` |
+| 6.24 | Hit-testing never returns a mid-character offset. | `action_tests::hit_testing_never_splits_a_character` |
+| 6.25 | Clicking after a trailing space lands after it, not before. | `action_tests::hit_testing_maps_x_to_the_nearest_character_gap` |
+| 6.26 | Dragging selects text, in either direction. | `dragging_selects_the_text_between_press_and_release`, `dragging_right_to_left_selects_the_same_range` |
+| 6.27 | Dragging outside the well keeps extending instead of dropping the selection. | `action_tests::dragging_above_or_below_the_well_keeps_extending` |
+| 6.28 | Releasing ends the drag; later moves do not select. | `releasing_ends_the_drag_so_later_moves_do_not_select`, `a_pointer_move_without_a_press_changes_nothing` |
+| 6.29 | Double click selects a word; two slow clicks do not. | `double_clicking_selects_the_word_under_the_pointer`, `two_slow_clicks_are_not_a_double_click` |
+| 6.30 | Shift+click extends from the existing caret. | `action_tests::shift_clicking_extends_from_the_existing_caret` |
+| 6.31 | Clicks outside the composer are ignored. | `action_tests::clicking_outside_the_composer_is_ignored` |
+| 6.32 | Shift+motion extends a selection; unshifted motion collapses it. | `keymap::tests::shift_motion_extends_instead_of_moving`, `editor::selection_tests::plain_motion_collapses_the_selection` |
+| 6.33 | Typing or deleting replaces the selection, undoably. | `editor::selection_tests::typing_replaces_the_selection`, `deleting_a_selection_is_undoable` |
+| 6.34 | Copy and cut prefer the selection over the whole line. | `copy_prefers_the_selection_over_the_whole_line`, `cut_removes_only_the_selection_when_there_is_one` |
+| 6.35 | The selection renders as a band under the text, and only when there is a selection. | `visual_tests::a_selection_is_visible_and_text_on_it_stays_readable`, `no_band_is_drawn_without_a_selection` |
+| 4.6 | Selected text stays readable against the selection band, in both themes. | `theme::tests::selected_text_stays_readable` |
+| 5.9 | The mouse wheel scrolls the transcript and clamps. | `action_tests::the_wheel_scrolls_and_clamps_like_the_keyboard` |
+
 Remaining interaction gaps, honestly:
 
 | # | Rule | Status |
 |---|------|--------|
-| 6.22 | Mouse text selection and click-to-position-caret. | **gap** |
-| 6.23 | Shift+arrow keyboard selection. | **gap** |
-| 6.24 | Multi-line composer (Shift+Enter currently inserts a space). | **gap** |
-| 6.25 | Window remembers its size and position. | **gap** |
-| 6.26 | Slash-command autocomplete, queue mode, stash (see `NOT_PORTED`). | **gap** |
+| 6.36 | Multi-line composer (Shift+Enter currently inserts a space). | **gap** |
+| 6.37 | Window remembers its size and position. | **gap** |
+| 6.38 | Slash-command autocomplete, queue mode, stash (see `NOT_PORTED`). | **gap** |
+| 6.39 | Selecting text in the *transcript* (only the composer is selectable). | **gap** |
+| 6.40 | Text-cursor mouse pointer shape over the composer. | **gap** |
 
 ## 7. Performance and correctness
 

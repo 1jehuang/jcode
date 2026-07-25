@@ -34,6 +34,9 @@ pub struct Theme {
     /// Errors. The print theme keeps this ink-only per the style guide;
     /// other themes may use hue.
     pub error: Color,
+    /// Text selection band. Ink density, not hue, so selected text stays
+    /// readable against it.
+    pub selection: Color,
 }
 
 impl Theme {
@@ -48,6 +51,7 @@ impl Theme {
             rule: Color::from_rgb8(0xcc, 0xcc, 0xcc),
             wash: Color::from_rgb8(0xf4, 0xf4, 0xf4),
             error: Color::from_rgb8(0x11, 0x11, 0x11),
+            selection: Color::from_rgb8(0xd8, 0xd8, 0xd8),
         }
     }
 
@@ -62,6 +66,7 @@ impl Theme {
             rule: Color::from_rgb8(0x33, 0x33, 0x33),
             wash: Color::from_rgb8(0x1a, 0x1a, 0x1a),
             error: Color::from_rgb8(0xee, 0xee, 0xee),
+            selection: Color::from_rgb8(0x3a, 0x3a, 0x3a),
         }
     }
 
@@ -106,6 +111,7 @@ mod tests {
                 ("faint", theme.faint),
                 ("rule", theme.rule),
                 ("error", theme.error),
+                ("selection", theme.selection),
             ] {
                 assert_ne!(
                     role.components, theme.background.components,
@@ -141,6 +147,31 @@ mod tests {
             assert!(
                 contrast(theme.faint) > contrast(theme.rule),
                 "faint is not stronger than a hairline in {:?}",
+                theme.mode
+            );
+        }
+    }
+
+    /// Selected text must stay readable: the band has to contrast with the
+    /// text drawn on top of it, not just with the page.
+    #[test]
+    fn selected_text_stays_readable() {
+        let luma = |color: Color| {
+            let [r, g, b, _] = color.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for theme in [Theme::print_light(), Theme::print_dark()] {
+            let contrast = (luma(theme.text) - luma(theme.selection)).abs();
+            assert!(
+                contrast > 0.35,
+                "text on the selection band is unreadable in {:?} (contrast {contrast:.2})",
+                theme.mode
+            );
+            // The band must also be visible against the page.
+            let against_page = (luma(theme.selection) - luma(theme.background)).abs();
+            assert!(
+                against_page > 0.03,
+                "the selection band is invisible in {:?}",
                 theme.mode
             );
         }

@@ -87,7 +87,36 @@ impl TextSystem {
         Self::push_defaults(&mut builder, style);
         let mut layout: Layout<Brush> = builder.build(text);
         layout.break_all_lines(None);
-        f64::from(layout.width()) / scale
+        // `full_width` includes trailing whitespace; `width` trims it, which
+        // would place the caret before a trailing space instead of after it.
+        f64::from(layout.full_width()) / scale
+    }
+
+    /// Byte offset in `text` nearest to `x` logical pixels from its start.
+    /// Used to place the caret from a mouse click: picks the closest *gap*
+    /// between characters, so clicking the right half of a glyph lands after
+    /// it, like any normal text field.
+    pub fn offset_at_x(&mut self, text: &str, x: f64, style: ParagraphStyle, scale: f64) -> usize {
+        if text.is_empty() || x <= 0.0 {
+            return 0;
+        }
+        let mut best = 0usize;
+        let mut best_distance = f64::MAX;
+        // Walk the char boundaries and measure each prefix. Text in the
+        // composer is short, so this stays cheap and exactly matches the
+        // drawn glyphs (same font, size, and scale).
+        for (offset, _) in text
+            .char_indices()
+            .chain(std::iter::once((text.len(), ' ')))
+        {
+            let width = self.measure_width(&text[..offset], style, scale);
+            let distance = (width - x).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best = offset;
+            }
+        }
+        best
     }
 
     /// Measure a paragraph without drawing it. Returns the wrapped height in
