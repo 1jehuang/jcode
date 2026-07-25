@@ -51,6 +51,45 @@ impl Default for ParagraphStyle {
 }
 
 impl TextSystem {
+    /// Apply the design-language defaults for `style` to a layout builder.
+    /// Shared by drawing and measurement so a measured caret position can
+    /// never disagree with the drawn glyphs.
+    fn push_defaults(builder: &mut parley::RangedBuilder<'_, Brush>, style: ParagraphStyle) {
+        builder.push_default(StyleProperty::FontFamily(parley::FontFamily::Source(
+            std::borrow::Cow::Borrowed(FONT_STACK),
+        )));
+        builder.push_default(StyleProperty::FontSize(style.font_size));
+        if style.bold {
+            builder.push_default(StyleProperty::FontWeight(parley::FontWeight::BOLD));
+        }
+        if style.letter_spacing_em > 0.0 {
+            builder.push_default(StyleProperty::LetterSpacing(
+                style.letter_spacing_em * style.font_size,
+            ));
+        }
+        builder.push_default(StyleProperty::LineHeight(
+            parley::LineHeight::FontSizeRelative(style.line_height),
+        ));
+        builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
+    }
+
+    /// Width in logical pixels of `text` on one line, used to place the caret
+    /// at a cursor offset. Measured with the same font and size as the drawn
+    /// text so the caret lands exactly between glyphs.
+    pub fn measure_width(&mut self, text: &str, style: ParagraphStyle, scale: f64) -> f64 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let scale32 = scale as f32;
+        let mut builder = self
+            .layouts
+            .ranged_builder(&mut self.fonts, text, scale32, true);
+        Self::push_defaults(&mut builder, style);
+        let mut layout: Layout<Brush> = builder.build(text);
+        layout.break_all_lines(None);
+        f64::from(layout.width()) / scale
+    }
+
     /// Measure a paragraph without drawing it. Returns the wrapped height in
     /// logical pixels, so callers can bottom-align or paginate text.
     pub fn measure_paragraph(
@@ -82,22 +121,7 @@ impl TextSystem {
         let mut builder = self
             .layouts
             .ranged_builder(&mut self.fonts, text, scale32, true);
-        builder.push_default(StyleProperty::FontFamily(parley::FontFamily::Source(
-            std::borrow::Cow::Borrowed(FONT_STACK),
-        )));
-        builder.push_default(StyleProperty::FontSize(style.font_size));
-        if style.bold {
-            builder.push_default(StyleProperty::FontWeight(parley::FontWeight::BOLD));
-        }
-        if style.letter_spacing_em > 0.0 {
-            builder.push_default(StyleProperty::LetterSpacing(
-                style.letter_spacing_em * style.font_size,
-            ));
-        }
-        builder.push_default(StyleProperty::LineHeight(
-            parley::LineHeight::FontSizeRelative(style.line_height),
-        ));
-        builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
+        Self::push_defaults(&mut builder, style);
         let mut layout: Layout<Brush> = builder.build(text);
         layout.break_all_lines(Some(max_width * scale32));
         layout.align(Alignment::Start, parley::AlignmentOptions::default());

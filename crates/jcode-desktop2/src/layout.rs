@@ -23,6 +23,14 @@ pub const WORDMARK_ADVANCE: f64 = 72.0;
 pub const COMPOSER_HEIGHT: f64 = 44.0;
 pub const COMPOSER_PAD_X: f64 = 14.0;
 pub const COMPOSER_RADIUS: f64 = 6.0;
+/// Baseline offset of the prompt text inside the composer well.
+pub const COMPOSER_TEXT_OFFSET: f64 = 13.0;
+/// Insert caret: a thin vertical bar, like any normal text input.
+pub const CARET_WIDTH: f64 = 1.5;
+pub const CARET_HEIGHT: f64 = 18.0;
+/// Caption row under the composer for notices and the scrollback indicator.
+pub const FOOTNOTE_HEIGHT: f64 = 16.0;
+pub const FOOTNOTE_GAP: f64 = 6.0;
 /// Vertical breathing room between regions.
 pub const SPACE_AFTER_RULE: f64 = 22.0;
 pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
@@ -47,6 +55,10 @@ pub struct Frame {
     pub body_bottom: f64,
     pub composer_top: f64,
     pub composer_bottom: f64,
+    /// Caption row under the composer. Reserved even when empty, so a notice
+    /// appearing never shifts the composer or spills off-paper.
+    pub footnote_top: f64,
+    pub footnote_bottom: f64,
 }
 
 impl Frame {
@@ -69,7 +81,10 @@ impl Frame {
         let masthead_top = (height * 0.05).clamp(24.0, 44.0);
         let masthead_rule = masthead_top + 28.0;
 
-        let composer_bottom = height - (height * 0.05).clamp(20.0, 40.0);
+        let bottom_margin = (height * 0.05).clamp(20.0, 40.0);
+        let footnote_bottom = height - bottom_margin;
+        let footnote_top = footnote_bottom - FOOTNOTE_HEIGHT;
+        let composer_bottom = footnote_top - FOOTNOTE_GAP;
         let composer_top = composer_bottom - COMPOSER_HEIGHT;
 
         let body_top = masthead_rule + SPACE_AFTER_RULE;
@@ -87,6 +102,8 @@ impl Frame {
             body_bottom,
             composer_top,
             composer_bottom,
+            footnote_top,
+            footnote_bottom,
         }
     }
 
@@ -113,6 +130,13 @@ impl Frame {
     /// Body lines that fit in the transcript region.
     pub fn visible_body_lines(&self) -> usize {
         (((self.body_bottom - self.body_top) / self.body_line_height()) as usize).max(1)
+    }
+
+    /// The caret must stay inside the composer well at any size.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn caret_fits_in_composer(&self) -> bool {
+        let top = self.composer_top + COMPOSER_TEXT_OFFSET - 1.0;
+        top >= self.composer_top && top + CARET_HEIGHT <= self.composer_bottom
     }
 
     /// Thickness that renders as exactly one physical pixel.
@@ -198,8 +222,13 @@ mod tests {
             );
             assert!(frame.composer_top < frame.composer_bottom);
             assert!(
-                frame.composer_bottom <= frame.height + 0.001,
-                "composer fell off the bottom"
+                frame.composer_bottom <= frame.footnote_top,
+                "composer overlapped the footnote row"
+            );
+            assert!(frame.footnote_top < frame.footnote_bottom);
+            assert!(
+                frame.footnote_bottom <= frame.height + 0.001,
+                "footnote row fell off the bottom"
             );
         });
     }
@@ -209,6 +238,18 @@ mod tests {
         sweep(|frame| {
             assert!(frame.status_left() > frame.left);
             assert!(frame.status_width() >= 80.0);
+        });
+    }
+
+    #[test]
+    fn the_caret_always_fits_inside_the_composer() {
+        sweep(|frame| {
+            assert!(
+                frame.caret_fits_in_composer(),
+                "caret escaped the composer well at {}x{}",
+                frame.width,
+                frame.height
+            );
         });
     }
 
@@ -242,6 +283,7 @@ mod tests {
                 ("body_top", base.body_top, scaled.body_top),
                 ("body_bottom", base.body_bottom, scaled.body_bottom),
                 ("composer_top", base.composer_top, scaled.composer_top),
+                ("footnote_top", base.footnote_top, scaled.footnote_top),
             ] {
                 assert!(
                     (a - b).abs() < 1.0,
