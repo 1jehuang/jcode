@@ -101,11 +101,28 @@ pub(super) async fn create_headless_session(
             provider_key_override.as_deref(),
             route_api_method_override.as_deref(),
         );
-        if let Err(e) = new_agent.set_model(&model_request) {
+        // A worker that silently runs a model other than the requested one burns
+        // the wrong quota and produces results the caller attributes to the wrong
+        // model, with only a log line to explain it (#512, #514, #519). So check
+        // the *outcome*, not whether `set_model` returned Ok: a provider that
+        // cannot switch is fine as long as it already serves the requested model,
+        // and a switch that "succeeds" onto a different model is not.
+        let switch_error = new_agent.set_model(&model_request).err();
+        if let Some(error) = switch_error.as_ref() {
             crate::logging::warn(&format!(
-                "Failed to set headless session model override '{}' (request '{}'): {}",
-                model, model_request, e
+                "Failed to set headless session model override '{model}' (request '{model_request}'): {error}"
             ));
+        }
+        let resolved = new_agent.provider_model();
+        if !models_are_equivalent(&resolved, &model) {
+            let detail = switch_error
+                .map(|error| format!(": {error}"))
+                .unwrap_or_else(|| " (the switch reported success)".to_string());
+            anyhow::bail!(
+                "Cannot spawn session on model '{model}' (request '{model_request}'){detail}. \
+                 It would run '{resolved}' instead; refusing to silently use a different \
+                 model. Check the model id and that its provider is authenticated."
+            );
         }
     }
 
@@ -268,4 +285,73 @@ pub(super) async fn create_headless_session(
         "is_canary": selfdev_requested,
     })
     .to_string())
+}
+
+/// Whether a resolved provider model satisfies a requested model id.
+///
+/// Routes legitimately canonicalize ids (dated aliases, `[1m]`/`[web]` suffixes,
+/// and vendor prefixes like `anthropic/`), so compare on a normalized form and
+/// allow either side to be a prefix of the other. This exists only to decide
+/// whether to log a mismatch, so it errs toward staying quiet.
+fn models_are_equivalent(resolved: &str, requested: &str) -> bool {
+    fn normalize(model: &str) -> String {
+        let model = model.trim().to_ascii_lowercase();
+        let bare = model.rsplit('/').next().unwrap_or(&model);
+        let bare = bare.split(':').next_back().unwrap_or(bare);
+        bare.split('[').next().unwrap_or(bare).trim().to_string()
+    }
+    let resolved = normalize(resolved);
+    let requested = normalize(requested);
+    if resolved.is_empty() || requested.is_empty() {
+        return true;
+    }
+    resolved.starts_with(&requested) || requested.starts_with(&resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::models_are_equivalent;
+
+    #[test]
+    fn equivalent_models_tolerate_route_canonicalization() {
+        // Routes legitimately rewrite ids; these must not look like mismatches.
+        assert!(models_are_equivalent(
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6"
+        ));
+        assert!(models_are_equivalent(
+            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-5"
+        ));
+        assert!(models_are_equivalent(
+            "anthropic/claude-sonnet-4-6",
+            "claude-sonnet-4-6"
+        ));
+        assert!(models_are_equivalent(
+            "claude-opus-4-6",
+            "claude-opus-4-6[1m]"
+        ));
+        assert!(models_are_equivalent(
+            "gpt-5.6-pro",
+            "openai-api:gpt-5.6-pro"
+        ));
+        // Unknown/empty resolution should stay quiet rather than cry wolf.
+        assert!(models_are_equivalent("", "claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn different_models_are_reported_as_mismatched() {
+        // The #519 symptom: a worker asked for one model and got the
+        // coordinator's instead.
+        assert!(!models_are_equivalent(
+            "deepseek-v4-pro",
+            "deepseek-v4-flash"
+        ));
+        assert!(!models_are_equivalent("deepseek-v4-pro", "MiniMax-M3"));
+        assert!(!models_are_equivalent(
+            "claude-fable-5",
+            "deepseek-v4-flash"
+        ));
+        assert!(!models_are_equivalent("gpt-5.6-sol", "gpt-5.5"));
+    }
 }
