@@ -218,7 +218,7 @@ fn smoothness_plain_text_commit_preserves_the_live_viewport() {
     for _ in 0..3 {
         observe_smoothness_frame(&app, &mut terminal, &mut recorder);
     }
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 7 }, &mut remote);
     for _ in 0..3 {
         observe_smoothness_frame(&app, &mut terminal, &mut recorder);

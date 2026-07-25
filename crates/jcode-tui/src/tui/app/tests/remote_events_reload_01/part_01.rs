@@ -1214,7 +1214,7 @@ fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall
     app.streaming.streaming_tps_collect_output = true;
 
     let needs_redraw =
-        app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+        app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
 
     assert!(needs_redraw);
     assert!(app.stream_message_ended);
@@ -1237,7 +1237,7 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     app.apply_stream_ops(ops);
     assert!(!app.stream_buffer.is_empty());
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
     assert!(app.is_processing, "Done must not force-flush the backlog");
@@ -1367,7 +1367,7 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
     );
     app.streaming.streaming_tps_start = Some(Instant::now() - Duration::from_secs(4));
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
 
     assert!(app.streaming.streaming_tps_collect_output);
     assert!(app.streaming.streaming_tps_start.is_none());
@@ -1413,7 +1413,7 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
         },
         &mut remote,
     );
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
             input: 100,

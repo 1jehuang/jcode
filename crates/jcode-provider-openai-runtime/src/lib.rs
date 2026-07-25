@@ -1216,7 +1216,15 @@ impl OpenAIProvider {
         }
 
         if let Some(effort) = reasoning_effort {
-            request["reasoning"] = serde_json::json!({ "effort": effort });
+            // Always ask for reasoning summaries. Without `summary`, the
+            // Responses stream is completely silent while the model thinks,
+            // so high/xhigh/max efforts can exceed the streaming idle timeout
+            // and get killed mid-thought. Summary deltas both keep the stream
+            // alive and give the user visible thinking.
+            request["reasoning"] = serde_json::json!({
+                "effort": effort,
+                "summary": "auto",
+            });
         }
 
         if let Some(service_tier) = service_tier {

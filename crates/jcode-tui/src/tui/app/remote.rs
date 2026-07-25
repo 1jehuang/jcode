@@ -1460,7 +1460,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 fn stall_timeout() -> Duration {
     const MIN_STALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
     const GRACE: Duration = Duration::from_secs(30);
-    let provider_idle = crate::provider::stream_idle_timeout();
+    // The client cannot see the request's reasoning effort, so budget for the
+    // largest effort-scaled server timeout. Otherwise a max-effort silent think
+    // gets cancelled client-side before the server's visible timeout fires.
+    let provider_idle = crate::provider::max_stream_idle_timeout();
     provider_idle.saturating_add(GRACE).max(MIN_STALL_TIMEOUT)
 }
 
@@ -1913,7 +1916,7 @@ mod stall_guard_tests {
         // And it must exceed the provider idle timeout so a healthy silent
         // reasoning stretch is cancelled server-side (visible error + retry)
         // rather than by the client watchdog (issue #434).
-        let provider_idle = crate::provider::stream_idle_timeout();
+        let provider_idle = crate::provider::max_stream_idle_timeout();
         assert!(
             timeout > provider_idle,
             "stall timeout {timeout:?} must exceed provider idle timeout {provider_idle:?}"
