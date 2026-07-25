@@ -282,6 +282,60 @@ fn a_selection_across_lines_highlights_every_line() {
     }
 }
 
+/// The founding bug for wrapping: a long line rendered past the right edge of
+/// the well. Nothing may be drawn outside the composer.
+#[test]
+#[ignore = "requires a GPU"]
+fn a_long_line_wraps_inside_the_composer_well() {
+    let model = states::by_name("wrapped_long_line").expect("node");
+    assert_eq!(
+        model.editor.line_count(),
+        1,
+        "node should be one logical line"
+    );
+    let Some(r) = Rendered::new(&model) else {
+        return;
+    };
+    let f = r.frame;
+    assert!(
+        f.composer_lines() > 1,
+        "the well did not grow to fit the wrapped text"
+    );
+    // No ink right of the column, and none between the well and the footnote.
+    let right = r.darkest_in(
+        f.right + 1.0,
+        f.composer_top,
+        f.width - 1.0,
+        f.composer_bottom,
+    );
+    assert!(
+        right > 0.9,
+        "wrapped text ran past the right edge ({right:.3})"
+    );
+    let below = r.darkest_in(
+        f.left,
+        f.composer_bottom + 1.0,
+        f.right,
+        f.footnote_top - 1.0,
+    );
+    assert!(
+        below > 0.9,
+        "wrapped text spilled below the well ({below:.3})"
+    );
+    // Every visible row must actually carry text.
+    let s = f.scale;
+    for row in 0..f.composer_lines().min(3) {
+        let y = f.composer_top
+            + crate::layout::COMPOSER_TEXT_OFFSET
+            + row as f64 * crate::layout::COMPOSER_LINE_HEIGHT
+            + 6.0;
+        let inked = ((f.left * s) as u32..(f.right * s) as u32)
+            .filter(|&x| r.luma(x, (y * s) as u32) < 0.5)
+            .count();
+        assert!(inked > 0, "wrapped row {row} rendered nothing");
+    }
+}
+
 /// A node must render identically no matter when it is rendered, or every
 /// pixel test becomes timing-dependent and flaky.
 #[test]
