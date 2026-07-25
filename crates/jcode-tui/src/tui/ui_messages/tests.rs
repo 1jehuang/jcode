@@ -557,15 +557,17 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        user_intention: Some("Keep the agent aligned with the user's request".to_string()),
-        alignment_score: Some(98),
         hill_climbability: Some(95),
-        objective: Some("Readable at 80 columns".to_string()),
         feedback_loop: Some("Inspect a debug frame".to_string()),
         end_to_end_ownership: Some(90),
     }];
-    let msg =
-        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+    let plan = crate::todo::TodoPlan {
+        user_intention: Some("Keep the agent aligned with the user's request".to_string()),
+        understands_user_intent: Some(98),
+    };
+    let msg = DisplayMessage::todos(
+        serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
+    );
 
     let plain = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -574,15 +576,13 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
         .join("\n");
 
     assert!(
-        plain.contains("Alignment score 98% · Hill climbability 95% · Ownership 90%"),
+        plain.contains("Hill climbability 95% · Ownership 90%"),
         "{plain}"
     );
+    // Plan-level intent renders once, above the groups.
+    assert!(plain.contains("Understands user intent 98%"), "{plain}");
     assert!(
         plain.contains("User intention · Keep the agent aligned with the user's request"),
-        "{plain}"
-    );
-    assert!(
-        plain.contains("Objective · Readable at 80 columns"),
         "{plain}"
     );
     assert!(
@@ -609,15 +609,17 @@ fn render_todos_message_uses_readable_semantic_colors() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        user_intention: None,
-        alignment_score: Some(98),
         hill_climbability: Some(95),
-        objective: Some("Readable metadata".to_string()),
         feedback_loop: None,
         end_to_end_ownership: None,
     }];
-    let msg =
-        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+    let plan = crate::todo::TodoPlan {
+        user_intention: Some("Readable metadata".to_string()),
+        understands_user_intent: Some(98),
+    };
+    let msg = DisplayMessage::todos(
+        serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
+    );
     let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
     let color_for = |text: &str| {
         lines
@@ -651,10 +653,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        user_intention: None,
-        alignment_score: Some(98),
         hill_climbability: Some(95),
-        objective: None,
         feedback_loop: None,
         end_to_end_ownership: Some(90),
     }];
@@ -668,7 +667,6 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("Alignment score 98%"), "{plain}");
     assert!(plain.contains("Hill climbability 95%"), "{plain}");
     assert!(plain.contains("Ownership 90%"), "{plain}");
     assert!(
@@ -712,10 +710,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        user_intention: Some("See current work at a glance".to_string()),
-        alignment_score: Some(97),
         hill_climbability: Some(95),
-        objective: Some("Readable card".to_string()),
         feedback_loop: Some("Inspect the rendered frame".to_string()),
         end_to_end_ownership: Some(92),
     }];
@@ -749,7 +744,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(!plain.contains("Todos"), "{plain}");
     assert!(plain.contains("todo rendering  ●"), "{plain}");
     assert!(
-        plain.contains("Alignment score 97% · Hill climbability 95% · Ownership 92%"),
+        plain.contains("Hill climbability 95% · Ownership 92%"),
         "{plain}"
     );
     assert!(plain.contains("● Render the todo result · 92%"), "{plain}");
@@ -777,10 +772,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
     }];
     let before = crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        user_intention: Some("See current work at a glance".to_string()),
-        alignment_score: Some(99),
         hill_climbability: Some(90),
-        objective: Some("Keep the todo card concise".to_string()),
         feedback_loop: Some("Inspect one frame".to_string()),
         end_to_end_ownership: None,
     };
@@ -845,6 +837,69 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
 }
 
 #[test]
+fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "render".to_string(),
+        content: "Render the entire unchanged todo plan".to_string(),
+        status: "in_progress".to_string(),
+        priority: "high".to_string(),
+        confidence: Some(92),
+        ..Default::default()
+    }];
+    let before = crate::todo::TodoPlan {
+        user_intention: Some("Ship the plan-level intent gate".to_string()),
+        understands_user_intent: Some(80),
+    };
+    let after = crate::todo::TodoPlan {
+        understands_user_intent: Some(97),
+        ..before.clone()
+    };
+    let update = crate::todo::TodoPlanChange {
+        before: Some(before),
+        after: Some(after.clone()),
+        fields: vec![crate::todo::TodoPlanField::UnderstandsUserIntent],
+    };
+    let content = format!(
+        "{}\n\nPlan:\n{}\n\nPlan updates:\n{}",
+        serde_json::to_string_pretty(&todos).unwrap(),
+        serde_json::to_string_pretty(&after).unwrap(),
+        serde_json::to_string_pretty(&update).unwrap(),
+    );
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content,
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("1 todos".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_plan_update".to_string(),
+            name: "todo".to_string(),
+            input: serde_json::Value::Null,
+            intent: Some("Reassess the user's intent".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("Plan  updated"), "{plain}");
+    assert!(
+        plain.contains("Understands user intent 80% → 97%"),
+        "{plain}"
+    );
+    // Unchanged fields and the full plan stay out of the refinement card.
+    assert!(!plain.contains("User intention"), "{plain}");
+    assert!(
+        !plain.contains("Render the entire unchanged todo plan"),
+        "{plain}"
+    );
+}
+
+#[test]
 fn parse_todo_tool_output_accepts_timestamp_only_header() {
     let todos = vec![crate::todo::TodoItem {
         id: "timed".to_string(),
@@ -897,11 +952,17 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         ..Default::default()
     }];
     let render = |goal: crate::todo::TodoGoal,
+                  intention: &str,
                   continuation: Option<&str>,
                   tool_data: Option<crate::message::ToolCall>| {
+        let plan = crate::todo::TodoPlan {
+            user_intention: Some(intention.to_string()),
+            understands_user_intent: Some(96),
+        };
         let mut content = format!(
-            "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nGoals:\n{}",
+            "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nPlan:\n{}\n\nGoals:\n{}",
             serde_json::to_string_pretty(&todos).unwrap(),
+            serde_json::to_string_pretty(&plan).unwrap(),
             serde_json::to_string_pretty(&vec![goal]).unwrap()
         );
         if let Some(continuation) = continuation {
@@ -926,16 +987,11 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let initial = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            user_intention: None,
-            alignment_score: None,
             hill_climbability: Some(90),
-            objective: Some(
-                "Create a polished, working pelican-riding-a-bike animation using only HTML, CSS, and vanilla JavaScript."
-                    .to_string(),
-            ),
             feedback_loop: Some(INITIAL_FEEDBACK.to_string()),
             end_to_end_ownership: None,
         },
+        "Make a pelican riding a bike animation that clearly works in a browser",
         Some(crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE),
         Some(crate::message::ToolCall {
             id: "call_initial_todo".to_string(),
@@ -956,13 +1012,11 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let revised = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            user_intention: None,
-            alignment_score: None,
             hill_climbability: Some(98),
-            objective: Some(REVISED_OBJECTIVE.to_string()),
             feedback_loop: Some(REVISED_FEEDBACK.to_string()),
             end_to_end_ownership: None,
         },
+        REVISED_OBJECTIVE,
         None,
         None,
     );
@@ -970,7 +1024,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     assert!(revised.contains("pelican-bike-animation"), "{revised}");
     assert!(
         compact_revised.contains(&without_whitespace(REVISED_OBJECTIVE)),
-        "revised objective was truncated:\n{revised}"
+        "revised plan intention was truncated:\n{revised}"
     );
     assert!(
         compact_revised.contains(&without_whitespace(REVISED_FEEDBACK)),
@@ -1012,16 +1066,18 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("pelican-bike".to_string()),
-        user_intention: None,
-        alignment_score: None,
         hill_climbability: Some(98),
-        objective: Some(OBJECTIVE.to_string()),
         feedback_loop: Some(FEEDBACK.to_string()),
         end_to_end_ownership: None,
     }];
+    let plan = crate::todo::TodoPlan {
+        user_intention: Some(OBJECTIVE.to_string()),
+        understands_user_intent: Some(97),
+    };
     let todo_output = format!(
-        "{}\n\nGoals:\n{}",
+        "{}\n\nPlan:\n{}\n\nGoals:\n{}",
         serde_json::to_string_pretty(&todos).unwrap(),
+        serde_json::to_string_pretty(&plan).unwrap(),
         serde_json::to_string_pretty(&goals).unwrap()
     );
     let content = format!(
@@ -1066,7 +1122,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     assert!(rendered.contains("pelican-bike"), "{rendered}");
     assert!(
         compact.contains(&without_whitespace(OBJECTIVE)),
-        "batched todo objective was truncated:\n{rendered}"
+        "batched todo plan intention was truncated:\n{rendered}"
     );
     assert!(
         compact.contains(&without_whitespace(FEEDBACK)),

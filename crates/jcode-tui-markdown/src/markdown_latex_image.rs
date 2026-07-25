@@ -56,6 +56,58 @@ struct HandtermNativeLatexCache {
 static HANDTERM_NATIVE_LATEX: LazyLock<Mutex<HandtermNativeLatexCache>> =
     LazyLock::new(|| Mutex::new(HandtermNativeLatexCache::default()));
 
+/// Negative cache for LaTeX snippets whose render already failed.
+///
+/// `render_latex_image` runs synchronously on the draw path, so without this a
+/// snippet that fails (or times out after `COMMAND_TIMEOUT`) respawns
+/// latex/pdflatex on every redraw, chaining hundreds of processes and freezing
+/// the TUI for minutes (see #563).
+const FAILED_RENDER_CACHE_LIMIT: usize = 4096;
+
+#[derive(Default)]
+struct FailedRenderCache {
+    entries: HashMap<u64, String>,
+    order: VecDeque<u64>,
+}
+
+static FAILED_RENDERS: LazyLock<Mutex<FailedRenderCache>> =
+    LazyLock::new(|| Mutex::new(FailedRenderCache::default()));
+
+/// Lock the failure cache, recovering from poisoning.
+///
+/// A panic while holding this lock leaves only cache bookkeeping inconsistent,
+/// never user data, so recovering the guard is strictly better than silently
+/// disabling the cache (which would restore the #563 respawn loop).
+fn failed_renders() -> std::sync::MutexGuard<'static, FailedRenderCache> {
+    FAILED_RENDERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cached_render_failure(key: u64) -> Option<String> {
+    failed_renders().entries.get(&key).cloned()
+}
+
+fn remember_render_failure(key: u64, error: &str) {
+    let mut cache = failed_renders();
+    if cache.entries.insert(key, error.to_string()).is_none() {
+        cache.order.push_back(key);
+    }
+    while cache.order.len() > FAILED_RENDER_CACHE_LIMIT {
+        if let Some(oldest) = cache.order.pop_front() {
+            cache.entries.remove(&oldest);
+        }
+    }
+}
+
+/// Test hook: forget remembered failures so a retry actually re-renders.
+#[cfg(test)]
+pub(super) fn reset_failed_render_cache() {
+    let mut cache = failed_renders();
+    cache.entries.clear();
+    cache.order.clear();
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_HANDTERM_NATIVE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -252,7 +304,19 @@ pub(super) fn render_latex_image(
         return Err("terminal image protocol unavailable".to_string());
     }
     let dpi = render_dpi(super::mermaid::get_font_size());
-    let artifact = render_artifact(source, display, dpi, &Toolchain::from_environment())?;
+    // Never re-run the toolchain for a snippet that already failed at this
+    // geometry: this function runs on the synchronous draw path (see #563).
+    let failure_key = cache_key(source, display, dpi);
+    if let Some(error) = cached_render_failure(failure_key) {
+        return Err(error);
+    }
+    let artifact = match render_artifact(source, display, dpi, &Toolchain::from_environment()) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            remember_render_failure(failure_key, &error);
+            return Err(error);
+        }
+    };
     let hash =
         super::mermaid::register_external_image(&artifact.path, artifact.width, artifact.height);
     register_copy_source(hash, source, display);
@@ -774,6 +838,99 @@ mod tests {
         assert!(with_handterm_native_latex_override(true, || {
             render_handterm_native_latex(r"\frac{a}{b}", true, Some(0)).is_none()
         }));
+    }
+
+    #[test]
+    fn failed_renders_are_remembered_so_the_toolchain_is_not_respawned() {
+        // #563: a failing snippet must not re-run latex/pdflatex on every redraw.
+        reset_failed_render_cache();
+        let key = cache_key("unique_failed_render_test_2026", true, 240);
+        assert_eq!(cached_render_failure(key), None);
+        remember_render_failure(key, "pdflatex timed out");
+        assert_eq!(
+            cached_render_failure(key).as_deref(),
+            Some("pdflatex timed out")
+        );
+        // A different snippet/geometry is unaffected.
+        assert_eq!(
+            cached_render_failure(cache_key("unique_failed_render_test_2026", false, 240)),
+            None
+        );
+        reset_failed_render_cache();
+        assert_eq!(cached_render_failure(key), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_snippet_spawns_the_toolchain_only_once_across_many_redraws() {
+        // #563: the real symptom was a chain of latex/pdflatex processes, one per
+        // redraw. Count actual spawns via a stub that appends to a log file, and
+        // assert repeated render attempts do not re-spawn it.
+        use std::os::unix::fs::PermissionsExt;
+
+        reset_failed_render_cache();
+        let root = tempfile::tempdir().unwrap();
+        let spawn_log = root.path().join("spawns.log");
+        let failing = root.path().join("latex-fail");
+        fs::write(
+            &failing,
+            format!(
+                "#!/bin/sh\necho spawn >> '{}'\nexit 1\n",
+                spawn_log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+        let toolchain = Toolchain {
+            latex: failing.clone(),
+            dvipng: failing.clone(),
+            pdflatex: failing.clone(),
+            pdftocairo: failing,
+        };
+        let cache = root.path().join("cache");
+        let source = "unique_spawn_count_probe_2026_563";
+        let key = cache_key(source, true, 240);
+
+        // First attempt runs the toolchain and records the failure.
+        let first = render_artifact_in(source, true, 240, &toolchain, &cache);
+        assert!(first.is_err(), "stub toolchain must fail");
+        remember_render_failure(key, &first.unwrap_err());
+        let spawns_after_first = fs::read_to_string(&spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert!(
+            spawns_after_first > 0,
+            "first render should spawn the toolchain"
+        );
+
+        // Every later "redraw" must short-circuit on the cached failure.
+        for _ in 0..50 {
+            assert!(
+                cached_render_failure(key).is_some(),
+                "cached failure must short-circuit the redraw"
+            );
+        }
+        let spawns_after_redraws = fs::read_to_string(&spawn_log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            spawns_after_first, spawns_after_redraws,
+            "50 redraws must not spawn the toolchain again"
+        );
+        reset_failed_render_cache();
+    }
+
+    #[test]
+    fn failed_render_cache_is_bounded() {
+        reset_failed_render_cache();
+        for i in 0..(FAILED_RENDER_CACHE_LIMIT + 50) {
+            remember_render_failure(i as u64, "boom");
+        }
+        let len = failed_renders().entries.len();
+        assert!(len <= FAILED_RENDER_CACHE_LIMIT, "cache grew to {len}");
+        reset_failed_render_cache();
     }
 
     #[test]

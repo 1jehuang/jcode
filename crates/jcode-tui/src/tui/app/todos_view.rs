@@ -42,8 +42,10 @@ impl App {
         let session_id = self.active_client_session_id().map(str::to_string);
         let todos = load_current_session_todos(session_id.as_deref());
         let goals = load_current_session_goals(session_id.as_deref());
-        let content = todo_card_payload_json(&todos, &goals);
-        self.todo_card_rendered_hash = hash_todos_payload(session_id.as_deref(), &todos, &goals);
+        let plan = load_current_session_plan(session_id.as_deref());
+        let content = todo_card_payload_json(&todos, &plan, &goals);
+        self.todo_card_rendered_hash =
+            hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
 
         if let Some(idx) = self.latest_todo_card_index() {
             if idx + 1 == self.display_messages.len() {
@@ -65,12 +67,13 @@ impl App {
         let session_id = self.active_client_session_id().map(str::to_string);
         let todos = load_current_session_todos(session_id.as_deref());
         let goals = load_current_session_goals(session_id.as_deref());
-        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &goals);
+        let plan = load_current_session_plan(session_id.as_deref());
+        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
         if next_hash == self.todo_card_rendered_hash {
             return false;
         }
         self.todo_card_rendered_hash = next_hash;
-        let content = todo_card_payload_json(&todos, &goals);
+        let content = todo_card_payload_json(&todos, &plan, &goals);
         self.replace_display_message_content(idx, content)
     }
 
@@ -169,12 +172,13 @@ impl App {
         let session_id = self.active_client_session_id();
         let todos = load_current_session_todos(session_id);
         let goals = load_current_session_goals(session_id);
-        let next_hash = hash_todos_payload(session_id, &todos, &goals);
+        let plan = load_current_session_plan(session_id);
+        let next_hash = hash_todos_payload(session_id, &todos, &plan, &goals);
         if !force && self.todos_view_rendered_hash == next_hash {
             return false;
         }
 
-        self.todos_view_markdown = build_todos_view_markdown(session_id, &todos, &goals);
+        self.todos_view_markdown = build_todos_view_markdown(session_id, &todos, &plan, &goals);
         self.todos_view_updated_at_ms = now_ms();
         self.todos_view_rendered_hash = next_hash;
         true
@@ -285,9 +289,21 @@ fn load_current_session_goals(session_id: Option<&str>) -> Vec<crate::todo::Todo
     crate::todo::load_goals(session_id).unwrap_or_default()
 }
 
-fn todo_card_payload_json(todos: &[TodoItem], goals: &[crate::todo::TodoGoal]) -> String {
+fn load_current_session_plan(session_id: Option<&str>) -> crate::todo::TodoPlan {
+    let Some(session_id) = session_id else {
+        return crate::todo::TodoPlan::default();
+    };
+    crate::todo::load_plan(session_id).unwrap_or_default()
+}
+
+fn todo_card_payload_json(
+    todos: &[TodoItem],
+    plan: &crate::todo::TodoPlan,
+    goals: &[crate::todo::TodoGoal],
+) -> String {
     serde_json::to_string(&serde_json::json!({
         "todos": todos,
+        "plan": plan,
         "goals": goals,
     }))
     .unwrap_or_else(|_| r#"{"todos":[],"goals":[]}"#.to_string())
@@ -296,6 +312,7 @@ fn todo_card_payload_json(todos: &[TodoItem], goals: &[crate::todo::TodoGoal]) -
 fn build_todos_view_markdown(
     session_id: Option<&str>,
     todos: &[TodoItem],
+    plan: &crate::todo::TodoPlan,
     goals: &[crate::todo::TodoGoal],
 ) -> String {
     let session_label = session_id
@@ -357,6 +374,8 @@ fn build_todos_view_markdown(
         format_confidence_value(lowest_completed_confidence),
         missing_completion_confidence,
     );
+
+    markdown.push_str(&format_plan_markdown(plan));
 
     let sections = [
         ("in_progress", "In progress"),
@@ -427,44 +446,41 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         return String::new();
     };
     let mut line = String::new();
-    if let Some(user_intention) = goal
-        .user_intention
-        .as_deref()
-        .filter(|user_intention| !user_intention.trim().is_empty())
-    {
-        line.push_str(&format!("\n- User intention: {}\n", user_intention.trim()));
-    }
-    if let Some(score) = goal.alignment_score {
-        if line.is_empty() {
-            line.push('\n');
-        }
-        line.push_str(&format!("- Alignment score: **{}%**\n", score));
-    }
     if let Some(score) = goal.hill_climbability {
-        if line.is_empty() {
-            line.push('\n');
-        }
-        line.push_str(&format!("- Hill climbability: **{}%**", score));
         line.push('\n');
-    }
-    if let Some(objective) = goal
-        .objective
-        .as_deref()
-        .filter(|objective| !objective.trim().is_empty())
-    {
-        line.push_str(&format!("- Objective: {}\n", objective.trim()));
+        line.push_str(&format!("- Hill climbability: **{}%**\n", score));
     }
     if let Some(feedback_loop) = goal
         .feedback_loop
         .as_deref()
         .filter(|feedback_loop| !feedback_loop.trim().is_empty())
     {
+        if line.is_empty() {
+            line.push('\n');
+        }
         line.push_str(&format!("- Feedback loop: {}\n", feedback_loop.trim()));
     }
     if let Some(score) = goal.end_to_end_ownership {
         line.push_str(&format!("- End-to-end ownership: **{}%**\n", score));
     }
     line
+}
+
+/// Plan-level intent lines, shown once for the whole todo list.
+fn format_plan_markdown(plan: &crate::todo::TodoPlan) -> String {
+    let mut markdown = String::new();
+    if let Some(intention) = plan
+        .user_intention
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        markdown.push_str(&format!("- User intention: {}\n", intention));
+    }
+    if let Some(score) = plan.understands_user_intent {
+        markdown.push_str(&format!("- Understands user intent: **{}%**\n", score));
+    }
+    markdown
 }
 
 /// Partition todos into ordered groups (first-seen order, ungrouped last).
@@ -612,6 +628,7 @@ fn priority_rank(priority: &str) -> u8 {
 fn hash_todos_payload(
     session_id: Option<&str>,
     todos: &[TodoItem],
+    plan: &crate::todo::TodoPlan,
     goals: &[crate::todo::TodoGoal],
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -627,12 +644,11 @@ fn hash_todos_payload(
         todo.blocked_by.hash(&mut hasher);
         todo.assigned_to.hash(&mut hasher);
     }
+    plan.user_intention.hash(&mut hasher);
+    plan.understands_user_intent.hash(&mut hasher);
     for goal in goals {
         goal.group.hash(&mut hasher);
-        goal.user_intention.hash(&mut hasher);
-        goal.alignment_score.hash(&mut hasher);
         goal.hill_climbability.hash(&mut hasher);
-        goal.objective.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
         goal.end_to_end_ownership.hash(&mut hasher);
     }
@@ -653,6 +669,14 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plan-level intent used by the view tests.
+    fn plan() -> crate::todo::TodoPlan {
+        crate::todo::TodoPlan {
+            user_intention: Some("make navigation feel immediate".to_string()),
+            understands_user_intent: Some(96),
+        }
+    }
 
     fn todo(
         id: &str,
@@ -697,7 +721,7 @@ mod tests {
             ),
         ];
 
-        let markdown = build_todos_view_markdown(Some("session_test"), &todos, &[]);
+        let markdown = build_todos_view_markdown(Some("session_test"), &todos, &plan(), &[]);
 
         assert!(markdown.contains("- Weighted confidence: **86%**"));
         assert!(markdown.contains("- Lowest completed confidence: **95%**"));
@@ -717,9 +741,9 @@ mod tests {
             Some(80),
             None,
         )];
-        let before = hash_todos_payload(Some("session_test"), &todos, &[]);
+        let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         todos[0].confidence = Some(81);
-        let after = hash_todos_payload(Some("session_test"), &todos, &[]);
+        let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
 
         assert_ne!(before, after);
     }
@@ -751,12 +775,10 @@ mod tests {
         let markdown = build_todos_view_markdown(
             Some("session_test"),
             &[grouped_a, grouped_b, other, ungrouped],
+            &plan(),
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
-                user_intention: Some("make navigation feel immediate".to_string()),
-                alignment_score: Some(96),
                 hill_climbability: Some(90),
-                objective: Some("frame time under 8ms".to_string()),
                 feedback_loop: Some(
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
@@ -768,20 +790,17 @@ mod tests {
             markdown.contains("## optimize rendering (1/2)"),
             "{markdown}"
         );
+        // Plan-level intent renders once for the whole list.
         assert!(
             markdown.contains("- User intention: make navigation feel immediate"),
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Alignment score: **96%**"),
+            markdown.contains("- Understands user intent: **96%**"),
             "{markdown}"
         );
         assert!(
             markdown.contains("- Hill climbability: **90%**"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("- Objective: frame time under 8ms"),
             "{markdown}"
         );
         assert!(
@@ -807,21 +826,21 @@ mod tests {
     #[test]
     fn todos_view_hash_changes_when_group_changes() {
         let mut todos = vec![todo("g", "Group hash", "pending", "high", Some(80), None)];
-        let before = hash_todos_payload(Some("session_test"), &todos, &[]);
+        let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         todos[0].group = Some("rendering".to_string());
-        let after = hash_todos_payload(Some("session_test"), &todos, &[]);
+        let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         assert_ne!(before, after);
     }
 
     #[test]
     fn todos_view_hash_changes_when_goals_change() {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
-        let before = hash_todos_payload(Some("session_test"), &todos, &[]);
+        let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         let goals = vec![crate::todo::TodoGoal {
             hill_climbability: Some(30),
             ..Default::default()
         }];
-        let after = hash_todos_payload(Some("session_test"), &todos, &goals);
+        let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);
         assert_ne!(before, after);
     }
 
@@ -832,35 +851,29 @@ mod tests {
             feedback_loop: Some("run test A".to_string()),
             ..Default::default()
         }];
-        let before = hash_todos_payload(Some("session_test"), &todos, &goals);
+        let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);
         goals[0].feedback_loop = Some("run test B".to_string());
-        let after = hash_todos_payload(Some("session_test"), &todos, &goals);
+        let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);
         assert_ne!(before, after);
     }
 
     #[test]
     fn todos_view_hash_changes_when_user_intention_changes() {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
-        let mut goals = vec![crate::todo::TodoGoal {
-            user_intention: Some("reduce friction".to_string()),
-            ..Default::default()
-        }];
-        let before = hash_todos_payload(Some("session_test"), &todos, &goals);
-        goals[0].user_intention = Some("increase clarity".to_string());
-        let after = hash_todos_payload(Some("session_test"), &todos, &goals);
+        let mut current = plan();
+        let before = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
+        current.user_intention = Some("increase clarity".to_string());
+        let after = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
         assert_ne!(before, after);
     }
 
     #[test]
-    fn todos_view_hash_changes_when_alignment_score_changes() {
+    fn todos_view_hash_changes_when_intent_understanding_changes() {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
-        let mut goals = vec![crate::todo::TodoGoal {
-            alignment_score: Some(70),
-            ..Default::default()
-        }];
-        let before = hash_todos_payload(Some("session_test"), &todos, &goals);
-        goals[0].alignment_score = Some(95);
-        let after = hash_todos_payload(Some("session_test"), &todos, &goals);
+        let mut current = plan();
+        let before = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
+        current.understands_user_intent = Some(99);
+        let after = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
         assert_ne!(before, after);
     }
 }

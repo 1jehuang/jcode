@@ -139,16 +139,19 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
     }];
     let goal = |score| crate::todo::TodoGoal {
         group: None,
-        user_intention: Some("keep the plan state visible".to_string()),
-        alignment_score: Some(95),
         hill_climbability: Some(score),
-        objective: Some("readable card".to_string()),
         feedback_loop: Some("inspect the frame".to_string()),
         end_to_end_ownership: Some(90),
     };
 
+    let plan = crate::todo::TodoPlan {
+        user_intention: Some("keep the plan state visible".to_string()),
+        understands_user_intent: Some(95),
+    };
+
     crate::todo::save_todos(&session_id, &todos).unwrap();
     crate::todo::save_goals(&session_id, &[goal(70)]).unwrap();
+    crate::todo::save_plan(&session_id, &plan).unwrap();
     app.toggle_todo_card();
     let card = app
         .display_messages
@@ -156,7 +159,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         .find(|message| message.role == "todos")
         .expect("todo card pushed");
     assert!(card.content.contains("\"hill_climbability\":70"));
-    assert!(card.content.contains("\"alignment_score\":95"));
+    assert!(card.content.contains("\"understands_user_intent\":95"));
 
     crate::todo::save_goals(&session_id, &[goal(95)]).unwrap();
     assert!(app.refresh_todo_card_if_needed());
@@ -169,4 +172,5 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
 
     let _ = crate::todo::save_todos(&session_id, &[]);
     let _ = crate::todo::save_goals(&session_id, &[]);
+    let _ = crate::todo::save_plan(&session_id, &crate::todo::TodoPlan::default());
 }

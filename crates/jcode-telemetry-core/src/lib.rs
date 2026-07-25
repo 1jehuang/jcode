@@ -114,6 +114,8 @@ struct TurnTelemetry {
     tool_cat_todo: u32,
     todo_gate_ownership_count: u32,
     todo_gate_hill_count: u32,
+    todo_gate_alignment_count: u32,
+    todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
     todo_gate_spike_count: u32,
 }
@@ -198,6 +200,8 @@ struct SessionTelemetry {
     tool_cat_todo: u32,
     todo_gate_ownership_count: u32,
     todo_gate_hill_count: u32,
+    todo_gate_alignment_count: u32,
+    todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
     todo_gate_spike_count: u32,
     command_login_used: bool,
@@ -291,6 +295,8 @@ impl TurnTelemetry {
             tool_cat_todo: 0,
             todo_gate_ownership_count: 0,
             todo_gate_hill_count: 0,
+            todo_gate_alignment_count: 0,
+            todo_gate_intent_count: 0,
             todo_gate_completion_count: 0,
             todo_gate_spike_count: 0,
         }
@@ -1262,6 +1268,8 @@ fn finalize_current_turn(
         tool_cat_todo: turn.tool_cat_todo,
         todo_gate_ownership_count: turn.todo_gate_ownership_count,
         todo_gate_hill_count: turn.todo_gate_hill_count,
+        todo_gate_alignment_count: turn.todo_gate_alignment_count,
+        todo_gate_intent_count: turn.todo_gate_intent_count,
         todo_gate_completion_count: turn.todo_gate_completion_count,
         todo_gate_spike_count: turn.todo_gate_spike_count,
         workflow_chat_only,
@@ -1661,6 +1669,8 @@ fn begin_session_with_mode(
         tool_cat_todo: 0,
         todo_gate_ownership_count: 0,
         todo_gate_hill_count: 0,
+        todo_gate_alignment_count: 0,
+        todo_gate_intent_count: 0,
         todo_gate_completion_count: 0,
         todo_gate_spike_count: 0,
         command_login_used: false,
@@ -1951,6 +1961,10 @@ pub enum TodoGateKind {
     Ownership,
     /// Hill-climbability was too low; the goal needs a measurable objective.
     HillClimbability,
+    /// Plan-level alignment with the user's intention was too low.
+    Alignment,
+    /// Plan-level understanding of the user's intent was too low.
+    IntentUnderstanding,
     /// Completion confidence was missing or too low at wrap-up.
     Completion,
     /// Completion confidence rose too sharply to count as validated.
@@ -1966,6 +1980,8 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         let counter = match kind {
             TodoGateKind::Ownership => &mut state.todo_gate_ownership_count,
             TodoGateKind::HillClimbability => &mut state.todo_gate_hill_count,
+            TodoGateKind::Alignment => &mut state.todo_gate_alignment_count,
+            TodoGateKind::IntentUnderstanding => &mut state.todo_gate_intent_count,
             TodoGateKind::Completion => &mut state.todo_gate_completion_count,
             TodoGateKind::ConfidenceSpike => &mut state.todo_gate_spike_count,
         };
@@ -1974,6 +1990,8 @@ pub fn record_todo_gate(kind: TodoGateKind) {
             let counter = match kind {
                 TodoGateKind::Ownership => &mut turn.todo_gate_ownership_count,
                 TodoGateKind::HillClimbability => &mut turn.todo_gate_hill_count,
+                TodoGateKind::Alignment => &mut turn.todo_gate_alignment_count,
+                TodoGateKind::IntentUnderstanding => &mut turn.todo_gate_intent_count,
                 TodoGateKind::Completion => &mut turn.todo_gate_completion_count,
                 TodoGateKind::ConfidenceSpike => &mut turn.todo_gate_spike_count,
             };
