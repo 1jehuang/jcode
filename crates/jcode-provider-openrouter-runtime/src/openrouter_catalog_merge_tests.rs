@@ -49,3 +49,49 @@ fn named_profile_static_models_survive_live_catalog_refresh() {
     );
     assert!(models.iter().any(|m| m == "vendor-live-model"));
 }
+
+/// A built-in profile keeps replace-after-fetch semantics: its `static_models`
+/// are a pre-catalog fallback, not a user-authored list.
+#[test]
+fn builtin_profile_is_not_treated_as_user_named() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("CEREBRAS_API_KEY", "test-key");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://api.cerebras.ai/v1".to_string(),
+        api_key_env: Some("CEREBRAS_API_KEY".to_string()),
+        model_catalog: true,
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("cerebras", &profile)
+        .expect("builtin-shaped profile should initialize");
+    assert!(!provider.is_user_named_profile());
+    assert!(!provider.should_merge_static_models_with_live_catalog());
+}
+
+/// A `[providers.cerebras]` block that shadows a built-in name but points at a
+/// different endpoint is still user-declared, so its models must be preserved.
+#[test]
+fn profile_shadowing_builtin_name_with_other_base_is_user_named() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("TEST_SHADOW_KEY", "test-key");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://proxy.internal.test/v1".to_string(),
+        api_key_env: Some("TEST_SHADOW_KEY".to_string()),
+        model_catalog: true,
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "shadowed-model".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("cerebras", &profile)
+        .expect("shadowing profile should initialize");
+    assert!(provider.is_user_named_profile());
+    assert!(provider.should_merge_static_models_with_live_catalog());
+}
