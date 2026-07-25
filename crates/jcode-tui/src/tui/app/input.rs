@@ -987,7 +987,7 @@ fn bare_terminal_report_length(bytes: &[u8]) -> Option<usize> {
     {
         return None;
     }
-    const REPORT_FINALS: [u8; 6] = [b'M', b'm', b'~', b'R', b'I', b'O'];
+    const REPORT_FINALS: [u8; 6] = *b"Mm~RIO";
     REPORT_FINALS.contains(&bytes[len - 1]).then_some(len)
 }
 
