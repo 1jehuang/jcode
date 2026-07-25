@@ -1,0 +1,26 @@
+{
+  "version": "0.57.0",
+  "date": "2026-07-24",
+  "title": "Triage batch: model limits, streaming, and rendering fixes",
+  "highlights": [
+    "Claude Opus 5 is now in the built-in Anthropic catalog and works without manual configuration",
+    "Anthropic requests derive their max output tokens per model instead of a flat 32K cap",
+    "OpenRouter streaming no longer drops content when responses arrive with CRLF or multi-line SSE events"
+  ],
+  "improvements": [
+    "Todo plans ask for user intent once at the plan level instead of per item",
+    "Requests show a distinct 'sending request' phase instead of sitting on 'connecting'",
+    "Thinking/reasoning display is off by default for new users",
+    "The /login heading lists unconfigured providers as dim rows for a cleaner header",
+    "/model requests the route-expanded catalog and rebuilds an already-open picker"
+  ],
+  "fixes": [
+    "Kimi K3 now resolves to its full 1M context window everywhere",
+    "The context meter reflects catalog context limits for Anthropic models",
+    "Failed LaTeX renders are cached so redraws stop respawning latex processes",
+    "PDF extraction failures are recovered instead of crashing the session",
+    "Swarm history truncation no longer panics on multi-byte characters",
+    "Anthropic OAuth sessions no longer advertise built-in tools that are not available",
+    "Desktop builds no longer break on Windows from Unix-only IPC"
+  ]
+}
