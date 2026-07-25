@@ -170,25 +170,41 @@ fn split_bedrock_model_id(model: &str) -> Option<(Option<&str>, &str, &str, Opti
         return None;
     }
 
-    // Trailing `-v1:0` / `-v2:0` is a Bedrock API revision, not part of the
-    // model version. Keep it as a marker so distinct revisions stay
+    // A trailing `-v1`, `-v1:0`, or `-v1:0:200k` is a Bedrock API revision plus
+    // an optional context/modality variant, not part of the model version. Keep
+    // it as a marker so distinct revisions and context variants stay
     // distinguishable, but stop it from corrupting the version number.
-    let (model_part, revision) = match model_part.rsplit_once("-v") {
-        Some((head, tail))
-            if !head.is_empty()
-                && tail.split_once(':').is_some_and(|(major, minor)| {
-                    !major.is_empty()
-                        && major.chars().all(|c| c.is_ascii_digit())
-                        && !minor.is_empty()
-                        && minor.chars().all(|c| c.is_ascii_digit())
-                }) =>
-        {
-            (head, Some(format!("v{tail}")))
-        }
-        _ => (model_part, None),
+    let (model_part, revision) = match split_bedrock_revision(model_part) {
+        Some((head, revision)) => (head, Some(revision)),
+        None => (model_part, None),
     };
 
     Some((region, &vendor[..vendor.len() - 1], model_part, revision))
+}
+
+/// Split a trailing Bedrock revision segment (`-v1`, `-v1:0`, `-v1:0:200k`,
+/// `-v1:0:mm`) off a model id, returning the head plus the revision label.
+fn split_bedrock_revision(model_part: &str) -> Option<(&str, String)> {
+    let (head, tail) = model_part.rsplit_once("-v")?;
+    if head.is_empty() || tail.is_empty() {
+        return None;
+    }
+    let mut segments = tail.split(':');
+    // The revision major must be numeric (`v1`), which is what distinguishes it
+    // from a family word such as the `-vl` in `qwen3-vl-235b`.
+    let major = segments.next()?;
+    if major.is_empty() || !major.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // Remaining segments are the revision minor and an optional context or
+    // modality variant (`200k`, `mm`); accept alphanumerics so new variants do
+    // not silently fall back to a raw id.
+    for segment in segments {
+        if segment.is_empty() || !segment.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+    }
+    Some((head, format!("v{tail}")))
 }
 
 /// Render `us.anthropic.claude-opus-4-20250514-v1:0` as
@@ -412,6 +428,20 @@ mod tests {
             pretty_known_model_family("us.anthropic.claude-sonnet-4-6").as_deref(),
             Some("Claude Sonnet 4.6 (us)")
         );
+        // Bare `-v1` revisions (no minor) and `-v1:0:200k` context variants are
+        // both real Bedrock shapes seen in a live catalog.
+        assert_eq!(
+            pretty_known_model_family("us.anthropic.claude-opus-4-6-v1").as_deref(),
+            Some("Claude Opus 4.6 (us, v1)")
+        );
+        assert_eq!(
+            pretty_known_model_family("anthropic.claude-3-haiku-20240307-v1:0:200k").as_deref(),
+            Some("Claude 3 Haiku (2024-03-07, v1:0:200k)")
+        );
+        assert_eq!(
+            pretty_known_model_family("amazon.nova-premier-v1:0:mm").as_deref(),
+            Some("Amazon Nova Premier (v1:0:mm)")
+        );
         // Amazon's first-party Nova family keeps its vendor word.
         assert_eq!(
             pretty_known_model_family("amazon.nova-pro-v1:0").as_deref(),
@@ -432,6 +462,13 @@ mod tests {
             // quantization detail that only reads correctly byte-exact.
             "meta.llama3-1-405b-instruct-v1:0",
             "qwen.qwen3-coder-480b-a35b-v1:0",
+            // `-vl` is a family word, not a `-v<major>` revision, so the
+            // revision split must not fire here.
+            "qwen.qwen3-vl-235b-a22b",
+            "meta.llama3-1-70b-instruct-v1:0:128k",
+            "google.gemma-3-27b-it",
+            "zai.glm-4.7-flash",
+            "mistral.devstral-2-123b",
             "mistral.mistral-large-2407-v1:0",
             "cohere.command-r-plus-v1:0",
             "ai21.jamba-1-5-large-v1:0",
