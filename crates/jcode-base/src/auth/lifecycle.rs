@@ -1956,6 +1956,13 @@ mod tests {
     fn post_auth_model_selection_keeps_catalog_order_for_unranked_providers() {
         // OpenAI-compatible / namespaced providers have no curated flagship
         // order; the fallback must preserve live-catalog order for them.
+        //
+        // Selection consults the process-global namespaced catalog, so hold the
+        // shared test-env lock (and a private JCODE_HOME) or a sibling test's
+        // cached catalog decides this assertion depending on ordering.
+        let _env = EnvGuard::new(&["JCODE_HOME"]);
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
         let activation = AuthActivationResult {
             provider_id: Some("cerebras".to_string()),
             provider_label: Some("Cerebras".to_string()),

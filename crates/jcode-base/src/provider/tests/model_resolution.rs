@@ -79,43 +79,48 @@ fn test_openrouter_catalog_model_id_normalizes_bare_openai_and_claude_models() {
 
 #[test]
 fn test_available_models_display_uses_route_models_and_filters_placeholder_rows() {
-    let provider = MultiProvider {
-        claude: RwLock::new(None),
-        anthropic: RwLock::new(None),
-        openai: RwLock::new(None),
-        copilot_api: RwLock::new(None),
-        antigravity: RwLock::new(None),
-        gemini: RwLock::new(None),
-        cursor: RwLock::new(None),
-        bedrock: RwLock::new(None),
-        openrouter: RwLock::new(None),
-        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
-        active_openai_compatible_profile: RwLock::new(None),
-        active: RwLock::new(ActiveProvider::OpenAI),
-        use_claude_cli: false,
-        startup_notices: RwLock::new(Vec::new()),
-        initial_provider: None,
-        routes_memo: std::sync::Mutex::new(None),
-        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    };
+    // Hermetic env: this reads the process-global model catalog, so without a
+    // clean scope it observes whatever catalog a sibling test installed and
+    // fails depending on test ordering.
+    with_clean_provider_test_env(|| {
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenAI),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            initial_provider: None,
+            routes_memo: std::sync::Mutex::new(None),
+            post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
 
-    let models = provider.available_models_display();
-    assert!(
-        models
-            .iter()
-            .any(|model| known_openai_model_ids().contains(model)),
-        "route-backed display models should include OpenAI picker rows: {:?}",
-        models
-    );
-    assert!(
-        models
-            .iter()
-            .any(|model| known_anthropic_model_ids().contains(model)),
-        "route-backed display models should include Anthropic picker rows: {:?}",
-        models
-    );
-    assert!(!models.iter().any(|model| model == "openrouter models"));
-    assert!(!models.iter().any(|model| model == "copilot models"));
+        let models = provider.available_models_display();
+        assert!(
+            models
+                .iter()
+                .any(|model| known_openai_model_ids().contains(model)),
+            "route-backed display models should include OpenAI picker rows: {:?}",
+            models
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| known_anthropic_model_ids().contains(model)),
+            "route-backed display models should include Anthropic picker rows: {:?}",
+            models
+        );
+        assert!(!models.iter().any(|model| model == "openrouter models"));
+        assert!(!models.iter().any(|model| model == "copilot models"));
+    });
 }
 
 #[test]
