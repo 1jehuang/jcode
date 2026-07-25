@@ -776,7 +776,9 @@ impl Agent {
                         if reason.is_some() {
                             stop_reason = reason;
                         }
-                        let _ = event_tx.send(ServerEvent::MessageEnd);
+                        let _ = event_tx.send(ServerEvent::MessageEnd {
+                            stop_reason: stop_reason.clone(),
+                        });
                     }
                     StreamEvent::SessionId(sid) => {
                         self.provider_session_id = Some(sid.clone());

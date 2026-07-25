@@ -3042,9 +3042,10 @@ fn emit_ndjson_event(
                 &serde_json::json!({ "type": "status_detail", "detail": detail }),
             )
         }
-        ServerEvent::MessageEnd => {
-            write_json_line(stdout, &serde_json::json!({ "type": "message_end" }))
-        }
+        ServerEvent::MessageEnd { stop_reason } => write_json_line(
+            stdout,
+            &serde_json::json!({ "type": "message_end", "stop_reason": stop_reason }),
+        ),
         ServerEvent::UpstreamProvider { provider } => {
             state.upstream_provider = Some(provider.clone());
             write_json_line(
