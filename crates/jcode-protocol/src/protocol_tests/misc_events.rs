@@ -466,3 +466,34 @@ fn test_provider_guardrail_event_roundtrip() -> Result<()> {
     assert!(stop_reason.is_none());
     Ok(())
 }
+
+#[test]
+fn test_message_end_carries_provider_stop_reason() -> Result<()> {
+    // `max_tokens` is the only signal that the output budget truncated a turn.
+    // Dropping it made a truncated benchmark run look like a clean one, so the
+    // reason must survive the wire round trip.
+    let event = ServerEvent::MessageEnd {
+        stop_reason: Some("max_tokens".to_string()),
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"message_end\""));
+    assert!(json.contains("\"stop_reason\":\"max_tokens\""));
+
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::MessageEnd { stop_reason } = decoded else {
+        return Err(anyhow!("expected MessageEnd event"));
+    };
+    assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
+
+    // Older producers omit the field entirely, which must still decode.
+    let decoded = parse_event_json(r#"{"type":"message_end"}"#)?;
+    let ServerEvent::MessageEnd { stop_reason } = decoded else {
+        return Err(anyhow!("expected MessageEnd event"));
+    };
+    assert!(stop_reason.is_none());
+
+    // A reasonless end-of-turn must not add noise to the wire.
+    let json = encode_event(&ServerEvent::MessageEnd { stop_reason: None });
+    assert!(!json.contains("stop_reason"), "unexpected field: {json}");
+    Ok(())
+}
