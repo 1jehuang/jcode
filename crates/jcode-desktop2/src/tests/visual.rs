@@ -90,15 +90,31 @@ impl Rendered {
         let s = self.frame.scale;
         let x = ((self.frame.right - 3.0) * s).round() as u32;
         let paper = self.luma(x, ((self.frame.body_top + 2.0) * s).round() as u32);
-        let mut first = None;
-        let mut last = None;
-        for y in 0..self.height {
+        // Below the masthead rule, so its hairline is not mistaken for the
+        // well, and take the tallest contiguous inked run: the wash is the one
+        // large filled region on this column.
+        let start = ((self.frame.masthead_rule + 6.0) * s).round() as u32;
+        let mut best: Option<(u32, u32)> = None;
+        let mut run: Option<(u32, u32)> = None;
+        for y in start..self.height {
             if paper - self.luma(x, y) > 0.004 {
-                first = first.or(Some(y));
-                last = Some(y);
+                run = Some(match run {
+                    Some((a, _)) => (a, y),
+                    None => (y, y),
+                });
+            } else if let Some((a, b)) = run.take()
+                && best.is_none_or(|(c, d)| b - a > d - c)
+            {
+                best = Some((a, b));
             }
         }
-        Some((f64::from(first?) / s, f64::from(last?) / s))
+        if let Some((a, b)) = run
+            && best.is_none_or(|(c, d)| b - a > d - c)
+        {
+            best = Some((a, b));
+        }
+        let (a, b) = best?;
+        Some((f64::from(a) / s, f64::from(b) / s))
     }
 }
 
