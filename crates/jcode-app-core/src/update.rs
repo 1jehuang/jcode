@@ -10,11 +10,19 @@ pub use jcode_update_core::{
     DownloadProgress, GIT_PULL_DIVERGED_SUMMARY, GitHubAsset, GitHubRelease, PreparedUpdate,
     UpdateCheckResult, UpdateEstimate, format_download_progress_bar, summary_is_divergence,
 };
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+
+#[path = "update_metadata.rs"]
+mod update_metadata;
+#[path = "update_rate_limit.rs"]
+mod update_rate_limit;
+pub use update_metadata::UpdateMetadata;
+use update_metadata::{record_release_update_duration, record_source_update_duration};
+pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
+use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
 const GITHUB_REPO: &str = "1jehuang/jcode";
 /// Minimum gap between *automatic* update checks.
@@ -26,16 +34,7 @@ const GITHUB_REPO: &str = "1jehuang/jcode";
 /// spurious 403s. Half an hour is far below any realistic release cadence and
 /// keeps automatic checks to at most a couple of requests per hour.
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
-/// How long to stop checking after GitHub reports the rate limit is exhausted
-/// and gives us no usable reset hint.
-const RATE_LIMIT_BACKOFF_FALLBACK: Duration = Duration::from_secs(60 * 60);
-/// Upper bound on a server-provided backoff, so a bogus reset header cannot
-/// disable update checks indefinitely.
-const RATE_LIMIT_BACKOFF_MAX: Duration = Duration::from_secs(6 * 60 * 60);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-/// Marker prefix on errors caused by GitHub API rate limiting, so callers can
-/// present the situation as "checked too often" rather than a real failure.
-pub const RATE_LIMIT_ERROR_PREFIX: &str = "GitHub API rate limit reached";
 /// Time allowed for the initial TCP/TLS connect to the download host.
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Total wall-clock budget for a single download *attempt*.
@@ -99,99 +98,12 @@ fn current_update_semver() -> &'static str {
     jcode_build_meta::update_semver()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateMetadata {
-    pub last_check: SystemTime,
-    pub installed_version: Option<String>,
-    pub installed_from: Option<String>,
-    #[serde(default)]
-    pub last_release_update_secs: Option<f64>,
-    #[serde(default)]
-    pub last_source_update_secs: Option<f64>,
-    /// When set, automatic update checks are suppressed until this time
-    /// because GitHub reported the API rate limit was exhausted. Shared via
-    /// the metadata file so every jcode process on the machine backs off, not
-    /// just the one that saw the 403.
-    #[serde(default)]
-    pub rate_limited_until: Option<SystemTime>,
-}
-
-impl Default for UpdateMetadata {
-    fn default() -> Self {
-        Self {
-            last_check: SystemTime::UNIX_EPOCH,
-            installed_version: None,
-            installed_from: None,
-            last_release_update_secs: None,
-            last_source_update_secs: None,
-            rate_limited_until: None,
-        }
-    }
-}
-
-impl UpdateMetadata {
-    pub fn load() -> Result<Self> {
-        let path = metadata_path()?;
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
-            Ok(serde_json::from_str(&content)?)
-        } else {
-            Ok(Self::default())
-        }
-    }
-
-    pub fn save(&self) -> Result<()> {
-        let path = metadata_path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)?;
-        Ok(())
-    }
-
-    pub fn should_check(&self) -> bool {
-        if self.rate_limited_backoff_remaining().is_some() {
-            return false;
-        }
-        match self.last_check.elapsed() {
-            Ok(elapsed) => elapsed > UPDATE_CHECK_INTERVAL,
-            Err(_) => true,
-        }
-    }
-
-    /// Remaining rate-limit backoff, if an earlier check was rate limited and
-    /// the backoff window has not elapsed yet.
-    pub fn rate_limited_backoff_remaining(&self) -> Option<Duration> {
-        let until = self.rate_limited_until?;
-        until.duration_since(SystemTime::now()).ok().filter(|remaining| !remaining.is_zero())
-    }
-}
-
-fn metadata_path() -> Result<PathBuf> {
-    Ok(storage::jcode_dir()?.join("update_metadata.json"))
-}
-
 fn source_build_root() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("builds").join("source"))
 }
 
 fn source_build_repo_dir() -> Result<PathBuf> {
     Ok(source_build_root()?.join("jcode"))
-}
-
-fn record_release_update_duration(duration: Duration) {
-    if let Ok(mut metadata) = UpdateMetadata::load() {
-        metadata.last_release_update_secs = Some(duration.as_secs_f64());
-        let _ = metadata.save();
-    }
-}
-
-fn record_source_update_duration(duration: Duration) {
-    if let Ok(mut metadata) = UpdateMetadata::load() {
-        metadata.last_source_update_secs = Some(duration.as_secs_f64());
-        let _ = metadata.save();
-    }
 }
 
 pub fn should_auto_update() -> bool {
@@ -296,100 +208,6 @@ fn github_api_request(
     } else {
         request
     }
-}
-
-/// Detect a GitHub API rate-limit rejection, record a shared backoff window,
-/// and return a recognizable error.
-///
-/// GitHub answers an exhausted bucket with 403 (or 429) plus
-/// `x-ratelimit-remaining: 0`, so we distinguish it from a genuine
-/// authorization failure and avoid hammering the API from every new session.
-fn rate_limit_error(response: &reqwest::blocking::Response) -> Option<anyhow::Error> {
-    let status = response.status();
-    let headers = response.headers();
-    let header_num = |name: &str| -> Option<u64> {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok())
-    };
-    let backoff = rate_limit_backoff(
-        status.as_u16(),
-        header_num("x-ratelimit-remaining"),
-        header_num("retry-after"),
-        header_num("x-ratelimit-reset"),
-        SystemTime::now(),
-    )?;
-    record_rate_limit_backoff(backoff);
-    Some(anyhow::anyhow!(
-        "{}; skipping update checks for {}. Set GH_TOKEN/GITHUB_TOKEN or run `gh auth login` to use your 5000 req/h quota.",
-        RATE_LIMIT_ERROR_PREFIX,
-        format_duration_estimate(backoff)
-    ))
-}
-
-/// How long to back off for a GitHub response, or `None` when the response is
-/// not a rate-limit rejection.
-///
-/// Split out from the HTTP plumbing so the header interpretation is unit
-/// testable: GitHub signals an exhausted bucket with 403/429 plus
-/// `x-ratelimit-remaining: 0`, while a 403 with quota remaining is a genuine
-/// authorization failure that must not silence update checks.
-fn rate_limit_backoff(
-    status: u16,
-    remaining: Option<u64>,
-    retry_after_secs: Option<u64>,
-    reset_epoch_secs: Option<u64>,
-    now: SystemTime,
-) -> Option<Duration> {
-    if status != 403 && status != 429 {
-        return None;
-    }
-    if status == 403 && remaining != Some(0) {
-        return None;
-    }
-
-    Some(
-        retry_after_secs
-            .map(Duration::from_secs)
-            .or_else(|| {
-                // checked_add: a garbage reset header must not panic here.
-                let reset_at =
-                    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(reset_epoch_secs?))?;
-                reset_at.duration_since(now).ok()
-            })
-            .filter(|backoff| !backoff.is_zero())
-            .unwrap_or(RATE_LIMIT_BACKOFF_FALLBACK)
-            .min(RATE_LIMIT_BACKOFF_MAX),
-    )
-}
-
-fn record_rate_limit_backoff(backoff: Duration) {
-    let until = SystemTime::now() + backoff;
-    if let Ok(mut metadata) = UpdateMetadata::load() {
-        metadata.rate_limited_until = Some(until);
-        metadata.last_check = SystemTime::now();
-        let _ = metadata.save();
-    }
-    crate::logging::warn(&format!(
-        "update: GitHub API rate limited; suppressing update checks for {}. Set GH_TOKEN/GITHUB_TOKEN or run `gh auth login` for a 5000 req/h quota.",
-        format_duration_estimate(backoff)
-    ));
-}
-
-fn clear_rate_limit_backoff() {
-    if let Ok(mut metadata) = UpdateMetadata::load()
-        && metadata.rate_limited_until.is_some()
-    {
-        metadata.rate_limited_until = None;
-        let _ = metadata.save();
-    }
-}
-
-/// True when this error came from GitHub API throttling rather than a real
-/// update failure, so UIs can stay quiet about it.
-pub fn is_rate_limit_error(error: &str) -> bool {
-    error.contains(RATE_LIMIT_ERROR_PREFIX)
 }
 
 fn latest_main_sha_blocking() -> Result<String> {
@@ -1473,76 +1291,6 @@ mod tests {
     #[test]
     fn test_should_auto_update_dev_build() {
         assert!(!should_auto_update());
-    }
-
-    #[test]
-    fn test_rate_limit_backoff_ignores_non_rate_limit_statuses() {
-        let now = SystemTime::now();
-        assert!(rate_limit_backoff(200, None, None, None, now).is_none());
-        assert!(rate_limit_backoff(404, None, None, None, now).is_none());
-        // 403 with quota left is a real authorization failure.
-        assert!(rate_limit_backoff(403, Some(37), None, None, now).is_none());
-        assert!(rate_limit_backoff(403, None, None, None, now).is_none());
-    }
-
-    #[test]
-    fn test_rate_limit_backoff_uses_reset_header() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-        let backoff = rate_limit_backoff(403, Some(0), None, Some(1_600), now).unwrap();
-        assert_eq!(backoff, Duration::from_secs(600));
-    }
-
-    #[test]
-    fn test_rate_limit_backoff_prefers_retry_after_and_clamps() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-        assert_eq!(
-            rate_limit_backoff(429, None, Some(90), Some(9_999), now).unwrap(),
-            Duration::from_secs(90)
-        );
-        // A bogus far-future reset must not disable checks forever.
-        assert_eq!(
-            rate_limit_backoff(429, Some(0), None, Some(u64::MAX / 2), now).unwrap(),
-            RATE_LIMIT_BACKOFF_MAX
-        );
-        // Past/zero hints fall back to the default window.
-        assert_eq!(
-            rate_limit_backoff(429, Some(0), None, Some(10), now).unwrap(),
-            RATE_LIMIT_BACKOFF_FALLBACK
-        );
-    }
-
-    #[test]
-    fn test_should_check_respects_rate_limit_backoff() {
-        let mut metadata = UpdateMetadata {
-            last_check: SystemTime::UNIX_EPOCH,
-            ..Default::default()
-        };
-        assert!(metadata.should_check());
-        metadata.rate_limited_until = Some(SystemTime::now() + Duration::from_secs(600));
-        assert!(!metadata.should_check());
-        assert!(metadata.rate_limited_backoff_remaining().is_some());
-        // An elapsed backoff no longer blocks checks.
-        metadata.rate_limited_until = Some(SystemTime::now() - Duration::from_secs(1));
-        assert!(metadata.rate_limited_backoff_remaining().is_none());
-        assert!(metadata.should_check());
-    }
-
-    #[test]
-    fn test_should_check_enforces_interval() {
-        let metadata = UpdateMetadata {
-            last_check: SystemTime::now(),
-            ..Default::default()
-        };
-        assert!(!metadata.should_check());
-    }
-
-    #[test]
-    fn test_is_rate_limit_error_matches_wrapped_message() {
-        assert!(is_rate_limit_error(&format!(
-            "Check failed: {}; skipping",
-            RATE_LIMIT_ERROR_PREFIX
-        )));
-        assert!(!is_rate_limit_error("Check failed: connection reset"));
     }
 
     #[test]
