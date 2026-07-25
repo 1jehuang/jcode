@@ -202,15 +202,15 @@ windows. That is compositor policy, not a bug to fix here.
 
 | # | Rule | Enforced by |
 |---|------|-------------|
-| 6.54 | A long line wraps inside the well instead of running past its right edge. | `visual::a_long_line_wraps_inside_the_composer_well` |
-| 6.55 | Wrapping grows the well and is a view concern: the buffer keeps one logical line. | `actions::a_long_line_wraps_into_multiple_rows_and_grows_the_well` |
+| 6.54 | A long line wraps inside the well instead of running past its right edge. | `visual_tests::a_long_line_wraps_inside_the_composer_well` |
+| 6.55 | Wrapping grows the well and is a view concern: the buffer keeps one logical line. | `action_tests::a_long_line_wraps_into_multiple_rows_and_grows_the_well` |
 | 6.56 | Wrapping breaks at whitespace, and mid-word only when a word exceeds the row. | `wrap::tests::long_text_wraps_at_whitespace`, `a_word_longer_than_the_line_breaks_mid_word` |
 | 6.57 | No row exceeds the width budget, at any budget. | `wrap::tests::wrapped_rows_never_exceed_the_budget` |
 | 6.58 | Wrapping never loses, duplicates, or splits a character. | `wrapping_preserves_every_character`, `row_boundaries_stay_on_char_boundaries` |
 | 6.59 | Rows are ordered, never overlap, and cover the whole text. | `wrap::tests::rows_are_ordered_and_never_overlap` |
 | 6.60 | Every cursor offset maps to a row, so the caret can never vanish. | `wrap::tests::every_offset_maps_to_some_row`, `the_cursor_maps_to_a_row_and_column` |
-| 6.61 | The wrap budget matches the measured font width, so text cannot silently overflow. | `actions::the_wrap_budget_matches_the_measured_font_width` |
-| 6.62 | Clicking a wrapped row places the caret on that row. | `actions::clicking_a_wrapped_row_lands_on_that_row` |
+| 6.61 | The wrap budget matches the measured font width, so text cannot silently overflow. | `action_tests::the_wrap_budget_matches_the_measured_font_width` |
+| 6.62 | Clicking a wrapped row places the caret on that row. | `action_tests::clicking_a_wrapped_row_lands_on_that_row` |
 | 6.63 | A degenerate width never hangs or panics. | `wrap::tests::a_zero_budget_does_not_hang_or_panic` |
 
 Remaining interaction gaps, honestly:
