@@ -180,38 +180,20 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
 }
 
-/// Whether `model` resolves to a Claude family jcode classifies statically
-/// (i.e. one whose long-context behavior we have verified). Matches by family
-/// prefix so dated aliases (`claude-opus-4-5-20251101`) and `[1m]` suffixes are
-/// covered, while unknown/future Claude ids fall through to the dynamic cache.
+/// Whether `model` is a Claude id whose long-context behavior
+/// [`crate::anthropic::anthropic_context_mode`] can classify.
+///
+/// This deliberately accepts *any* versioned `claude-*` id rather than a
+/// hardcoded prefix list: the classifier itself is version-aware and defaults
+/// optimistically for new generations, so newly released Claude models no
+/// longer silently fall through to the 200K default (issues #450, #577, #578).
+/// Unversioned/unknown-shaped ids still fall through to the dynamic cache.
 fn base_is_known_claude_model(base: &str) -> bool {
-    const KNOWN_CLAUDE_PREFIXES: &[&str] = &[
-        "claude-opus-5",
-        "claude-opus-4-8",
-        "claude-opus-4.8",
-        "claude-opus-4-7",
-        "claude-opus-4.7",
-        "claude-opus-4-6",
-        "claude-opus-4.6",
-        "claude-opus-4-5",
-        "claude-opus-4.5",
-        "claude-sonnet-5",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4.6",
-        "claude-sonnet-4-5",
-        "claude-sonnet-4.5",
-        "claude-haiku-4-5",
-        "claude-haiku-4.5",
-        // Fable 5 is a native-1M flagship (see `anthropic_context_mode`). It is
-        // not in `ALL_CLAUDE_MODELS` because Anthropic retired its public id (it
-        // 404s and is served as Opus 4.8), but sessions can still be pinned to
-        // it, so it must classify as 1M instead of falling through to 200K.
-        "claude-fable-5",
-        "claude-fable",
-    ];
-    KNOWN_CLAUDE_PREFIXES
-        .iter()
-        .any(|prefix| base.starts_with(prefix))
+    let normalized = base.to_ascii_lowercase();
+    if !normalized.starts_with("claude") {
+        return false;
+    }
+    crate::anthropic::claude_id_has_parseable_version(&normalized)
 }
 
 pub fn context_limit_for_model_with_provider_and_cache(
@@ -227,18 +209,23 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(copilot_context_limit_for_model(model));
     }
 
-    // Claude models: classify long-context behavior centrally. This is the
-    // authoritative source for known Claude models because the live catalog's
-    // `max_input_tokens` field over-advertises 1M for models that are actually
-    // 200K-capped (verified against the live API). Unknown/future Claude models
-    // fall through to the dynamic cache below.
-    if base_is_known_claude_model(model) {
+    // Claude models: classify long-context behavior centrally. For generations
+    // verified against the live API this is authoritative, because the live
+    // catalog's `max_input_tokens` over-advertises 1M for models that are
+    // actually 200K-capped (e.g. `claude-sonnet-4-5`). For newer generations the
+    // classification is an optimistic guess, so catalog/config data below wins
+    // and the guess is only a last-resort fallback (issues #450, #577, #578).
+    let claude_static_limit = base_is_known_claude_model(model).then(|| {
         let mode = crate::anthropic::anthropic_context_mode(model);
-        return Some(if is_1m {
+        if is_1m {
             mode.long_context_window()
         } else {
             mode.default_context_window()
-        });
+        }
+    });
+    if claude_static_limit.is_some() && crate::anthropic::anthropic_context_mode_is_verified(model)
+    {
+        return claude_static_limit;
     }
 
     // Honor an explicitly configured/cached context limit before applying broad
@@ -288,7 +275,9 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(limit);
     }
 
-    None
+    // Last resort for unverified Claude generations: the optimistic static
+    // classification, which is far better than falling back to the 200K default.
+    claude_static_limit
 }
 
 /// Best-effort context window for well-known open-weight model families.
@@ -336,8 +325,14 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
-    // --- Moonshot Kimi K2 family: 256K context ---
-    if m.contains("kimi") {
+    // --- Moonshot Kimi family ---
+    // Kimi Code serves the flagship under the bare id `k3` (no `kimi` in the
+    // id), so match the bare `k<n>` shape too (issue #577).
+    if m.contains("kimi") || is_bare_kimi_id(m) {
+        // K3 and newer ship a 1M window; K2 and earlier are 256K.
+        if kimi_generation(m).is_some_and(|generation| generation >= 3) {
+            return Some(1_048_576);
+        }
         return Some(262_144);
     }
 
@@ -395,6 +390,43 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(128_000);
     }
 
+    None
+}
+
+/// Whether `model` is a bare Moonshot Kimi id like `k2`, `k3`, or `k3-turbo`,
+/// as served by `api.kimi.com/coding` without the `kimi` prefix.
+fn is_bare_kimi_id(model: &str) -> bool {
+    let Some(rest) = model.strip_prefix('k') else {
+        return false;
+    };
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return false;
+    }
+    // Only a version suffix may follow the digits (`k3`, `k3-turbo`, `k2.5`).
+    matches!(
+        rest[digits.len()..].chars().next(),
+        None | Some('-') | Some('.')
+    )
+}
+
+/// Parse the Kimi generation number from ids like `kimi-k2`, `k3`, `kimi-k3-turbo`.
+fn kimi_generation(model: &str) -> Option<u32> {
+    let bytes = model.as_bytes();
+    for (index, window) in bytes.windows(2).enumerate() {
+        if window[0] != b'k' || !window[1].is_ascii_digit() {
+            continue;
+        }
+        // Require a word boundary before the `k` so `mk4` style ids don't match.
+        if index > 0 && (bytes[index - 1].is_ascii_alphanumeric()) {
+            continue;
+        }
+        let digits: String = model[index + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        return digits.parse().ok();
+    }
     None
 }
 
@@ -555,6 +587,91 @@ mod tests {
         assert!(!anthropic_context_mode("claude-opus-4-8").exposes_1m_alias());
         assert!(anthropic_context_mode("claude-opus-4-6").exposes_1m_alias());
         assert!(!anthropic_context_mode("claude-sonnet-4-5").exposes_1m_alias());
+    }
+
+    /// Regression guard for the recurring "new model resolves to 200K" bug
+    /// shape (#450 Sonnet 5, #577 Kimi K3, #578 Opus 5). The point is not these
+    /// specific ids: it is that an *unreleased* future generation must never
+    /// fall back to `DEFAULT_CONTEXT_LIMIT` just because no one edited a list.
+    #[test]
+    fn future_claude_generations_do_not_fail_closed_at_the_default_limit() {
+        for model in [
+            "claude-opus-5",
+            "claude-opus-6",
+            "claude-sonnet-6",
+            "claude-haiku-5",
+            "claude-fable-5",
+            "claude-fable-6",
+            "claude-opus-7-20270101",
+        ] {
+            let limit = context_limit_for_model_with_provider(model, Some("claude"));
+            assert!(
+                limit.is_some_and(|limit| limit > DEFAULT_CONTEXT_LIMIT),
+                "{model} fell back to the {DEFAULT_CONTEXT_LIMIT} default (got {limit:?})"
+            );
+        }
+    }
+
+    /// Verified 200K-capped generations must stay pinned, and must win over a
+    /// live catalog that over-advertises 1M for them.
+    #[test]
+    fn verified_claude_generations_stay_pinned_over_the_catalog() {
+        for model in [
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5-20250929",
+        ] {
+            assert_eq!(
+                context_limit_for_model_with_provider_and_cache(model, Some("claude"), |_| Some(
+                    1_000_000
+                )),
+                Some(200_000),
+                "{model} should stay pinned at 200K despite the catalog"
+            );
+        }
+        // Native-1M verified generations stay at 1M.
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-opus-4-8", Some("claude")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-sonnet-5", Some("claude")),
+            Some(1_000_000)
+        );
+    }
+
+    /// For unverified (new) generations the live catalog/config wins over the
+    /// optimistic static guess.
+    #[test]
+    fn catalog_overrides_optimistic_guess_for_unverified_claude_generations() {
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-opus-5",
+                Some("claude"),
+                |_| { Some(400_000) }
+            ),
+            Some(400_000)
+        );
+    }
+
+    /// Kimi Code serves its flagship under the bare id `k3` (issue #577).
+    #[test]
+    fn bare_kimi_ids_resolve_to_their_real_window() {
+        assert_eq!(open_weight_family_context_limit("k3"), Some(1_048_576));
+        assert_eq!(
+            open_weight_family_context_limit("k3-turbo"),
+            Some(1_048_576)
+        );
+        assert_eq!(open_weight_family_context_limit("kimi-k3"), Some(1_048_576));
+        assert_eq!(open_weight_family_context_limit("k2"), Some(262_144));
+        assert_eq!(
+            open_weight_family_context_limit("kimi-k2-0905-preview"),
+            Some(262_144)
+        );
+        // Unrelated ids that merely start with `k` must not be misread as Kimi.
+        assert_eq!(open_weight_family_context_limit("kernel-model"), None);
+        assert_eq!(open_weight_family_context_limit("gpt-4k"), None);
     }
 
     #[test]
