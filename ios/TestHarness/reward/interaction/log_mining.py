@@ -32,8 +32,13 @@ What we CAN mine (clean, structured, low-noise markers):
   req_set_reasoning_effort      ... request_kind=set_reasoning_effort       open_settings
   req_subscribe                 ... request_kind=subscribe                  (dropped: connect noise)
   req_reload                    ... request_kind=reload                     (dropped: reconnect)
+  req_set_route / req_set_model ... request_kind=set_route|set_model         change_model
+  req_resume_session            ... request_kind=resume_session              switch_session
   session_resume_start          SESSION_LIFECYCLE phase=resume_start         switch_session
-  env_set_model                 ENV_SNAPSHOT ... "reason":"set_model"        change_model
+  env_set_model                 ENV_SNAPSHOT ... "reason":"set_model"        (cross-check only:
+                                                                             also fires for
+                                                                             automatic/internal
+                                                                             model changes)
   tool_start                    TOOL_LIFECYCLE phase=start                   (dropped: agent-driven)
   assistant_turns               "Assistant:"                                 (cross-check only)
   remote_interrupt_cancel       REMOTE_INTERRUPT_SEND_START kind=cancel      (cross-check only)
@@ -268,8 +273,17 @@ def _map_to_mobile(counts: dict[str, int]) -> dict[str, int]:
         "soft_interrupt": counts.get("req_soft_interrupt", 0),
         "interrupt": counts.get("req_cancel", 0),               # hard stop a run
         "cancel": counts.get("req_cancel_soft_interrupts", 0),  # drop a queued msg
-        "switch_session": counts.get("session_resume_start", 0),
-        "change_model": counts.get("env_set_model", 0),
+        "switch_session": counts.get("session_resume_start", 0)
+        + counts.get("req_resume_session", 0),
+        # A USER model switch is a client `set_route`/`set_model` REQUEST.
+        # ENV_SNAPSHOT reason=set_model also fires for internal/automatic model
+        # changes (failover, per-subagent routing, swarm spawns), which are not
+        # taps: on this machine it over-counted by ~240x (950 vs 4) and made
+        # "change model" look like the dominant mobile action. Keep the snapshot
+        # count only as a cross-check, never as demand.
+        "change_model": counts.get("req_set_route", 0) + counts.get("req_set_model", 0),
+        # Reasoning effort now lives in the nested Settings screen, so it is the
+        # honest proxy for "went digging in configuration".
         "open_settings": counts.get("req_set_reasoning_effort", 0),
     }
 

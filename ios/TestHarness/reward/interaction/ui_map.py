@@ -212,12 +212,29 @@ def _chat_targets(
 
     targets: list[UITarget] = []
 
-    # --- Settings (ellipsis) button: trailing item of the top-pinned header ---
-    sw, sh = _size_from_source(frames, "ellipsis.circle", "settings")
+    # --- Sessions button: LEADING item of the top-pinned header ---------------
+    # Navigation lives on the leading edge (iOS back/menu convention) because
+    # switching session is the most frequent non-typing action.
+    sw, sh = _size_from_source(frames, "line.3.horizontal", "sessions")
     header_band_top = TOP_SAFE_INSET_PT
-    settings_x = screen_w - h_margin - sw / 2.0
-    settings_y = header_band_top + header_vpad + sh / 2.0
-    targets.append(UITarget("settings", sw, sh, settings_x, settings_y, exists=True))
+    sessions_x = h_margin + sw / 2.0
+    sessions_y = header_band_top + header_vpad + sh / 2.0
+    targets.append(UITarget("sessions", sw, sh, sessions_x, sessions_y, exists=True))
+
+    # --- Model label: the tappable title block between sessions and status ----
+    # It fills the remaining header width, so it is a large, cheap target for
+    # changing model mid-conversation (one tap from chat).
+    status_pill_w = 20.0   # StatusPill dot + padding, trailing item
+    header_gap = 12.0      # HStack(spacing: 12) in the header
+    model_left = h_margin + sw + header_gap
+    model_right = screen_w - h_margin - status_pill_w - header_gap
+    model_w = max(44.0, model_right - model_left)
+    # Two mono lines (title 15pt + model 11pt) plus the 1pt VStack spacing.
+    model_h = round(15 * 1.30) + round(11 * 1.30) + 1.0
+    model_x = (model_left + model_right) / 2.0
+    model_y = header_band_top + header_vpad + max(sh, model_h) / 2.0
+    targets.append(UITarget("model_label", model_w, model_h, model_x, model_y, exists=True))
+    _note("model_label", "tappable header title block; opens ModelPickerView")
 
     # --- Composer band, pinned to the bottom above the home indicator ---------
     band_bottom = screen_h - BOTTOM_SAFE_INSET_PT
@@ -288,7 +305,12 @@ def _chat_targets(
 def _settings_targets(
     src: dict[str, str], screen_w: float, screen_h: float
 ) -> list[UITarget]:
-    """Settings sheet: NavigationStack + grouped List (Model/Sessions/Servers)."""
+    """Sessions sheet: NavigationStack + grouped List (Sessions/Servers/More).
+
+    This is the sheet opened from the header's leading "sessions" button. Model
+    selection is NOT here any more: it lives in its own picker (see
+    ``_model_picker_targets``), reached by tapping the header model label.
+    """
     targets: list[UITarget] = []
     row_x = screen_w / 2.0
     row_w = screen_w - 2.0 * LIST_H_MARGIN_PT
@@ -315,17 +337,12 @@ def _settings_targets(
         targets.append(UITarget(tid, row_w, LIST_ROW_H_PT, row_x, cy, exists=True))
         y += LIST_ROW_H_PT
 
-    # Section: Model
+    # Section: Sessions -- FIRST, because switching session is why this sheet is
+    # opened most of the time. "New session" leads so it is the cheapest target.
     y += SECTION_HEADER_H_PT
-    add_rows("model_row", N_MODEL_ROWS, LIST_ROW_H_PT)
-    _note("model_row_*", f"{N_MODEL_ROWS} representative rows (count is runtime/dynamic); {LIST_ROW_H_PT}pt each")
-
-    # Section: Sessions (rows + "Rename" + "New session")
-    y += SECTION_GAP_PT + SECTION_HEADER_H_PT
+    add_button("new_session")
     add_rows("session_row", N_SESSION_ROWS, LIST_ROW_H_PT)
     _note("session_row_*", f"{N_SESSION_ROWS} representative rows (count is runtime/dynamic); {LIST_ROW_H_PT}pt each")
-    add_button("rename_session")
-    add_button("new_session")
 
     # Section: Servers (two-line rows + "Pair new server")
     y += SECTION_GAP_PT + SECTION_HEADER_H_PT
@@ -333,6 +350,36 @@ def _settings_targets(
     _note("server_row_*", f"{N_SERVER_ROWS} representative two-line rows ({LIST_ROW_2LINE_H_PT}pt); count is runtime/dynamic")
     add_button("pair_new_server")
 
+    # Section: More (rare configuration, deliberately last)
+    y += SECTION_GAP_PT
+    add_button("rename_session")
+    add_button("compact_conversation")
+    add_button("open_settings_row")
+    _note("open_settings_row", "Settings is a NavigationLink one level down from Sessions")
+
+    return targets
+
+
+def _model_picker_targets(
+    src: dict[str, str], screen_w: float, screen_h: float
+) -> list[UITarget]:
+    """Model picker sheet: reached in one tap from the chat header model label."""
+    targets: list[UITarget] = []
+    row_x = screen_w / 2.0
+    row_w = screen_w - 2.0 * LIST_H_MARGIN_PT
+
+    done_x = screen_w - LIST_H_MARGIN_PT - NAV_DONE_W_PT / 2.0
+    done_y = SHEET_TOP_PT + NAV_BAR_H_PT / 2.0
+    targets.append(
+        UITarget("model_picker_done", NAV_DONE_W_PT, NAV_BAR_H_PT, done_x, done_y, exists=True)
+    )
+
+    y = SHEET_TOP_PT + NAV_BAR_H_PT + LIST_TOP_PAD_PT + SECTION_HEADER_H_PT
+    for i in range(N_MODEL_ROWS):
+        cy = y + LIST_ROW_H_PT / 2.0
+        targets.append(UITarget(f"model_row_{i}", row_w, LIST_ROW_H_PT, row_x, cy, exists=True))
+        y += LIST_ROW_H_PT
+    _note("model_row_*", f"{N_MODEL_ROWS} representative rows in ModelPickerView; {LIST_ROW_H_PT}pt each")
     return targets
 
 
@@ -410,8 +457,9 @@ def build_ui_map(
 ) -> dict[str, list[UITarget]]:
     """Build the per-screen map of tappable-control geometry from the Swift source.
 
-    Returns a dict keyed by screen/state id -- ``"chat"``, ``"settings_sheet"``,
-    ``"pairing"`` -- each a list of :class:`UITarget` (center + size in points).
+    Returns a dict keyed by screen/state id -- ``"chat"``, ``"sessions_sheet"``,
+    ``"model_picker"``, ``"pairing"`` -- each a list of :class:`UITarget`
+    (center + size in points).
     Conditionally-shown controls (e.g. the composer stop button) are included with
     ``exists=False`` so the cost model can price both states. Size assumptions are
     recorded in :data:`LAYOUT_ASSUMPTIONS` (also via :func:`assumptions`).
@@ -421,7 +469,8 @@ def build_ui_map(
     src = _read_sources(root)
     return {
         "chat": _chat_targets(src, screen_w_pt, screen_h_pt),
-        "settings_sheet": _settings_targets(src, screen_w_pt, screen_h_pt),
+        "sessions_sheet": _settings_targets(src, screen_w_pt, screen_h_pt),
+        "model_picker": _model_picker_targets(src, screen_w_pt, screen_h_pt),
         "pairing": _pairing_targets(src, screen_w_pt, screen_h_pt),
     }
 
@@ -547,11 +596,24 @@ def _self_test() -> None:
     assert send.x_pt > DEFAULT_SCREEN_W_PT * 0.75, "send should be on the right"
     assert send.y_pt > DEFAULT_SCREEN_H_PT * 0.80, "send should be near the bottom"
 
-    # The 44x44 settings ellipsis must read 44x44, near the top-right.
-    settings = chat["settings"]
-    assert (settings.width_pt, settings.height_pt) == (44.0, 44.0), settings
-    assert settings.x_pt > DEFAULT_SCREEN_W_PT * 0.75, "settings should be on the right"
-    assert settings.y_pt < DEFAULT_SCREEN_H_PT * 0.20, "settings should be near the top"
+    # The 44x44 sessions button must read 44x44, near the top-LEFT.
+    sessions = chat["sessions"]
+    assert (sessions.width_pt, sessions.height_pt) == (44.0, 44.0), sessions
+    assert sessions.x_pt < DEFAULT_SCREEN_W_PT * 0.25, "sessions should be on the left"
+    assert sessions.y_pt < DEFAULT_SCREEN_H_PT * 0.20, "sessions should be near the top"
+
+    # The header model label is a wide, cheap target between them.
+    label = chat["model_label"]
+    assert label.width_pt > 150.0, f"model label should be wide, got {label.width_pt}"
+    assert label.y_pt < DEFAULT_SCREEN_H_PT * 0.20, "model label should be near the top"
+    assert label.x_pt > sessions.x_pt, "model label sits right of the sessions button"
+
+    # Model rows live in their own picker now, not in the sessions sheet.
+    sessions_sheet = {t.id: t for t in m["sessions_sheet"]}
+    assert "model_row_0" not in sessions_sheet, "model rows moved to the picker"
+    assert "open_settings_row" in sessions_sheet, "settings is nested under sessions"
+    picker = {t.id: t for t in m["model_picker"]}
+    assert "model_row_0" in picker, "picker should carry the model rows"
 
     # Stop button is conditional -> mapped but exists=False.
     assert chat["stop"].exists is False

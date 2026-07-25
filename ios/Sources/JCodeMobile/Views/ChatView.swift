@@ -5,7 +5,8 @@ import SwiftUI
 struct ChatView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.compactEdgePads) private var edgePads
-    @State private var showSettings = false
+    @State private var showSessions = false
+    @State private var showModelPicker = false
     @State private var sendCount = 0
 
     var body: some View {
@@ -59,8 +60,11 @@ struct ChatView: View {
                 onInterrupt: { model.interrupt() }
             )
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
+        .sheet(isPresented: $showSessions) {
+            SessionsView()
+        }
+        .sheet(isPresented: $showModelPicker) {
+            ModelPickerView()
         }
         .sensoryFeedback(.impact(weight: .light), trigger: sendCount)
         .sensoryFeedback(.impact(flexibility: .soft), trigger: finishedToolCallCount) {
@@ -91,28 +95,13 @@ struct ChatView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            // Single-line header: title + model on one baseline keeps chrome
-            // lean so the transcript gets the vertical space.
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(model.session.sessionTitle ?? model.activeServer?.serverName ?? "jcode")
-                    .font(Theme.mono(16, weight: .semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                if let modelName = model.session.modelName {
-                    Text(shortModelName(modelName))
-                        .font(Theme.mono(11))
-                        .foregroundStyle(Theme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-            }
-            Spacer()
-            StatusPill(phase: model.session.phase)
+            // Sessions live top-left: switching session is the most frequent
+            // navigation, and the leading edge is the cheapest thumb target for
+            // a "go somewhere else" action (matching iOS back/menu convention).
             Button {
-                showSettings = true
+                showSessions = true
             } label: {
-                Image(systemName: "ellipsis")
+                Image(systemName: "line.3.horizontal")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 44, height: 44)
@@ -120,8 +109,40 @@ struct ChatView: View {
                     .clipShape(Circle())
                     .overlay(Circle().stroke(Theme.border, lineWidth: 1))
             }
-            .accessibilityLabel("Settings")
-            .accessibilityHint("Sessions, model, and servers")
+            .accessibilityLabel("Sessions")
+            .accessibilityHint("Switch session, manage servers, and open settings")
+
+            // Title + model on one baseline keeps chrome lean so the transcript
+            // gets the vertical space. Tapping the model opens the picker, so
+            // changing model is one tap from the conversation.
+            Button {
+                showModelPicker = true
+            } label: {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.session.sessionTitle ?? model.activeServer?.serverName ?? "jcode")
+                        .font(Theme.mono(15, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                    HStack(spacing: 3) {
+                        Text(shortModelName(model.session.modelName ?? "model"))
+                            .font(Theme.mono(11))
+                            .foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Model \(shortModelName(model.session.modelName ?? "unknown"))")
+            .accessibilityHint("Opens the model picker")
+
+            StatusPill(phase: model.session.phase)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
