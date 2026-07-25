@@ -484,6 +484,11 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("gpt-oss-120b");
             push("zai-glm-4.7");
         }
+        // Celeris serves exactly one model per base URL today, and `/models`
+        // requires auth, so keep the documented id available pre-refresh.
+        "celeris" => {
+            push("celeris-1");
+        }
         "xiaomi-mimo" => {
             push("mimo-v2.5");
             push("mimo-v2.5-pro");
