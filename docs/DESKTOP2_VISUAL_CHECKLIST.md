@@ -169,15 +169,29 @@ deliberately skipped, with the reason.
 | 6.45 | A selection spanning a line break highlights every line it covers. | `visual_tests::a_selection_across_lines_highlights_every_line`, `multiline_tests::selection_can_span_lines` |
 | 6.46 | Line motion and multi-line offsets stay on char boundaries. | `multiline_tests::line_motion_stays_on_char_boundaries` |
 
+### Window and pointer
+
+| # | Rule | Enforced by |
+|---|------|-------------|
+| 6.47 | The window reopens at the size and position it was left. | `window_state::tests::round_trips_through_the_saved_format`, `action_tests::window_geometry_is_remembered_across_resizes` |
+| 6.47a | Geometry is saved as it changes, not only on a clean exit, so a crash does not lose it. | `geometry_is_saved_promptly_the_first_time` |
+| 6.47b | Saving is throttled and skips unchanged values, so dragging an edge does not hammer the disk. | `repeated_saves_are_throttled_while_dragging`, `unchanged_geometry_is_not_rewritten` |
+| 6.48 | A corrupt, tiny, or absurd saved geometry degrades to defaults instead of opening a broken window. | `corrupt_content_never_panics_and_falls_back`, `a_tiny_saved_window_is_rejected`, `an_absurd_saved_window_is_rejected` |
+| 6.49 | Negative positions are kept (multi-monitor), non-finite ones dropped. | `negative_positions_are_kept_for_multi_monitor_setups`, `non_finite_positions_are_dropped` |
+| 6.50 | The pointer is a text caret over the composer and an arrow elsewhere. | `action_tests::the_pointer_becomes_a_text_caret_over_the_composer` |
+| 6.51 | The pointer shape and the click target agree exactly. | `action_tests::the_composer_hit_area_matches_the_drawn_well` |
+
+Note: the saved size is a *request*. Tiling compositors (niri, sway) decide
+window geometry themselves, so restoration is only visible for floating
+windows. That is compositor policy, not a bug to fix here.
+
 Remaining interaction gaps, honestly:
 
 | # | Rule | Status |
 |---|------|--------|
-| 6.47 | Window remembers its size and position. | **gap** |
-| 6.48 | Slash-command autocomplete, queue mode, stash (see `NOT_PORTED`). | **gap** |
-| 6.49 | Selecting text in the *transcript* (only the composer is selectable). | **gap** |
-| 6.50 | Text-cursor mouse pointer shape over the composer. | **gap** |
-| 6.51 | Soft wrapping of one long line in the composer (it scrolls instead). | **gap** |
+| 6.52 | Slash-command autocomplete, queue mode, stash (see `NOT_PORTED`). | **gap** |
+| 6.53 | Selecting text in the *transcript* (only the composer is selectable). | **gap** |
+| 6.54 | Soft wrapping of one long line in the composer (it scrolls instead). | **gap** |
 
 ## 7. Performance and correctness
 

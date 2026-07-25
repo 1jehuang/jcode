@@ -15,6 +15,7 @@ mod render;
 mod states;
 mod text;
 mod theme;
+mod window_state;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -217,6 +218,13 @@ struct App {
     dragging: bool,
     /// Last click time and offset, for double-click word selection.
     last_click: Option<(std::time::Instant, usize)>,
+    /// Current mouse pointer shape, tracked so it is only set when it changes.
+    cursor_icon: winit::window::CursorIcon,
+    /// Window size and position, persisted so the app reopens as it was left.
+    geometry: window_state::Geometry,
+    /// When the geometry was last written, and what was written, so resizing
+    /// does not hit the disk on every event.
+    geometry_saved: Option<(std::time::Instant, window_state::Geometry)>,
     /// Geometry of the most recently built frame. Pointer hit-testing reads
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
@@ -235,6 +243,9 @@ impl Default for App {
             pointer: (0.0, 0.0),
             dragging: false,
             last_click: None,
+            cursor_icon: winit::window::CursorIcon::Default,
+            geometry: window_state::Geometry::default(),
+            geometry_saved: None,
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
@@ -421,7 +432,48 @@ impl App {
         self.request_redraw();
     }
 
+    /// Persist the window geometry if it changed and the throttle has elapsed.
+    /// Saving as we go (rather than only on exit) means the size survives a
+    /// crash or a kill.
+    fn save_geometry(&mut self, force: bool) {
+        let now = std::time::Instant::now();
+        if !force && !self.geometry.should_save(self.geometry_saved, now) {
+            return;
+        }
+        if self.geometry_saved.map(|(_, g)| g) == Some(self.geometry.sanitized()) && !force {
+            return;
+        }
+        self.geometry.save();
+        self.geometry_saved = Some((now, self.geometry.sanitized()));
+    }
+
+    /// Whether a logical point is inside the composer well.
+    fn in_composer(&self, x: f64, y: f64) -> bool {
+        y >= self.frame.composer_top
+            && y <= self.frame.composer_bottom
+            && x >= self.frame.left
+            && x <= self.frame.right
+    }
+
+    /// Show a text caret over the composer and the default arrow elsewhere, so
+    /// the input box looks editable before it is clicked.
+    fn update_cursor_icon(&mut self) {
+        let (x, y) = self.pointer;
+        let wanted = if self.in_composer(x, y) {
+            winit::window::CursorIcon::Text
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        if self.cursor_icon != wanted {
+            self.cursor_icon = wanted;
+            if let Some(state) = self.state.as_ref() {
+                state.set_cursor_icon(wanted);
+            }
+        }
+    }
+
     fn on_pointer_moved(&mut self) {
+        self.update_cursor_icon();
         if !self.dragging {
             return;
         }
@@ -585,15 +637,19 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("jcode desktop2")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0)),
-                )
-                .expect("create window"),
-        );
+        // Reopen where the user left off.
+        let geometry = window_state::Geometry::load();
+        let mut attributes = Window::default_attributes()
+            .with_title("jcode desktop2")
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                geometry.width,
+                geometry.height,
+            ));
+        if let Some((x, y)) = geometry.position {
+            attributes = attributes.with_position(winit::dpi::LogicalPosition::new(x, y));
+        }
+        self.geometry = geometry;
+        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
         let redraw_window = Arc::clone(&window);
         self.harness = Some(harness::spawn(move || redraw_window.request_redraw()));
         let state = pollster::block_on(render::RenderState::new(window)).expect("init gpu");
@@ -610,11 +666,28 @@ impl ApplicationHandler for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save_geometry(true);
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(state) = self.state.as_mut() {
                     state.resize(size.width, size.height);
+                    let scale = state.scale_factor();
+                    self.geometry.width = f64::from(size.width) / scale;
+                    self.geometry.height = f64::from(size.height) / scale;
                 }
+                self.save_geometry(false);
+            }
+            WindowEvent::Moved(position) => {
+                let scale = self
+                    .state
+                    .as_ref()
+                    .map(|state| state.scale_factor())
+                    .unwrap_or(1.0);
+                self.geometry.position =
+                    Some((f64::from(position.x) / scale, f64::from(position.y) / scale));
+                self.save_geometry(false);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self
@@ -672,6 +745,7 @@ impl ApplicationHandler for App {
                     keymap::resolve(&logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
                 let typed = text.as_ref().map(|t| t.as_str());
                 if !self.apply(action, typed) {
+                    self.save_geometry(true);
                     event_loop.exit();
                     return;
                 }
@@ -1562,6 +1636,65 @@ mod action_tests {
             5,
             "hit-testing did not follow the resized layout"
         );
+    }
+
+    #[test]
+    fn the_pointer_becomes_a_text_caret_over_the_composer() {
+        let mut app = app_with("alpha");
+        // Over the transcript: default arrow.
+        app.pointer = (app.frame.left + 10.0, app.frame.body_top + 10.0);
+        app.update_cursor_icon();
+        assert_eq!(app.cursor_icon, winit::window::CursorIcon::Default);
+        // Over the composer: text caret, so the box looks editable.
+        app.pointer = (app.frame.left + 10.0, composer_y(&app));
+        app.update_cursor_icon();
+        assert_eq!(app.cursor_icon, winit::window::CursorIcon::Text);
+        // And back.
+        app.pointer = (app.frame.left + 10.0, app.frame.body_top + 10.0);
+        app.update_cursor_icon();
+        assert_eq!(app.cursor_icon, winit::window::CursorIcon::Default);
+    }
+
+    #[test]
+    fn the_composer_hit_area_matches_the_drawn_well() {
+        // The pointer shape and the click target must agree, or the cursor
+        // would promise editability where clicking does nothing.
+        let mut app = app_with("alpha");
+        let f = app.frame;
+        let inside = [
+            (f.left + 1.0, f.composer_top + 1.0),
+            (f.right - 1.0, f.composer_bottom - 1.0),
+        ];
+        for (x, y) in inside {
+            assert!(app.in_composer(x, y));
+            assert!(
+                app.composer_offset_at(x, y).is_some(),
+                "({x}, {y}) shows a text cursor but is not clickable"
+            );
+        }
+        let outside = [
+            (f.left + 1.0, f.composer_top - 2.0),
+            (f.left + 1.0, f.composer_bottom + 2.0),
+            (f.left - 2.0, composer_y(&app)),
+            (f.right + 2.0, composer_y(&app)),
+        ];
+        for (x, y) in outside {
+            assert!(!app.in_composer(x, y));
+            assert!(
+                app.composer_offset_at(x, y).is_none(),
+                "({x}, {y}) is clickable but shows no text cursor"
+            );
+        }
+    }
+
+    #[test]
+    fn window_geometry_is_remembered_across_resizes() {
+        let mut app = App::default();
+        app.geometry.width = 1600.0;
+        app.geometry.height = 1000.0;
+        app.geometry.position = Some((120.0, 40.0));
+        let restored = super::window_state::Geometry::parse(&app.geometry.serialize());
+        assert_eq!(restored, app.geometry);
     }
 
     #[test]
