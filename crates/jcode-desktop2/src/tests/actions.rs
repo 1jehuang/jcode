@@ -243,7 +243,7 @@ fn x_for_offset_in(app: &mut App, offset: usize, frame: crate::layout::Frame) ->
     // never hardcode font metrics.
     let source = app.model.editor.text().to_string();
     let caret = composer_layout(app, &source, frame).caret_rect(offset, 1.0);
-    frame.left + crate::layout::COMPOSER_PAD_X + caret.x0
+    frame.composer_text_left() + caret.x0
 }
 
 /// The composer's Parley layout for a frame: the same one the renderer and the
@@ -585,7 +585,7 @@ fn clicking_a_lower_line_lands_on_that_line() {
     let text_top = app.frame.composer_top + crate::layout::COMPOSER_TEXT_OFFSET;
     for (row, expected_line) in [(0usize, 0usize), (1, 1), (2, 2)] {
         let y = text_top + row as f64 * crate::layout::COMPOSER_LINE_HEIGHT + 4.0;
-        app.pointer = (app.frame.left + crate::layout::COMPOSER_PAD_X + 1.0, y);
+        app.pointer = (app.frame.composer_text_left() + 1.0, y);
         app.last_click = None;
         app.on_pointer_pressed();
         app.dragging = false;
@@ -700,7 +700,7 @@ fn clicking_a_wrapped_row_lands_on_that_row() {
     for (index, row) in rows.iter().enumerate().take(3) {
         // Aim at the vertical middle of the row Parley actually laid out.
         let y = text_top + (row.top + row.bottom) / 2.0;
-        app.pointer = (frame.left + crate::layout::COMPOSER_PAD_X + 1.0, y);
+        app.pointer = (frame.composer_text_left() + 1.0, y);
         app.last_click = None;
         app.on_pointer_pressed();
         app.dragging = false;
