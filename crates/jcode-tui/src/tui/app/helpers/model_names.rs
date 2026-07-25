@@ -124,13 +124,119 @@ fn prettify_versioned_family(family_label: &str, core: &str) -> String {
     out
 }
 
-/// Prettify only recognized model families (`gpt-*`, `claude-*`, `gemini-*`),
-/// returning `None` for anything else so unfamiliar or namespaced ids
-/// (`vendor/model`, `profile:model`) keep their exact spelling. Used by the
-/// `/model` picker, where hiding the real id would break copy-paste and
-/// provider-specific naming.
+/// AWS Bedrock region routing prefixes on cross-region inference profile ids.
+const BEDROCK_REGION_PREFIXES: [&str; 4] = ["us.", "eu.", "apac.", "global."];
+
+/// Bedrock vendor namespaces jcode knows how to render.
+///
+/// `anthropic.` reuses the Claude formatter. `amazon.` covers the first-party
+/// Nova family, which users see most on Bedrock and which title-cases cleanly.
+/// `meta.`, `qwen.`, `cohere.`, `ai21.`, `writer.`, `stability.` and friends are
+/// deliberately absent: their slugs carry parameter counts and quantization
+/// detail (`llama3-1-405b-instruct`, `qwen3-coder-480b-a35b`) that must stay
+/// byte-exact to remain meaningful.
+const BEDROCK_PRETTY_VENDORS: [&str; 2] = ["anthropic.", "amazon."];
+
+/// Split an AWS Bedrock model id into its region prefix, vendor namespace, and
+/// model portion.
+///
+/// Bedrock ids are structured rather than opaque:
+/// `us.anthropic.claude-opus-4-20250514-v1:0` is a region-routed cross-region
+/// inference profile for `anthropic`'s `claude-opus-4` snapshot at API revision
+/// `v1:0`. Rendering that raw makes Bedrock rows the least readable in the
+/// picker, so the parts are separated and reassembled by the caller.
+fn split_bedrock_model_id(model: &str) -> Option<(Option<&str>, &str, &str, Option<String>)> {
+    // Full ARNs carry account/region routing detail that must not be hidden.
+    let trimmed = model.trim();
+    if trimmed.starts_with("arn:aws:bedrock:") {
+        return None;
+    }
+
+    let mut rest = trimmed;
+    let mut region = None;
+    for prefix in BEDROCK_REGION_PREFIXES {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            region = Some(&prefix[..prefix.len() - 1]);
+            rest = stripped;
+            break;
+        }
+    }
+
+    let vendor = BEDROCK_PRETTY_VENDORS
+        .iter()
+        .find(|vendor| rest.starts_with(**vendor))?;
+    let model_part = &rest[vendor.len()..];
+    if model_part.is_empty() {
+        return None;
+    }
+
+    // Trailing `-v1:0` / `-v2:0` is a Bedrock API revision, not part of the
+    // model version. Keep it as a marker so distinct revisions stay
+    // distinguishable, but stop it from corrupting the version number.
+    let (model_part, revision) = match model_part.rsplit_once("-v") {
+        Some((head, tail))
+            if !head.is_empty()
+                && tail.split_once(':').is_some_and(|(major, minor)| {
+                    !major.is_empty()
+                        && major.chars().all(|c| c.is_ascii_digit())
+                        && !minor.is_empty()
+                        && minor.chars().all(|c| c.is_ascii_digit())
+                }) =>
+        {
+            (head, Some(format!("v{tail}")))
+        }
+        _ => (model_part, None),
+    };
+
+    Some((region, &vendor[..vendor.len() - 1], model_part, revision))
+}
+
+/// Render `us.anthropic.claude-opus-4-20250514-v1:0` as
+/// `Claude Opus 4 (2025-05-14, us, v1:0)`.
+fn prettify_bedrock(model: &str) -> Option<String> {
+    let (region, vendor, model_part, revision) = split_bedrock_model_id(model)?;
+    // Only render when the model portion is a family we know how to format;
+    // otherwise the raw id is more informative than a half-prettified one.
+    let base = match vendor {
+        // `Amazon Nova Pro` is the official product name, and unlike `Claude`
+        // the family slug alone would not identify the vendor.
+        "amazon" if model_part.to_ascii_lowercase().starts_with("nova") => {
+            format!("Amazon {}", title_case_dashed(model_part))
+        }
+        _ => pretty_known_model_family(model_part)?,
+    };
+    let mut markers: Vec<String> = Vec::new();
+    if let Some(region) = region {
+        markers.push(region.to_string());
+    }
+    if let Some(revision) = revision {
+        markers.push(revision);
+    }
+    if markers.is_empty() {
+        return Some(base);
+    }
+    // The base may already carry its own parenthetical (snapshot date, 1M);
+    // merge into a single group rather than stacking them.
+    Some(match base.strip_suffix(')') {
+        Some(head) => format!("{head}, {})", markers.join(", ")),
+        None => format!("{base} ({})", markers.join(", ")),
+    })
+}
+
+/// Prettify only recognized model families (`gpt-*`, `claude-*`, `gemini-*`,
+/// plus AWS Bedrock ids wrapping those families), returning `None` for anything
+/// else so unfamiliar or namespaced ids (`vendor/model`, `profile:model`) keep
+/// their exact spelling. Used by the `/model` picker, where hiding the real id
+/// would break copy-paste and provider-specific naming.
 pub(crate) fn pretty_known_model_family(model: &str) -> Option<String> {
     let (core, _) = split_bracket_suffix(model);
+    if core.contains('.') && core.contains('-') {
+        // Possibly a Bedrock id; `gpt-5.5` and `gemini-2.5-pro` also contain a
+        // dot, so only take this path when a vendor namespace actually matches.
+        if let Some(pretty) = prettify_bedrock(core) {
+            return Some(pretty);
+        }
+    }
     if core.contains('/') || core.contains(':') {
         return None;
     }
@@ -272,6 +378,73 @@ mod tests {
             "anthropic/claude-opus-4.6",
             "google/gemini-3-pro-preview",
             "comtegra:glm-51-nvfp4",
+        ] {
+            assert!(
+                pretty_known_model_family(raw).is_none(),
+                "{raw} should stay verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn pretty_known_model_family_renders_aws_bedrock_ids() {
+        // Region-routed cross-region inference profiles keep the region and the
+        // Bedrock API revision visible, since both distinguish real routes.
+        assert_eq!(
+            pretty_known_model_family("us.anthropic.claude-opus-4-20250514-v1:0").as_deref(),
+            Some("Claude Opus 4 (2025-05-14, us, v1:0)")
+        );
+        assert_eq!(
+            pretty_known_model_family("eu.anthropic.claude-3-5-sonnet-20241022-v2:0").as_deref(),
+            Some("Claude 3.5 Sonnet (2024-10-22, eu, v2:0)")
+        );
+        // Plain foundation-model ids have no region segment.
+        assert_eq!(
+            pretty_known_model_family("anthropic.claude-3-haiku-20240307-v1:0").as_deref(),
+            Some("Claude 3 Haiku (2024-03-07, v1:0)")
+        );
+        // Undated ids stay clean rather than gaining an empty group.
+        assert_eq!(
+            pretty_known_model_family("anthropic.claude-sonnet-4-6").as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(
+            pretty_known_model_family("us.anthropic.claude-sonnet-4-6").as_deref(),
+            Some("Claude Sonnet 4.6 (us)")
+        );
+        // Amazon's first-party Nova family keeps its vendor word.
+        assert_eq!(
+            pretty_known_model_family("amazon.nova-pro-v1:0").as_deref(),
+            Some("Amazon Nova Pro (v1:0)")
+        );
+        assert_eq!(
+            pretty_known_model_family("global.amazon.nova-2-lite-v1:0").as_deref(),
+            Some("Amazon Nova 2 Lite (global, v1:0)")
+        );
+    }
+
+    #[test]
+    fn pretty_known_model_family_keeps_opaque_bedrock_ids_verbatim() {
+        for raw in [
+            // Full ARNs carry account/region routing that must not be hidden.
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-20250514-v1:0",
+            // Third-party Bedrock vendors encode parameter counts and
+            // quantization detail that only reads correctly byte-exact.
+            "meta.llama3-1-405b-instruct-v1:0",
+            "qwen.qwen3-coder-480b-a35b-v1:0",
+            "mistral.mistral-large-2407-v1:0",
+            "cohere.command-r-plus-v1:0",
+            "ai21.jamba-1-5-large-v1:0",
+            "writer.palmyra-x5-v1:0",
+            "stability.sd3-5-large-v1:0",
+            "deepseek.r1-v1:0",
+            "us.deepseek.r1-v1:0",
+            "openai.gpt-oss-120b-1:0",
+            "moonshotai.kimi-k2-instruct-v1:0",
+            "minimax.m2-v1:0",
+            "zai.glm-4-6-v1:0",
+            "nvidia.nemotron-super-v1:0",
+            "google.gemini-2-5-pro-v1:0",
         ] {
             assert!(
                 pretty_known_model_family(raw).is_none(),
