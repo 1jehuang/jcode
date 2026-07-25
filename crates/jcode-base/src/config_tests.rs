@@ -1098,6 +1098,50 @@ fn frozen_machine_written_sponsors_optout_is_repaired() {
     );
 }
 
+/// End-to-end: a real config file frozen by an old save must load with
+/// discovery enabled, and the next save must drop the section entirely so the
+/// freeze cannot recur.
+#[test]
+fn frozen_sponsors_optout_recovers_through_a_real_config_file() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
+    std::fs::write(
+        &path,
+        "[display]\ncentered = false\n\n[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n",
+    )
+    .expect("write frozen config");
+
+    let loaded = Config::load();
+    assert!(
+        loaded.sponsors.enabled,
+        "loading a machine-frozen opt-out must restore the shipped default"
+    );
+
+    loaded.save().expect("save config");
+    let rewritten = std::fs::read_to_string(&path).expect("read config");
+    assert!(
+        !rewritten.contains("[sponsors]"),
+        "saving must not write the discovery section back: {rewritten}"
+    );
+    assert!(
+        Config::load().sponsors.enabled,
+        "discovery must stay enabled after a save/load round trip"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    Config::invalidate_cache();
+}
+
 #[test]
 fn legacy_endpoint_optout_is_also_repaired() {
     let raw =
