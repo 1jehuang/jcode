@@ -106,26 +106,12 @@ fn picker_entry_pretty_name(entry: &crate::tui::PickerEntry) -> String {
         },
         None => (entry.name.as_str(), String::new()),
     };
-    match pretty_known_model_family(base) {
+    match crate::tui::app::helpers::pretty_known_model_family(base) {
         Some(pretty) => format!("{pretty}{suffix}"),
         None => entry.name.clone(),
     }
 }
 
-/// Prettify only recognized model families; return `None` for anything else so
-/// the raw id is shown verbatim.
-fn pretty_known_model_family(model: &str) -> Option<String> {
-    let core = model.strip_suffix("[1m]").unwrap_or(model);
-    if core.contains('/') || core.contains(':') {
-        return None;
-    }
-    let lower = core.to_ascii_lowercase();
-    if !(lower.starts_with("gpt-") || lower.starts_with("claude-") || lower.starts_with("gemini-"))
-    {
-        return None;
-    }
-    Some(crate::tui::app::helpers::pretty_model_display_name(model))
-}
 
 fn picker_row_marker(is_row_selected: bool, unavailable: bool, limited: bool) -> &'static str {
     if unavailable {
@@ -1227,6 +1213,8 @@ mod tests {
             "deepseek-ai/DeepSeek-V3",
             "qwen3-coder-plus",
             "openai/gpt-5.5",
+            "gpt-oss-120b",
+            "GLM-5.1",
         ] {
             entry.name = raw.to_string();
             assert_eq!(picker_entry_display_name(entry), raw);
