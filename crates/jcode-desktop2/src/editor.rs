@@ -425,6 +425,10 @@ impl Editor {
     /// callers can fall back to history recall.
     pub fn move_line(&mut self, delta: isize) -> bool {
         let (line, col) = self.cursor_line_col();
+        // A plain motion always collapses the selection, including when it
+        // cannot move: otherwise pressing Up at the first line would leave a
+        // stale highlight behind.
+        self.anchor = None;
         let target = match delta {
             d if d < 0 => {
                 if line == 0 {
@@ -869,6 +873,64 @@ mod selection_tests {
         backward.extend_to(1);
         assert_eq!(forward.selection(), backward.selection());
         assert_eq!(backward.selected_text(), Some("ell"));
+    }
+
+    /// *Every* plain motion must collapse the selection, not just whichever one
+    /// happened to be tested: a lingering highlight after any arrow key is a
+    /// bug, and testing one motion lets the others regress silently.
+    #[test]
+    fn every_plain_motion_collapses_the_selection() {
+        type Motion = (&'static str, fn(&mut Editor));
+        let motions: Vec<Motion> = vec![
+            ("move_left", |e| e.move_left()),
+            ("move_right", |e| e.move_right()),
+            ("move_home", |e| e.move_home()),
+            ("move_end", |e| e.move_end()),
+            ("move_word_left", |e| e.move_word_left()),
+            ("move_word_right", |e| e.move_word_right()),
+            ("move_line_up", |e| {
+                e.move_line(-1);
+            }),
+            ("move_line_down", |e| {
+                e.move_line(1);
+            }),
+        ];
+        for (name, motion) in motions {
+            let mut editor = Editor::with_text("alpha bravo\ncharlie delta");
+            editor.place_cursor(3);
+            editor.extend_to(8);
+            assert!(editor.selection().is_some(), "{name}: setup failed");
+            motion(&mut editor);
+            assert_eq!(
+                editor.selection(),
+                None,
+                "{name} left a stale selection behind"
+            );
+        }
+    }
+
+    /// And every extending motion must *keep* a selection, so the two families
+    /// can never be confused for one another.
+    #[test]
+    fn every_extending_motion_keeps_a_selection() {
+        type Motion = (&'static str, fn(&mut Editor));
+        let motions: Vec<Motion> = vec![
+            ("extend_left", |e| e.extend_left()),
+            ("extend_right", |e| e.extend_right()),
+            ("extend_home", |e| e.extend_home()),
+            ("extend_end", |e| e.extend_end()),
+            ("extend_word_left", |e| e.extend_word_left()),
+            ("extend_word_right", |e| e.extend_word_right()),
+        ];
+        for (name, motion) in motions {
+            let mut editor = Editor::with_text("alpha bravo charlie");
+            editor.place_cursor(8);
+            motion(&mut editor);
+            assert!(
+                editor.selection().is_some(),
+                "{name} did not create a selection"
+            );
+        }
     }
 
     #[test]

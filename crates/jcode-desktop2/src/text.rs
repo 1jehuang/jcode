@@ -190,3 +190,86 @@ fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f
             }),
         );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style() -> ParagraphStyle {
+        ParagraphStyle {
+            font_size: 13.5,
+            ..Default::default()
+        }
+    }
+
+    /// Measurement is in *logical* units, so the same text must measure the
+    /// same width at any scale factor. If measurement ignored the scale, the
+    /// caret and the soft-wrap budget would drift on HiDPI displays while
+    /// looking correct at 1x.
+    #[test]
+    fn measured_width_is_scale_independent() {
+        let mut text = TextSystem::default();
+        let sample = "the quick brown fox";
+        let base = text.measure_width(sample, style(), 1.0);
+        assert!(base > 0.0, "measured nothing");
+        for scale in [1.25, 1.5, 1.75, 2.0, 3.0] {
+            let scaled = text.measure_width(sample, style(), scale);
+            let drift = (scaled - base).abs();
+            assert!(
+                drift < base * 0.05,
+                "width drifted at scale {scale}: {base:.1} vs {scaled:.1} logical px"
+            );
+        }
+    }
+
+    /// Hit-testing shares the measurement path, so a click must map to the same
+    /// offset at every scale.
+    #[test]
+    fn hit_testing_is_scale_independent() {
+        let mut text = TextSystem::default();
+        let sample = "alpha bravo charlie";
+        for offset in [0usize, 6, 12, sample.len()] {
+            let x = text.measure_width(&sample[..offset], style(), 1.0);
+            for scale in [1.0, 1.75, 2.0] {
+                assert_eq!(
+                    text.offset_at_x(sample, x, style(), scale),
+                    offset,
+                    "a click at offset {offset} missed at scale {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn measuring_scales_monotonically_with_text_length() {
+        let mut text = TextSystem::default();
+        let mut previous = 0.0;
+        for count in 1..12 {
+            let width = text.measure_width(&"m".repeat(count), style(), 1.75);
+            assert!(
+                width > previous,
+                "{count} chars measured {width:.1}, not wider than {previous:.1}"
+            );
+            previous = width;
+        }
+    }
+
+    #[test]
+    fn empty_text_measures_zero() {
+        let mut text = TextSystem::default();
+        assert_eq!(text.measure_width("", style(), 1.75), 0.0);
+    }
+
+    #[test]
+    fn a_trailing_space_widens_the_measurement() {
+        // Guards the `full_width` vs `width` distinction: trimming trailing
+        // whitespace puts the caret before a trailing space.
+        let mut text = TextSystem::default();
+        let bare = text.measure_width("word", style(), 1.0);
+        let spaced = text.measure_width("word ", style(), 1.0);
+        assert!(
+            spaced > bare,
+            "a trailing space was trimmed: {bare:.1} vs {spaced:.1}"
+        );
+    }
+}
