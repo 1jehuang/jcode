@@ -716,3 +716,64 @@ fn the_masthead_meta_row_is_drawn_and_legible() {
         );
     }
 }
+
+/// Not an assertion: writes frames to `JCODE_DESKTOP2_DUMP` for eyeballing.
+/// Ignored, so it only runs when a human asks for pictures.
+#[test]
+#[ignore = "writes files for review"]
+fn dump_frames_for_review() {
+    let Some(dir) = std::env::var_os("JCODE_DESKTOP2_DUMP") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("create dump dir");
+    let mut text = TextSystem::default();
+    for (name, model) in nodes() {
+        let mut scene = Scene::new();
+        build_scene(&mut scene, &mut text, &model, (WIDTH, HEIGHT), SCALE);
+        let path = dir.join(format!("{name}.png"));
+        crate::capture::capture_scene_to_png(&scene, WIDTH, HEIGHT, &path).expect("write png");
+        eprintln!("wrote {}", path.display());
+    }
+}
+
+/// Composer text must sit vertically centred in its well: equal paper above
+/// and below the ink. A hardcoded text offset left it a pixel high, which is
+/// exactly the kind of drift that makes an input box look wrong.
+#[test]
+#[ignore = "requires a GPU"]
+fn composer_text_is_vertically_centred_in_the_well() {
+    for name in ["mid_input", "attached_empty", "selection", "multiline"] {
+        let model = states::by_name(name).expect("node");
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let s = f.scale;
+        let x0 = ((f.left + crate::layout::COMPOSER_PAD_X) * s) as u32;
+        let x1 = (f.right * s) as u32 - 2;
+        let mut first = None;
+        let mut last = None;
+        for y in ((f.composer_top * s) as u32)..((f.composer_bottom * s) as u32) {
+            if (x0..x1).any(|x| r.luma(x, y) < 0.5) {
+                first = first.or(Some(y));
+                last = Some(y);
+            }
+        }
+        let a = first.expect("no composer ink was drawn");
+        let b = last.expect("no composer ink was drawn");
+        let lines = model.editor.line_count();
+        let above = f64::from(a) / s - f.composer_top;
+        let below = f.composer_bottom - f64::from(b) / s;
+        // Glyph ink is not symmetric about its line box: the cap height leaves
+        // more room above than the descender leaves below, and that gap grows
+        // with the number of lines because only the outer lines are measured.
+        // Allow for that, but not for the padding itself being wrong, which is
+        // what a hardcoded text offset got wrong by a whole line-box pixel.
+        let budget = if lines > 1 { 4.0 } else { 1.5 };
+        assert!(
+            (above - below).abs() <= budget,
+            "{name}: composer text is off-centre: {above:.1}px above, {below:.1}px below"
+        );
+    }
+}

@@ -30,8 +30,9 @@ pub const COMPOSER_LINE_HEIGHT: f64 = 20.0;
 pub const COMPOSER_MAX_LINES: usize = 8;
 pub const COMPOSER_PAD_X: f64 = 14.0;
 pub const COMPOSER_RADIUS: f64 = 6.0;
-/// Baseline offset of the prompt text inside the composer well.
-pub const COMPOSER_TEXT_OFFSET: f64 = 13.0;
+/// Top of the prompt text inside the composer well. Derived so a single line
+/// is vertically centred: hardcoding it left the text a pixel high.
+pub const COMPOSER_TEXT_OFFSET: f64 = (COMPOSER_HEIGHT - COMPOSER_LINE_HEIGHT) / 2.0;
 /// Insert caret: a thin vertical bar, like any normal text input.
 pub const CARET_WIDTH: f64 = 1.5;
 pub const CARET_HEIGHT: f64 = 18.0;
