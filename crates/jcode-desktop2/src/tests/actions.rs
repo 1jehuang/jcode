@@ -630,6 +630,72 @@ fn down_moves_between_lines_before_returning_from_history() {
     );
 }
 
+/// The wrap budget is a character count derived from an assumed monospace
+/// advance. If that assumption drifts from the real font, wrapped text
+/// silently overflows the well, so check it against measured text.
+#[test]
+fn the_wrap_budget_matches_the_measured_font_width() {
+    let mut app = app_with("");
+    let frame = crate::layout::Frame::new((1400, 900), 1.0);
+    let budget = frame.composer_char_budget();
+    let style = crate::text::ParagraphStyle {
+        font_size: crate::layout::BODY_SIZE,
+        ..Default::default()
+    };
+    let usable = frame.column() - crate::layout::COMPOSER_PAD_X * 2.0;
+    let full: String = "m".repeat(budget);
+    let measured = app.text.measure_width(&full, style, 1.0);
+    assert!(
+        measured <= usable,
+        "a full row of {budget} chars measures {measured:.1}px but only {usable:.1}px fit"
+    );
+    // The budget must also not be needlessly small.
+    let over: String = "m".repeat(budget + 3);
+    assert!(
+        app.text.measure_width(&over, style, 1.0) > usable,
+        "the wrap budget is far smaller than the available width"
+    );
+}
+
+#[test]
+fn a_long_line_wraps_into_multiple_rows_and_grows_the_well() {
+    let long = "word ".repeat(60);
+    let app = app_with(&long);
+    let single = crate::layout::Frame::new((1400, 900), 1.0);
+    let rows = app.model.composer_rows(single.composer_char_budget());
+    assert!(rows.len() > 1, "a long line did not wrap");
+    let frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+    assert!(
+        frame.composer_top < single.composer_top,
+        "the well did not grow for wrapped rows"
+    );
+    // Wrapping is a view concern: it must not touch the buffer.
+    assert_eq!(app.model.editor.text(), long);
+    assert_eq!(app.model.editor.line_count(), 1);
+}
+
+#[test]
+fn clicking_a_wrapped_row_lands_on_that_row() {
+    let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ".repeat(3);
+    let mut app = app_with(&long);
+    app.frame = App::frame_for_model((900, 800), 1.0, &app.model);
+    let rows = app.model.composer_rows(app.frame.composer_char_budget());
+    assert!(rows.len() > 1, "test needs a wrapped input");
+    let text_top = app.frame.composer_top + crate::layout::COMPOSER_TEXT_OFFSET;
+    for (index, row) in rows.iter().enumerate().take(3) {
+        let y = text_top + index as f64 * crate::layout::COMPOSER_LINE_HEIGHT + 4.0;
+        app.pointer = (app.frame.left + crate::layout::COMPOSER_PAD_X + 1.0, y);
+        app.last_click = None;
+        app.on_pointer_pressed();
+        app.dragging = false;
+        assert_eq!(
+            app.model.editor.cursor(),
+            row.start,
+            "clicking the start of wrapped row {index} missed"
+        );
+    }
+}
+
 #[test]
 fn the_composer_frame_follows_the_input_line_count() {
     let mut app = app_with("one");

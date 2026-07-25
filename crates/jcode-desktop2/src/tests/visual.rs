@@ -32,9 +32,10 @@ impl Rendered {
             pixels,
             width,
             height,
-            // Must match the frame `build_scene` used, which sizes the
-            // composer to the model's line count.
-            frame: Frame::with_composer_lines((width, height), scale, model.editor.line_count()),
+            // Must be the same frame `build_scene` used: sized from the
+            // model's *wrapped* row count, via the shared helper so the two
+            // can never disagree.
+            frame: crate::App::frame_for_model((width, height), scale, model),
         })
     }
 

@@ -18,6 +18,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("caret_hidden", caret_hidden),
     ("selection", selection),
     ("multiline", multiline),
+    ("wrapped_long_line", wrapped_long_line),
     ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
@@ -132,6 +133,20 @@ fn selection_all() -> Model {
 fn multiline() -> Model {
     let mut editor = crate::editor::Editor::default();
     editor.insert_str("first line\nsecond line\nthird line");
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// One very long logical line: must wrap inside the well rather than running
+/// past its right edge.
+fn wrapped_long_line() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str(
+        "this is a single very long line with no newlines at all that has to wrap \
+         inside the composer well instead of spilling past its right edge",
+    );
     Model {
         editor,
         ..attached_empty()
