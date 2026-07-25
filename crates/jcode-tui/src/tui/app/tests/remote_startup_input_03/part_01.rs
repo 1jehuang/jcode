@@ -802,17 +802,17 @@ fn test_startup_update_error_replaces_checking_card() {
         .last()
         .expect("expected update display message");
     assert_eq!(message.title.as_deref(), Some("Update"));
-    assert!(message.content.contains("Status: failed"));
-    assert!(message.content.contains("Check failed: offline"));
+    // The failure card and notice are one short line each; the verbose error
+    // stays in the log.
+    assert_eq!(message.content, "Status: failed (offline)");
     assert!(
-        message
-            .content
-            .contains("Continuing with the current version.")
+        !message.content.contains('\n'),
+        "failure card should be one line: {}",
+        message.content
     );
-    assert_eq!(
-        app.status_notice(),
-        Some("Update failed; continuing current version".to_string())
-    );
+    let notice = app.status_notice().expect("expected failure notice");
+    assert_eq!(notice, "Update failed: offline");
+    assert!(!notice.contains('\n'), "notice should be one line: {notice}");
     assert!(app.background_client_action.is_none());
     assert!(app.pending_background_client_reload.is_none());
 }

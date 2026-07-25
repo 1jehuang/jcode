@@ -218,6 +218,108 @@ pub fn summary_is_divergence(summary: &str) -> bool {
     summary == GIT_PULL_DIVERGED_SUMMARY
 }
 
+/// Longest single-line update summary we hand to the UI.
+const UPDATE_ERROR_SUMMARY_MAX_CHARS: usize = 72;
+
+/// Condense any update-path error into a single short line fit for a status
+/// notice or a one-line card.
+///
+/// Update errors reach the UI from many layers (reqwest, git, cargo, tar,
+/// checksum verification), so raw text is often multi-line, prefixed with
+/// redundant "Update failed:" wrappers, and long enough to wrap several times.
+/// Users only need to know what went wrong in a few words; the full text stays
+/// in the log.
+pub fn summarize_update_error(error: &str) -> String {
+    let text = error.trim();
+    // Divergence is matched verbatim by callers that offer a merge affordance,
+    // so never rewrite it.
+    if summary_is_divergence(text) || git_pull_failure_is_divergence(text) {
+        return GIT_PULL_DIVERGED_SUMMARY.to_string();
+    }
+
+    // Strip the wrapper prefixes callers stack on top of each other.
+    let mut stripped = text;
+    while let Some(next) = ["Update failed:", "Update check failed:", "Check failed:"]
+        .iter()
+        .find_map(|prefix| stripped.strip_prefix(prefix))
+        .map(str::trim_start)
+    {
+        stripped = next;
+    }
+
+    let first_line = stripped
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown error");
+    if summary_is_divergence(first_line) {
+        return GIT_PULL_DIVERGED_SUMMARY.to_string();
+    }
+    if let Some(known) = known_update_error_summary(first_line) {
+        return known.to_string();
+    }
+
+    // Keep one clause: drop any trailing context sentence and punctuation.
+    let clause = first_line
+        .split_once(". ")
+        .map(|(head, _)| head)
+        .unwrap_or(first_line)
+        .trim_end_matches(['.', ':'])
+        .trim();
+    let clause = if clause.is_empty() { first_line } else { clause };
+
+    if clause.chars().count() <= UPDATE_ERROR_SUMMARY_MAX_CHARS {
+        return clause.to_string();
+    }
+    let truncated: String = clause
+        .chars()
+        .take(UPDATE_ERROR_SUMMARY_MAX_CHARS - 1)
+        .collect();
+    format!("{}…", truncated.trim_end())
+}
+
+/// Map noisy transport/tooling failures onto short human phrases.
+fn known_update_error_summary(line: &str) -> Option<&'static str> {
+    let lower = line.to_ascii_lowercase();
+    let has = |needle: &str| lower.contains(needle);
+
+    if has("dns") || has("failed to lookup address") || has("name or service not known") {
+        return Some("no network connection");
+    }
+    if has("timed out") || has("timeout") {
+        return Some("GitHub timed out");
+    }
+    if has("connection refused")
+        || has("connection reset")
+        || has("network is unreachable")
+        || has("tcp connect error")
+    {
+        return Some("could not reach GitHub");
+    }
+    if has("certificate") || has("tls ") || has("ssl") {
+        return Some("TLS error reaching GitHub");
+    }
+    if has("checksum") {
+        return Some("download failed checksum verification");
+    }
+    if has("permission denied") || has("read-only file system") || has("os error 13") {
+        return Some("no permission to install the update");
+    }
+    if has("no space left") {
+        return Some("not enough disk space");
+    }
+    if has("cargo build failed") {
+        return Some("cargo build failed");
+    }
+    if has("no asset found for platform") {
+        return Some("no release build for this platform");
+    }
+    if has("no releases found") {
+        return Some("no releases published yet");
+    }
+    None
+}
+
 pub fn parse_sha256sums(contents: &str) -> Result<HashMap<String, String>> {
     let mut checksums = HashMap::new();
     for (line_idx, line) in contents.lines().enumerate() {
@@ -336,6 +438,75 @@ mod tests {
     fn version_comparison_works() {
         assert!(version_is_newer("v0.2.0", "0.1.9"));
         assert!(!version_is_newer("v0.1.0", "0.1.0"));
+    }
+
+    /// Every UI surface renders these on one line, so the summary must stay
+    /// short and never contain a newline.
+    #[test]
+    fn summarize_update_error_is_always_one_short_line() {
+        let inputs = [
+            "Update failed: Update check failed: error sending request for url (https://api.github.com/repos/1jehuang/jcode/releases/latest)\n\nCaused by:\n    dns error: failed to lookup address information",
+            "cargo build failed: error[E0308]: mismatched types\n  --> src/lib.rs:1:1",
+            "Checksum mismatch for jcode-linux-x86_64.tar.gz: expected aaa, got bbb",
+            "Failed to install /home/u/.jcode/builds/versions/0.1.0/jcode: Permission denied (os error 13)",
+            "a very long single clause with no recognizable cause that just keeps going and going well past any sensible terminal width",
+            "",
+        ];
+        for input in inputs {
+            let summary = summarize_update_error(input);
+            assert!(!summary.contains('\n'), "multi-line summary for {input:?}");
+            assert!(!summary.is_empty(), "empty summary for {input:?}");
+            assert!(
+                summary.chars().count() <= UPDATE_ERROR_SUMMARY_MAX_CHARS,
+                "summary too long ({}) for {input:?}: {summary}",
+                summary.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn summarize_update_error_maps_known_causes() {
+        assert_eq!(
+            summarize_update_error("Update failed: dns error: failed to lookup address"),
+            "no network connection"
+        );
+        assert_eq!(
+            summarize_update_error("Check failed: operation timed out"),
+            "GitHub timed out"
+        );
+        assert_eq!(
+            summarize_update_error("Checksum mismatch for jcode: expected a, got b"),
+            "download failed checksum verification"
+        );
+        assert_eq!(
+            summarize_update_error("No asset found for platform: jcode-linux-x86_64"),
+            "no release build for this platform"
+        );
+    }
+
+    #[test]
+    fn summarize_update_error_strips_stacked_wrappers() {
+        assert_eq!(
+            summarize_update_error("Update failed: Update check failed: something odd happened"),
+            "something odd happened"
+        );
+    }
+
+    /// The merge affordance matches the divergence summary verbatim, so
+    /// summarizing must not rewrite it.
+    #[test]
+    fn summarize_update_error_preserves_divergence_summary() {
+        assert_eq!(
+            summarize_update_error(GIT_PULL_DIVERGED_SUMMARY),
+            GIT_PULL_DIVERGED_SUMMARY
+        );
+        assert_eq!(
+            summarize_update_error(&format!("Update failed: {GIT_PULL_DIVERGED_SUMMARY}")),
+            GIT_PULL_DIVERGED_SUMMARY
+        );
+        assert!(summary_is_divergence(&summarize_update_error(
+            "fatal: Need to specify how to reconcile divergent branches."
+        )));
     }
 
     #[test]
