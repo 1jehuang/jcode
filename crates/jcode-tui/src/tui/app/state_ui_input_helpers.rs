@@ -146,6 +146,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::public("/wrapped", "Alias for /productivity"),
     RegisteredCommand::public("/feedback", "Send feedback about jcode"),
+    RegisteredCommand::public("/telemetry", "Show or change what jcode sends"),
     RegisteredCommand::public("/support", "Email support with diagnostics prefilled"),
     RegisteredCommand::public("/subscription", "Show jcode subscription status"),
     RegisteredCommand::public("/subscribe", "Why and how to subscribe to jcode"),
@@ -1261,7 +1262,7 @@ impl App {
     /// the active guided flow phase. Defaults to the starter suggestion cards.
     pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
         use crate::tui::OnboardingWelcomeKind;
-        use crate::tui::app::onboarding_flow::OnboardingPhase;
+        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill, TelemetryLevel};
         match self.onboarding_phase() {
             Some(OnboardingPhase::Login { import }) => {
                 let prompt = import.as_ref().map(|review| {
@@ -1280,6 +1281,17 @@ impl App {
                         cursor: review.cursor,
                         continue_focused: review.continue_focused,
                         choosing: review.choosing,
+                        summary_pill: match review.summary_pill {
+                            SummaryPill::Continue => crate::tui::ImportSummaryPill::Continue,
+                            SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
+                            SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
+                        },
+                        telemetry: review.telemetry.map(|level| match level {
+                            TelemetryLevel::Everything => crate::tui::TelemetryChoice::Everything,
+                            TelemetryLevel::NoContent => crate::tui::TelemetryChoice::NoContent,
+                            TelemetryLevel::Nothing => crate::tui::TelemetryChoice::Nothing,
+                        }),
+                        telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
                         checked_count: review.checked_count(),
                         seconds_left: review.seconds_remaining(),
                     }

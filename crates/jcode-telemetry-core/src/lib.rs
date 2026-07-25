@@ -314,13 +314,59 @@ pub fn is_enabled() -> bool {
         logging::debug("telemetry disabled by environment");
         return false;
     }
-    if let Ok(dir) = storage::jcode_dir()
-        && dir.join("no_telemetry").exists()
-    {
+    if opt_out_marker_path().map(|p| p.exists()).unwrap_or(false) {
         logging::debug("telemetry disabled by no_telemetry marker");
         return false;
     }
     true
+}
+
+/// Marker file recording that the user opted out of anonymous usage telemetry.
+/// Its presence is equivalent to setting `JCODE_NO_TELEMETRY=1`, but persists
+/// across shells so the onboarding "Telemetry settings" screen can honor the
+/// choice without asking the user to edit their environment.
+fn opt_out_marker_path() -> Option<std::path::PathBuf> {
+    storage::jcode_dir().ok().map(|d| d.join("no_telemetry"))
+}
+
+/// Whether telemetry is disabled by an environment variable rather than by the
+/// persisted marker. Env opt-outs win, so UI should present themselves as
+/// read-only in that case.
+pub fn opt_out_forced_by_env() -> bool {
+    std::env::var("JCODE_NO_TELEMETRY").is_ok() || std::env::var("DO_NOT_TRACK").is_ok()
+}
+
+/// Persist the user's anonymous-usage telemetry choice. `enabled == false`
+/// writes the `no_telemetry` marker; `true` removes it. Returns whether the
+/// change was persisted (an env-var opt-out still overrides at runtime).
+pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
+    let Some(path) = opt_out_marker_path() else {
+        return false;
+    };
+    if enabled {
+        match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+            Err(err) => {
+                logging::debug(&format!("failed to remove no_telemetry marker: {err}"));
+                false
+            }
+        }
+    } else {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&path, b"1") {
+            Ok(()) => {
+                logging::debug("usage telemetry opted out via marker");
+                true
+            }
+            Err(err) => {
+                logging::debug(&format!("failed to write no_telemetry marker: {err}"));
+                false
+            }
+        }
+    }
 }
 
 /// Marker file recording that the user opted in to sharing prompt and

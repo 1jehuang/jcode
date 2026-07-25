@@ -1672,6 +1672,7 @@ fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_model_command(app, trimmed)
         || super::commands::handle_usage_command(app, trimmed)
         || super::commands::handle_feedback_command(app, trimmed)
+        || super::commands::handle_telemetry_command(app, trimmed)
         || super::support::handle_support_command(app, trimmed)
         || super::state_ui::handle_info_command(app, trimmed)
         || super::auth::handle_auth_command(app, trimmed)

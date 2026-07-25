@@ -108,7 +108,7 @@ fn onboarding_golden_walks_every_phase() {
 
     // 2. Login with detected imports: the default SUMMARY screen. It lists
     // everything we detected read-only and lands focus on a preselected
-    // "Continue" pill, with a second "Choose what to import" pill beside it.
+    // "Continue" pill, with "Import less" and "Telemetry settings" beside it.
     {
         let review = ImportReview::new(vec![
             ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
@@ -130,12 +130,14 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Codex auth.json"), "source 1: {text}");
         assert!(text.contains("Claude"), "provider 2: {text}");
         assert!(text.contains('✓'), "detected checkmark: {text}");
-        // The two action pills: "Continue" (preselected) and "Choose what to
-        // import", drawn as lozenges with half-circle end caps (◖ ◗).
+        // The three action pills: "Continue" (preselected), "Import less",
+        // and "Telemetry settings", drawn as lozenges with half-circle end
+        // caps (◖ ◗).
         assert!(text.contains("Continue"), "continue pill label: {text}");
+        assert!(text.contains("Import less"), "import-less pill: {text}");
         assert!(
-            text.contains("Choose what to import"),
-            "choose pill label: {text}"
+            text.contains("Telemetry settings"),
+            "telemetry pill label: {text}"
         );
         assert!(
             text.contains('\u{25D6}') && text.contains('\u{25D7}'),
@@ -342,4 +344,42 @@ fn onboarding_golden_walks_failure_and_async_states() {
         let text = render_onboarding_text(&app, width, height);
         assert_guided_polish("ContinuePrompt", &text);
     }
+}
+
+/// Golden render of the "Telemetry settings" sub-page reached from the import
+/// summary. Three stacked options with dim consequence captions, defaulting to
+/// "Send everything".
+#[test]
+fn onboarding_golden_telemetry_settings_page() {
+    use crate::external_auth::ExternalAuthReviewCandidate;
+    use crate::tui::app::onboarding_flow::ImportReview;
+
+    let mut review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+        "OpenAI/Codex",
+        "Codex auth.json",
+    )])
+    .unwrap();
+    review.open_telemetry();
+    let app = app_in_phase(OnboardingPhase::Login {
+        import: Some(review),
+    });
+    let text = render_onboarding_text(&app, 80, 34);
+    dump("Telemetry settings page", &text);
+    assert!(text.contains("Telemetry settings"), "title: {text}");
+    assert!(
+        text.contains("Send everything, including prompts"),
+        "option 1: {text}"
+    );
+    assert!(text.contains("Helps jcode the most"), "caption 1: {text}");
+    assert!(
+        text.contains("No prompts or transcripts"),
+        "option 2: {text}"
+    );
+    assert!(text.contains("Send nothing"), "option 3: {text}");
+    assert!(text.contains("/telemetry"), "later-change hint: {text}");
+    // The import summary is hidden while the sub-page is open.
+    assert!(
+        !text.contains("We found 1 existing login"),
+        "summary hidden: {text}"
+    );
 }

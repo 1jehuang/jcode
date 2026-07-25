@@ -142,16 +142,90 @@ fn continue_pill_line(focused: bool, align: Alignment) -> Line<'static> {
 }
 
 /// The summary-screen action row: "Continue" (imports everything, preselected)
-/// next to "Choose what to import" (opens the per-login checkbox list).
-fn import_summary_pills_line(continue_focused: bool, align: Alignment) -> Line<'static> {
+/// next to "Import less" (opens the per-login checkbox list) and "Telemetry
+/// settings" (opens the telemetry sub-page).
+fn import_summary_pills_line(
+    focused: crate::tui::ImportSummaryPill,
+    align: Alignment,
+) -> Line<'static> {
+    use crate::tui::ImportSummaryPill as Pill;
     let mut spans = Vec::new();
-    spans.extend(lozenge_pill_spans("Continue", continue_focused));
+    spans.extend(lozenge_pill_spans("Continue", focused == Pill::Continue));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
-        "Choose what to import",
-        !continue_focused,
+        "Import less",
+        focused == Pill::ImportLess,
+    ));
+    spans.push(Span::raw("   "));
+    spans.extend(lozenge_pill_spans(
+        "Telemetry settings",
+        focused == Pill::Telemetry,
     ));
     Line::from(spans).alignment(align)
+}
+
+/// The telemetry settings sub-page: three stacked pills, most sharing first,
+/// each with a dim one-line consequence caption. Reached from the "Telemetry
+/// settings" pill on the import summary; Esc returns without changing anything.
+fn telemetry_settings_lines(
+    highlighted: crate::tui::TelemetryChoice,
+    env_forced_off: bool,
+    align: Alignment,
+) -> Vec<Line<'static>> {
+    use crate::tui::TelemetryChoice as Choice;
+    let dim = Style::default().fg(dim_color());
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(
+        Line::from(Span::styled(
+            "Telemetry settings",
+            Style::default()
+                .fg(welcome_accent())
+                .add_modifier(Modifier::BOLD),
+        ))
+        .alignment(align),
+    );
+    lines.push(Line::from(""));
+
+    let options = [
+        (
+            Choice::Everything,
+            "Send everything, including prompts",
+            "Helps jcode the most",
+        ),
+        (
+            Choice::NoContent,
+            "No prompts or transcripts",
+            "Usage stats and crash reports only",
+        ),
+        (
+            Choice::Nothing,
+            "Send nothing",
+            "We stop seeing crashes and can't fix them",
+        ),
+    ];
+    for (choice, label, caption) in options {
+        lines.push(Line::from(lozenge_pill_spans(label, choice == highlighted)).alignment(align));
+        lines.push(Line::from(Span::styled(caption, dim)).alignment(align));
+        lines.push(Line::from(""));
+    }
+
+    if env_forced_off {
+        lines.push(
+            Line::from(Span::styled(
+                "Your environment already disables telemetry (JCODE_NO_TELEMETRY).",
+                dim,
+            ))
+            .alignment(align),
+        );
+    }
+    lines.push(
+        Line::from(Span::styled(
+            "Esc goes back. Change this later with /telemetry.",
+            dim,
+        ))
+        .alignment(align),
+    );
+    lines
 }
 
 /// Render the read-only detected-login list for the import summary screen: one
@@ -289,7 +363,7 @@ fn telemetry_header_lines(width: u16) -> Vec<Line<'static>> {
     let lines = vec![
         "jcode collects anonymous usage statistics (version, OS, session",
         "activity, and crash reasons). No code, prompts, or personal data.",
-        "Opt out anytime: export JCODE_NO_TELEMETRY=1",
+        "Change anytime: /telemetry (or export JCODE_NO_TELEMETRY=1)",
     ];
     lines
         .into_iter()
@@ -435,10 +509,21 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     );
                 }
                 Some(prompt) if !prompt.choosing => {
+                    // Telemetry settings sub-page takes over the body while
+                    // it is open, then returns to the summary below.
+                    if let Some(choice) = prompt.telemetry {
+                        lines.extend(telemetry_settings_lines(
+                            choice,
+                            prompt.telemetry_env_forced_off,
+                            align,
+                        ));
+                        return lines;
+                    }
                     // Summary screen (default): show what we detected as a
                     // read-only checkmarked list, then land the user on a
                     // preselected "Continue" pill that imports everything.
-                    // "Choose what to import" opens the per-login list.
+                    // "Import less" opens the per-login list; "Telemetry
+                    // settings" opens the telemetry sub-page.
                     let found = prompt.rows.len();
                     lines.push(
                         Line::from(Span::styled(
@@ -455,7 +540,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.push(Line::from(""));
                     lines.extend(import_summary_lines(&prompt));
                     lines.push(Line::from(""));
-                    lines.push(import_summary_pills_line(prompt.continue_focused, align));
+                    lines.push(import_summary_pills_line(prompt.summary_pill, align));
                 }
                 Some(prompt) => {
                     // Choose mode: a short "Import:" label, the Continue pill,
