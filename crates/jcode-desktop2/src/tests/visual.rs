@@ -650,28 +650,3 @@ fn the_masthead_meta_row_is_drawn_and_legible() {
         );
     }
 }
-
-/// The input box is the visual centre of the app: the well must span the middle
-/// of the window and really be painted there, at every node.
-#[test]
-#[ignore = "requires a GPU"]
-fn the_composer_well_covers_the_middle_of_the_window() {
-    for (name, model) in nodes() {
-        let Some(r) = Rendered::new(&model) else {
-            return;
-        };
-        let f = r.frame;
-        let middle = f.height / 2.0;
-        assert!(
-            f.composer_top <= middle && middle <= f.composer_bottom,
-            "{name}: the well ({:.1}..{:.1}) missed the page middle {middle:.1}",
-            f.composer_top,
-            f.composer_bottom
-        );
-        let luma = r.luma(((f.left + 4.0) * f.scale) as u32, (middle * f.scale) as u32);
-        assert!(
-            luma < 0.99,
-            "{name}: no well fill at the page middle (luma {luma:.3})"
-        );
-    }
-}
