@@ -87,33 +87,22 @@ impl Rendered {
     /// column, where only the well can ink, so prompt glyphs cannot be
     /// mistaken for the well itself.
     fn wash_band(&self) -> Option<(f64, f64)> {
+        // The composer is an outlined field, so it is found by its horizontal
+        // border rules rather than by a fill: scan a column just inside the
+        // right edge (where only the field's own borders can ink) and take the
+        // first and last inked rows below the transcript.
         let s = self.frame.scale;
-        let x = ((self.frame.right - 3.0) * s).round() as u32;
-        let paper = self.luma(x, ((self.frame.body_top + 2.0) * s).round() as u32);
-        // Take the tallest contiguous inked run: the wash is the one large
-        // filled region on this column.
+        let x = ((self.frame.right - 8.0) * s).round() as u32;
         let start = ((self.frame.body_top + 6.0) * s).round() as u32;
-        let mut best: Option<(u32, u32)> = None;
-        let mut run: Option<(u32, u32)> = None;
+        let mut first = None;
+        let mut last = None;
         for y in start..self.height {
-            if paper - self.luma(x, y) > 0.004 {
-                run = Some(match run {
-                    Some((a, _)) => (a, y),
-                    None => (y, y),
-                });
-            } else if let Some((a, b)) = run.take()
-                && best.is_none_or(|(c, d)| b - a > d - c)
-            {
-                best = Some((a, b));
+            if self.luma(x, y) < 0.95 {
+                first = first.or(Some(y));
+                last = Some(y);
             }
         }
-        if let Some((a, b)) = run
-            && best.is_none_or(|(c, d)| b - a > d - c)
-        {
-            best = Some((a, b));
-        }
-        let (a, b) = best?;
-        Some((f64::from(a) / s, f64::from(b) / s))
+        Some((f64::from(first?) / s, f64::from(last?) / s))
     }
 }
 
@@ -148,8 +137,8 @@ fn the_selection_band_lines_up_with_the_selected_glyphs() {
         // Columns inside the well that are neither paper nor pure glyph ink:
         // the band tints them. Sample a row clear of glyph ascenders.
         let y = ((f.composer_top + crate::layout::COMPOSER_TEXT_OFFSET + 3.0) * s).round() as u32;
-        let x0 = (f.left * s) as u32;
-        let x1 = (f.right * s) as u32;
+        let x0 = (f.composer_text_left() * s) as u32;
+        let x1 = ((f.right - 6.0) * s) as u32;
         let paper = r.luma(x1 - 2, y);
         let tinted: Vec<u32> = (x0..x1).filter(|&x| paper - r.luma(x, y) > 0.01).collect();
         assert!(
@@ -321,7 +310,7 @@ fn a_selection_is_visible_and_text_on_it_stays_readable() {
     let y = (band_y * s) as u32;
     let mut band_pixels = 0;
     let mut ink_pixels = 0;
-    for x in ((f.left * s) as u32)..((f.right * s) as u32) {
+    for x in ((f.composer_text_left() * s) as u32)..(((f.right - 4.0) * s) as u32) {
         let luma = r.luma(x, y);
         if (0.55..0.95).contains(&luma) {
             band_pixels += 1;
@@ -351,7 +340,7 @@ fn no_band_is_drawn_without_a_selection() {
     let s = f.scale;
     // Sample a row above the glyph bodies where a band would still paint.
     let y = ((f.composer_top + crate::layout::COMPOSER_TEXT_OFFSET + 1.0) * s) as u32;
-    let band_pixels = (((f.left + 2.0) * s) as u32..((f.right - 2.0) * s) as u32)
+    let band_pixels = ((f.composer_text_left() * s) as u32..((f.right - 6.0) * s) as u32)
         .filter(|&x| (0.55..0.95).contains(&r.luma(x, y)))
         .count();
     assert!(
@@ -383,7 +372,7 @@ fn a_multiline_message_renders_on_multiple_rows() {
             + line as f64 * crate::layout::COMPOSER_LINE_HEIGHT
             + 6.0;
         let row = (y * s) as u32;
-        let inked = ((f.left * s) as u32..(f.right * s) as u32)
+        let inked = (((f.composer_text_left()) * s) as u32..((f.right - 4.0) * s) as u32)
             .filter(|&x| r.luma(x, row) < 0.5)
             .count();
         assert!(inked > 0, "composer line {line} rendered nothing");
@@ -406,7 +395,7 @@ fn a_selection_across_lines_highlights_every_line() {
             + line as f64 * crate::layout::COMPOSER_LINE_HEIGHT
             + 2.0;
         let row = (y * s) as u32;
-        let band = ((f.left * s) as u32..(f.right * s) as u32)
+        let band = (((f.composer_text_left()) * s) as u32..((f.right - 4.0) * s) as u32)
             .filter(|&x| (0.55..0.95).contains(&r.luma(x, row)))
             .count();
         assert!(
@@ -463,7 +452,7 @@ fn a_long_line_wraps_inside_the_composer_well() {
             + crate::layout::COMPOSER_TEXT_OFFSET
             + row as f64 * crate::layout::COMPOSER_LINE_HEIGHT
             + 6.0;
-        let inked = ((f.left * s) as u32..(f.right * s) as u32)
+        let inked = (((f.composer_text_left()) * s) as u32..((f.right - 4.0) * s) as u32)
             .filter(|&x| r.luma(x, (y * s) as u32) < 0.5)
             .count();
         assert!(inked > 0, "wrapped row {row} rendered nothing");
@@ -565,8 +554,10 @@ fn caret_columns(r: &Rendered) -> Vec<u32> {
     let s = f.scale;
     let y0 = ((f.composer_top + crate::layout::COMPOSER_TEXT_OFFSET + 2.0) * s) as u32;
     let y1 = ((f.composer_top + crate::layout::COMPOSER_TEXT_OFFSET + 12.0) * s) as u32;
-    let x0 = (f.left * s) as u32;
-    let x1 = (f.right * s) as u32;
+    // Inside the field: its own left/right borders are full-height inked
+    // columns and would otherwise be mistaken for the caret.
+    let x0 = (f.composer_text_left() * s) as u32;
+    let x1 = ((f.right - 4.0) * s) as u32;
     (x0..x1)
         .filter(|&x| (y0..=y1).all(|y| r.luma(x, y) < 0.5))
         .collect()
@@ -650,7 +641,7 @@ fn the_caret_disappears_on_the_blink_off_phase() {
     let darkest = r.darkest_in(
         text_end,
         f.composer_top + 4.0,
-        f.right - 2.0,
+        f.right - 6.0,
         f.composer_bottom - 4.0,
     );
     assert!(
@@ -669,7 +660,7 @@ fn the_caret_stays_inside_the_composer_well() {
         };
         let f = r.frame;
         // Bands immediately above and below the well must stay paper.
-        let above = r.darkest_in(f.left, f.composer_top - 6.0, f.right, f.composer_top - 2.0);
+        let above = r.darkest_in(f.left, f.composer_top - 6.0, f.right, f.composer_top - 3.0);
         assert!(above > 0.9, "{name}: ink just above the composer well");
         let below = r.darkest_in(
             f.left,
@@ -803,7 +794,12 @@ fn the_composer_is_an_outlined_field_not_a_filled_slab() {
             f.right - 6.0,
             f.composer_bottom - 6.0,
         );
-        let page = r.darkest_in(f.left, f.body_top + 4.0, f.right, f.body_top + 10.0);
+        let page = r.darkest_in(
+            f.right - 40.0,
+            f.body_top + 4.0,
+            f.right - 6.0,
+            f.body_top + 10.0,
+        );
         assert!(
             interior > 0.97,
             "{name}: the field interior is tinted ({interior:.3}); it should be paper"
@@ -821,15 +817,14 @@ fn the_composer_is_an_outlined_field_not_a_filled_slab() {
         ];
         for (edge, x, y) in edges {
             // Allow a pixel of slack for stroke centring and antialiasing.
-            let inked = (-2i64..=2)
-                .any(|d| {
-                    let (px, py) = if edge == "top" || edge == "bottom" {
-                        (x, (y as i64 + d).max(0) as u32)
-                    } else {
-                        ((x as i64 + d).max(0) as u32, y)
-                    };
-                    px < r.width && py < r.height && r.luma(px, py) < 0.95
-                });
+            let inked = (-2i64..=2).any(|d| {
+                let (px, py) = if edge == "top" || edge == "bottom" {
+                    (x, (y as i64 + d).max(0) as u32)
+                } else {
+                    ((x as i64 + d).max(0) as u32, y)
+                };
+                px < r.width && py < r.height && r.luma(px, py) < 0.95
+            });
             assert!(inked, "{name}: no {edge} border was drawn on the field");
         }
     }
@@ -876,7 +871,10 @@ fn the_field_border_shows_focus() {
 fn no_caret_is_drawn_while_unfocused() {
     let model = states::by_name("unfocused").expect("node");
     assert!(!model.focused, "the unfocused node is focused");
-    assert!(model.caret.visible(), "node pins the caret on, to prove focus gates it");
+    assert!(
+        model.caret.visible(),
+        "node pins the caret on, to prove focus gates it"
+    );
     let Some(r) = Rendered::new(&model) else {
         return;
     };

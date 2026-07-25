@@ -56,7 +56,11 @@ fn sanitize(raw: String) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
         .take(64)
         .collect();
-    if out.is_empty() { "user".to_string() } else { out }
+    if out.is_empty() {
+        "user".to_string()
+    } else {
+        out
+    }
 }
 
 /// Path of the versioned harness API socket. `JCODE_API_SOCKET` overrides it.
