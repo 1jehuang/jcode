@@ -1270,6 +1270,21 @@ async fn tool_snapshot_is_stable_without_new_mcp_tools() {
 }
 
 #[test]
+fn empty_post_tool_response_gets_more_than_one_retry() {
+    // Regression guard for the Claude Opus 5 benchmark incident. A provider can
+    // return an empty response immediately after tool results; that is a
+    // transient hiccup, not a finished task. With only one retry allowed, a
+    // single empty response (observed once in 43 turns) ended a 20-hour agent
+    // run with the work half-done and the submission unoptimized.
+    assert!(
+        Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS > 1,
+        "a single retry lets one transient empty response end a long run"
+    );
+    // Bounded, so a genuinely finished agent still exits instead of looping.
+    assert!(Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS <= 10);
+}
+
+#[test]
 fn output_budget_truncation_requests_a_continuation() {
     // Regression guard for the Claude Opus 5 benchmark incident. A turn cut off
     // by the output budget reports stop_reason=max_tokens and can contain zero

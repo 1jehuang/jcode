@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent_tests.rs": 1346,
+    "crates/jcode-app-core/src/agent_tests.rs": 1361,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1231,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1394,
@@ -31,10 +31,10 @@
     "crates/jcode-tui/src/tui/app/tests/state_model_poke_02/part_01.rs": 1361,
     "crates/jcode-tui/src/tui/app/tests/state_model_poke_03.rs": 2766,
     "crates/jcode-tui/src/tui/app/tests/swarm_plan_graph_inline.rs": 1972,
-    "crates/jcode-tui/src/tui/info_widget_tests.rs": 1814,
+    "crates/jcode-tui/src/tui/info_widget_tests.rs": 1810,
     "crates/jcode-tui/src/tui/session_picker/loading_tests.rs": 1268,
     "crates/jcode-tui/src/tui/session_picker_tests.rs": 2453,
-    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2836,
+    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2892,
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1285,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1352,
     "tests/e2e/test_support/mod.rs": 1424

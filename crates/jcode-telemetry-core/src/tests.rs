@@ -356,6 +356,8 @@ fn test_session_end_event_serialization() {
         tool_cat_todo: 0,
         todo_gate_ownership_count: 0,
         todo_gate_hill_count: 0,
+        todo_gate_alignment_count: 0,
+        todo_gate_intent_count: 0,
         todo_gate_completion_count: 0,
         todo_gate_spike_count: 0,
         command_login_used: false,
@@ -479,6 +481,8 @@ fn test_record_todo_tool_and_gates_aggregate_session_and_turn() {
     record_tool_execution("todo", &serde_json::json!({}), true, 5);
     record_todo_gate(TodoGateKind::Ownership);
     record_todo_gate(TodoGateKind::HillClimbability);
+    record_todo_gate(TodoGateKind::Alignment);
+    record_todo_gate(TodoGateKind::IntentUnderstanding);
     record_todo_gate(TodoGateKind::Completion);
     record_todo_gate(TodoGateKind::ConfidenceSpike);
     record_todo_gate(TodoGateKind::HillClimbability);
@@ -491,6 +495,8 @@ fn test_record_todo_tool_and_gates_aggregate_session_and_turn() {
         assert_eq!(state.tool_cat_other, 0);
         assert_eq!(state.todo_gate_ownership_count, 1);
         assert_eq!(state.todo_gate_hill_count, 2);
+        assert_eq!(state.todo_gate_alignment_count, 1);
+        assert_eq!(state.todo_gate_intent_count, 1);
         assert_eq!(state.todo_gate_completion_count, 1);
         assert_eq!(state.todo_gate_spike_count, 1);
         let turn = state.current_turn.as_ref().expect("current turn");
@@ -498,6 +504,8 @@ fn test_record_todo_tool_and_gates_aggregate_session_and_turn() {
         assert!(turn.feature_todo_used);
         assert_eq!(turn.todo_gate_ownership_count, 1);
         assert_eq!(turn.todo_gate_hill_count, 2);
+        assert_eq!(turn.todo_gate_alignment_count, 1);
+        assert_eq!(turn.todo_gate_intent_count, 1);
         assert_eq!(turn.todo_gate_completion_count, 1);
         assert_eq!(turn.todo_gate_spike_count, 1);
     }

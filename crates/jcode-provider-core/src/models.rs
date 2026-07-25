@@ -329,6 +329,10 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
     // Kimi Code serves the flagship under the bare id `k3` (no `kimi` in the
     // id), so match the bare `k<n>` shape too (issue #577).
     if m.contains("kimi") || is_bare_kimi_id(m) {
+        // An explicit `-256k` variant overrides the family default.
+        if m.ends_with("-256k") {
+            return Some(262_144);
+        }
         // K3 and newer ship a 1M window; K2 and earlier are 256K.
         if kimi_generation(m).is_some_and(|generation| generation >= 3) {
             return Some(1_048_576);
@@ -472,6 +476,28 @@ mod tests {
         assert_eq!(
             ALL_OPENAI_MODELS.first().copied(),
             Some(DEFAULT_OPENAI_MODEL)
+        );
+    }
+
+    #[test]
+    fn bare_k3_resolves_globally_to_one_million_context() {
+        // Global resolution path used by the TUI meter and compaction budget (#577).
+        assert_eq!(context_limit_for_model("k3"), Some(1_048_576));
+    }
+
+    #[test]
+    fn kimi_k3_family_resolves_to_one_million_context() {
+        // Kimi Code serves K3 under the bare id `k3` (see #577).
+        assert_eq!(open_weight_family_context_limit("k3"), Some(1_048_576));
+        assert_eq!(
+            open_weight_family_context_limit("moonshotai/kimi-k3"),
+            Some(1_048_576)
+        );
+        assert_eq!(open_weight_family_context_limit("k3-256k"), Some(262_144));
+        // The K2 family keeps its 256K window.
+        assert_eq!(
+            open_weight_family_context_limit("moonshotai/kimi-k2"),
+            Some(262_144)
         );
     }
 
@@ -693,6 +719,20 @@ mod tests {
                 (model == "custom-model").then_some(42_000)
             }),
             Some(42_000)
+        );
+    }
+
+    #[test]
+    fn unknown_claude_model_prefers_catalog_limit_over_default() {
+        // A future Claude id absent from the static override table must take the
+        // live catalog's 1M value instead of falling back to 200K. See #578.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-opus-6",
+                Some("claude"),
+                |model| { (model == "claude-opus-6").then_some(1_000_000) }
+            ),
+            Some(1_000_000)
         );
     }
 
