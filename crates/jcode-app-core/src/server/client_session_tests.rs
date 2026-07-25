@@ -3,7 +3,8 @@ use super::{
     handle_subscribe, mark_remote_reload_started, remove_detached_source_if_unclaimed,
     rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    effective_subscribe_working_dir, subscribe_working_dir_replacement,
+    apply_or_defer_subscribe_working_dir, effective_subscribe_working_dir,
+    subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -390,6 +391,50 @@ fn effective_subscribe_working_dir_binds_all_consumers_to_one_directory() {
     assert_eq!(
         effective_subscribe_working_dir(Some(project), project, Some(home)),
         project
+    );
+}
+
+/// Issue #481 end to end: drive the real subscribe-cwd application path against
+/// a live `Agent` and assert the agent's stored working directory, which is what
+/// bash/file tools actually run in. The pure-resolver tests above cover the
+/// decision; this covers the wiring that applies it.
+#[tokio::test]
+async fn apply_subscribe_working_dir_keeps_project_when_client_reports_home() {
+    let home = dirs::home_dir().expect("home directory");
+    let home_str = home.to_string_lossy().to_string();
+    let project = home.join("jcode-481-project");
+    let project_str = project.to_string_lossy().to_string();
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new_with_initial_working_dir(
+        provider,
+        registry,
+        Some(&project_str),
+    )));
+
+    assert_eq!(
+        agent.lock().await.working_dir(),
+        Some(project_str.as_str()),
+        "precondition: session starts bound to the project"
+    );
+
+    // A client whose inherited cwd is home must not re-pin the session.
+    apply_or_defer_subscribe_working_dir(&agent, &home_str, "session_test_481");
+    assert_eq!(
+        agent.lock().await.working_dir(),
+        Some(project_str.as_str()),
+        "a home-dir subscribe must not clobber the project cwd"
+    );
+
+    // A genuine project-to-project move still applies.
+    let other = home.join("jcode-481-other");
+    let other_str = other.to_string_lossy().to_string();
+    apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481");
+    assert_eq!(
+        agent.lock().await.working_dir(),
+        Some(other_str.as_str()),
+        "a real directory change must still be honored"
     );
 }
 
