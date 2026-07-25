@@ -105,12 +105,20 @@ impl Geometry {
         )
     }
 
-    /// Load the saved geometry, falling back to defaults.
+    /// Load the saved geometry, falling back to defaults. A missing file is
+    /// normal on first run; any other failure is reported rather than hidden.
     pub fn load() -> Self {
-        Self::path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| Self::parse(&text))
-            .unwrap_or_default()
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::parse(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                eprintln!("window geometry: cannot read {}: {error}", path.display());
+                Self::default()
+            }
+        }
     }
 
     /// Whether this geometry should be written yet, given the last write time
@@ -128,16 +136,23 @@ impl Geometry {
         }
     }
 
-    /// Persist the geometry. Failures are ignored: not remembering a window
-    /// size must never break the app or block exit.
+    /// Persist the geometry. A failure must never break the app or block exit,
+    /// but it is reported: silently forgetting the window size looks like a bug
+    /// with no way to diagnose it.
     pub fn save(&self) {
-        let Some(path) = Self::path() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = self.try_save() {
+            eprintln!("window geometry: not saved: {error}");
         }
-        let _ = std::fs::write(path, self.sanitized().serialize());
+    }
+
+    fn try_save(&self) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no HOME to store geometry in")
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.sanitized().serialize())
     }
 }
 
@@ -256,6 +271,23 @@ mod tests {
         };
         let once = geometry.sanitized();
         assert_eq!(once, once.sanitized());
+    }
+
+    #[test]
+    fn saving_reports_failure_instead_of_silently_dropping_it() {
+        // A save that cannot happen must surface an error rather than leaving
+        // the user wondering why the window size is never remembered.
+        let previous = std::env::var_os("HOME");
+        // SAFETY: single-threaded test; restored below.
+        unsafe { std::env::remove_var("HOME") };
+        let result = Geometry::default().try_save();
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("HOME", previous) };
+        }
+        assert!(
+            result.is_err(),
+            "a save with nowhere to write reported success"
+        );
     }
 
     #[test]
