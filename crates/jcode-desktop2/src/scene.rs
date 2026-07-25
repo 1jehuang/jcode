@@ -105,6 +105,25 @@ pub fn build_scene(
         status_style,
         scale,
     );
+    // Meta row: version, update state, and the signed-in account. The same
+    // three facts the TUI shows on its idle screen, elided rather than wrapped
+    // so the masthead stays two lines tall at any width.
+    let meta_style = ParagraphStyle {
+        font_size: layout::CAPTION_SIZE,
+        color: theme.faint,
+        letter_spacing_em: 0.04,
+        ..Default::default()
+    };
+    let meta_chars = (f64::from(column) / (f64::from(meta_style.font_size) * 0.62)) as usize;
+    let meta = elide(&model.meta.caption(), meta_chars.max(12));
+    text.draw_paragraph_scaled(
+        scene,
+        &meta,
+        (frame.left, frame.masthead_meta),
+        column,
+        meta_style,
+        scale,
+    );
     hairline(scene, frame.masthead_rule);
 
     // Composer: a quiet well pinned to the bottom.

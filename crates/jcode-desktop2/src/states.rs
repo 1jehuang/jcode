@@ -39,9 +39,20 @@ pub fn names() -> Vec<&'static str> {
     NODES.iter().map(|(name, _)| *name).collect()
 }
 
+/// Captures must be deterministic, so nodes pin the build identity instead of
+/// reading the real version, update channels, and auth store.
+fn fixed_meta() -> crate::meta::Meta {
+    crate::meta::Meta {
+        version: "v0.0.0-demo (0000000)".into(),
+        update: crate::meta::UpdateState::Current,
+        account: Some("demo@jcode.dev (anthropic)".into()),
+    }
+}
+
 fn connecting() -> Model {
     Model {
         theme: crate::theme::Theme::from_env(),
+        meta: fixed_meta(),
         status: "connecting to ~/.jcode/jcode-api.sock...".into(),
         session_id: None,
         transcript: String::new(),
@@ -62,6 +73,7 @@ fn fixed_caret() -> crate::caret::Caret {
 fn attached_empty() -> Model {
     Model {
         theme: crate::theme::Theme::from_env(),
+        meta: fixed_meta(),
         status: "attached: session_demo_0000".into(),
         session_id: Some("session_demo_0000".into()),
         transcript: String::new(),

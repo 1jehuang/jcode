@@ -81,6 +81,25 @@ impl Rendered {
         }
         darkest
     }
+
+    /// Vertical extent, in logical units, of the composer wash as actually
+    /// drawn. Sampled on a column just inside the right edge of the measure
+    /// column, where only the well can ink, so prompt glyphs cannot be
+    /// mistaken for the well itself.
+    fn wash_band(&self) -> Option<(f64, f64)> {
+        let s = self.frame.scale;
+        let x = ((self.frame.right - 3.0) * s).round() as u32;
+        let paper = self.luma(x, ((self.frame.body_top + 2.0) * s).round() as u32);
+        let mut first = None;
+        let mut last = None;
+        for y in 0..self.height {
+            if paper - self.luma(x, y) > 0.004 {
+                first = first.or(Some(y));
+                last = Some(y);
+            }
+        }
+        Some((f64::from(first?) / s, f64::from(last?) / s))
+    }
 }
 
 fn nodes() -> Vec<(&'static str, Model)> {
@@ -88,6 +107,34 @@ fn nodes() -> Vec<(&'static str, Model)> {
         .into_iter()
         .map(|name| (name, states::by_name(name).expect("listed node")))
         .collect()
+}
+
+/// The input box must be *drawn* on the middle of the window, not merely laid
+/// out there: this catches a renderer that ignores the centred geometry.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_composer_well_is_drawn_on_the_middle_of_the_window() {
+    for (name, model) in nodes() {
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let Some((top, bottom)) = r.wash_band() else {
+            panic!("{name}: no composer well was drawn");
+        };
+        assert!(
+            (top - f.composer_top).abs() < 2.0 && (bottom - f.composer_bottom).abs() < 2.0,
+            "{name}: the drawn well {top:.1}..{bottom:.1} left its geometry {:.1}..{:.1}",
+            f.composer_top,
+            f.composer_bottom
+        );
+        let center = (top + bottom) / 2.0;
+        assert!(
+            (center - f.height / 2.0).abs() < 2.0,
+            "{name}: the well centre {center:.1} is not the page middle {:.1}",
+            f.height / 2.0
+        );
+    }
 }
 
 #[test]
@@ -561,5 +608,54 @@ fn margins_stay_empty() {
         assert!(left_margin > 0.9, "{name}: ink in the left margin");
         let bottom = r.darkest_in(0.0, f.footnote_bottom + 2.0, f.width - 1.0, f.height - 1.0);
         assert!(bottom > 0.9, "{name}: ink below the footnote row");
+    }
+}
+
+/// The masthead meta row must actually render its three facts, legibly, and
+/// stay inside its own band between the wordmark and the rule.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_masthead_meta_row_is_drawn_and_legible() {
+    for (name, model) in nodes() {
+        let Some(r) = Rendered::new(&model) else {
+            eprintln!("skipping {name}: no GPU");
+            return;
+        };
+        let f = r.frame;
+        let darkest = r.darkest_in(
+            f.left,
+            f.masthead_meta,
+            f.right,
+            f.masthead_meta + crate::layout::MASTHEAD_ROW_HEIGHT,
+        );
+        assert!(
+            darkest < 0.85,
+            "{name}: the version/update/auth row drew nothing readable ({darkest:.3})"
+        );
+    }
+}
+
+/// The input box is the visual centre of the app: the well must span the middle
+/// of the window and really be painted there, at every node.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_composer_well_covers_the_middle_of_the_window() {
+    for (name, model) in nodes() {
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let middle = f.height / 2.0;
+        assert!(
+            f.composer_top <= middle && middle <= f.composer_bottom,
+            "{name}: the well ({:.1}..{:.1}) missed the page middle {middle:.1}",
+            f.composer_top,
+            f.composer_bottom
+        );
+        let luma = r.luma(((f.left + 4.0) * f.scale) as u32, (middle * f.scale) as u32);
+        assert!(
+            luma < 0.99,
+            "{name}: no well fill at the page middle (luma {luma:.3})"
+        );
     }
 }

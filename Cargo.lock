@@ -3858,9 +3858,12 @@ name = "jcode-desktop2"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
+ "jcode-build-meta",
  "jcode-harness-api",
  "parley",
  "pollster",
+ "serde_json",
  "vello",
  "winit 0.30.13",
 ]
