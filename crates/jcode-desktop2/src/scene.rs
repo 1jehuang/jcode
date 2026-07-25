@@ -5,10 +5,69 @@
 //! possible.
 
 use crate::text::ParagraphStyle;
-use crate::{Model, layout, text};
+use crate::{Model, donut, layout, text};
 use vello::Scene;
-use vello::kurbo::{Affine, Rect, RoundedRect};
+use vello::kurbo::{Affine, Circle, Rect, RoundedRect};
 use vello::peniko::Color;
+
+/// Halftone dots across the donut box, matching the website's screen density.
+const HALFTONE_CELLS: f64 = 76.0;
+/// Classic 45-degree halftone screen angle.
+const SCREEN_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
+/// Dot radius as a fraction of the dot pitch at full luminance.
+const DOT_FILL: f64 = 0.62;
+/// Luminance below which a dot is not worth drawing.
+const DOT_FLOOR: f32 = 0.04;
+/// Gamma applied to luminance before sizing a dot.
+const DOT_GAMMA: f32 = 0.85;
+
+/// Draw the halftone donut into `box_`, sampling `field` as a luminance image.
+/// The dot lattice is in logical units so the screen density is identical on
+/// 1x and HiDPI, exactly like the website's CSS-pixel lattice.
+fn draw_donut(
+    scene: &mut Scene,
+    field: &donut::Donut,
+    box_: Rect,
+    ink: Color,
+    scale: f64,
+) {
+    let side = box_.width().min(box_.height());
+    if side < layout::DONUT_MIN_SIDE {
+        return;
+    }
+    let pitch = side / HALFTONE_CELLS;
+    let (sin_a, cos_a) = SCREEN_ANGLE.sin_cos();
+    let cx = box_.x0 + box_.width() / 2.0;
+    let cy = box_.y0 + box_.height() / 2.0;
+    // A rotated lattice must cover the square, so extend it by sqrt(2).
+    let ext = (HALFTONE_CELLS * std::f64::consts::FRAC_1_SQRT_2).ceil() as i32 + 1;
+    let grid = field.grid() as f32;
+
+    for j in -ext..=ext {
+        for i in -ext..=ext {
+            let px = cx + (i as f64 * cos_a - j as f64 * sin_a) * pitch;
+            let py = cy + (i as f64 * sin_a + j as f64 * cos_a) * pitch;
+            // Sample in the donut's own square, centred in the box.
+            let u = (px - (cx - side / 2.0)) / side;
+            let v = (py - (cy - side / 2.0)) / side;
+            if !(-0.02..1.02).contains(&u) || !(-0.02..1.02).contains(&v) {
+                continue;
+            }
+            let lum = field.sample(u as f32 * grid, v as f32 * grid);
+            if lum <= DOT_FLOOR {
+                continue;
+            }
+            let radius = f64::from(lum.powf(DOT_GAMMA)) * pitch * DOT_FILL;
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                ink,
+                None,
+                &Circle::new((px, py), radius),
+            );
+        }
+    }
+}
 
 /// The one style used for composer text. Wrapping, drawing, caret placement,
 /// and hit-testing must all use the same style or their geometry diverges, so
@@ -58,14 +117,6 @@ pub fn build_scene(
             shape,
         );
     };
-    // Hairlines stay one physical pixel regardless of scale.
-    let hairline = |scene: &mut Scene, y: f64| {
-        fill(
-            scene,
-            theme.rule,
-            &Rect::new(frame.left, y, frame.right, y + frame.hairline()),
-        );
-    };
 
     // Paper.
     fill(
@@ -74,81 +125,44 @@ pub fn build_scene(
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
 
-    // Masthead: wordmark, then status as a caption beside it.
-    text.draw_paragraph_scaled(
-        scene,
-        "jcode",
-        (frame.left, frame.masthead_top),
-        column,
-        ParagraphStyle {
-            font_size: layout::WORDMARK_SIZE,
-            bold: true,
-            color: theme.text,
-            letter_spacing_em: 0.02,
-            ..Default::default()
-        },
-        scale,
-    );
-    // Elide rather than wrap, so the masthead stays one line and never
-    // crosses its own rule.
-    let status_style = ParagraphStyle {
-        font_size: layout::CAPTION_SIZE,
-        color: if model.session_id.is_some() {
-            theme.muted
-        } else {
-            theme.faint
-        },
-        letter_spacing_em: 0.1,
-        ..Default::default()
-    };
-    let status_width = frame.status_width();
-    let status_chars = (status_width / (f64::from(status_style.font_size) * 0.72)) as usize;
-    let status = elide(&model.status, status_chars.max(12));
-    text.draw_paragraph_scaled(
-        scene,
-        &status,
-        (frame.status_left(), frame.masthead_top + 4.0),
-        status_width as f32,
-        status_style,
-        scale,
-    );
-    // Meta row: version, update state, and the signed-in account. The same
-    // three facts the TUI shows on its idle screen, elided rather than wrapped
-    // so the masthead stays two lines tall at any width.
-    let meta_style = ParagraphStyle {
-        font_size: layout::CAPTION_SIZE,
-        color: theme.faint,
-        letter_spacing_em: 0.04,
-        ..Default::default()
-    };
-    let meta_chars = (f64::from(column) / (f64::from(meta_style.font_size) * 0.62)) as usize;
-    let meta = elide(&model.meta.caption(), meta_chars.max(12));
-    text.draw_paragraph_scaled(
-        scene,
-        &meta,
-        (frame.left, frame.masthead_meta),
-        column,
-        meta_style,
-        scale,
-    );
-    hairline(scene, frame.masthead_rule);
 
-    // Composer: a quiet well pinned to the bottom.
-    fill_round(
-        scene,
-        theme.wash,
-        &RoundedRect::new(
-            frame.left,
-            frame.composer_top,
-            frame.right,
-            frame.composer_bottom,
-            layout::COMPOSER_RADIUS,
-        ),
+    // Composer: a real input field. Paper fill plus a hairline border, rather
+    // than a grey slab: a filled block reads as disabled or as a code block,
+    // while an outlined field reads as somewhere to type. The border thickens
+    // when the window has focus, so focus is legible without a colour accent.
+    let well = RoundedRect::new(
+        frame.left,
+        frame.composer_top,
+        frame.right,
+        frame.composer_bottom,
+        layout::COMPOSER_RADIUS,
+    );
+    fill_round(scene, theme.field, &well);
+    let (border_color, border_width) = if model.focused {
+        (theme.field_border_focus, layout::COMPOSER_BORDER_FOCUS)
+    } else {
+        (theme.field_border, layout::COMPOSER_BORDER)
+    };
+    scene.stroke(
+        &vello::kurbo::Stroke::new(border_width),
+        Affine::scale(scale),
+        border_color,
+        None,
+        &well,
     );
 
     // Transcript: ink on paper, bottom-aligned against the composer so new
     // lines rise from the well rather than dangling from the masthead.
     let placeholder = model.transcript.trim().is_empty();
+
+    // On an empty session the transcript region is dead space, so the hero
+    // donut from the website lives there: the same halftone torus, and
+    // draggable in the same way. It stands down the moment there is real
+    // content, so it can never compete with the transcript.
+    if let Some(field) = model.donut.as_ref().filter(|_| placeholder) {
+        draw_donut(scene, field, frame.donut_box(), theme.text, scale);
+    }
+
     let transcript = if placeholder {
         "type a message and press enter"
     } else {
@@ -196,23 +210,27 @@ pub fn build_scene(
     // the measured width of the text before the cursor, so it sits between
     // glyphs and moves with Ctrl+A/E, word motion, and the arrows.
     let prompt_style = composer_text_style(model);
-    let prompt_x = frame.left + layout::COMPOSER_PAD_X;
+    let prompt_x = frame.composer_text_left();
     let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
-    let prompt_width = (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32;
+    let prompt_width = frame.composer_text_width() as f32;
 
-    if model.busy {
-        text.draw_paragraph_scaled(
-            scene,
-            "working...",
-            (prompt_x, prompt_y),
-            prompt_width,
-            ParagraphStyle {
-                color: theme.muted,
-                ..prompt_style
-            },
-            scale,
-        );
-    } else {
+    // Prompt marker: a fixed origin for the text, so an empty field still
+    // shows where typing starts. It dims while busy instead of the field
+    // swapping to a "working..." label, which used to hide anything already
+    // typed for the next turn.
+    text.draw_paragraph_scaled(
+        scene,
+        ">",
+        (frame.left + layout::COMPOSER_PAD_X, prompt_y),
+        layout::COMPOSER_MARKER_ADVANCE as f32,
+        ParagraphStyle {
+            color: if model.busy { theme.faint } else { theme.muted },
+            ..prompt_style
+        },
+        scale,
+    );
+
+    {
         // One Parley layout drives wrapping, the selection bands, the glyphs,
         // and the caret, so the three can never disagree: the highlight lines
         // up with the text because it *is* the text's own geometry.
@@ -255,7 +273,11 @@ pub fn build_scene(
         if model.editor.is_empty() {
             text.draw_paragraph_scaled(
                 scene,
-                "message jcode",
+                if model.busy {
+                    "working... esc to interrupt"
+                } else {
+                    "message jcode"
+                },
                 (prompt_x, prompt_y),
                 prompt_width,
                 ParagraphStyle {
@@ -275,7 +297,9 @@ pub fn build_scene(
             );
         }
 
-        if model.caret.visible() {
+        // An unfocused window must not show a blinking caret: it would claim
+        // keystrokes land here when they do not.
+        if model.focused && model.caret.visible() {
             let bar = input.caret_rect(model.editor.cursor(), layout::CARET_WIDTH);
             let top = (origin_y + bar.y0).max(clip_top);
             let bottom = (origin_y + bar.y1).min(clip_bottom);
@@ -292,10 +316,18 @@ pub fn build_scene(
 
     // A transient notice, or a scrollback indicator, as a caption under the
     // well. Never covers content.
+    // Priority: a transient notice, then a scrollback indicator, then the
+    // connection status. Status lives here instead of a masthead so the top of
+    // the page stays clear, while a failure to attach is still visible.
     let footnote = model
         .notice
         .clone()
-        .or_else(|| (model.scroll > 0).then(|| format!("scrolled back {} lines", model.scroll)));
+        .or_else(|| (model.scroll > 0).then(|| format!("scrolled back {} lines", model.scroll)))
+        .or_else(|| model.status_footnote());
+    let footnote = footnote.map(|line| {
+        let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72)) as usize;
+        elide(&line, chars.max(12))
+    });
     if let Some(footnote) = footnote {
         text.draw_paragraph_scaled(
             scene,

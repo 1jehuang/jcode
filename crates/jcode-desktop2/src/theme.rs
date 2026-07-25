@@ -31,6 +31,15 @@ pub struct Theme {
     pub rule: Color,
     /// Quiet fill for code blocks and wells.
     pub wash: Color,
+    /// Fill of an input field. The composer is a field, not a code block, so
+    /// it gets its own role: a grey slab reads as disabled, paper with a
+    /// hairline reads as somewhere to type.
+    pub field: Color,
+    /// Hairline around an unfocused field.
+    pub field_border: Color,
+    /// Hairline around the focused field. Stronger than `field_border` so
+    /// focus is visible without a colour accent.
+    pub field_border_focus: Color,
     /// Errors. The print theme keeps this ink-only per the style guide;
     /// other themes may use hue.
     pub error: Color,
@@ -50,6 +59,9 @@ impl Theme {
             faint: Color::from_rgb8(0x99, 0x99, 0x99),
             rule: Color::from_rgb8(0xcc, 0xcc, 0xcc),
             wash: Color::from_rgb8(0xf4, 0xf4, 0xf4),
+            field: Color::from_rgb8(0xff, 0xff, 0xff),
+            field_border: Color::from_rgb8(0xd4, 0xd4, 0xd4),
+            field_border_focus: Color::from_rgb8(0x77, 0x77, 0x77),
             error: Color::from_rgb8(0x11, 0x11, 0x11),
             selection: Color::from_rgb8(0xd8, 0xd8, 0xd8),
         }
@@ -65,6 +77,9 @@ impl Theme {
             faint: Color::from_rgb8(0x66, 0x66, 0x66),
             rule: Color::from_rgb8(0x33, 0x33, 0x33),
             wash: Color::from_rgb8(0x1a, 0x1a, 0x1a),
+            field: Color::from_rgb8(0x16, 0x16, 0x16),
+            field_border: Color::from_rgb8(0x3a, 0x3a, 0x3a),
+            field_border_focus: Color::from_rgb8(0x88, 0x88, 0x88),
             error: Color::from_rgb8(0xee, 0xee, 0xee),
             selection: Color::from_rgb8(0x3a, 0x3a, 0x3a),
         }

@@ -7,6 +7,7 @@
 mod capture;
 mod caret;
 mod clipboard;
+mod donut;
 mod editor;
 mod harness;
 mod input;
@@ -229,6 +230,8 @@ struct App {
     /// When the geometry was last written, and what was written, so resizing
     /// does not hit the disk on every event.
     geometry_saved: Option<(std::time::Instant, window_state::Geometry)>,
+    /// When the last animated frame was drawn, for the donut's time step.
+    last_frame: Option<std::time::Instant>,
     /// Geometry of the most recently built frame. Pointer hit-testing reads
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
@@ -250,12 +253,16 @@ impl Default for App {
             cursor_icon: winit::window::CursorIcon::Default,
             geometry: window_state::Geometry::default(),
             geometry_saved: None,
+            last_frame: None,
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
         }
     }
 }
+
+/// Frame interval while the donut animates (~60fps).
+const DONUT_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Maximum gap between two clicks that still counts as a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
@@ -273,10 +280,19 @@ pub struct Model {
     pub editor: editor::Editor,
     pub caret: caret::Caret,
     pub busy: bool,
+    /// Whether the window has keyboard focus. The field border and the caret
+    /// both key off this: an unfocused input that still shows a blinking caret
+    /// lies about where typing will go.
+    pub focused: bool,
     /// Lines scrolled up from the tail. 0 follows the newest output.
     pub scroll: usize,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
+    /// The hero donut's luminance field, or `None` when the donut is off
+    /// (reduced motion, or a headless capture that wants a still frame).
+    pub donut: Option<donut::Donut>,
+    /// The donut's animation clock and drag momentum.
+    pub spin: donut::Spin,
 }
 
 impl Default for Model {
@@ -290,10 +306,28 @@ impl Default for Model {
             editor: editor::Editor::default(),
             caret: caret::Caret::default(),
             busy: false,
+            focused: true,
             scroll: 0,
             notice: None,
+            donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
+            spin: donut::Spin::default(),
         }
     }
+}
+
+/// Luminance grid resolution for the donut. The website adapts this to
+/// measured frame cost; on the desktop the field is raymarched on the CPU once
+/// per frame at a fixed, comfortably cheap size, and the halftone screen (the
+/// part the eye reads) is resolution-independent vector output.
+pub const DONUT_GRID: usize = 96;
+
+/// Escape hatch: `JCODE_DESKTOP2_DONUT=0` turns the animation off for users who
+/// do not want motion, and for benchmarking the rest of the frame.
+fn donut_disabled() -> bool {
+    matches!(
+        std::env::var("JCODE_DESKTOP2_DONUT").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
 }
 
 impl Model {
@@ -315,6 +349,25 @@ impl Model {
 
     fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
+    }
+
+    /// The status line to show as a footnote, or `None` when it is not worth
+    /// the user's attention.
+    ///
+    /// A healthy connection is the expected case, so saying "attached:
+    /// session_..." forever is noise; it was the worst of the clutter the old
+    /// masthead carried. Startup progress and failures are worth showing,
+    /// because otherwise a dead runtime looks like an app that simply ignores
+    /// your input.
+    pub fn status_footnote(&self) -> Option<String> {
+        if self.session_id.is_some() {
+            return None;
+        }
+        let status = self.status.trim();
+        if status.is_empty() {
+            return None;
+        }
+        Some(status.to_string())
     }
 }
 
@@ -418,7 +471,7 @@ impl App {
         );
         let origin_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET
             - input.scroll_offset(self.model.editor.cursor(), frame.composer_lines());
-        Some(input.offset_at_point(x - (frame.left + layout::COMPOSER_PAD_X), y - origin_y))
+        Some(input.offset_at_point(x - frame.composer_text_left(), y - origin_y))
     }
 
     fn on_pointer_pressed(&mut self) {
@@ -431,6 +484,13 @@ impl App {
             );
         }
         let Some(offset) = hit else {
+            // Outside the well: the donut is the only other interactive thing,
+            // so a press on it starts a spin drag (as on the website).
+            if self.donut_visible() && self.frame.hits_donut(x, y) {
+                self.model.spin.press(x);
+                self.update_cursor_icon();
+                self.request_redraw();
+            }
             return;
         };
         let now = std::time::Instant::now();
@@ -486,6 +546,10 @@ impl App {
         let (x, y) = self.pointer;
         let wanted = if self.in_composer(x, y) {
             winit::window::CursorIcon::Text
+        } else if self.model.spin.dragging {
+            winit::window::CursorIcon::Grabbing
+        } else if self.donut_visible() && self.frame.hits_donut(x, y) {
+            winit::window::CursorIcon::Grab
         } else {
             winit::window::CursorIcon::Default
         };
@@ -497,7 +561,18 @@ impl App {
         }
     }
 
+    /// Whether the donut is on screen: enabled, and the session is still empty
+    /// (the same condition `build_scene` draws it under).
+    fn donut_visible(&self) -> bool {
+        self.model.donut.is_some() && self.model.transcript.trim().is_empty()
+    }
+
     fn on_pointer_moved(&mut self) {
+        if self.model.spin.dragging {
+            self.model.spin.drag_to(self.pointer.0);
+            self.request_redraw();
+            return;
+        }
         self.update_cursor_icon();
         if !self.dragging {
             return;
@@ -516,9 +591,62 @@ impl App {
         }
     }
 
+    /// Whether the donut should be driving frames. Decorative motion is not
+    /// worth waking the GPU for when the window is not focused or the donut is
+    /// not on screen, which is what keeps an idle window off the CPU.
+    fn donut_animating(&self) -> bool {
+        self.donut_visible() && self.model.focused
+    }
+
+    /// Advance the donut one frame and rebuild its luminance field. Skipped
+    /// entirely when the donut is not being drawn, so a busy session pays
+    /// nothing for it.
+    fn animate_donut(&mut self) {
+        if !self.donut_animating() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_frame
+            .map(|last| now.duration_since(last).as_secs_f32())
+            // Clamp so a stall (or a laptop resuming from sleep) does not jump
+            // the animation forward by a visible lurch.
+            .map_or(DONUT_FRAME.as_secs_f32(), |dt| dt.min(0.1));
+        self.last_frame = Some(now);
+        self.model.spin.advance(dt);
+        let (time, offset) = (self.model.spin.time, self.model.spin.offset);
+        if let Some(field) = self.model.donut.as_mut() {
+            field.render(time, offset);
+        }
+    }
+
     fn request_redraw(&self) {
         if let Some(state) = self.state.as_ref() {
             state.request_redraw();
+        }
+    }
+
+    /// When the loop must next wake to repaint, or `None` when nothing on
+    /// screen is animating.
+    ///
+    /// Two things want frames: the blinking caret, and the donut while it is on
+    /// screen. Both go through this one function so they cannot fight over
+    /// `ControlFlow`, and the earlier deadline wins.
+    ///
+    /// `None` matters as much as `Some`: an idle window must sleep rather than
+    /// spin, so the states that animate nothing (no window focus, a turn in
+    /// flight, a pinned caret with no donut) return `None` here.
+    pub fn animation_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        if !self.model.focused {
+            return None;
+        }
+        let caret = (!self.model.busy)
+            .then(|| self.model.caret.next_toggle_at(now))
+            .flatten();
+        let donut = self.donut_animating().then(|| now + DONUT_FRAME);
+        match (caret, donut) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
         }
     }
 
@@ -735,7 +863,13 @@ impl ApplicationHandler for App {
                 ..
             } => match element_state {
                 ElementState::Pressed => self.on_pointer_pressed(),
-                ElementState::Released => self.dragging = false,
+                ElementState::Released => {
+                    self.dragging = false;
+                    // Releasing hands the donut its momentum; it keeps
+                    // spinning down on its own.
+                    self.model.spin.release();
+                    self.update_cursor_icon();
+                }
             },
             WindowEvent::MouseWheel { delta, .. } => {
                 // Scrolling the transcript with the wheel, in line units.
@@ -755,6 +889,15 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+            }
+            WindowEvent::Focused(focused) => {
+                self.model.focused = focused;
+                // Restart the blink phase on focus so the caret is immediately
+                // solid rather than appearing mid-off-phase.
+                if focused {
+                    self.model.caret.touch();
+                }
+                self.request_redraw();
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -780,6 +923,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
+                self.animate_donut();
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();
@@ -792,13 +936,30 @@ impl ApplicationHandler for App {
                         eprintln!("render error: {error:#}");
                     }
                 }
-                // Wake exactly when the caret next toggles: blinking without a
-                // busy redraw loop.
-                if let Some(at) = self.model.caret.next_toggle_at(std::time::Instant::now()) {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(at));
-                }
             }
             _ => {}
         }
+    }
+
+    /// An animation deadline expired, so the window has to be repainted.
+    /// Setting a `WaitUntil` deadline only wakes the loop, it does not draw
+    /// anything, which is why the caret used to sit static and never blink.
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            self.request_redraw();
+        }
+    }
+
+    /// Schedule the next animation tick before the loop sleeps.
+    ///
+    /// Done here rather than in the redraw handler so the deadline is refreshed
+    /// after *any* event, and so an idle window sleeps indefinitely instead of
+    /// waking forever.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let flow = match self.animation_deadline(std::time::Instant::now()) {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        };
+        event_loop.set_control_flow(flow);
     }
 }

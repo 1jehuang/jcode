@@ -13,9 +13,12 @@ type NodeBuilder = fn() -> Model;
 pub const NODES: &[(&str, NodeBuilder)] = &[
     ("connecting", connecting),
     ("attached_empty", attached_empty),
+    ("donut_dragged", donut_dragged),
+    ("donut_off", donut_off),
     ("mid_input", mid_input),
     ("mid_input_caret_inside", mid_input_caret_inside),
     ("caret_hidden", caret_hidden),
+    ("unfocused", unfocused),
     ("selection", selection),
     ("multiline", multiline),
     ("wrapped_long_line", wrapped_long_line),
@@ -58,11 +61,35 @@ fn connecting() -> Model {
         transcript: String::new(),
         editor: crate::editor::Editor::default(),
         caret: fixed_caret(),
+        // Nodes render the focused case: an unfocused window hides the caret,
+        // which would make most caret nodes indistinguishable.
+        focused: true,
         busy: false,
         scroll: 0,
         notice: None,
+        donut: Some(fixed_donut()),
+        spin: fixed_spin(),
     }
 }
+
+/// The donut is animated in the app, so nodes pin its clock: the field is
+/// rendered once, at a fixed time, which keeps captures byte-reproducible while
+/// still exercising the halftone path.
+fn fixed_donut() -> crate::donut::Donut {
+    let mut donut = crate::donut::Donut::new(crate::DONUT_GRID);
+    donut.render(DONUT_TIME, 0.0);
+    donut
+}
+
+fn fixed_spin() -> crate::donut::Spin {
+    crate::donut::Spin {
+        time: DONUT_TIME,
+        ..Default::default()
+    }
+}
+
+/// A flattering pose for captures: the hole is clearly visible.
+const DONUT_TIME: f32 = 0.8;
 
 /// Captures must be a pure function of the model, so nodes pin the caret
 /// instead of letting it blink on wall-clock time.
@@ -79,9 +106,39 @@ fn attached_empty() -> Model {
         transcript: String::new(),
         editor: crate::editor::Editor::default(),
         caret: fixed_caret(),
+        // Nodes render the focused case: an unfocused window hides the caret,
+        // which would make most caret nodes indistinguishable.
+        focused: true,
         busy: false,
         scroll: 0,
         notice: None,
+        donut: Some(fixed_donut()),
+        spin: fixed_spin(),
+    }
+}
+
+/// The hero donut after a drag: same tilt, rotated yaw. Proves the drag path
+/// changes only the spin, so the pose stays flattering however hard it is spun.
+fn donut_dragged() -> Model {
+    let mut donut = crate::donut::Donut::new(crate::DONUT_GRID);
+    let offset = 1.2;
+    donut.render(DONUT_TIME, offset);
+    Model {
+        donut: Some(donut),
+        spin: crate::donut::Spin {
+            offset,
+            ..fixed_spin()
+        },
+        ..attached_empty()
+    }
+}
+
+/// The donut turned off (`JCODE_DESKTOP2_DONUT=0`): the empty screen must still
+/// read as a finished frame with nothing missing.
+fn donut_off() -> Model {
+    Model {
+        donut: None,
+        ..attached_empty()
     }
 }
 
@@ -115,6 +172,16 @@ fn caret_hidden() -> Model {
     Model {
         editor: editor_with("blink off phase", None),
         caret: crate::caret::Caret::pinned(false),
+        ..attached_empty()
+    }
+}
+
+/// The window without keyboard focus: the field border goes quiet and no
+/// caret is drawn, so the frame cannot claim keystrokes it will not receive.
+fn unfocused() -> Model {
+    Model {
+        editor: editor_with("window lost focus", None),
+        focused: false,
         ..attached_empty()
     }
 }

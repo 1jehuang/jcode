@@ -90,10 +90,9 @@ impl Rendered {
         let s = self.frame.scale;
         let x = ((self.frame.right - 3.0) * s).round() as u32;
         let paper = self.luma(x, ((self.frame.body_top + 2.0) * s).round() as u32);
-        // Below the masthead rule, so its hairline is not mistaken for the
-        // well, and take the tallest contiguous inked run: the wash is the one
-        // large filled region on this column.
-        let start = ((self.frame.masthead_rule + 6.0) * s).round() as u32;
+        // Take the tallest contiguous inked run: the wash is the one large
+        // filled region on this column.
+        let start = ((self.frame.body_top + 6.0) * s).round() as u32;
         let mut best: Option<(u32, u32)> = None;
         let mut run: Option<(u32, u32)> = None;
         for y in start..self.height {
@@ -168,7 +167,7 @@ fn the_selection_band_lines_up_with_the_selected_glyphs() {
             crate::scene::composer_text_style(&model),
             f.scale,
         );
-        let text_x = f.left + crate::layout::COMPOSER_PAD_X;
+        let text_x = f.composer_text_left();
         let expected_start = ((text_x + input.caret_rect(start, 1.0).x0) * s).round() as u32;
         let expected_end = ((text_x + input.caret_rect(end, 1.0).x0) * s).round() as u32;
         let drawn_start = *tinted.first().expect("checked non-empty");
@@ -238,18 +237,24 @@ fn nothing_draws_in_the_gap_above_the_composer() {
     }
 }
 
+/// The top of the page must be bare paper. The app previously carried a
+/// wordmark, a status caption, a build-identity row, and a rule up there,
+/// which is the clutter this test exists to keep out: any of them reappearing
+/// inks the band above the transcript.
 #[test]
 #[ignore = "requires a GPU"]
-fn masthead_rule_is_clear_of_text() {
+fn the_top_of_the_page_is_clear() {
     for (name, model) in nodes() {
         let Some(r) = Rendered::new(&model) else {
+            eprintln!("skipping {name}: no GPU");
             return;
         };
         let f = r.frame;
-        // Just below the rule must be paper: status text that wraps past
-        // its own rule was the second bug.
-        let darkest = r.darkest_in(f.left, f.masthead_rule + 3.0, f.right, f.body_top - 3.0);
-        assert!(darkest > 0.9, "{name}: text crossed the masthead rule");
+        let darkest = r.darkest_in(0.0, 0.0, f.width - 1.0, f.body_top - 2.0);
+        assert!(
+            darkest > 0.9,
+            "{name}: ink ({darkest:.3} luma) above the transcript"
+        );
     }
 }
 
@@ -494,7 +499,7 @@ fn the_caret_sits_on_the_cursor_row_when_wrapped() {
     };
     let bar_columns = |row: usize| {
         let (y0, y1) = row_band(row);
-        (((f.left + crate::layout::COMPOSER_PAD_X) * s) as u32..((f.right - 2.0) * s) as u32)
+        (((f.composer_text_left()) * s) as u32..((f.right - 2.0) * s) as u32)
             .filter(|&x| (y0..=y1).all(|y| r.luma(x, y) < 0.5))
             .count()
     };
@@ -521,7 +526,7 @@ fn the_caret_sits_on_the_cursor_row_when_wrapped() {
                 + row as f64 * crate::layout::COMPOSER_LINE_HEIGHT;
             let y0 = ((top + 2.0) * s) as u32;
             let y1 = ((top + 12.0) * s) as u32;
-            (((f.left + crate::layout::COMPOSER_PAD_X) * s) as u32..((f.right - 2.0) * s) as u32)
+            (((f.composer_text_left()) * s) as u32..((f.right - 2.0) * s) as u32)
                 .any(|x| (y0..=y1).all(|y| rendered.luma(x, y) < 0.5))
         })
     };
@@ -582,7 +587,7 @@ fn an_insert_caret_is_drawn_in_the_empty_composer() {
         "no insert caret was drawn in the empty composer"
     );
     let f = r.frame;
-    let expected = ((f.left + crate::layout::COMPOSER_PAD_X) * f.scale) as u32;
+    let expected = ((f.composer_text_left()) * f.scale) as u32;
     assert!(
         columns.iter().any(|&x| x.abs_diff(expected) <= 4),
         "caret was not at the start of the empty input (columns {:?}, expected ~{expected})",
@@ -641,7 +646,7 @@ fn the_caret_disappears_on_the_blink_off_phase() {
     };
     // Sample past the end of the text, where only a caret could ink.
     let f = r.frame;
-    let text_end = f.left + crate::layout::COMPOSER_PAD_X + 200.0;
+    let text_end = f.composer_text_left() + 200.0;
     let darkest = r.darkest_in(
         text_end,
         f.composer_top + 4.0,
@@ -693,28 +698,27 @@ fn margins_stay_empty() {
     }
 }
 
-/// The masthead meta row must actually render its three facts, legibly, and
-/// stay inside its own band between the wordmark and the rule.
+/// A model that is not attached must still say so somewhere, or a dead
+/// runtime is indistinguishable from an app that ignores input. With the
+/// masthead gone, that somewhere is the footnote row.
 #[test]
 #[ignore = "requires a GPU"]
-fn the_masthead_meta_row_is_drawn_and_legible() {
-    for (name, model) in nodes() {
-        let Some(r) = Rendered::new(&model) else {
-            eprintln!("skipping {name}: no GPU");
-            return;
-        };
-        let f = r.frame;
-        let darkest = r.darkest_in(
-            f.left,
-            f.masthead_meta,
-            f.right,
-            f.masthead_meta + crate::layout::MASTHEAD_ROW_HEIGHT,
-        );
-        assert!(
-            darkest < 0.85,
-            "{name}: the version/update/auth row drew nothing readable ({darkest:.3})"
-        );
-    }
+fn an_unattached_state_still_reports_its_status() {
+    let model = crate::states::by_name("connecting").expect("connecting node");
+    assert!(
+        model.status_footnote().is_some(),
+        "an unattached model reported no status at all"
+    );
+    let Some(r) = Rendered::new(&model) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let f = r.frame;
+    let darkest = r.darkest_in(f.left, f.footnote_top, f.right, f.footnote_bottom);
+    assert!(
+        darkest < 0.9,
+        "the connection status was not drawn in the footnote row ({darkest:.3})"
+    );
 }
 
 /// Not an assertion: writes frames to `JCODE_DESKTOP2_DUMP` for eyeballing.
@@ -750,7 +754,7 @@ fn composer_text_is_vertically_centred_in_the_well() {
         };
         let f = r.frame;
         let s = f.scale;
-        let x0 = ((f.left + crate::layout::COMPOSER_PAD_X) * s) as u32;
+        let x0 = ((f.composer_text_left()) * s) as u32;
         let x1 = (f.right * s) as u32 - 2;
         let mut first = None;
         let mut last = None;
@@ -776,4 +780,169 @@ fn composer_text_is_vertically_centred_in_the_well() {
             "{name}: composer text is off-centre: {above:.1}px above, {below:.1}px below"
         );
     }
+}
+
+/// The composer must read as an input field: a bordered box, not a shaded
+/// slab. So the field interior must be the same paper as the page, and the
+/// border must be a thin inked outline on all four edges. A filled well
+/// passes neither check.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_composer_is_an_outlined_field_not_a_filled_slab() {
+    for name in ["mid_input", "attached_empty", "multiline"] {
+        let model = states::by_name(name).expect("node");
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let s = f.scale;
+        // Interior, clear of the marker/text column and of the border.
+        let interior = r.darkest_in(
+            f.right - 40.0,
+            f.composer_top + 6.0,
+            f.right - 6.0,
+            f.composer_bottom - 6.0,
+        );
+        let page = r.darkest_in(f.left, f.body_top + 4.0, f.right, f.body_top + 10.0);
+        assert!(
+            interior > 0.97,
+            "{name}: the field interior is tinted ({interior:.3}); it should be paper"
+        );
+        assert!(page > 0.9, "unexpected ink in the sampled page band");
+
+        // Border: each edge must ink, midway along that edge.
+        let mid_x = ((f.left + f.right) / 2.0 * s) as u32;
+        let mid_y = ((f.composer_top + f.composer_bottom) / 2.0 * s) as u32;
+        let edges = [
+            ("top", mid_x, (f.composer_top * s).round() as u32),
+            ("bottom", mid_x, (f.composer_bottom * s).round() as u32),
+            ("left", (f.left * s).round() as u32, mid_y),
+            ("right", (f.right * s).round() as u32, mid_y),
+        ];
+        for (edge, x, y) in edges {
+            // Allow a pixel of slack for stroke centring and antialiasing.
+            let inked = (-2i64..=2)
+                .any(|d| {
+                    let (px, py) = if edge == "top" || edge == "bottom" {
+                        (x, (y as i64 + d).max(0) as u32)
+                    } else {
+                        ((x as i64 + d).max(0) as u32, y)
+                    };
+                    px < r.width && py < r.height && r.luma(px, py) < 0.95
+                });
+            assert!(inked, "{name}: no {edge} border was drawn on the field");
+        }
+    }
+}
+
+/// Focus must be visible: the focused border is stronger than the unfocused
+/// one. Without this the field looks identical whether or not keystrokes will
+/// land in it.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_field_border_shows_focus() {
+    let mut focused = states::by_name("mid_input").expect("node");
+    focused.focused = true;
+    let mut blurred = states::by_name("mid_input").expect("node");
+    blurred.focused = false;
+    let Some(a) = Rendered::new(&focused) else {
+        return;
+    };
+    let Some(b) = Rendered::new(&blurred) else {
+        return;
+    };
+    let f = a.frame;
+    // Sample the top border band on both, away from the text.
+    let band = |r: &Rendered| {
+        r.darkest_in(
+            f.right - 60.0,
+            f.composer_top - 1.0,
+            f.right - 10.0,
+            f.composer_top + 1.0,
+        )
+    };
+    let focused_ink = band(&a);
+    let blurred_ink = band(&b);
+    assert!(
+        focused_ink < blurred_ink - 0.05,
+        "focus is invisible: focused border {focused_ink:.3} vs unfocused {blurred_ink:.3}"
+    );
+}
+
+/// An unfocused window must not blink a caret, or it claims keystrokes it will
+/// not receive.
+#[test]
+#[ignore = "requires a GPU"]
+fn no_caret_is_drawn_while_unfocused() {
+    let model = states::by_name("unfocused").expect("node");
+    assert!(!model.focused, "the unfocused node is focused");
+    assert!(model.caret.visible(), "node pins the caret on, to prove focus gates it");
+    let Some(r) = Rendered::new(&model) else {
+        return;
+    };
+    let f = r.frame;
+    // Past the end of the text, inside the field: only a caret could ink here.
+    let darkest = r.darkest_in(
+        f.composer_text_left() + 220.0,
+        f.composer_top + 4.0,
+        f.right - 4.0,
+        f.composer_bottom - 4.0,
+    );
+    assert!(
+        darkest > 0.9,
+        "a caret was drawn in an unfocused field ({darkest:.3})"
+    );
+}
+
+/// The prompt marker must be drawn, and the text must start after it: the
+/// marker exists to make the text origin explicit, so overlapping glyphs would
+/// defeat it.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_prompt_marker_precedes_the_text() {
+    let model = states::by_name("mid_input").expect("node");
+    let Some(r) = Rendered::new(&model) else {
+        return;
+    };
+    let f = r.frame;
+    let marker = r.darkest_in(
+        f.left + crate::layout::COMPOSER_PAD_X,
+        f.composer_top + 4.0,
+        f.composer_text_left() - 2.0,
+        f.composer_bottom - 4.0,
+    );
+    assert!(marker < 0.8, "no prompt marker was drawn ({marker:.3})");
+    // The gap immediately left of the text origin must stay clear, so the
+    // marker cannot be touching the message.
+    let gap = r.darkest_in(
+        f.composer_text_left() - 4.0,
+        f.composer_top + 4.0,
+        f.composer_text_left() - 1.0,
+        f.composer_bottom - 4.0,
+    );
+    assert!(gap > 0.85, "the marker runs into the text ({gap:.3})");
+}
+
+/// While busy, anything already typed for the next turn must stay visible.
+/// The old design replaced the whole field with a "working..." label, silently
+/// hiding queued input.
+#[test]
+#[ignore = "requires a GPU"]
+fn typed_text_survives_the_busy_state() {
+    let mut model = states::by_name("mid_input").expect("node");
+    model.busy = true;
+    let Some(r) = Rendered::new(&model) else {
+        return;
+    };
+    let f = r.frame;
+    let darkest = r.darkest_in(
+        f.composer_text_left(),
+        f.composer_top + 3.0,
+        f.right - 4.0,
+        f.composer_bottom - 3.0,
+    );
+    assert!(
+        darkest < 0.6,
+        "the busy state hid text typed for the next turn ({darkest:.3})"
+    );
 }
