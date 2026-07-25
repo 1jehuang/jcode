@@ -86,16 +86,41 @@ fn split_bracket_suffix(model: &str) -> (&str, Option<String>) {
 
 /// Split a trailing `-YYYYMMDD` snapshot date into a `YYYY-MM-DD` label.
 fn split_snapshot_date(model: &str) -> (&str, Option<String>) {
-    let Some((head, tail)) = model.rsplit_once('-') else {
-        return (model, None);
-    };
-    if head.is_empty() || tail.len() != 8 || !tail.chars().all(|c| c.is_ascii_digit()) {
-        return (model, None);
+    // Compact form: `-20251001`.
+    if let Some((head, tail)) = model.rsplit_once('-')
+        && !head.is_empty()
+        && tail.len() == 8
+        && tail.chars().all(|c| c.is_ascii_digit())
+    {
+        return (
+            head,
+            Some(format!("{}-{}-{}", &tail[..4], &tail[4..6], &tail[6..])),
+        );
     }
-    (
-        head,
-        Some(format!("{}-{}-{}", &tail[..4], &tail[4..6], &tail[6..])),
-    )
+
+    // Dashed form: `-2025-04-14`, as used by OpenAI snapshot ids. Without this
+    // the date leaks into the name as three separate title-cased words
+    // (`GPT-4.1 Mini 2025 04 14`).
+    let mut segments = model.rsplitn(4, '-');
+    let day = segments.next();
+    let month = segments.next();
+    let year = segments.next();
+    let head = segments.next();
+    if let (Some(head), Some(year), Some(month), Some(day)) = (head, year, month, day)
+        && !head.is_empty()
+        && is_ascii_digits(year, 4)
+        && is_ascii_digits(month, 2)
+        && is_ascii_digits(day, 2)
+    {
+        return (&model[..head.len()], Some(format!("{year}-{month}-{day}")));
+    }
+
+    (model, None)
+}
+
+/// True when `value` is exactly `len` ASCII digits.
+fn is_ascii_digits(value: &str, len: usize) -> bool {
+    value.len() == len && value.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Render a `<family>-<version>[-<qualifier>...]` id such as `gpt-5.1-codex-max`
@@ -298,6 +323,9 @@ fn title_case_dashed(core: &str) -> String {
         .join(" ")
 }
 
+/// Acronyms that read wrong when naively title-cased (`Tts`, `Api`, `Vl`).
+const UPPERCASE_TOKENS: [&str; 6] = ["tts", "stt", "api", "vl", "ocr", "id"];
+
 /// Title-case a single token, leaving anything containing a digit untouched so
 /// version fragments like `4.8` or `2.5` are preserved.
 fn title_case_word(word: &str) -> String {
@@ -306,6 +334,10 @@ fn title_case_word(word: &str) -> String {
     }
     if word.chars().any(|c| c.is_ascii_digit()) {
         return word.to_string();
+    }
+    let lower = word.to_ascii_lowercase();
+    if UPPERCASE_TOKENS.contains(&lower.as_str()) {
+        return lower.to_ascii_uppercase();
     }
     let mut chars = word.chars();
     match chars.next() {
@@ -400,6 +432,42 @@ mod tests {
                 "{raw} should stay verbatim"
             );
         }
+    }
+
+    #[test]
+    fn pretty_model_display_name_collapses_dashed_snapshot_dates() {
+        // OpenAI snapshot ids use a dashed date, which previously leaked into
+        // the name as three separate words (`GPT-4.1 Mini 2025 04 14`).
+        assert_eq!(
+            pretty_model_display_name("gpt-4.1-mini-2025-04-14"),
+            "GPT-4.1 Mini (2025-04-14)"
+        );
+        assert_eq!(
+            pretty_model_display_name("gpt-4-turbo-2024-04-09"),
+            "GPT-4 Turbo (2024-04-09)"
+        );
+        assert_eq!(
+            pretty_model_display_name("gpt-5-pro-2025-10-06"),
+            "GPT-5 Pro (2025-10-06)"
+        );
+        // A bare version segment must not be mistaken for a date.
+        assert_eq!(pretty_model_display_name("gpt-5.4"), "GPT-5.4");
+        assert_eq!(
+            pretty_model_display_name("gemini-2.5-flash-lite"),
+            "Gemini 2.5 Flash Lite"
+        );
+    }
+
+    #[test]
+    fn pretty_model_display_name_uppercases_known_acronyms() {
+        assert_eq!(
+            pretty_model_display_name("gpt-4o-mini-tts"),
+            "GPT-4o Mini TTS"
+        );
+        assert_eq!(
+            pretty_model_display_name("gpt-5-search-api"),
+            "GPT-5 Search API"
+        );
     }
 
     #[test]
