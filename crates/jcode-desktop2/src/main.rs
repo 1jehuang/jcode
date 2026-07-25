@@ -5,7 +5,11 @@
 //! connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
 mod capture;
+mod caret;
+mod clipboard;
+mod editor;
 mod harness;
+mod keymap;
 mod layout;
 mod render;
 mod states;
@@ -21,11 +25,15 @@ use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+
 use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--keys") {
+        print_keys();
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--capture") {
         return run_capture(&args[1..]);
     }
@@ -41,6 +49,31 @@ fn main() -> Result<()> {
     let mut app = App::default();
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// `--keys`: print the keybindings ported from the TUI, and the ones that were
+/// deliberately skipped. Makes the parity table discoverable to users instead
+/// of living only in the source.
+fn print_keys() {
+    println!("keybindings (ported from the jcode TUI)\n");
+    let width = keymap::PORTED
+        .iter()
+        .map(|row| row.chord.len())
+        .max()
+        .unwrap_or(0);
+    for row in keymap::PORTED {
+        println!(
+            "  {:<width$}  {:<20}  {}",
+            row.chord,
+            format!("{:?}", row.action),
+            row.tui,
+            width = width
+        );
+    }
+    println!("\nnot ported yet:\n");
+    for (chord, reason) in keymap::NOT_PORTED {
+        println!("  {chord:<width$}  {reason}", width = width);
+    }
 }
 
 /// `--e2e [message]`: headless validation of the app's own harness wiring.
@@ -139,6 +172,9 @@ struct App {
     text: text::TextSystem,
     model: Model,
     harness: Option<(Receiver<harness::HarnessUpdate>, Sender<String>)>,
+    /// Latest modifier state; winit reports it separately from key events.
+    modifiers: winit::keyboard::ModifiersState,
+    clipboard: clipboard::Clipboard,
 }
 
 /// UI model: what the frame is built from.
@@ -147,8 +183,15 @@ pub struct Model {
     pub status: String,
     pub session_id: Option<String>,
     pub transcript: String,
-    pub input: String,
+    /// The composer: a real text buffer with a cursor, not an append-only
+    /// string.
+    pub editor: editor::Editor,
+    pub caret: caret::Caret,
     pub busy: bool,
+    /// Lines scrolled up from the tail. 0 follows the newest output.
+    pub scroll: usize,
+    /// Transient one-line notice (e.g. "nothing to undo").
+    pub notice: Option<String>,
 }
 
 impl Default for Model {
@@ -158,9 +201,34 @@ impl Default for Model {
             status: "starting...".into(),
             session_id: None,
             transcript: String::new(),
-            input: String::new(),
+            editor: editor::Editor::default(),
+            caret: caret::Caret::default(),
             busy: false,
+            scroll: 0,
+            notice: None,
         }
+    }
+}
+
+impl Model {
+    /// Total transcript lines, used to clamp scrolling.
+    fn transcript_lines(&self) -> usize {
+        self.transcript.lines().count()
+    }
+
+    /// Scroll up by `lines`, clamped so the view cannot run past the top.
+    fn scroll_up(&mut self, lines: usize, visible: usize) {
+        let max = self.transcript_lines().saturating_sub(visible);
+        self.scroll = (self.scroll + lines).min(max);
+    }
+
+    /// Scroll down by `lines`; reaching 0 re-follows the tail.
+    fn scroll_down(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    fn set_notice(&mut self, notice: impl Into<String>) {
+        self.notice = Some(notice.into());
     }
 }
 
@@ -186,17 +254,132 @@ impl App {
     }
 
     fn submit_input(&mut self) {
-        if self.model.input.trim().is_empty() || self.model.session_id.is_none() {
+        if self.model.editor.text().trim().is_empty() {
             return;
         }
-        let content = std::mem::take(&mut self.model.input);
+        if self.model.session_id.is_none() {
+            self.model.set_notice("not attached yet");
+            return;
+        }
+        let content = self.model.editor.take_for_submit();
         self.model
             .transcript
             .push_str(&format!("\n> {content}\n\n"));
         self.model.busy = true;
+        // Submitting jumps back to the live tail; otherwise the reply streams
+        // in off-screen.
+        self.model.scroll = 0;
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(content);
         }
+    }
+
+    /// Lines of transcript currently visible, needed to clamp scrolling.
+    fn visible_lines(&self) -> usize {
+        self.state
+            .as_ref()
+            .map(|state| {
+                layout::Frame::new(state.size(), state.scale_factor()).visible_body_lines()
+            })
+            .unwrap_or(20)
+    }
+
+    /// Apply one resolved action. Returns false when the app should exit, so
+    /// quitting stays an explicit outcome rather than a side effect.
+    fn apply(&mut self, action: keymap::Action, typed: Option<&str>) -> bool {
+        use keymap::Action;
+        let page = self.visible_lines().saturating_sub(1).max(1);
+        self.model.notice = None;
+        match action {
+            Action::Insert => {
+                if let Some(text) = typed {
+                    self.model.editor.insert_str(text);
+                }
+            }
+            Action::Submit => self.submit_input(),
+            Action::InsertNewline => self.model.editor.insert_char(' '),
+
+            Action::MoveLeft => self.model.editor.move_left(),
+            Action::MoveRight => self.model.editor.move_right(),
+            Action::MoveWordLeft => self.model.editor.move_word_left(),
+            Action::MoveWordRight => self.model.editor.move_word_right(),
+            Action::MoveHome => self.model.editor.move_home(),
+            Action::MoveEnd => self.model.editor.move_end(),
+
+            Action::DeleteBack => self.model.editor.delete_back(),
+            Action::DeleteForward => self.model.editor.delete_forward(),
+            Action::DeleteWordBack => self.model.editor.delete_word_back(),
+            Action::DeleteWordForward => self.model.editor.delete_word_forward(),
+            Action::KillToStart => {
+                let killed = self.model.editor.kill_to_start();
+                self.clipboard.set(&killed);
+            }
+            Action::KillToEnd => {
+                let killed = self.model.editor.kill_to_end();
+                self.clipboard.set(&killed);
+            }
+            Action::CutLine => {
+                let cut = self.model.editor.cut_line();
+                self.clipboard.set(&cut);
+            }
+
+            Action::Undo => {
+                if !self.model.editor.undo() {
+                    self.model.set_notice("nothing to undo");
+                }
+            }
+            Action::Copy => self.clipboard.set(self.model.editor.text()),
+            Action::Paste => match self.clipboard.get() {
+                Some(text) => self.model.editor.insert_str(&text),
+                None => self.model.set_notice("clipboard is empty"),
+            },
+
+            Action::HistoryPrev => {
+                if !self.model.editor.history_prev() {
+                    self.model.set_notice("no earlier input");
+                }
+            }
+            Action::HistoryNext => {
+                self.model.editor.history_next();
+            }
+
+            Action::ScrollUp => self.model.scroll_up(1, self.visible_lines()),
+            Action::ScrollDown => self.model.scroll_down(1),
+            Action::PageUp => self.model.scroll_up(page, self.visible_lines()),
+            Action::PageDown => self.model.scroll_down(page),
+            Action::ScrollTop => {
+                let visible = self.visible_lines();
+                self.model.scroll_up(usize::MAX / 2, visible);
+            }
+            Action::ScrollBottom => self.model.scroll = 0,
+
+            // Escape never quits: it cancels, then clears, then re-follows the
+            // tail, matching the TUI.
+            Action::Cancel => {
+                if self.model.busy {
+                    self.model.busy = false;
+                    self.model.set_notice("interrupting...");
+                } else if !self.model.editor.is_empty() {
+                    self.model.editor.clear();
+                } else {
+                    self.model.scroll = 0;
+                }
+            }
+            // Ctrl+C interrupts while busy and only quits when idle with an
+            // empty composer, so it cannot discard typed work.
+            Action::InterruptOrQuit => {
+                if self.model.busy {
+                    self.model.busy = false;
+                    self.model.set_notice("interrupting...");
+                } else if !self.model.editor.is_empty() {
+                    self.model.editor.clear();
+                } else {
+                    return false;
+                }
+            }
+        }
+        self.model.caret.touch();
+        true
     }
 }
 
@@ -236,6 +419,9 @@ impl ApplicationHandler for App {
                     state.resize(size.width, size.height);
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -246,19 +432,12 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                match logical_key {
-                    Key::Named(NamedKey::Enter) => self.submit_input(),
-                    Key::Named(NamedKey::Backspace) => {
-                        self.model.input.pop();
-                    }
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    _ => {
-                        if let Some(text) = text {
-                            for ch in text.chars().filter(|c| !c.is_control()) {
-                                self.model.input.push(ch);
-                            }
-                        }
-                    }
+                let action =
+                    keymap::resolve(&logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
+                let typed = text.as_ref().map(|t| t.as_str());
+                if !self.apply(action, typed) {
+                    event_loop.exit();
+                    return;
                 }
                 if let Some(state) = self.state.as_ref() {
                     state.request_redraw();
@@ -273,6 +452,11 @@ impl ApplicationHandler for App {
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");
                     }
+                }
+                // Wake exactly when the caret next toggles: blinking without a
+                // busy redraw loop.
+                if let Some(at) = self.model.caret.next_toggle_at(std::time::Instant::now()) {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(at));
                 }
             }
             _ => {}
@@ -406,6 +590,13 @@ fn build_scene(
     // Measure the *wrapped* height so long replies never bleed into the well.
     let available = frame.body_bottom - frame.body_top;
     let lines: Vec<&str> = transcript.lines().collect();
+    // `scroll` counts lines held back from the tail, so 0 follows live output.
+    let end = lines
+        .len()
+        .saturating_sub(model.scroll)
+        .max(1)
+        .min(lines.len().max(1));
+    let lines = &lines[..end];
     let mut first_line = lines.len().saturating_sub(frame.visible_body_lines());
     let mut tail = lines[first_line..].join("\n");
     let mut tail_height = text.measure_paragraph(&tail, column, body_style, scale);
@@ -428,29 +619,87 @@ fn build_scene(
         scale,
     );
 
-    // Prompt line inside the well.
-    let (prompt, prompt_color) = if model.busy {
-        ("working...".to_string(), theme.muted)
-    } else if model.input.is_empty() {
-        (">".to_string(), theme.faint)
-    } else {
-        (format!("> {}_", model.input), theme.text)
+    // Prompt line inside the well: a real input box. The caret is drawn at
+    // the measured width of the text before the cursor, so it sits between
+    // glyphs and moves with Ctrl+A/E, word motion, and the arrows.
+    let prompt_style = ParagraphStyle {
+        font_size: layout::BODY_SIZE,
+        color: theme.text,
+        ..Default::default()
     };
-    text.draw_paragraph_scaled(
-        scene,
-        &prompt,
-        (
-            frame.left + layout::COMPOSER_PAD_X,
-            frame.composer_top + 13.0,
-        ),
-        (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32,
-        ParagraphStyle {
-            font_size: layout::BODY_SIZE,
-            color: prompt_color,
-            ..Default::default()
-        },
-        scale,
-    );
+    let prompt_x = frame.left + layout::COMPOSER_PAD_X;
+    let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
+    let prompt_width = (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32;
+
+    if model.busy {
+        text.draw_paragraph_scaled(
+            scene,
+            "working...",
+            (prompt_x, prompt_y),
+            prompt_width,
+            ParagraphStyle {
+                color: theme.muted,
+                ..prompt_style
+            },
+            scale,
+        );
+    } else {
+        if model.editor.is_empty() {
+            text.draw_paragraph_scaled(
+                scene,
+                "message jcode",
+                (prompt_x, prompt_y),
+                prompt_width,
+                ParagraphStyle {
+                    color: theme.faint,
+                    ..prompt_style
+                },
+                scale,
+            );
+        } else {
+            text.draw_paragraph_scaled(
+                scene,
+                model.editor.text(),
+                (prompt_x, prompt_y),
+                prompt_width,
+                prompt_style,
+                scale,
+            );
+        }
+        if model.caret.visible() {
+            let offset = text.measure_width(model.editor.before_cursor(), prompt_style, scale);
+            let caret_x = (prompt_x + offset).min(frame.right - layout::COMPOSER_PAD_X);
+            let top = prompt_y - 1.0;
+            let bottom = top + layout::CARET_HEIGHT;
+            fill(
+                scene,
+                theme.text,
+                &Rect::new(caret_x, top, caret_x + layout::CARET_WIDTH, bottom),
+            );
+        }
+    }
+
+    // A transient notice, or a scrollback indicator, as a caption under the
+    // well. Never covers content.
+    let footnote = model
+        .notice
+        .clone()
+        .or_else(|| (model.scroll > 0).then(|| format!("scrolled back {} lines", model.scroll)));
+    if let Some(footnote) = footnote {
+        text.draw_paragraph_scaled(
+            scene,
+            &footnote,
+            (frame.left, frame.footnote_top),
+            frame.column() as f32,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: theme.faint,
+                letter_spacing_em: 0.1,
+                ..Default::default()
+            },
+            scale,
+        );
+    }
 }
 
 /// Middle-elide `text` to at most `max_chars` characters, keeping the head and
@@ -493,6 +742,288 @@ mod tests {
     #[test]
     fn elide_handles_tiny_budget() {
         assert_eq!(elide("abcdef", 2), "...");
+    }
+}
+
+/// Action-level tests: drive the real `App::apply` dispatch so the wiring
+/// between keymap, editor, scrolling, and interrupt semantics is covered, not
+/// just the pure modules.
+#[cfg(test)]
+mod action_tests {
+    use super::keymap::Action;
+    use super::{App, keymap};
+    use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
+
+    fn app_with(text: &str) -> App {
+        let mut app = App::default();
+        app.model.session_id = Some("session_test".into());
+        app.apply(Action::Insert, Some(text));
+        app
+    }
+
+    /// Press a chord the way the window event handler does: resolve it, then
+    /// apply it. Returns false when the app would exit.
+    fn press(app: &mut App, key: Key, mods: ModifiersState, typed: Option<&str>) -> bool {
+        let action = keymap::resolve(&key, mods).unwrap_or(Action::Insert);
+        app.apply(action, typed)
+    }
+
+    fn ch(c: char) -> Key {
+        Key::Character(SmolStr::new(c.to_string()))
+    }
+
+    #[test]
+    fn escape_clears_the_input_instead_of_quitting() {
+        // The starter quit the app on Escape, silently losing typed work.
+        let mut app = app_with("a draft message");
+        assert!(
+            press(
+                &mut app,
+                Key::Named(NamedKey::Escape),
+                ModifiersState::empty(),
+                None
+            ),
+            "Escape asked the app to exit"
+        );
+        assert!(
+            app.model.editor.is_empty(),
+            "Escape did not clear the input"
+        );
+    }
+
+    #[test]
+    fn escape_on_an_empty_composer_still_does_not_quit() {
+        let mut app = App::default();
+        assert!(press(
+            &mut app,
+            Key::Named(NamedKey::Escape),
+            ModifiersState::empty(),
+            None
+        ));
+    }
+
+    #[test]
+    fn escape_interrupts_a_running_turn_before_clearing_input() {
+        let mut app = app_with("keep me");
+        app.model.busy = true;
+        press(
+            &mut app,
+            Key::Named(NamedKey::Escape),
+            ModifiersState::empty(),
+            None,
+        );
+        assert!(!app.model.busy, "Escape did not interrupt the turn");
+        assert_eq!(
+            app.model.editor.text(),
+            "keep me",
+            "Escape cleared the input while interrupting"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_only_when_idle_and_empty() {
+        // While busy: interrupt.
+        let mut app = App::default();
+        app.model.busy = true;
+        assert!(press(&mut app, ch('c'), ModifiersState::CONTROL, None));
+        assert!(!app.model.busy);
+
+        // With typed text: clear rather than discard the session.
+        let mut app = app_with("unsent");
+        assert!(press(&mut app, ch('c'), ModifiersState::CONTROL, None));
+        assert!(app.model.editor.is_empty());
+
+        // Idle and empty: quit.
+        let mut app = App::default();
+        assert!(
+            !press(&mut app, ch('c'), ModifiersState::CONTROL, None),
+            "Ctrl+C on an idle empty composer should quit"
+        );
+    }
+
+    #[test]
+    fn editing_chords_reach_the_editor() {
+        let mut app = app_with("alpha beta");
+        press(&mut app, ch('a'), ModifiersState::CONTROL, None);
+        assert_eq!(app.model.editor.cursor(), 0, "Ctrl+A did not go home");
+        press(&mut app, ch('e'), ModifiersState::CONTROL, None);
+        assert_eq!(
+            app.model.editor.cursor(),
+            10,
+            "Ctrl+E did not go to the end"
+        );
+        press(&mut app, ch('w'), ModifiersState::CONTROL, None);
+        assert_eq!(
+            app.model.editor.text(),
+            "alpha ",
+            "Ctrl+W did not cut a word"
+        );
+        press(&mut app, ch('u'), ModifiersState::CONTROL, None);
+        assert!(app.model.editor.is_empty(), "Ctrl+U did not kill to start");
+        press(&mut app, ch('z'), ModifiersState::CONTROL, None);
+        assert_eq!(app.model.editor.text(), "alpha ", "Ctrl+Z did not undo");
+    }
+
+    #[test]
+    fn cut_then_paste_round_trips_through_the_clipboard() {
+        let mut app = app_with("cut me");
+        press(&mut app, ch('x'), ModifiersState::CONTROL, None);
+        assert!(app.model.editor.is_empty());
+        press(&mut app, ch('v'), ModifiersState::CONTROL, None);
+        assert_eq!(
+            app.model.editor.text(),
+            "cut me",
+            "paste did not restore the cut"
+        );
+    }
+
+    #[test]
+    fn typing_inserts_at_the_caret_after_moving() {
+        let mut app = app_with("ac");
+        press(
+            &mut app,
+            Key::Named(NamedKey::ArrowLeft),
+            ModifiersState::empty(),
+            None,
+        );
+        press(&mut app, ch('b'), ModifiersState::empty(), Some("b"));
+        assert_eq!(app.model.editor.text(), "abc");
+    }
+
+    #[test]
+    fn typing_keeps_the_caret_solid() {
+        let mut app = App::default();
+        press(&mut app, ch('x'), ModifiersState::empty(), Some("x"));
+        assert!(
+            app.model.caret.visible(),
+            "caret was not solid while typing"
+        );
+    }
+
+    #[test]
+    fn history_recall_walks_submitted_messages() {
+        let mut app = app_with("first message");
+        app.submit_input();
+        app.apply(Action::Insert, Some("draft"));
+        press(
+            &mut app,
+            Key::Named(NamedKey::ArrowUp),
+            ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.model.editor.text(), "first message");
+        press(
+            &mut app,
+            Key::Named(NamedKey::ArrowDown),
+            ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.model.editor.text(), "draft", "live draft was lost");
+    }
+
+    #[test]
+    fn submitting_without_a_session_keeps_the_text_and_says_why() {
+        let mut app = App::default();
+        app.apply(Action::Insert, Some("hello"));
+        app.apply(Action::Submit, None);
+        assert_eq!(
+            app.model.editor.text(),
+            "hello",
+            "text was discarded while detached"
+        );
+        assert!(app.model.notice.is_some(), "no notice explained the no-op");
+    }
+
+    #[test]
+    fn scrolling_clamps_and_returns_to_the_tail() {
+        let mut app = App::default();
+        app.model.transcript = (1..=100)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.apply(Action::ScrollTop, None);
+        let top = app.model.scroll;
+        assert!(top > 0, "scrolling up did nothing");
+        app.apply(Action::ScrollUp, None);
+        assert_eq!(app.model.scroll, top, "scroll ran past the top of history");
+        app.apply(Action::ScrollBottom, None);
+        assert_eq!(app.model.scroll, 0, "did not return to the live tail");
+        app.apply(Action::ScrollDown, None);
+        assert_eq!(app.model.scroll, 0, "scrolled below the tail");
+    }
+
+    #[test]
+    fn submitting_jumps_back_to_the_live_tail() {
+        let mut app = app_with("question");
+        app.model.transcript = (1..=100)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.apply(Action::PageUp, None);
+        assert!(app.model.scroll > 0);
+        app.submit_input();
+        assert_eq!(app.model.scroll, 0, "reply would stream in off-screen");
+    }
+
+    #[test]
+    fn a_notice_is_cleared_by_the_next_keypress() {
+        let mut app = App::default();
+        app.apply(Action::Undo, None);
+        assert!(
+            app.model.notice.is_some(),
+            "undo with empty stack said nothing"
+        );
+        press(&mut app, ch('a'), ModifiersState::empty(), Some("a"));
+        assert!(app.model.notice.is_none(), "stale notice persisted");
+    }
+
+    /// Every action must be dispatchable without panicking, including on an
+    /// empty model: a crash on an edge key is worse than a no-op.
+    #[test]
+    fn every_action_is_safe_on_an_empty_model() {
+        let actions = [
+            Action::Insert,
+            Action::Submit,
+            Action::InsertNewline,
+            Action::MoveLeft,
+            Action::MoveRight,
+            Action::MoveWordLeft,
+            Action::MoveWordRight,
+            Action::MoveHome,
+            Action::MoveEnd,
+            Action::DeleteBack,
+            Action::DeleteForward,
+            Action::DeleteWordBack,
+            Action::DeleteWordForward,
+            Action::KillToStart,
+            Action::KillToEnd,
+            Action::CutLine,
+            Action::Undo,
+            Action::Copy,
+            Action::Paste,
+            Action::HistoryPrev,
+            Action::HistoryNext,
+            Action::ScrollUp,
+            Action::ScrollDown,
+            Action::PageUp,
+            Action::PageDown,
+            Action::ScrollTop,
+            Action::ScrollBottom,
+            Action::Cancel,
+        ];
+        for action in actions {
+            let mut app = App::default();
+            app.apply(action, Some("x"));
+        }
+    }
+
+    /// Every chord in the parity table must survive real dispatch.
+    #[test]
+    fn every_ported_chord_dispatches_without_panicking() {
+        for row in keymap::PORTED {
+            let mut app = app_with("alpha beta gamma");
+            app.apply(row.action, Some("x"));
+        }
     }
 }
 
@@ -665,6 +1196,149 @@ mod visual_tests {
         );
     }
 
+    /// A node must render identically no matter when it is rendered, or every
+    /// pixel test becomes timing-dependent and flaky.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn state_nodes_render_deterministically() {
+        for (name, model) in nodes() {
+            let Some(first) = Rendered::new(&model) else {
+                return;
+            };
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let Some(second) = Rendered::new(&model) else {
+                return;
+            };
+            assert!(
+                first.pixels == second.pixels,
+                "{name} rendered differently 700ms later (time-dependent frame)"
+            );
+        }
+    }
+
+    /// Columns of ink inside the composer well, as physical x positions.
+    /// Used to find the caret without knowing font metrics.
+    fn caret_columns(r: &Rendered) -> Vec<u32> {
+        let f = r.frame;
+        let s = f.scale;
+        let y0 = ((f.composer_top + super::layout::COMPOSER_TEXT_OFFSET + 2.0) * s) as u32;
+        let y1 = ((f.composer_top + super::layout::COMPOSER_TEXT_OFFSET + 12.0) * s) as u32;
+        let x0 = (f.left * s) as u32;
+        let x1 = (f.right * s) as u32;
+        (x0..x1)
+            .filter(|&x| (y0..=y1).all(|y| r.luma(x, y) < 0.5))
+            .collect()
+    }
+
+    /// A caret is a full-height vertical bar, so it inks every sampled row in
+    /// its column. Empty input has no glyphs, so any such column is the caret.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn an_insert_caret_is_drawn_in_the_empty_composer() {
+        let model = states::by_name("attached_empty").expect("node");
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let columns = caret_columns(&r);
+        assert!(
+            !columns.is_empty(),
+            "no insert caret was drawn in the empty composer"
+        );
+        let f = r.frame;
+        let expected = ((f.left + super::layout::COMPOSER_PAD_X) * f.scale) as u32;
+        assert!(
+            columns.iter().any(|&x| x.abs_diff(expected) <= 4),
+            "caret was not at the start of the empty input (columns {:?}, expected ~{expected})",
+            &columns[..columns.len().min(8)]
+        );
+    }
+
+    /// The caret must track the cursor index, which is what makes this a real
+    /// input box rather than a trailing underscore. Compared against a caret
+    /// rendered on the *same* text with the cursor at the end, so the only
+    /// difference is the cursor position.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn the_caret_moves_with_the_cursor() {
+        let mut inside = states::by_name("mid_input_caret_inside").expect("node");
+        let mut at_end = states::by_name("mid_input_caret_inside").expect("node");
+        at_end.editor.set_cursor_public(at_end.editor.text().len());
+        // Same text, same node, different cursor.
+        assert_eq!(inside.editor.text(), at_end.editor.text());
+        assert!(inside.editor.cursor() < at_end.editor.cursor());
+        inside.caret = super::caret::Caret::pinned(true);
+        at_end.caret = super::caret::Caret::pinned(true);
+
+        let Some(a) = Rendered::new(&inside) else {
+            return;
+        };
+        let Some(b) = Rendered::new(&at_end) else {
+            return;
+        };
+        let mid = caret_columns(&a);
+        let tail = caret_columns(&b);
+        assert!(!mid.is_empty(), "no caret drawn with the cursor mid-text");
+        assert!(
+            !tail.is_empty(),
+            "no caret drawn with the cursor at the end"
+        );
+        let mid_x = *mid.iter().max().expect("columns");
+        let tail_x = *tail.iter().max().expect("columns");
+        assert!(
+            tail_x > mid_x + 20,
+            "caret did not follow the cursor: mid-text at {mid_x}, at end {tail_x}"
+        );
+    }
+
+    /// The blink must actually blink: the off phase draws no caret.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn the_caret_disappears_on_the_blink_off_phase() {
+        let hidden = states::by_name("caret_hidden").expect("node");
+        assert!(
+            !hidden.caret.visible(),
+            "the caret_hidden node is not actually in an off phase"
+        );
+        let Some(r) = Rendered::new(&hidden) else {
+            return;
+        };
+        // Sample past the end of the text, where only a caret could ink.
+        let f = r.frame;
+        let text_end = f.left + super::layout::COMPOSER_PAD_X + 200.0;
+        let darkest = r.darkest_in(
+            text_end,
+            f.composer_top + 4.0,
+            f.right - 2.0,
+            f.composer_bottom - 4.0,
+        );
+        assert!(
+            darkest > 0.85,
+            "something was drawn past the text on the blink off phase ({darkest:.3})"
+        );
+    }
+
+    /// The caret must never escape its well, at any window size.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn the_caret_stays_inside_the_composer_well() {
+        for (name, model) in nodes() {
+            let Some(r) = Rendered::new(&model) else {
+                return;
+            };
+            let f = r.frame;
+            // Bands immediately above and below the well must stay paper.
+            let above = r.darkest_in(f.left, f.composer_top - 6.0, f.right, f.composer_top - 2.0);
+            assert!(above > 0.9, "{name}: ink just above the composer well");
+            let below = r.darkest_in(
+                f.left,
+                f.composer_bottom + 1.0,
+                f.right,
+                f.footnote_top - 1.0,
+            );
+            assert!(below > 0.9, "{name}: ink between the well and the footnote");
+        }
+    }
+
     #[test]
     #[ignore = "requires a GPU"]
     fn margins_stay_empty() {
@@ -677,8 +1351,8 @@ mod visual_tests {
             // wrapped to the column and not clipped by the window edge.
             let left_margin = r.darkest_in(0.0, 0.0, f.left - 3.0, f.height - 1.0);
             assert!(left_margin > 0.9, "{name}: ink in the left margin");
-            let bottom = r.darkest_in(0.0, f.composer_bottom + 3.0, f.width - 1.0, f.height - 1.0);
-            assert!(bottom > 0.9, "{name}: ink below the composer");
+            let bottom = r.darkest_in(0.0, f.footnote_bottom + 2.0, f.width - 1.0, f.height - 1.0);
+            assert!(bottom > 0.9, "{name}: ink below the footnote row");
         }
     }
 }
