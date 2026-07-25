@@ -5,6 +5,12 @@
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - If the git state is not clean, or there are other agents working in the codebase in parallel, do your best to still commit your work. 
 - **Push when done** - Push all commits to remote when finishing a task or session
+- **Run the guardrails before pushing** - `scripts/check_guardrails.sh` runs every gate in
+  CI's Format + Quality Guardrails jobs (fmt, clippy `-D warnings`, and the warning,
+  code-size, test-size, panic, swallowed-error, dependency-boundary, and wildcard-reexport
+  ratchets). Use `--skip-slow` to skip cargo check/clippy, and `--fix` to rustfmt and
+  rebaseline ratchets after intentional growth. CI tracks the `stable` toolchain, so run
+  `rustup update stable` too: a stale local clippy passes on lints that CI enforces.
 - **Use fast iteration by default** - Prefer `cargo check`, targeted tests, and dev builds while iterating
 - **Rebuild when done** - When you are done making changes, build the source.
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases. When cutting a new release, look at all the changes that happened since the last release and determine what the version bump should be ie patch or minor, etc. 
