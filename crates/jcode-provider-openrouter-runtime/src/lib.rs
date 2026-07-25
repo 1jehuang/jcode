@@ -2739,3 +2739,7 @@ mod openrouter_sse_stream;
 #[allow(clippy::await_holding_lock)]
 #[path = "openrouter_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "openrouter_catalog_merge_tests.rs"]
+mod openrouter_catalog_merge_tests;
