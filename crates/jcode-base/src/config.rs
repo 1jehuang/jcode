@@ -509,7 +509,10 @@ pub struct Config {
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
 
-    /// Sponsored discovery configuration
+    /// Partner discovery configuration. Skipped when it matches the shipped
+    /// default so saving config never bakes today's default into the file (see
+    /// `SponsorsConfig::is_default`).
+    #[serde(skip_serializing_if = "SponsorsConfig::is_default")]
     pub sponsors: SponsorsConfig,
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
