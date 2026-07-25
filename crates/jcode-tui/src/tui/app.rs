@@ -846,6 +846,10 @@ pub struct App {
     deferred_stream_done_id: Option<u64>,
     // Server-reported processing snapshot captured from resume/history before live events arrive.
     remote_resume_activity: Option<RemoteResumeActivity>,
+    // First tick at which a queued follow-up was observed sitting undispatched
+    // while the client was idle. Drives the starvation watchdog that recovers a
+    // stranded auto-poke continuation instead of spinning forever.
+    queued_followup_starved_since: Option<Instant>,
     // Reload reconnect is waiting for server history before deciding whether to continue.
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
     // Current status

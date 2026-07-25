@@ -1473,6 +1473,9 @@ impl App {
             .collect();
         if incomplete.is_empty() {
             if todos.is_empty() {
+                crate::logging::info(
+                    "AUTO_POKE_DECISION action=disarm reason=no_todos incomplete=0",
+                );
                 self.auto_poke_incomplete_todos = false;
                 return false;
             }
@@ -1543,6 +1546,17 @@ impl App {
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
         )));
+        // Auto-poke previously had no log trail, so a continuation that was
+        // queued but never dispatched looked identical in the logs to a silent
+        // model. Emit a decision line on every arm so the queue -> send handoff
+        // can be correlated with "Sending queued continuation message".
+        crate::logging::info(&format!(
+            "AUTO_POKE_DECISION action=queue_continuation incomplete={} queued_before={} is_processing={} pending_turn={}",
+            incomplete.len(),
+            self.queued_messages.len(),
+            self.is_processing,
+            self.pending_turn,
+        ));
         // Open todos mean the model is still iterating; completion-gate
         // exhaustion should only trip when the gate itself stops moving.
         self.todo_completion_gate_attempts = 0;
