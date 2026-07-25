@@ -192,6 +192,24 @@ jobs:
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
+      - name: Run TUI library tests
+        shell: bash
+        # These were previously only compiled (`--no-run` above), so test-only
+        # breakage reached master with CI green: three `ServerEvent::MessageEnd`
+        # call sites stayed unit variants after the enum gained a field, and the
+        # whole target failed to compile unnoticed (see #592).
+        #
+        # Run serially. Many of these tests share process-global state (model
+        # catalog, ambient cache, render state) and fail on ordering under
+        # parallelism, while passing reliably one-at-a-time: 1977 pass serially
+        # versus 2-4 varying failures in parallel. Scoping that state is tracked
+        # in #592; until then serial execution is the honest signal, and costs
+        # ~30s once the target is already built above.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-tui --lib -- --test-threads=1
+
       - name: Compile integration test binaries
         shell: bash
         # Build the integration-test binaries up front (not counted against the
