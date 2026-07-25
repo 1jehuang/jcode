@@ -885,7 +885,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
                 event,
                 ServerEvent::TextDelta { ref text } if text == "after attach"
             );
-            if matches!(event, ServerEvent::MessageEnd) {
+            if matches!(event, ServerEvent::MessageEnd { .. }) {
                 assert!(!saw_done, "MessageEnd must precede the terminal Done event");
                 saw_message_end = true;
             }
