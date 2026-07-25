@@ -295,7 +295,7 @@ fn test_websocket_first_activity_payload_counts_typed_control_events() {
 
 #[test]
 fn test_websocket_completion_timeout_is_long_enough_for_reasoning() {
-    let timeout = std::hint::black_box(WEBSOCKET_COMPLETION_TIMEOUT_SECS);
+    let timeout = std::hint::black_box(jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS);
     assert!(
         timeout >= 120,
         "completion timeout regressed to {}s; reasoning models may need several minutes",
@@ -378,7 +378,7 @@ fn test_websocket_next_activity_timeout_resets_after_api_activity() {
     let remaining = websocket_next_activity_timeout_secs(ws_started_at, last_api_activity_at, true)
         .expect("idle timeout should use last activity, not total request age");
     assert!(
-        remaining >= WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(3),
+        remaining >= jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(3),
         "expected full idle budget to reset after activity, got {remaining}"
     );
 }

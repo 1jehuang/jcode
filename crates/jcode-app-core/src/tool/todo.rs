@@ -528,9 +528,9 @@ impl Tool for TodoTool {
                 }
                 let nudges = take_reframe_nudges(&plan, &goals, &todos);
                 for nudge in &nudges {
+                    // `take_reframe_nudges` only emits these two kinds, so the
+                    // hill-climbability nudge is the remaining case.
                     let kind = if nudge == TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE {
-                        crate::telemetry::TodoGateKind::IntentUnderstanding
-                    } else if nudge == TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE {
                         crate::telemetry::TodoGateKind::IntentUnderstanding
                     } else {
                         crate::telemetry::TodoGateKind::HillClimbability
