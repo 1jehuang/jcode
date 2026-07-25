@@ -841,26 +841,10 @@ impl Default for SponsorsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            endpoint: DEFAULT_DISCOVERY_ENDPOINT.to_string(),
+            endpoint: "https://api.jcode.sh/v1/discovery".to_string(),
         }
     }
 }
-
-impl SponsorsConfig {
-    /// Whether this section carries no information beyond the shipped default.
-    ///
-    /// Used to keep `[sponsors]` out of written config files unless the user
-    /// actually changed something. Discovery originally shipped opt-in with
-    /// `enabled = false`, and because config saves serialize the whole struct,
-    /// any save during that window froze the old default into the user's file
-    /// and permanently disabled discovery even after the opt-out flip.
-    pub fn is_default(&self) -> bool {
-        self.enabled && self.endpoint == DEFAULT_DISCOVERY_ENDPOINT
-    }
-}
-
-/// Default base URL of the hosted discovery endpoint.
-pub const DEFAULT_DISCOVERY_ENDPOINT: &str = "https://api.jcode.sh/v1/discovery";
 
 /// Automatic end-of-turn execution judging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

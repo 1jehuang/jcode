@@ -511,8 +511,8 @@ pub struct Config {
 
     /// Partner discovery configuration. Skipped when it matches the shipped
     /// default so saving config never bakes today's default into the file (see
-    /// `SponsorsConfig::is_default`).
-    #[serde(skip_serializing_if = "SponsorsConfig::is_default")]
+    /// [`sponsors_is_default`]).
+    #[serde(skip_serializing_if = "sponsors_is_default")]
     pub sponsors: SponsorsConfig,
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
@@ -704,3 +704,22 @@ mod env_overrides;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+/// Whether partner discovery settings carry no information beyond the shipped
+/// default, so `[sponsors]` can be left out of written config files.
+///
+/// Discovery originally shipped opt-in with `enabled = false`, and because
+/// config saves serialize the whole struct, any save during that window froze
+/// the old default into the user's file and permanently disabled discovery even
+/// after the default flipped. Omitting default sections prevents a repeat.
+fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
+    sponsors.enabled && is_default_discovery_endpoint(&sponsors.endpoint)
+}
+
+/// Endpoints that only ever came from a shipped default, never a user choice.
+fn is_default_discovery_endpoint(endpoint: &str) -> bool {
+    matches!(
+        endpoint.trim_end_matches('/'),
+        "https://api.jcode.sh/v1/discovery" | "https://api.solosystems.dev/v1/discovery"
+    )
+}
