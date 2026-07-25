@@ -16,6 +16,14 @@ pub fn capture_scene_to_png(
     height: u32,
     path: &std::path::Path,
 ) -> Result<()> {
+    let pixels = capture_scene_to_rgba(scene, width, height)?;
+    write_png(path, width, height, &pixels)
+}
+
+/// Render `scene` offscreen and return tight RGBA8 pixels. Pixel-level tests
+/// use this to assert visual invariants (regions stay clear, contrast holds)
+/// against the app's real rendered output.
+pub fn capture_scene_to_rgba(scene: &Scene, width: u32, height: u32) -> Result<Vec<u8>> {
     let mut context = vello::util::RenderContext::new();
     let device_id = pollster::block_on(context.device(None))
         .ok_or_else(|| anyhow!("no compatible GPU device"))?;
@@ -108,7 +116,7 @@ pub fn capture_scene_to_png(
     drop(mapped);
     buffer.unmap();
 
-    write_png(path, width, height, &pixels)
+    Ok(pixels)
 }
 
 /// Minimal PNG writer (RGBA8, no external deps).

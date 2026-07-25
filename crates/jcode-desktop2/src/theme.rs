@@ -92,3 +92,69 @@ impl Default for Theme {
         Self::print_light()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_role_differs_from_the_background() {
+        for theme in [Theme::print_light(), Theme::print_dark()] {
+            for (name, role) in [
+                ("text", theme.text),
+                ("muted", theme.muted),
+                ("faint", theme.faint),
+                ("rule", theme.rule),
+                ("error", theme.error),
+            ] {
+                assert_ne!(
+                    role.components, theme.background.components,
+                    "{name} is invisible in {:?} mode",
+                    theme.mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ink_densities_are_ordered() {
+        // Hierarchy comes from ink density: text is the strongest contrast
+        // against paper, then muted, then faint. If this inverts, emphasis
+        // silently reverses.
+        let luma = |color: Color| {
+            let [r, g, b, _] = color.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for theme in [Theme::print_light(), Theme::print_dark()] {
+            let bg = luma(theme.background);
+            let contrast = |color: Color| (luma(color) - bg).abs();
+            assert!(
+                contrast(theme.text) > contrast(theme.muted),
+                "text is not stronger than muted in {:?}",
+                theme.mode
+            );
+            assert!(
+                contrast(theme.muted) > contrast(theme.faint),
+                "muted is not stronger than faint in {:?}",
+                theme.mode
+            );
+            assert!(
+                contrast(theme.faint) > contrast(theme.rule),
+                "faint is not stronger than a hairline in {:?}",
+                theme.mode
+            );
+        }
+    }
+
+    #[test]
+    fn both_modes_are_defined_for_every_role() {
+        let light = Theme::print_light();
+        let dark = Theme::print_dark();
+        assert_eq!(light.mode, ThemeMode::Light);
+        assert_eq!(dark.mode, ThemeMode::Dark);
+        // A theme is data: light and dark must actually differ, so "adding a
+        // theme" can never be a copy of another mode.
+        assert_ne!(light.background.components, dark.background.components);
+        assert_ne!(light.text.components, dark.text.components);
+    }
+}

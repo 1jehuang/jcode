@@ -6,6 +6,7 @@
 
 mod capture;
 mod harness;
+mod layout;
 mod render;
 mod states;
 mod text;
@@ -282,6 +283,9 @@ impl ApplicationHandler for App {
 /// Build the frame. `size` is the surface size in physical pixels and
 /// `scale` is the window scale factor; all layout below is in logical units
 /// so the design reads identically on 1x and HiDPI displays.
+/// Build the frame. `size` is the surface size in physical pixels and `scale`
+/// is the window scale factor; geometry comes from [`layout::Frame`] in logical
+/// units, so the design reads identically on 1x and HiDPI displays.
 fn build_scene(
     scene: &mut Scene,
     text: &mut text::TextSystem,
@@ -289,10 +293,14 @@ fn build_scene(
     size: (u32, u32),
     scale: f64,
 ) {
+    use layout::Frame;
     use text::ParagraphStyle;
     use vello::kurbo::{Rect, RoundedRect};
+
     let theme = &model.theme;
-    let (width, height) = (size.0 as f64 / scale, size.1 as f64 / scale);
+    let frame = Frame::new(size, scale);
+    let scale = frame.scale;
+    let column = frame.column() as f32;
 
     let fill = |scene: &mut Scene, color: Color, shape: &Rect| {
         scene.fill(
@@ -313,30 +321,29 @@ fn build_scene(
         );
     };
     // Hairlines stay one physical pixel regardless of scale.
-    let hairline = |scene: &mut Scene, y: f64, x0: f64, x1: f64| {
-        fill(scene, theme.rule, &Rect::new(x0, y, x1, y + 1.0 / scale));
+    let hairline = |scene: &mut Scene, y: f64| {
+        fill(
+            scene,
+            theme.rule,
+            &Rect::new(frame.left, y, frame.right, y + frame.hairline()),
+        );
     };
 
     // Paper.
-    fill(scene, theme.background, &Rect::new(0.0, 0.0, width, height));
+    fill(
+        scene,
+        theme.background,
+        &Rect::new(0.0, 0.0, frame.width, frame.height),
+    );
 
-    // Layout: a centered measure column with breathing room, like body copy
-    // on a page. Margins shrink gracefully on narrow windows.
-    const MEASURE: f64 = 720.0;
-    let gutter = (width * 0.06).clamp(20.0, 64.0);
-    let column = (width - gutter * 2.0).min(MEASURE);
-    let left = ((width - column) / 2.0).max(gutter);
-    let right = left + column;
-
-    // Masthead: product name, then status as a right-aligned caption.
-    let top = (height * 0.05).clamp(24.0, 44.0);
+    // Masthead: wordmark, then status as a caption beside it.
     text.draw_paragraph_scaled(
         scene,
         "jcode",
-        (left, top),
-        column as f32,
+        (frame.left, frame.masthead_top),
+        column,
         ParagraphStyle {
-            font_size: 15.0,
+            font_size: layout::WORDMARK_SIZE,
             bold: true,
             color: theme.text,
             letter_spacing_em: 0.02,
@@ -344,11 +351,10 @@ fn build_scene(
         },
         scale,
     );
-    // Status is a caption beside the wordmark. Elide rather than wrap, so the
-    // masthead stays one line and never crosses its own rule.
-    let status_x = left + 72.0;
+    // Elide rather than wrap, so the masthead stays one line and never
+    // crosses its own rule.
     let status_style = ParagraphStyle {
-        font_size: 10.5,
+        font_size: layout::CAPTION_SIZE,
         color: if model.session_id.is_some() {
             theme.muted
         } else {
@@ -357,37 +363,34 @@ fn build_scene(
         letter_spacing_em: 0.1,
         ..Default::default()
     };
-    let status_width = (right - status_x).max(80.0);
+    let status_width = frame.status_width();
     let status_chars = (status_width / (f64::from(status_style.font_size) * 0.72)) as usize;
     let status = elide(&model.status, status_chars.max(12));
     text.draw_paragraph_scaled(
         scene,
         &status,
-        (status_x, top + 4.0),
+        (frame.status_left(), frame.masthead_top + 4.0),
         status_width as f32,
         status_style,
         scale,
     );
-    let masthead_rule = top + 28.0;
-    hairline(scene, masthead_rule, left, right);
+    hairline(scene, frame.masthead_rule);
 
-    // Composer: a quiet well pinned to the bottom, sized to the design grid.
-    let composer_height = 44.0;
-    let composer_bottom = height - (height * 0.05).clamp(20.0, 40.0);
-    let composer_top = composer_bottom - composer_height;
+    // Composer: a quiet well pinned to the bottom.
     fill_round(
         scene,
         theme.wash,
-        &RoundedRect::new(left, composer_top, right, composer_bottom, 6.0),
+        &RoundedRect::new(
+            frame.left,
+            frame.composer_top,
+            frame.right,
+            frame.composer_bottom,
+            layout::COMPOSER_RADIUS,
+        ),
     );
 
     // Transcript: ink on paper, bottom-aligned against the composer so new
-    // lines rise from the rule rather than dangling from the masthead.
-    let body_size = 13.5f32;
-    let line_height = f64::from(body_size) * 1.65;
-    let body_top = masthead_rule + 22.0;
-    let body_bottom = composer_top - 20.0;
-    let visible_lines = (((body_bottom - body_top) / line_height) as usize).max(1);
+    // lines rise from the well rather than dangling from the masthead.
     let placeholder = model.transcript.trim().is_empty();
     let transcript = if placeholder {
         "type a message and press enter"
@@ -395,28 +398,28 @@ fn build_scene(
         model.transcript.trim_start_matches('\n')
     };
     let body_style = ParagraphStyle {
-        font_size: body_size,
+        font_size: layout::BODY_SIZE,
         color: if placeholder { theme.faint } else { theme.text },
+        line_height: layout::BODY_LEADING as f32,
         ..Default::default()
     };
-    // Bottom-align the tail against the composer, measuring the *wrapped*
-    // height so long replies never bleed into the input well.
-    let available = body_bottom - body_top;
+    // Measure the *wrapped* height so long replies never bleed into the well.
+    let available = frame.body_bottom - frame.body_top;
     let lines: Vec<&str> = transcript.lines().collect();
-    let mut first_line = lines.len().saturating_sub(visible_lines);
+    let mut first_line = lines.len().saturating_sub(frame.visible_body_lines());
     let mut tail = lines[first_line..].join("\n");
-    let mut tail_height = text.measure_paragraph(&tail, column as f32, body_style, scale);
+    let mut tail_height = text.measure_paragraph(&tail, column, body_style, scale);
     while tail_height > available && first_line < lines.len().saturating_sub(1) {
         first_line += 1;
         tail = lines[first_line..].join("\n");
-        tail_height = text.measure_paragraph(&tail, column as f32, body_style, scale);
+        tail_height = text.measure_paragraph(&tail, column, body_style, scale);
     }
     let origin_y = if placeholder {
-        body_top
+        frame.body_top
     } else {
-        (body_bottom - tail_height).max(body_top)
+        (frame.body_bottom - tail_height).max(frame.body_top)
     };
-    text.draw_paragraph_scaled(scene, &tail, (left, origin_y), column as f32, body_style, scale);
+    text.draw_paragraph_scaled(scene, &tail, (frame.left, origin_y), column, body_style, scale);
 
     // Prompt line inside the well.
     let (prompt, prompt_color) = if model.busy {
@@ -429,10 +432,13 @@ fn build_scene(
     text.draw_paragraph_scaled(
         scene,
         &prompt,
-        (left + 14.0, composer_top + 13.0),
-        (column - 28.0) as f32,
+        (
+            frame.left + layout::COMPOSER_PAD_X,
+            frame.composer_top + 13.0,
+        ),
+        (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32,
         ParagraphStyle {
-            font_size: body_size,
+            font_size: layout::BODY_SIZE,
             color: prompt_color,
             ..Default::default()
         },
@@ -480,5 +486,192 @@ mod tests {
     #[test]
     fn elide_handles_tiny_budget() {
         assert_eq!(elide("abcdef", 2), "...");
+    }
+}
+
+/// Pixel-level visual tests: render every state-space node offscreen and
+/// assert the invariants from `docs/DESKTOP2_VISUAL_CHECKLIST.md` that only
+/// the real rendered output can prove (regions stay clear, text is legible,
+/// nothing is clipped). Requires a GPU, so these are ignored by default and
+/// run with `cargo test -p jcode-desktop2 -- --ignored`.
+#[cfg(test)]
+mod visual_tests {
+    use super::{Model, build_scene, layout::Frame, states, text::TextSystem};
+    use vello::Scene;
+
+    const WIDTH: u32 = 1400;
+    const HEIGHT: u32 = 900;
+    const SCALE: f64 = 1.75;
+
+    struct Rendered {
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+        frame: Frame,
+    }
+
+    impl Rendered {
+        fn new(model: &Model) -> Option<Self> {
+            Self::at(model, WIDTH, HEIGHT, SCALE)
+        }
+
+        /// Render one model at an explicit surface size and scale factor.
+        fn at(model: &Model, width: u32, height: u32, scale: f64) -> Option<Self> {
+            let mut text = TextSystem::default();
+            let mut scene = Scene::new();
+            build_scene(&mut scene, &mut text, model, (width, height), scale);
+            let pixels = super::capture::capture_scene_to_rgba(&scene, width, height).ok()?;
+            Some(Self {
+                pixels,
+                width,
+                height,
+                frame: Frame::new((width, height), scale),
+            })
+        }
+
+        /// Height in physical pixels of the inked rows within a logical rect.
+        /// Used to verify text is rasterized at physical size (HiDPI), not
+        /// laid out at 1x and left tiny on a scaled display.
+        fn ink_rows(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> u32 {
+            let s = self.frame.scale;
+            let cx = |v: f64| (v * s).round().clamp(0.0, f64::from(self.width - 1)) as u32;
+            let cy = |v: f64| (v * s).round().clamp(0.0, f64::from(self.height - 1)) as u32;
+            let (px0, px1) = (cx(x0), cx(x1));
+            let mut rows = 0;
+            for y in cy(y0)..=cy(y1) {
+                if (px0..=px1).any(|x| self.luma(x, y) < 0.6) {
+                    rows += 1;
+                }
+            }
+            rows
+        }
+
+        /// Luminance at a physical pixel, 0.0 (black) to 1.0 (white).
+        fn luma(&self, x: u32, y: u32) -> f64 {
+            let i = ((y * self.width + x) * 4) as usize;
+            let [r, g, b] = [
+                self.pixels[i] as f64,
+                self.pixels[i + 1] as f64,
+                self.pixels[i + 2] as f64,
+            ];
+            (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        }
+
+        /// Darkest luminance inside a logical-unit rect.
+        fn darkest_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+            let s = self.frame.scale;
+            let to_px = |v: f64, max: u32| (v * s).round().clamp(0.0, f64::from(max - 1)) as u32;
+            let (px0, py0) = (to_px(x0, self.width), to_px(y0, self.height));
+            let (px1, py1) = (to_px(x1, self.width), to_px(y1, self.height));
+            let mut darkest = 1.0f64;
+            for y in py0..=py1 {
+                for x in px0..=px1 {
+                    darkest = darkest.min(self.luma(x, y));
+                }
+            }
+            darkest
+        }
+    }
+
+    fn nodes() -> Vec<(&'static str, Model)> {
+        states::names()
+            .into_iter()
+            .map(|name| (name, states::by_name(name).expect("listed node")))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn nothing_draws_in_the_gap_above_the_composer() {
+        for (name, model) in nodes() {
+            let Some(r) = Rendered::new(&model) else {
+                eprintln!("skipping {name}: no GPU");
+                return;
+            };
+            let f = r.frame;
+            // The band between the transcript and the well must stay paper:
+            // this is the overlap bug that made long replies collide.
+            let darkest = r.darkest_in(f.left, f.body_bottom + 2.0, f.right, f.composer_top - 2.0);
+            assert!(
+                darkest > 0.9,
+                "{name}: ink ({darkest:.3} luma) in the composer gap"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn masthead_rule_is_clear_of_text() {
+        for (name, model) in nodes() {
+            let Some(r) = Rendered::new(&model) else {
+                return;
+            };
+            let f = r.frame;
+            // Just below the rule must be paper: status text that wraps past
+            // its own rule was the second bug.
+            let darkest = r.darkest_in(f.left, f.masthead_rule + 3.0, f.right, f.body_top - 3.0);
+            assert!(darkest > 0.9, "{name}: text crossed the masthead rule");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn body_text_has_readable_contrast() {
+        for (name, model) in nodes() {
+            let Some(r) = Rendered::new(&model) else {
+                return;
+            };
+            let f = r.frame;
+            // Some real ink must exist in the transcript band, dark enough to
+            // read. Catches invisible text and silent layout collapse.
+            let darkest = r.darkest_in(f.left, f.body_top, f.right, f.body_bottom);
+            assert!(
+                darkest < 0.65,
+                "{name}: transcript is too faint to read (darkest {darkest:.3})"
+            );
+        }
+    }
+
+    /// The founding bug: layout in physical pixels with text laid out at 1x
+    /// made everything render tiny and blurry on a 1.75x display. Physical
+    /// text height must scale with the scale factor.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn text_is_rasterized_at_physical_size() {
+        let model = states::by_name("turn_done").expect("node");
+        const W: u32 = 1100;
+        const H: u32 = 720;
+        let Some(one) = Rendered::at(&model, W, H, 1.0) else {
+            return;
+        };
+        let Some(two) = Rendered::at(&model, W * 2, H * 2, 2.0) else {
+            return;
+        };
+        let f = one.frame;
+        let base = one.ink_rows(f.left, f.body_top, f.right, f.body_bottom);
+        let scaled = two.ink_rows(f.left, f.body_top, f.right, f.body_bottom);
+        assert!(base > 0 && scaled > 0, "no text was drawn");
+        let ratio = f64::from(scaled) / f64::from(base);
+        assert!(
+            (1.7..=2.3).contains(&ratio),
+            "text did not scale with DPI: {base} rows at 1x vs {scaled} at 2x (ratio {ratio:.2})"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn margins_stay_empty() {
+        for (name, model) in nodes() {
+            let Some(r) = Rendered::new(&model) else {
+                return;
+            };
+            let f = r.frame;
+            // Nothing may be drawn outside the measure column: proves text is
+            // wrapped to the column and not clipped by the window edge.
+            let left_margin = r.darkest_in(0.0, 0.0, f.left - 3.0, f.height - 1.0);
+            assert!(left_margin > 0.9, "{name}: ink in the left margin");
+            let bottom = r.darkest_in(0.0, f.composer_bottom + 3.0, f.width - 1.0, f.height - 1.0);
+            assert!(bottom > 0.9, "{name}: ink below the composer");
+        }
     }
 }
