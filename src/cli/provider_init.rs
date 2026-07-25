@@ -94,6 +94,8 @@ pub enum ProviderChoice {
     NvidiaNim,
     #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
     XiaomiMimo,
+    #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
+    Celeris,
     #[value(alias = "lm-studio")]
     Lmstudio,
     Ollama,
@@ -163,6 +165,7 @@ impl ProviderChoice {
             Self::Xai => "xai",
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
+            Self::Celeris => "celeris",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
             Self::Chutes => "chutes",
@@ -321,6 +324,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::XiaomiMimo,
         crate::provider_catalog::XIAOMI_MIMO_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Celeris,
+        crate::provider_catalog::CELERIS_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Lmstudio,
@@ -1517,6 +1524,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Xai
         | ProviderChoice::NvidiaNim
         | ProviderChoice::XiaomiMimo
+        | ProviderChoice::Celeris
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
         | ProviderChoice::Chutes
