@@ -62,7 +62,7 @@ impl Frame {
         let height = (f64::from(size.1) / scale).max(200.0);
 
         let gutter = (width * 0.06).clamp(20.0, 64.0);
-        let column = (width - gutter * 2.0).min(MEASURE).max(120.0);
+        let column = (width - gutter * 2.0).clamp(120.0, MEASURE);
         let left = ((width - column) / 2.0).max(gutter.min((width - column).max(0.0)));
         let right = left + column;
 
