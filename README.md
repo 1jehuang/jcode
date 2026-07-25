@@ -20,7 +20,7 @@ Built for multi-session workflows, infinite customizability, and performance.
 
 <br>
 
-[Website](https://jcode.sh) · [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
+[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [Benchmarks](https://jcode.sh/bench) · [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -706,6 +706,9 @@ Notes:
 
 ## Further Reading
 
+- [jcode.sh/docs](https://jcode.sh/docs) — install, providers, configuration, keybindings
+- [jcode.sh/swarm](https://jcode.sh/swarm) — many coding agents in one repository
+- [jcode.sh/bench](https://jcode.sh/bench) — benchmark methodology and results
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)

@@ -599,7 +599,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::ConnectionType { .. }
             | ServerEvent::ConnectionPhase { .. }
             | ServerEvent::StatusDetail { .. }
-            | ServerEvent::MessageEnd
+            | ServerEvent::MessageEnd { .. }
             | ServerEvent::RetryRollback { .. }
             | ServerEvent::UpstreamProvider { .. }
             | ServerEvent::Interrupted
@@ -962,7 +962,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_detail = Some(detail);
             eager_stream_redraw
         }
-        ServerEvent::MessageEnd => {
+        ServerEvent::MessageEnd { .. } => {
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;
             true
