@@ -27,6 +27,7 @@ mod routing;
 mod selection;
 mod startup;
 mod state;
+mod stream_timeout;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
@@ -110,52 +111,13 @@ pub fn active_provider_fork() -> Option<Arc<dyn Provider>> {
         .map(|p| p.fork())
 }
 
-/// Provider-agnostic streaming idle timeout: max seconds to wait between
-/// streamed chunks/events before treating the connection as dead. Resolved
-/// from `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
-/// (default 180). Shared by every streaming provider path so slow reasoning
-/// models that think silently for minutes don't trip a premature timeout on
-/// one transport but not another (issue #434).
-pub fn stream_idle_timeout() -> std::time::Duration {
-    let secs = crate::config::config()
-        .provider
-        .stream_idle_timeout_secs
-        .max(1);
-    std::time::Duration::from_secs(secs)
-}
-
-/// Multiplier applied to the base streaming idle timeout for a given reasoning
-/// effort. High efforts can think silently for many minutes before emitting
-/// anything, so the base budget (tuned for ordinary turns) is too tight.
-pub fn stream_idle_timeout_multiplier_for_effort(effort: Option<&str>) -> u32 {
-    match effort
-        .map(|e| e.trim().to_ascii_lowercase())
-        .as_deref()
-        .unwrap_or("")
-    {
-        "high" => 2,
-        "xhigh" => 3,
-        // `swarm`/`swarm-deep` resolve to the top wire effort, so budget them
-        // like `max`.
-        "max" | "swarm" | "swarm-deep" => 4,
-        _ => 1,
-    }
-}
-
-/// Largest multiplier [`stream_idle_timeout_multiplier_for_effort`] can return.
-/// Clients that guard against stalls without knowing the request's effort must
-/// use this so they never cancel a stream the provider would still accept.
-pub const MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER: u32 = 4;
-
-/// [`stream_idle_timeout`] scaled for the request's reasoning effort.
-pub fn stream_idle_timeout_for_effort(effort: Option<&str>) -> std::time::Duration {
-    stream_idle_timeout() * stream_idle_timeout_multiplier_for_effort(effort)
-}
-
-/// [`stream_idle_timeout`] scaled by the maximum effort multiplier.
-pub fn max_stream_idle_timeout() -> std::time::Duration {
-    stream_idle_timeout() * MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER
-}
+/// Provider-agnostic streaming idle-timeout budgets. See
+/// [`stream_timeout`] for the base budget and the reasoning-effort scaling that
+/// keeps long silent thinks from looking like dead connections (issue #434).
+pub use stream_timeout::{
+    MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER, max_stream_idle_timeout, stream_idle_timeout,
+    stream_idle_timeout_for_effort, stream_idle_timeout_multiplier_for_effort,
+};
 
 /// Whether reasoning deltas should be persisted in session history for later
 /// provider context reconstruction.

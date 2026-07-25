@@ -3,27 +3,12 @@ use super::*;
 #[path = "openai_rate_limit_format.rs"]
 mod openai_rate_limit_format;
 use self::openai_rate_limit_format::format_rate_limit_error;
-/// Reasoning effort requested on this Responses payload, if any.
-pub(super) fn request_reasoning_effort(request: &Value) -> Option<&str> {
-    request
-        .get("reasoning")
-        .and_then(|reasoning| reasoning.get("effort"))
-        .and_then(|effort| effort.as_str())
-}
-
-/// Effective websocket completion/idle budget in seconds. Uses the built-in
-/// default, extended by `[provider] stream_idle_timeout_secs` when the user
-/// raises it above the default so slow reasoning models don't get cut off at
-/// the hardcoded budget on one transport but not another (issue #434), and
-/// scaled up further for high reasoning efforts that think silently for many
-/// minutes.
-pub(super) fn effective_ws_completion_timeout_secs(request: &Value) -> u64 {
-    let effort = request_reasoning_effort(request);
-    let multiplier =
-        u64::from(jcode_base::provider::stream_idle_timeout_multiplier_for_effort(effort));
-    (WEBSOCKET_COMPLETION_TIMEOUT_SECS.max(jcode_base::provider::stream_idle_timeout().as_secs()))
-        .saturating_mul(multiplier)
-}
+#[path = "openai_stream_timeout.rs"]
+mod openai_stream_timeout;
+pub(super) use self::openai_stream_timeout::reasoning_payload;
+use self::openai_stream_timeout::{
+    effective_https_idle_timeout, effective_ws_completion_timeout_secs,
+};
 
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
@@ -265,10 +250,7 @@ pub(super) async fn stream_response(
     // minutes get cancelled prematurely. Resolved from
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
     // (issue #434).
-    // Scaled up for high reasoning efforts, which can think silently for many
-    // minutes on the Responses API before emitting a first event.
-    let idle_timeout =
-        jcode_base::provider::stream_idle_timeout_for_effort(request_reasoning_effort(&request));
+    let idle_timeout = effective_https_idle_timeout(&request);
 
     use futures::StreamExt;
     loop {

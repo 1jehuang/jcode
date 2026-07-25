@@ -1311,13 +1311,9 @@ pub struct ProviderConfig {
     /// ("myprofile"). The active model's routes always stay visible.
     pub model_picker_providers: Option<Vec<String>>,
     /// Max seconds to wait for streaming data before timing out a request with
-    /// no data received. Raise this for slow reasoning models (e.g. DeepSeek)
-    /// that think silently for minutes before emitting tokens. Default: 180.
-    /// Overridable per-launch via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
-    ///
-    /// This is the base budget. High reasoning efforts scale it automatically
-    /// (see `jcode_base::provider::stream_idle_timeout_for_effort`) because
-    /// they can think silently for many minutes before emitting anything.
+    /// no data received. Base budget only: high reasoning efforts scale it up
+    /// automatically (see `jcode_base::provider::stream_idle_timeout_for_effort`).
+    /// Default: 180. Overridable via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
     pub stream_idle_timeout_secs: u64,
 }
 
