@@ -118,12 +118,12 @@ struct ChatView: View {
             Button {
                 showModelPicker = true
             } label: {
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 0) {
                     Text(model.session.sessionTitle ?? model.activeServer?.serverName ?? "jcode")
                         .font(Theme.mono(15, weight: .semibold))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         Text(shortModelName(model.session.modelName ?? "model"))
                             .font(Theme.mono(11))
                             .foregroundStyle(Theme.textTertiary)
