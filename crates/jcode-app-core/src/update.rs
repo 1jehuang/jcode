@@ -8,8 +8,10 @@ use jcode_update_core::{
 };
 pub use jcode_update_core::{
     DownloadProgress, GIT_PULL_DIVERGED_SUMMARY, GitHubAsset, GitHubRelease, PreparedUpdate,
-    UpdateCheckResult, UpdateEstimate, format_download_progress_bar, summary_is_divergence,
+    UpdateCheckResult, UpdateEstimate, format_download_progress_bar, summarize_update_error,
+    summary_is_divergence,
 };
+
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -441,6 +443,15 @@ pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
     }
 }
 
+/// Log the full error and return a single short line for the UI.
+///
+/// Update failures come from many layers and are often multi-line, so the
+/// verbose text belongs in the log while the card/notice stay one line.
+fn short_update_error(context: &str, error: &anyhow::Error) -> String {
+    crate::logging::warn(&format!("update: {}: {:#}", context, error));
+    summarize_update_error(&format!("{:#}", error))
+}
+
 pub fn spawn_background_session_update(session_id: String) {
     std::thread::spawn(move || {
         use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
@@ -492,7 +503,7 @@ pub fn spawn_background_session_update(session_id: String) {
                     Err(error) => publish(SessionUpdateStatus::Error {
                         session_id,
                         action,
-                        message: format!("Update failed: {}", error),
+                        message: short_update_error("update failed", &error),
                     }),
                 }
             }
@@ -523,14 +534,14 @@ pub fn spawn_background_session_update(session_id: String) {
                     Err(error) => publish(SessionUpdateStatus::Error {
                         session_id,
                         action,
-                        message: format!("Update failed: {}", error),
+                        message: short_update_error("update failed", &error),
                     }),
                 }
             }
             Err(error) => publish(SessionUpdateStatus::Error {
                 session_id,
                 action,
-                message: format!("Update check failed: {}", error),
+                message: short_update_error("update check failed", &error),
             }),
         }
     });
@@ -1148,7 +1159,7 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             UpdateCheckResult::NoUpdate
         }
         Err(e) => {
-            let msg = format!("Check failed: {}", e);
+            let msg = short_update_error("update check failed", &e);
             if is_rate_limit_error(&msg) {
                 // Throttling is not an update failure and there is nothing the
                 // user needs to do, so keep it out of the UI. The backoff was

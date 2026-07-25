@@ -208,13 +208,15 @@ impl App {
                 {
                     self.offer_update_merge(action, &error);
                 } else {
-                    self.set_status_notice("Update failed; continuing current version");
+                    // One line only: the full error is already in the log.
+                    let reason = crate::update::summarize_update_error(&error);
+                    self.set_status_notice(format!("Update failed: {reason}"));
                     self.set_client_maintenance_message(
                         action,
                         Self::client_maintenance_card_message(
                             action,
-                            "failed",
-                            format!("{}\n\nContinuing with the current version.", error),
+                            format!("failed ({reason})"),
+                            "",
                         ),
                     );
                 }
@@ -349,12 +351,13 @@ impl App {
                     self.offer_update_merge(action, &message);
                     return;
                 }
-                self.set_status_notice(format!("{} failed", action.title()));
+                // One line only: the full error is already in the log.
+                let reason = crate::update::summarize_update_error(&message);
+                self.set_status_notice(format!("{} failed: {reason}", action.title()));
                 self.set_client_maintenance_message(
                     action,
-                    Self::client_maintenance_card_message(action, "failed", message.clone()),
+                    Self::client_maintenance_card_message(action, format!("failed ({reason})"), ""),
                 );
-                self.push_display_message(DisplayMessage::error(message));
             }
         }
     }

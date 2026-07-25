@@ -175,8 +175,10 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                     return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
                 }
                 Err(e) => {
-                    update::print_centered(&format!("✗ Download failed: {}", e));
-                    update::print_centered("Resuming session with current version...");
+                    update::print_centered(&format!(
+                        "✗ Download failed: {}",
+                        update::summarize_update_error(&format!("{:#}", e))
+                    ));
                 }
             }
         }
@@ -190,8 +192,10 @@ pub fn hot_update(session_id: &str) -> Result<()> {
             ));
         }
         Err(e) => {
-            update::print_centered(&format!("✗ Update check failed: {}", e));
-            update::print_centered("Resuming session with current version...");
+            update::print_centered(&format!(
+                "✗ Update check failed: {}",
+                update::summarize_update_error(&format!("{:#}", e))
+            ));
         }
     }
 
@@ -362,7 +366,10 @@ pub fn run_update() -> Result<()> {
                 ));
             }
             Err(e) => {
-                anyhow::bail!("Update check failed: {}", e);
+                anyhow::bail!(
+                    "Update check failed: {}",
+                    update::summarize_update_error(&format!("{:#}", e))
+                );
             }
         }
         return Ok(());
