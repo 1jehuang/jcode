@@ -34,7 +34,7 @@ pub const TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-climbab
 
 /// Model-facing continuation for the private end-to-end ownership check. Names
 /// the assessment category without disclosing the score or threshold.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "Your end-to-end ownership is not high enough to complete this goal. Take ownership of the full user outcome, not just the immediate implementation. Follow the work through every relevant integration and runtime path, resolve consequential gaps, validate the complete workflow, and finish the necessary follow-through.";
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "Your end-to-end ownership is not high enough to complete this goal. Take ownership of the full user outcome, not just the immediate implementation. Follow the work through every relevant integration and runtime path, resolve consequential gaps, validate the complete workflow, and finish the necessary follow-through. Then call the todo tool again, setting a higher `end_to_end_ownership` on the goal for this group; until that field is raised the write is rejected and the stored todo list is left unchanged.";
 
 /// Model-facing continuation for private completion-confidence checks. Names
 /// the assessment category without disclosing scores, items, or thresholds.
@@ -471,6 +471,29 @@ mod tests {
             &completed,
             &[ownership_goal(None, Some(96))],
         ));
+    }
+
+    /// The rejection is silent about *how* to clear it unless the message names
+    /// the field. A caller that cannot tell which field to raise reads the
+    /// rejection as a stuck tool and retries the same payload indefinitely.
+    #[test]
+    fn ownership_message_names_the_field_that_must_be_raised() {
+        assert!(
+            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("end_to_end_ownership"),
+            "the ownership nudge must name the field to raise"
+        );
+        assert!(
+            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("call the todo tool again"),
+            "the ownership nudge must say to retry the write"
+        );
+        // The write is discarded, so a caller must know its list was not saved.
+        assert!(
+            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
+            "the ownership nudge must disclose that the write was rejected"
+        );
+        // Every gate message that requires a specific field should name it, so
+        // this property is asserted for the sibling gates too.
+        assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("completion_confidence"));
     }
 
     #[test]
