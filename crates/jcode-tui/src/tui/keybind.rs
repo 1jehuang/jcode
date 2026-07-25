@@ -403,6 +403,12 @@ pub fn load_toggle_keys() -> ToggleKeys {
     }
 }
 
+/// `/effort` hint text. Mac keyboards label the Alt modifier ⌥, not "Alt".
+#[cfg(target_os = "macos")]
+pub(crate) const EFFORT_HELP: &str = "Show/change reasoning effort (⌥+left/right)";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const EFFORT_HELP: &str = "Show/change reasoning effort (Alt+left/right)";
+
 /// The default swarm-panel focus chord: Alt+N.
 fn swarm_panel_focus_default() -> KeyBinding {
     KeyBinding {
@@ -411,15 +417,30 @@ fn swarm_panel_focus_default() -> KeyBinding {
     }
 }
 
-pub(crate) fn side_panel_toggle_key_label() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "⌥+M"
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        "Alt+M"
-    }
+pub(crate) fn side_panel_toggle_key_label() -> String {
+    jcode_tui_core::keybind::alt_chord("M")
+}
+
+/// Status-line hint shown when the inline swarm controls open.
+pub(crate) fn swarm_view_hint(next: &str) -> String {
+    use jcode_tui_core::keybind::alt_chord_lower;
+    format!(
+        "Swarm: {} {next} · {} select · {} open · esc",
+        alt_chord_lower("n"),
+        alt_chord_lower("↑/↓"),
+        alt_chord_lower("o"),
+    )
+}
+
+/// Status-line hint shown when the full swarm page opens.
+pub(crate) fn swarm_page_hint() -> String {
+    use jcode_tui_core::keybind::alt_chord_lower;
+    format!(
+        "Swarm page: {} chat · {} select · {} open · esc",
+        alt_chord_lower("n"),
+        alt_chord_lower("↑/↓"),
+        alt_chord_lower("o"),
+    )
 }
 
 /// Human-friendly label for the configured swarm-panel focus chord (e.g.

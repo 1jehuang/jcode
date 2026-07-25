@@ -949,12 +949,12 @@ impl App {
     pub(super) fn toggle_inline_images(&mut self) {
         self.inline_images_visible = !self.inline_images_visible;
         super::ui_prefs::save_inline_images_visible(self.inline_images_visible);
-        let status = if self.inline_images_visible {
-            "Inline images: ON"
+        self.set_status_notice(if self.inline_images_visible {
+            "Inline images: ON".to_string()
         } else {
-            "Inline images: hidden (Alt+Shift+I to show)"
-        };
-        self.set_status_notice(status);
+            let alt = jcode_tui_core::keybind::alt_chord("Shift+I");
+            format!("Inline images: hidden ({alt} to show)")
+        });
     }
 
     /// Toggle the per-image inline expand level (Fit <-> Large) for

@@ -164,6 +164,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         ])
     };
 
+    let alt = jcode_tui_core::keybind::alt_chord;
     let key_entry = |key: &str, desc: &str| -> Line<'static> {
         Line::from(vec![
             Span::styled("    ", Style::default()),
@@ -457,12 +458,12 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     )));
     lines.push(Line::from(""));
     lines.push(key_entry(
-        crate::tui::keybind::side_panel_toggle_key_label(),
+        &crate::tui::keybind::side_panel_toggle_key_label(),
         "Toggle side panel (or diagram pane if empty)",
     ));
-    lines.push(key_entry("Alt+T", "Toggle diagram position (side/top)"));
+    lines.push(key_entry(&alt("T"), "Toggle diagram position (side/top)"));
     lines.push(key_entry(
-        "Alt+Shift+I",
+        &alt("Shift+I"),
         "Show/hide inline images (persists)",
     ));
     lines.push(key_entry("Ctrl+H / Ctrl+L", "Focus chat / diagram / diffs"));
@@ -474,7 +475,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("[ / ]", "Zoom diagram (when focused)"));
     lines.push(key_entry("+ / -", "Resize diagram pane"));
     lines.push(key_entry(
-        "Alt+G / /diff",
+        &format!("{} / /diff", alt("G")),
         "Cycle diff mode (Off/Inline/Pinned/File)",
     ));
     lines.push(key_entry("Shift+Tab", "Cycle favorited models"));
@@ -502,7 +503,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+U", "Clear input line"));
     lines.push(key_entry("Ctrl+K", "Delete to end of input"));
     lines.push(key_entry(
-        "Alt+Backspace / Alt+Delete",
+        &format!("{} / {}", alt("Backspace"), alt("Delete")),
         "Delete previous word in input",
     ));
     lines.push(key_entry(
@@ -526,7 +527,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+B / Ctrl+F", "Move by word left / right"));
     lines.push(key_entry("Ctrl+Left / Right", "Move by word left / right"));
     lines.push(key_entry(
-        "Shift+Enter / Alt+Enter",
+        &format!("Shift+Enter / {}", alt("Enter")),
         "Insert newline in input",
     ));
     lines.push(key_entry(
@@ -537,25 +538,25 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
     lines.push(key_entry("Ctrl+R", "Recover from missing tool outputs"));
     lines.push(key_entry(
-        "Ctrl+V / Alt+V",
+        &format!("Ctrl+V / {}", alt("V")),
         "Paste clipboard (text or image)",
     ));
     lines.push(key_entry(
-        "Alt+A",
+        &alt("A"),
         "Quick-copy visible chat viewport plus nearby context",
     ));
-    lines.push(key_entry("Alt+Y", "Toggle chat selection/copy mode"));
-    lines.push(key_entry("Alt+S", "Toggle typing scroll lock"));
+    lines.push(key_entry(&alt("Y"), "Toggle chat selection/copy mode"));
+    lines.push(key_entry(&alt("S"), "Toggle typing scroll lock"));
     lines.push(key_entry("Ctrl+P", "Toggle auto-poke for incomplete todos"));
-    lines.push(key_entry("Alt+X", "Show/dismiss todo list card in chat"));
+    lines.push(key_entry(&alt("X"), "Show/dismiss todo list card in chat"));
     lines.push(key_entry(
         &crate::tui::keybind::effort_switch_keys_label(),
         "Cycle effort (reasoning + swarm)",
     ));
     if cfg!(target_os = "macos") {
         lines.push(key_entry(
-            "Alt+Left / Right",
-            "Move by word in input (also Alt+B / Alt+F)",
+            &alt("Left / Right"),
+            &format!("Move by word in input (also {} / {})", alt("B"), alt("F")),
         ));
     }
     if let Some(label) = app.dictation_key_label() {
