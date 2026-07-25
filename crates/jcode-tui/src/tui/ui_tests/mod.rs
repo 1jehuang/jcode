@@ -1,13 +1,11 @@
 use super::*;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
-use std::sync::{Mutex, OnceLock};
 
+/// Delegates to the single shared render-state lock so viewport-snapshot tests
+/// serialize against every other rendering test, not just each other (#593).
 fn viewport_snapshot_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::tui::ui::render_state_test_lock()
 }
 
 #[test]
