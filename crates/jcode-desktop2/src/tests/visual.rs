@@ -125,6 +125,72 @@ fn nodes() -> Vec<(&'static str, Model)> {
         .collect()
 }
 
+/// The highlight band must line up with the glyphs it highlights. This is the
+/// bug the Parley geometry fixed: the band came from a separately measured
+/// string prefix, so it sat a few pixels off the selected text. Here the band's
+/// horizontal extent is compared against the ink it is supposed to cover.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_selection_band_lines_up_with_the_selected_glyphs() {
+    for name in ["selection", "selection_all", "multiline_selection"] {
+        let model = states::by_name(name).expect("node");
+        let (start, end) = model.editor.selection().expect("node has a selection");
+        let Some(r) = Rendered::new(&model) else {
+            return;
+        };
+        let f = r.frame;
+        let s = f.scale;
+        let band = model.theme.selection;
+        let band_luma = (0.2126 * f64::from(band.components[0])
+            + 0.7152 * f64::from(band.components[1]))
+            + 0.0722 * f64::from(band.components[2]);
+        assert!(band_luma > 0.0, "{name}: selection colour is not set");
+
+        // Columns inside the well that are neither paper nor pure glyph ink:
+        // the band tints them. Sample a row clear of glyph ascenders.
+        let y = ((f.composer_top + crate::layout::COMPOSER_TEXT_OFFSET + 3.0) * s).round() as u32;
+        let x0 = (f.left * s) as u32;
+        let x1 = (f.right * s) as u32;
+        let paper = r.luma(x1 - 2, y);
+        let tinted: Vec<u32> = (x0..x1).filter(|&x| paper - r.luma(x, y) > 0.01).collect();
+        assert!(
+            !tinted.is_empty(),
+            "{name}: no selection band was drawn at all"
+        );
+
+        // The band must start at the caret for the selection start and end at
+        // the caret for its end: same geometry the renderer used, re-derived.
+        let mut ts = TextSystem::default();
+        let input = crate::input::InputLayout::new(
+            &mut ts,
+            model.editor.text(),
+            f.composer_text_width(),
+            crate::scene::composer_text_style(&model),
+            f.scale,
+        );
+        let text_x = f.left + crate::layout::COMPOSER_PAD_X;
+        let expected_start = ((text_x + input.caret_rect(start, 1.0).x0) * s).round() as u32;
+        let expected_end = ((text_x + input.caret_rect(end, 1.0).x0) * s).round() as u32;
+        let drawn_start = *tinted.first().expect("checked non-empty");
+        // Only antialiasing slack: a band that is even a logical pixel off the
+        // caret is the misalignment this test exists to catch.
+        let slack = s.ceil() as u32 + 1;
+        assert!(
+            drawn_start.abs_diff(expected_start) <= slack,
+            "{name}: band started at {drawn_start}px, expected {expected_start}px"
+        );
+        // On the first row of a multi-line selection the band runs to the row
+        // end, so only check the end when the selection stays on one row.
+        if input.lines().len() == 1 {
+            let drawn_end = *tinted.last().expect("checked non-empty");
+            assert!(
+                drawn_end.abs_diff(expected_end) <= slack,
+                "{name}: band ended at {drawn_end}px, expected {expected_end}px"
+            );
+        }
+    }
+}
+
 /// The input box must be *drawn* on the middle of the window, not merely laid
 /// out there: this catches a renderer that ignores the centred geometry.
 #[test]

@@ -35,9 +35,6 @@ pub const COMPOSER_TEXT_OFFSET: f64 = 13.0;
 /// Insert caret: a thin vertical bar, like any normal text input.
 pub const CARET_WIDTH: f64 = 1.5;
 pub const CARET_HEIGHT: f64 = 18.0;
-/// Advance width of the body monospace font as a fraction of its size. Used
-/// for the wrapping budget; verified against measured text in the tests.
-pub const MONOSPACE_ADVANCE_RATIO: f64 = 0.6;
 /// Caption row under the composer for notices and the scrollback indicator.
 pub const FOOTNOTE_HEIGHT: f64 = 16.0;
 pub const FOOTNOTE_GAP: f64 = 6.0;
@@ -173,14 +170,11 @@ impl Frame {
         (((self.body_bottom - self.body_top) / self.body_line_height()) as usize).max(1)
     }
 
-    /// Characters that fit on one composer row. Monospace, so a character
-    /// budget is exact; used for soft wrapping.
-    pub fn composer_char_budget(&self) -> usize {
-        let usable = self.column() - COMPOSER_PAD_X * 2.0;
-        // Advance width of the monospace body font, measured empirically as a
-        // fraction of the font size.
-        let advance = f64::from(BODY_SIZE) * MONOSPACE_ADVANCE_RATIO;
-        ((usable / advance).floor() as usize).max(1)
+    /// Width available to composer text, inside the well's padding. This is
+    /// the wrap width handed to Parley, so the text wraps exactly where the
+    /// well ends rather than at an estimated character count.
+    pub fn composer_text_width(&self) -> f64 {
+        (self.column() - COMPOSER_PAD_X * 2.0).max(1.0)
     }
 
     /// Composer lines this frame was built for.

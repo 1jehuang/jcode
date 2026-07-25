@@ -10,9 +10,18 @@ use vello::Scene;
 use vello::kurbo::{Affine, Rect, RoundedRect};
 use vello::peniko::Color;
 
-/// Build the frame. `size` is the surface size in physical pixels and
-/// `scale` is the window scale factor; all layout below is in logical units
-/// so the design reads identically on 1x and HiDPI displays.
+/// The one style used for composer text. Wrapping, drawing, caret placement,
+/// and hit-testing must all use the same style or their geometry diverges, so
+/// there is exactly one definition of it.
+pub fn composer_text_style(model: &Model) -> ParagraphStyle {
+    ParagraphStyle {
+        font_size: layout::BODY_SIZE,
+        color: model.theme.text,
+        line_height: (layout::COMPOSER_LINE_HEIGHT / f64::from(layout::BODY_SIZE)) as f32,
+        ..Default::default()
+    }
+}
+
 /// Build the frame. `size` is the surface size in physical pixels and `scale`
 /// is the window scale factor; geometry comes from [`layout::Frame`] in logical
 /// units, so the design reads identically on 1x and HiDPI displays.
@@ -23,13 +32,11 @@ pub fn build_scene(
     size: (u32, u32),
     scale: f64,
 ) {
-    use layout::Frame;
-
     let theme = &model.theme;
-    // Size the composer from wrapped rows so the well always contains its text.
-    let probe = Frame::new(size, scale);
-    let row_count = crate::wrap::wrap(model.editor.text(), probe.composer_char_budget()).len();
-    let frame = Frame::with_composer_lines(size, scale, row_count);
+    // Size the composer from where the text really wraps, via the same helper
+    // the event loop uses, so pointer hit-testing can never see a different
+    // frame than the renderer.
+    let frame = crate::App::frame_for_model_with(size, scale, model, text);
     let scale = frame.scale;
     let column = frame.column() as f32;
 
@@ -188,11 +195,7 @@ pub fn build_scene(
     // Prompt line inside the well: a real input box. The caret is drawn at
     // the measured width of the text before the cursor, so it sits between
     // glyphs and moves with Ctrl+A/E, word motion, and the arrows.
-    let prompt_style = ParagraphStyle {
-        font_size: layout::BODY_SIZE,
-        color: theme.text,
-        ..Default::default()
-    };
+    let prompt_style = composer_text_style(model);
     let prompt_x = frame.left + layout::COMPOSER_PAD_X;
     let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
     let prompt_width = (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32;
@@ -210,49 +213,40 @@ pub fn build_scene(
             scale,
         );
     } else {
-        let line_height = layout::COMPOSER_LINE_HEIGHT;
+        // One Parley layout drives wrapping, the selection bands, the glyphs,
+        // and the caret, so the three can never disagree: the highlight lines
+        // up with the text because it *is* the text's own geometry.
         let source = model.editor.text();
-        // Visual rows, so a long line wraps inside the well instead of
-        // spilling past its right edge.
-        let rows = crate::wrap::wrap(source, frame.composer_char_budget());
-        // Show the tail when the input is taller than the well, so the caret
-        // stays visible while typing.
-        let shown = frame.composer_lines().min(rows.len());
-        let first = rows.len() - shown;
-        let row_y = |row: usize| prompt_y + (row.saturating_sub(first)) as f64 * line_height;
+        let input = crate::input::InputLayout::new(
+            text,
+            source,
+            frame.composer_text_width(),
+            prompt_style,
+            scale,
+        );
+        // Scroll the well to the caret's line when the text is taller than the
+        // well, so typing never runs out of sight.
+        let origin_y =
+            prompt_y - input.scroll_offset(model.editor.cursor(), frame.composer_lines());
+        let clip_top = frame.composer_top;
+        let clip_bottom = frame.composer_bottom;
 
-        // Selection band, drawn under the text so glyphs stay legible. A
-        // selection can span rows, so each visible row gets its own band.
+        // Selection bands, under the glyphs so text on them stays legible.
         if let Some((sel_start, sel_end)) = model.editor.selection() {
-            for (index, row) in rows.iter().enumerate().skip(first) {
-                let from = sel_start.max(row.start);
-                let to = sel_end.min(row.end);
-                let spans_break = sel_start <= row.end && sel_end > row.end;
-                if from >= to && !spans_break {
+            for band in input.selection_rects(sel_start, sel_end) {
+                let top = origin_y + band.y0;
+                let bottom = origin_y + band.y1;
+                if bottom <= clip_top || top >= clip_bottom {
                     continue;
                 }
-                let from = from.min(row.end);
-                let to = to.max(from);
-                let x0 =
-                    prompt_x + text.measure_width(&source[row.start..from], prompt_style, scale);
-                let mut x1 =
-                    prompt_x + text.measure_width(&source[row.start..to], prompt_style, scale);
-                // A selection continuing past this row highlights the break.
-                if spans_break {
-                    x1 += f64::from(layout::BODY_SIZE) * 0.5;
-                }
-                if x1 <= x0 {
-                    continue;
-                }
-                let top = row_y(index) - 1.0;
                 fill(
                     scene,
                     theme.selection,
                     &Rect::new(
-                        x0.min(frame.right),
-                        top,
-                        x1.min(frame.right - layout::COMPOSER_PAD_X * 0.5),
-                        top + layout::CARET_HEIGHT,
+                        (prompt_x + band.x0).min(frame.right),
+                        top.max(clip_top),
+                        (prompt_x + band.x1).min(frame.right),
+                        bottom.min(clip_bottom),
                     ),
                 );
             }
@@ -271,37 +265,28 @@ pub fn build_scene(
                 scale,
             );
         } else {
-            // Draw row by row so each sits on the composer's line grid and
-            // wrapping matches what hit-testing assumes.
-            for (index, row) in rows.iter().enumerate().skip(first) {
-                let line = row.text(source);
-                if line.is_empty() {
-                    continue;
-                }
-                text.draw_paragraph_scaled(
-                    scene,
-                    line,
-                    (prompt_x, row_y(index)),
-                    prompt_width,
-                    prompt_style,
-                    scale,
-                );
-            }
+            // Draw the whole layout in one pass: Parley already wrapped it to
+            // the well, so per-row drawing would only reintroduce drift.
+            crate::text::TextSystem::draw_layout(
+                scene,
+                input.layout(),
+                (prompt_x, origin_y),
+                scale,
+            );
         }
 
         if model.caret.visible() {
-            let (row, _) = crate::wrap::row_col_at(&rows, source, model.editor.cursor());
-            let row_start = rows.get(row).map(|r| r.start).unwrap_or(0);
-            let prefix = &source[row_start..model.editor.cursor().max(row_start)];
-            let offset = text.measure_width(prefix, prompt_style, scale);
-            let caret_x = (prompt_x + offset).min(frame.right - layout::COMPOSER_PAD_X);
-            let top = row_y(row.max(first)) - 1.0;
-            let bottom = top + layout::CARET_HEIGHT;
-            fill(
-                scene,
-                theme.text,
-                &Rect::new(caret_x, top, caret_x + layout::CARET_WIDTH, bottom),
-            );
+            let bar = input.caret_rect(model.editor.cursor(), layout::CARET_WIDTH);
+            let top = (origin_y + bar.y0).max(clip_top);
+            let bottom = (origin_y + bar.y1).min(clip_bottom);
+            let caret_x = (prompt_x + bar.x0).min(frame.right - layout::CARET_WIDTH);
+            if bottom > top {
+                fill(
+                    scene,
+                    theme.text,
+                    &Rect::new(caret_x, top, caret_x + layout::CARET_WIDTH, bottom),
+                );
+            }
         }
     }
 

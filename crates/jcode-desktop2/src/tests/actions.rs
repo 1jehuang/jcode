@@ -239,12 +239,27 @@ fn x_for_offset(app: &mut App, offset: usize) -> f64 {
 }
 
 fn x_for_offset_in(app: &mut App, offset: usize, frame: crate::layout::Frame) -> f64 {
-    let style = crate::text::ParagraphStyle {
-        font_size: crate::layout::BODY_SIZE,
-        ..Default::default()
-    };
-    let text = app.model.editor.text()[..offset].to_string();
-    frame.left + crate::layout::COMPOSER_PAD_X + app.text.measure_width(&text, style, frame.scale)
+    // Ask the renderer's own layout where that caret is drawn, so mouse tests
+    // never hardcode font metrics.
+    let source = app.model.editor.text().to_string();
+    let caret = composer_layout(app, &source, frame).caret_rect(offset, 1.0);
+    frame.left + crate::layout::COMPOSER_PAD_X + caret.x0
+}
+
+/// The composer's Parley layout for a frame: the same one the renderer and the
+/// hit-tester build.
+fn composer_layout(
+    app: &mut App,
+    source: &str,
+    frame: crate::layout::Frame,
+) -> crate::input::InputLayout {
+    crate::input::InputLayout::new(
+        &mut app.text,
+        source,
+        frame.composer_text_width(),
+        crate::scene::composer_text_style(&app.model),
+        frame.scale,
+    )
 }
 
 /// Mouse tests need a laid-out window, which needs a GPU surface. Instead
@@ -253,24 +268,20 @@ fn x_for_offset_in(app: &mut App, offset: usize, frame: crate::layout::Frame) ->
 #[test]
 fn hit_testing_maps_x_to_the_nearest_character_gap() {
     let mut app = app_with("alpha beta");
-    let style = crate::text::ParagraphStyle {
-        font_size: crate::layout::BODY_SIZE,
-        ..Default::default()
-    };
+    let frame = app.frame;
     let text = app.model.editor.text().to_string();
+    let input = composer_layout(&mut app, &text, frame);
     // Clicking left of the text lands at 0; far right lands at the end.
-    assert_eq!(app.text.offset_at_x(&text, -50.0, style, 1.0), 0);
-    assert_eq!(
-        app.text.offset_at_x(&text, 10_000.0, style, 1.0),
-        text.len()
-    );
-    // Clicking at the measured width of a prefix lands on that boundary.
+    assert_eq!(input.offset_at_point(-50.0, 1.0), 0);
+    assert_eq!(input.offset_at_point(10_000.0, 1.0), text.len());
+    // Clicking where a caret is drawn lands on that caret's offset.
     for offset in [0, 1, 5, 6, text.len()] {
-        let width = app.text.measure_width(&text[..offset], style, 1.0);
+        let caret = input.caret_rect(offset, 1.0);
+        let y = (caret.y0 + caret.y1) / 2.0;
         assert_eq!(
-            app.text.offset_at_x(&text, width, style, 1.0),
+            input.offset_at_point(caret.x0, y),
             offset,
-            "click at the boundary of offset {offset} missed"
+            "click at the caret for offset {offset} missed"
         );
     }
 }
@@ -278,16 +289,15 @@ fn hit_testing_maps_x_to_the_nearest_character_gap() {
 #[test]
 fn hit_testing_never_splits_a_character() {
     let mut app = app_with("héllo wörld 🌼");
-    let style = crate::text::ParagraphStyle {
-        font_size: crate::layout::BODY_SIZE,
-        ..Default::default()
-    };
+    let frame = app.frame;
     let text = app.model.editor.text().to_string();
+    let input = composer_layout(&mut app, &text, frame);
     for step in 0..200 {
-        let offset = app.text.offset_at_x(&text, step as f64 * 3.0, style, 1.0);
+        let offset = input.offset_at_point(step as f64 * 3.0, 1.0);
         assert!(
             text.is_char_boundary(offset),
-            "hit test returned a mid-character offset"
+            "hit test returned a mid-character offset at x {}",
+            step as f64 * 3.0
         );
     }
 }
@@ -630,40 +640,43 @@ fn down_moves_between_lines_before_returning_from_history() {
     );
 }
 
-/// The wrap budget is a character count derived from an assumed monospace
-/// advance. If that assumption drifts from the real font, wrapped text
-/// silently overflows the well, so check it against measured text.
+/// Wrapped rows must fit the well they were wrapped to. Parley wraps to a
+/// pixel width, so this is the invariant that replaced the old character
+/// budget: no laid-out line may be wider than the space available for text.
 #[test]
-fn the_wrap_budget_matches_the_measured_font_width() {
-    let mut app = app_with("");
-    let frame = crate::layout::Frame::new((1400, 900), 1.0);
-    let budget = frame.composer_char_budget();
-    let style = crate::text::ParagraphStyle {
-        font_size: crate::layout::BODY_SIZE,
-        ..Default::default()
-    };
-    let usable = frame.column() - crate::layout::COMPOSER_PAD_X * 2.0;
-    let full: String = "m".repeat(budget);
-    let measured = app.text.measure_width(&full, style, 1.0);
-    assert!(
-        measured <= usable,
-        "a full row of {budget} chars measures {measured:.1}px but only {usable:.1}px fit"
-    );
-    // The budget must also not be needlessly small.
-    let over: String = "m".repeat(budget + 3);
-    assert!(
-        app.text.measure_width(&over, style, 1.0) > usable,
-        "the wrap budget is far smaller than the available width"
-    );
+fn wrapped_rows_fit_inside_the_composer_well() {
+    let long = "word ".repeat(80);
+    let mut app = app_with(&long);
+    for &(size, scale) in &[
+        ((1400u32, 900u32), 1.0f64),
+        ((700, 600), 1.75),
+        ((2000, 1200), 2.0),
+    ] {
+        let frame = crate::layout::Frame::new(size, scale);
+        let source = app.model.editor.text().to_string();
+        let usable = frame.composer_text_width();
+        let input = composer_layout(&mut app, &source, frame);
+        let lines = input.lines();
+        assert!(lines.len() > 1, "a long line did not wrap at {size:?}");
+        for line in &lines {
+            let right = input.caret_rect(line.end, 1.0).x0;
+            assert!(
+                right <= usable + 1.0,
+                "a wrapped row reached {right:.1}px but only {usable:.1}px fit"
+            );
+        }
+    }
 }
 
 #[test]
 fn a_long_line_wraps_into_multiple_rows_and_grows_the_well() {
     let long = "word ".repeat(60);
     let app = app_with(&long);
+    let mut app = app;
     let single = crate::layout::Frame::new((1400, 900), 1.0);
-    let rows = app.model.composer_rows(single.composer_char_budget());
-    assert!(rows.len() > 1, "a long line did not wrap");
+    let source = app.model.editor.text().to_string();
+    let lines = composer_layout(&mut app, &source, single).line_count();
+    assert!(lines > 1, "a long line did not wrap");
     let frame = App::frame_for_model((1400, 900), 1.0, &app.model);
     assert!(
         frame.composer_top < single.composer_top,
@@ -679,12 +692,15 @@ fn clicking_a_wrapped_row_lands_on_that_row() {
     let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ".repeat(3);
     let mut app = app_with(&long);
     app.frame = App::frame_for_model((900, 800), 1.0, &app.model);
-    let rows = app.model.composer_rows(app.frame.composer_char_budget());
+    let frame = app.frame;
+    let source = app.model.editor.text().to_string();
+    let rows = composer_layout(&mut app, &source, frame).lines();
     assert!(rows.len() > 1, "test needs a wrapped input");
-    let text_top = app.frame.composer_top + crate::layout::COMPOSER_TEXT_OFFSET;
+    let text_top = frame.composer_top + crate::layout::COMPOSER_TEXT_OFFSET;
     for (index, row) in rows.iter().enumerate().take(3) {
-        let y = text_top + index as f64 * crate::layout::COMPOSER_LINE_HEIGHT + 4.0;
-        app.pointer = (app.frame.left + crate::layout::COMPOSER_PAD_X + 1.0, y);
+        // Aim at the vertical middle of the row Parley actually laid out.
+        let y = text_top + (row.top + row.bottom) / 2.0;
+        app.pointer = (frame.left + crate::layout::COMPOSER_PAD_X + 1.0, y);
         app.last_click = None;
         app.on_pointer_pressed();
         app.dragging = false;
