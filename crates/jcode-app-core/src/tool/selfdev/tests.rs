@@ -1,14 +1,11 @@
 use super::*;
 use crate::bus::BackgroundTaskStatus;
 use std::ffi::OsStr;
-use std::sync::{LazyLock, Mutex};
 
-static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
+/// Shared process-wide lock: env vars are global, so a private mutex here would
+/// race every other env-mutating test (issue #593).
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::storage::lock_test_env()
 }
 
 struct EnvVarGuard {

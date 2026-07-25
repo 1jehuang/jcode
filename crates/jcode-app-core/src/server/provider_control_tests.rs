@@ -230,11 +230,10 @@ impl Provider for AuthChangeMockProvider {
     }
 }
 
+/// Shared process-wide lock: env vars are global, so a private mutex here would
+/// race every other env-mutating test (issue #593).
 fn lock_env() -> StdMutexGuard<'static, ()> {
-    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| StdMutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    crate::storage::lock_test_env()
 }
 
 struct EnvGuard {
