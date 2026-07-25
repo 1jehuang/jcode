@@ -48,6 +48,15 @@ jobs:
       - name: Run clippy with warnings denied
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Enforce Cargo.lock is up to date
+        shell: bash
+        # Adding a dependency without regenerating Cargo.lock breaks every
+        # `--locked` build. Only the Windows jobs pass `--locked`, so such a
+        # commit passes 8 of 9 CI jobs and fails Windows at "Build release
+        # binary", skipping all of its validation steps. This catches it in
+        # seconds, on the job that already owns dependency hygiene.
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       - name: Enforce warning budget
         shell: bash
         run: scripts/check_warning_budget.sh

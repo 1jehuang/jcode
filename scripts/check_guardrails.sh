@@ -73,6 +73,9 @@ else
         cargo clippy --all-targets --all-features -j "$JOBS" -- -D warnings
 fi
 
+# Only the Windows CI jobs pass --locked, so a stale lockfile otherwise passes
+# 8 of 9 jobs and fails Windows at "Build release binary".
+run_gate "Cargo.lock is up to date" cargo metadata --locked --format-version 1
 run_gate "warning budget" bash scripts/check_warning_budget.sh
 run_ratchet "oversized-file ratchet" check_code_size_budget.py
 run_ratchet "oversized-test ratchet" check_test_size_budget.py
