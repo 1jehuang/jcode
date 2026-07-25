@@ -3,6 +3,7 @@ use super::{
     handle_subscribe, mark_remote_reload_started, remove_detached_source_if_unclaimed,
     rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_was_interrupted_by_reload, subscribe_should_mark_ready,
+    subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -306,6 +307,56 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             assert_eq!(incoming.client_instance_id.as_deref(), Some("instance-a"));
         }
     }
+}
+
+/// Issue #481: a subscribe cwd that is merely absolute is not enough. A client
+/// reporting the *home* directory must not silently re-pin (or clobber) a
+/// session that is already bound to a real project directory, because tools then
+/// run in home while the UI still shows the project.
+#[test]
+fn subscribe_working_dir_ignores_home_when_session_has_a_project_dir() {
+    let home = std::path::Path::new("/home/tester");
+    let project = "/home/tester/work/project";
+
+    assert_eq!(
+        subscribe_working_dir_replacement(Some(project), "/home/tester", Some(home)),
+        None,
+        "home must not clobber an established project cwd"
+    );
+
+    // A session with no cwd yet, or one already in home, may legitimately use home.
+    assert_eq!(
+        subscribe_working_dir_replacement(None, "/home/tester", Some(home)),
+        Some("/home/tester".to_string())
+    );
+    assert_eq!(
+        subscribe_working_dir_replacement(Some("/home/tester"), "/home/tester", Some(home)),
+        None,
+        "an unchanged cwd needs no reassignment"
+    );
+
+    // Genuine project-to-project moves still apply.
+    assert_eq!(
+        subscribe_working_dir_replacement(Some(project), "/home/tester/work/other", Some(home)),
+        Some("/home/tester/work/other".to_string())
+    );
+
+    // A subdirectory of home that is not home itself is a real project path.
+    assert_eq!(
+        subscribe_working_dir_replacement(Some(project), "/home/tester/scratch", Some(home)),
+        Some("/home/tester/scratch".to_string())
+    );
+
+    // Blank/whitespace reports are never applied, and an unknown home disables
+    // the guard rather than rejecting valid directories.
+    assert_eq!(
+        subscribe_working_dir_replacement(Some(project), "   ", Some(home)),
+        None
+    );
+    assert_eq!(
+        subscribe_working_dir_replacement(Some(project), "/home/tester", None),
+        Some("/home/tester".to_string())
+    );
 }
 
 #[path = "client_session_tests/clear.rs"]
