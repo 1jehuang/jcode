@@ -780,6 +780,16 @@ fn legacy_snapshot_without_mode_defaults_to_light() {
     let _env = test_env(&dir);
 
     // Simulate a pre-deep-mode snapshot on disk: no `mode`, no `node_meta`.
+    //
+    // The snapshot must look *recent*, not epoch-old. Dormant-plan pruning
+    // (33cd27330) drops a queued-only plan whose `updated_at_unix_ms` is older
+    // than the retention window, so a hardcoded timestamp of `1` would be
+    // garbage collected before the mode default could be observed. This test is
+    // about legacy field defaulting, not retention, so keep it fresh.
+    let updated_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_millis() as u64;
     let legacy = serde_json::json!({
         "swarm_id": "swarm-legacy",
         "plan": {
@@ -792,7 +802,7 @@ fn legacy_snapshot_without_mode_defaults_to_light() {
             "version": 2,
             "participants": ["session-1"]
         },
-        "updated_at_unix_ms": 1u64
+        "updated_at_unix_ms": updated_at_unix_ms
     });
     std::fs::create_dir_all(state_dir()).expect("state dir");
     std::fs::write(
