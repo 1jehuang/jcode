@@ -452,7 +452,7 @@ fn elide(text: &str, max_chars: usize) -> String {
         return "...".to_string();
     }
     let keep = max_chars - 3;
-    let head = (keep + 1) / 2;
+    let head = keep.div_ceil(2);
     let tail = keep - head;
     let mut out: String = chars[..head].iter().collect();
     out.push_str("...");

@@ -1,13 +1,11 @@
 use super::*;
 use crate::storage::lock_test_env;
-use std::sync::{Mutex, OnceLock};
 
+/// Shared process-wide lock: telemetry state is reached through env vars, which
+/// are global, so a private mutex here would race every other env-mutating test
+/// (issue #593).
 fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
-    static TELEMETRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TELEMETRY_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock_test_env()
 }
 
 #[test]

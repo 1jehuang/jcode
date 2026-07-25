@@ -239,9 +239,6 @@ pub(crate) fn process_alive(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -250,10 +247,9 @@ mod tests {
 
     impl EnvGuard {
         fn capture(names: &[&'static str]) -> Self {
-            let _lock = TEST_ENV_LOCK
-                .get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Shared process-wide lock: env vars are global, so a private
+            // mutex here would race every other env-mutating test (issue #593).
+            let _lock = crate::storage::lock_test_env();
             let entries = names
                 .iter()
                 .map(|name| (*name, std::env::var_os(name)))

@@ -112,7 +112,6 @@ fn picker_entry_pretty_name(entry: &crate::tui::PickerEntry) -> String {
     }
 }
 
-
 fn picker_row_marker(is_row_selected: bool, unavailable: bool, limited: bool) -> &'static str {
     if unavailable {
         "×"

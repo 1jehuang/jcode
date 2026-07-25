@@ -631,13 +631,17 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
+    /// Serialize env mutation on the *shared* process-wide test lock.
+    ///
+    /// Env vars are per-process, so a private mutex here would only exclude
+    /// other tests in this module while racing every other test that mutates
+    /// the environment (notably the `IsolatedHome` users in `reload_recovery`,
+    /// which set `JCODE_HOME` under `storage::lock_test_env`). Two mutexes
+    /// guarding one global serialize nothing, which showed up as a rotating set
+    /// of failures under `cargo test` that all passed with `--test-threads=1`
+    /// (issue #593). Everything touching the environment must share one lock.
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::storage::lock_test_env()
     }
 
     struct EnvGuard {
