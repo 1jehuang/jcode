@@ -3,7 +3,7 @@ use super::{
     handle_subscribe, mark_remote_reload_started, remove_detached_source_if_unclaimed,
     rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    subscribe_working_dir_replacement,
+    effective_subscribe_working_dir, subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -356,6 +356,40 @@ fn subscribe_working_dir_ignores_home_when_session_has_a_project_dir() {
     assert_eq!(
         subscribe_working_dir_replacement(Some(project), "/home/tester", None),
         Some("/home/tester".to_string())
+    );
+}
+
+/// Issue #481: agent cwd, swarm grouping, and project-local MCP resolution must
+/// all bind to the *same* directory. If a rejected home-dir report still reached
+/// the swarm id or the MCP resolver, tools would run in the project while swarm
+/// membership and `.jcode/mcp.json` discovery pointed at home.
+#[test]
+fn effective_subscribe_working_dir_binds_all_consumers_to_one_directory() {
+    let home = std::path::Path::new("/home/tester");
+    let project = "/home/tester/work/project";
+
+    // Rejected home report: every consumer keeps the project dir.
+    assert_eq!(
+        effective_subscribe_working_dir(Some(project), "/home/tester", Some(home)),
+        project
+    );
+
+    // Accepted move: every consumer follows to the new dir.
+    assert_eq!(
+        effective_subscribe_working_dir(Some(project), "/home/tester/work/other", Some(home)),
+        "/home/tester/work/other"
+    );
+
+    // No prior cwd: the report is authoritative, including home.
+    assert_eq!(
+        effective_subscribe_working_dir(None, "/home/tester", Some(home)),
+        "/home/tester"
+    );
+
+    // Unchanged report resolves to the same dir rather than dropping it.
+    assert_eq!(
+        effective_subscribe_working_dir(Some(project), project, Some(home)),
+        project
     );
 }
 
