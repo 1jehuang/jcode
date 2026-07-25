@@ -106,7 +106,7 @@ fn picker_entry_pretty_name(entry: &crate::tui::PickerEntry) -> String {
         },
         None => (entry.name.as_str(), String::new()),
     };
-    match crate::tui::app::helpers::pretty_known_model_family(base) {
+    match crate::tui::app::helpers::model_names::pretty_known_model_family(base) {
         Some(pretty) => format!("{pretty}{suffix}"),
         None => entry.name.clone(),
     }

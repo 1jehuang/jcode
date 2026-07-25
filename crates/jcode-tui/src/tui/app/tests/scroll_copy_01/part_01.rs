@@ -272,6 +272,21 @@ fn perf_assertions_enabled() -> bool {
         .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
 }
 
+/// Assert a wall-clock performance budget only when [`perf_assertions_enabled`],
+/// otherwise report the breach so the signal survives without failing the run.
+#[track_caller]
+fn assert_perf_budget(within_budget: bool, message: impl FnOnce() -> String) {
+    if perf_assertions_enabled() {
+        assert!(within_budget, "{}", message());
+    } else if !within_budget {
+        eprintln!(
+            "note: perf budget exceeded ({}); set JCODE_TEST_PERF_ASSERTIONS=1 \
+             on an idle machine to enforce it",
+            message()
+        );
+    }
+}
+
 /// Render app to TestBackend and return the buffer text.
 fn render_and_snap(
     app: &App,
