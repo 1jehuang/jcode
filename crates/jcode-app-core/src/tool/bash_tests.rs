@@ -494,7 +494,11 @@ async fn test_background_command_progress_marker_updates_status_and_stays_out_of
         .to_string();
 
     let mut saw_progress = false;
-    for _ in 0..50 {
+    // Wall-clock deadline: observing emitted progress depends on scheduler
+    // latency, so a fixed 50-iteration budget starved under parallel load
+    // (issue #593). The assertions inside stay exact.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         let status = crate::background::global()
             .status(&task_id)
             .await
@@ -552,7 +556,11 @@ async fn test_background_command_ratio_output_updates_progress() {
         .to_string();
 
     let mut saw_progress = false;
-    for _ in 0..50 {
+    // Wall-clock deadline: observing emitted progress depends on scheduler
+    // latency, so a fixed 50-iteration budget starved under parallel load
+    // (issue #593). The assertions inside stay exact.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         let status = crate::background::global()
             .status(&task_id)
             .await
@@ -600,7 +608,11 @@ async fn test_background_command_byte_ratio_output_updates_progress() {
         .to_string();
 
     let mut saw_progress = false;
-    for _ in 0..50 {
+    // Wall-clock deadline: observing emitted progress depends on scheduler
+    // latency, so a fixed 50-iteration budget starved under parallel load
+    // (issue #593). The assertions inside stay exact.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         let status = crate::background::global()
             .status(&task_id)
             .await
@@ -647,7 +659,14 @@ async fn test_background_command_respects_timeout() {
         .to_string();
 
     let mut final_status = None;
-    for _ in 0..50 {
+    // Wall-clock deadline rather than a fixed iteration count. The command's own
+    // timeout is 100ms, but the *observation* of the resulting Failed status
+    // depends on scheduler latency, and a 50 x 50ms budget starved when the full
+    // suite runs in parallel on a loaded machine (issue #593). A generous
+    // deadline keeps the assertion strict while removing the timing race: a real
+    // regression still fails, it just is not reported as a flake.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         let status = crate::background::global()
             .status(&task_id)
             .await
@@ -779,7 +798,10 @@ async fn process_group_kill_guard_terminates_descendants() {
         .expect("shell should exit after process-group kill")
         .expect("wait for shell");
 
-    for _ in 0..100 {
+    // Wall-clock deadline: process teardown is asynchronous and 100 x 10ms was
+    // too tight under parallel load (issue #593).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if !crate::platform::is_process_running(descendant_pid) {
             return;
         }
