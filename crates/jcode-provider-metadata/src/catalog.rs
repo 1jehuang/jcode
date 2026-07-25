@@ -408,6 +408,19 @@ pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     requires_api_key: true,
 };
 
+pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "celeris",
+    display_name: "Celeris",
+    // Celeris scopes the base URL per model: https://inference.celeris.ai/<model>/v1.
+    // `celeris-1` is the only served model today.
+    api_base: "https://inference.celeris.ai/celeris-1/v1",
+    api_key_env: "CELERIS_API_KEY",
+    env_file: "celeris.env",
+    setup_url: "https://docs.celeris.ai/",
+    default_model: Some("celeris-1"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
@@ -419,7 +432,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 36] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 37] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -453,6 +466,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 36] = [
     XAI_PROFILE,
     NVIDIA_NIM_PROFILE,
     XIAOMI_MIMO_PROFILE,
+    CELERIS_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -1072,6 +1086,19 @@ pub const XIAOMI_MIMO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDes
     order: LoginProviderSurfaceOrder::new(Some(37), Some(37), Some(37), Some(37), Some(37)),
 };
 
+pub const CELERIS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "celeris",
+    display_name: "Celeris",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["celeris-ai", "celeris1", "celeris-1"],
+    menu_detail: "OpenAI-compatible low-latency Celeris API",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(CELERIS_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "google",
     display_name: "Google/Gmail",
@@ -1085,7 +1112,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 47] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1124,6 +1151,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 47] = [
     XAI_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
+    CELERIS_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,

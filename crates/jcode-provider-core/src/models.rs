@@ -345,6 +345,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(204_800);
     }
 
+    // --- Celeris celeris-1: 8,192 total (prompt + completion) window ---
+    if m.contains("celeris") {
+        return Some(8_192);
+    }
+
     // --- Xiaomi MiMo V2 family: 256K context ---
     if m.contains("mimo") {
         return Some(262_144);

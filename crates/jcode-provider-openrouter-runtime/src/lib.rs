@@ -1171,7 +1171,14 @@ impl OpenRouterProvider {
             }
         }
 
-        let _ = profile_id;
+        // Celeris rejects `max_tokens` values that are not a positive multiple
+        // of 256, and requires prompt + max_tokens <= 8,192. Its own default
+        // (2,048) leaves only ~6K of prompt room, so ask for a smaller
+        // completion budget to keep more of the context window usable.
+        if profile_id.is_some_and(|id| id.eq_ignore_ascii_case("celeris")) {
+            return Some(1_024);
+        }
+
         None
     }
 
