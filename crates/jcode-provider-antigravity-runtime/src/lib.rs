@@ -231,6 +231,10 @@ impl AntigravityProvider {
         jcode_base::provider::antigravity::fetch_catalog_snapshot(&self.client).await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Code Assist call threads explicit per-request settings, including the signature policy, without hidden state"
+    )]
     async fn generate_content(
         &self,
         model: &str,
