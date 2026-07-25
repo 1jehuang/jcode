@@ -95,7 +95,7 @@ fn row_containing(rows: &[String], needle: &str) -> usize {
 fn fact_stack_rows(rows: &[String]) -> [usize; 4] {
     [
         row_containing(rows, "OpenAI · OAuth"),
-        row_containing(rows, "GPT-5.6-sol high"),
+        row_containing(rows, "GPT-5.6 Sol high"),
         row_containing(rows, "~/jcode"),
         row_containing(rows, "74k/256k"),
     ]
@@ -154,7 +154,7 @@ fn right_fact_stack_uses_neutral_gray_except_for_context_usage() {
     let rows = buffer_rows(&terminal);
     let buffer = terminal.backend().buffer();
     let neutral = Color::Rgb(140, 140, 150);
-    for needle in ["OpenAI · OAuth", "GPT-5.6-sol high", "~/jcode"] {
+    for needle in ["OpenAI · OAuth", "GPT-5.6 Sol high", "~/jcode"] {
         let y = row_containing(&rows, needle);
         let byte_x = rows[y].find(needle).expect("fact text start");
         let x = UnicodeWidthStr::width(&rows[y][..byte_x]) as u16;
@@ -261,7 +261,7 @@ fn right_fact_stack_hides_as_a_unit_when_streaming_chrome_cannot_fit_it() {
     assert!(
         rows.iter().all(|row| {
             !row.contains("OpenAI · OAuth")
-                && !row.contains("GPT-5.6-sol high")
+                && !row.contains("GPT-5.6 Sol high")
                 && !row.contains("74k/256k")
         }),
         "the stack must hide completely rather than render a partial block:\n{}",

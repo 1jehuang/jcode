@@ -389,7 +389,29 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
 #[test]
 fn pretty_model_display_name_formats_common_models() {
     assert_eq!(pretty_model_display_name("gpt-5.5"), "GPT-5.5");
-    assert_eq!(pretty_model_display_name("gpt-5.1-codex"), "GPT-5.1-codex");
+    assert_eq!(pretty_model_display_name("gpt-5.1-codex"), "GPT-5.1 Codex");
+    assert_eq!(
+        pretty_model_display_name("gpt-5.1-codex-max"),
+        "GPT-5.1 Codex Max"
+    );
+    // Bracketed route markers become a parenthetical instead of leaking `[web]`.
+    assert_eq!(
+        pretty_model_display_name("gpt-5.6-pro[web]"),
+        "GPT-5.6 Pro (web)"
+    );
+    // Dated snapshots read as a date, not as extra version digits.
+    assert_eq!(
+        pretty_model_display_name("claude-haiku-4-5-20251001"),
+        "Claude Haiku 4.5 (2025-10-01)"
+    );
+    assert_eq!(
+        pretty_model_display_name("claude-sonnet-4-20250514"),
+        "Claude Sonnet 4 (2025-05-14)"
+    );
+    assert_eq!(
+        pretty_model_display_name("claude-sonnet-4-5-20250929[1m]"),
+        "Claude Sonnet 4.5 (2025-09-29, 1M)"
+    );
     assert_eq!(
         pretty_model_display_name("claude-opus-4-8"),
         "Claude Opus 4.8"
@@ -406,6 +428,47 @@ fn pretty_model_display_name_formats_common_models() {
         pretty_model_display_name("gemini-2.5-pro"),
         "Gemini 2.5 Pro"
     );
+}
+
+#[test]
+fn pretty_known_model_family_gates_to_versioned_known_families() {
+    use crate::tui::app::helpers::pretty_known_model_family;
+    // Known families with a version are prettified.
+    assert_eq!(
+        pretty_known_model_family("claude-opus-4-8").as_deref(),
+        Some("Claude Opus 4.8")
+    );
+    assert_eq!(
+        pretty_known_model_family("gemini-3.1-pro-preview").as_deref(),
+        Some("Gemini 3.1 Pro Preview")
+    );
+    assert_eq!(
+        pretty_known_model_family("gpt-5.6-pro[web]").as_deref(),
+        Some("GPT-5.6 Pro (web)")
+    );
+    // Open-weights, third-party, namespaced, and profile-scoped ids stay raw so
+    // they remain copy-pasteable and unambiguous in the picker.
+    for raw in [
+        "gpt-oss-120b-medium",
+        "composer-2.5",
+        "sonnet-4.6-thinking",
+        "opus-4.6",
+        "GLM-5.1",
+        "Llama-3.3-70B-Instruct",
+        "MiniMax-M2.5-highspeed",
+        "qwen3-coder-plus",
+        "o3-mini",
+        "grok-4",
+        "deepseek/deepseek-v4-pro",
+        "anthropic/claude-opus-4.6",
+        "google/gemini-3-pro-preview",
+        "comtegra:glm-51-nvfp4",
+    ] {
+        assert!(
+            pretty_known_model_family(raw).is_none(),
+            "{raw} should stay verbatim"
+        );
+    }
 }
 
 #[test]
@@ -520,4 +583,35 @@ fn backdated_now_never_panics_and_prefers_past_instants() {
     // Zero backdate is a no-op.
     let zero = super::backdated_now(Duration::ZERO);
     assert!(zero <= Instant::now());
+}
+
+#[test]
+#[ignore = "developer review: dumps raw -> pretty model name mapping for manual audit"]
+fn dump_pretty_model_names_for_manual_audit() {
+    let mut names: Vec<String> = Vec::new();
+    for list in [
+        jcode_provider_core::ALL_CLAUDE_MODELS,
+        jcode_provider_core::ALL_OPENAI_MODELS,
+        jcode_provider_core::OPENAI_API_ONLY_PRO_MODELS,
+    ] {
+        names.extend(list.iter().map(|m| m.to_string()));
+    }
+    if let Ok(extra) = std::fs::read_to_string("/tmp/audit_names.txt") {
+        names.extend(
+            extra
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty()),
+        );
+    }
+    names.sort();
+    names.dedup();
+    for name in names {
+        let pretty = crate::tui::app::helpers::pretty_known_model_family(&name);
+        println!(
+            "{:<42} => {}",
+            name,
+            pretty.unwrap_or_else(|| format!("(verbatim) {name}"))
+        );
+    }
 }
