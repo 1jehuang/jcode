@@ -3858,6 +3858,7 @@ name = "jcode-desktop2"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "jcode-harness-api",
  "parley",
  "pollster",
