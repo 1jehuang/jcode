@@ -247,6 +247,13 @@ impl ImportReview {
         self.continue_focused = self.summary_pill == SummaryPill::Continue;
     }
 
+    /// Focus a specific summary pill (used by the onboarding simulator to land
+    /// directly on a given screen state).
+    pub(crate) fn focus_summary_pill(&mut self, pill: SummaryPill) {
+        self.summary_pill = pill;
+        self.continue_focused = pill == SummaryPill::Continue;
+    }
+
     /// The candidate the cursor is currently on, if any. Returns `None` while
     /// the "Continue" pill is focused.
     #[allow(dead_code)] // Accessor kept for the import-review UI; not wired to a caller yet.
