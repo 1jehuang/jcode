@@ -83,7 +83,7 @@ impl Config {
             && table
                 .get("endpoint")
                 .and_then(toml::Value::as_str)
-                .is_some_and(is_default_discovery_endpoint);
+                .is_some_and(super::is_default_discovery_endpoint);
         if !machine_written {
             return;
         }
@@ -634,12 +634,4 @@ impl Config {
         }
         Ok(())
     }
-}
-
-/// Endpoints that only ever came from a shipped default, never a user choice.
-fn is_default_discovery_endpoint(endpoint: &str) -> bool {
-    matches!(
-        endpoint.trim_end_matches('/'),
-        "https://api.jcode.sh/v1/discovery" | "https://api.solosystems.dev/v1/discovery"
-    )
 }
