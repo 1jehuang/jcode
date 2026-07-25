@@ -111,16 +111,26 @@ final class AppModel {
 
     // MARK: - Actions
 
+    /// Submit the composer draft. Whether it sends, queues, or is ignored is
+    /// decided by `ComposerRules` so the Return key and the send button always
+    /// agree (and the rule stays unit tested without a UI).
     func sendDraft() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        draft = ""
-        if session.isProcessing {
-            session = SessionReducer.reduce(session, intent: .userQueuedInterrupt(text))
-            send { .softInterrupt(id: $0, content: text, urgent: false) }
-        } else {
+        let action = ComposerRules.submitAction(
+            draft: draft,
+            isConnected: isConnected,
+            isProcessing: session.isProcessing
+        )
+        switch action {
+        case .ignore, .newline:
+            return
+        case .send(let text):
+            draft = ""
             session = SessionReducer.reduce(session, intent: .userSentMessage(text))
             send { .message(id: $0, content: text) }
+        case .queue(let text):
+            draft = ""
+            session = SessionReducer.reduce(session, intent: .userQueuedInterrupt(text))
+            send { .softInterrupt(id: $0, content: text, urgent: false) }
         }
     }
 
