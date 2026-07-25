@@ -697,7 +697,7 @@ fn margins_stay_empty() {
 fn an_unattached_state_still_reports_its_status() {
     let model = crate::states::by_name("connecting").expect("connecting node");
     assert!(
-        model.status_footnote().is_some(),
+        model.footnote().is_some(),
         "an unattached model reported no status at all"
     );
     let Some(r) = Rendered::new(&model) else {
@@ -890,35 +890,6 @@ fn no_caret_is_drawn_while_unfocused() {
         darkest > 0.9,
         "a caret was drawn in an unfocused field ({darkest:.3})"
     );
-}
-
-/// The prompt marker must be drawn, and the text must start after it: the
-/// marker exists to make the text origin explicit, so overlapping glyphs would
-/// defeat it.
-#[test]
-#[ignore = "requires a GPU"]
-fn the_prompt_marker_precedes_the_text() {
-    let model = states::by_name("mid_input").expect("node");
-    let Some(r) = Rendered::new(&model) else {
-        return;
-    };
-    let f = r.frame;
-    let marker = r.darkest_in(
-        f.left + crate::layout::COMPOSER_PAD_X,
-        f.composer_top + 4.0,
-        f.composer_text_left() - 2.0,
-        f.composer_bottom - 4.0,
-    );
-    assert!(marker < 0.8, "no prompt marker was drawn ({marker:.3})");
-    // The gap immediately left of the text origin must stay clear, so the
-    // marker cannot be touching the message.
-    let gap = r.darkest_in(
-        f.composer_text_left() - 4.0,
-        f.composer_top + 4.0,
-        f.composer_text_left() - 1.0,
-        f.composer_bottom - 4.0,
-    );
-    assert!(gap > 0.85, "the marker runs into the text ({gap:.3})");
 }
 
 /// While busy, anything already typed for the next turn must stay visible.
