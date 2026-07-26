@@ -25,6 +25,10 @@ pub struct BridgeState {
     pending_message_id: Option<u64>,
     /// Legacy id of an in-flight `create/attach` subscribe.
     pending_attach_id: Option<(u64, u64)>,
+    /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
+    /// reply becomes a `model_info` event rather than a request reply, so it is
+    /// tracked apart from `pending_simple`.
+    pending_model_probe: Option<u64>,
     /// Legacy id -> API id for simple acked requests (ping, clear, ...).
     pending_simple: Vec<(u64, u64, SimpleKind)>,
 }
@@ -50,7 +54,9 @@ impl BridgeState {
             "create_session" | "attach_session" => {
                 let id = self.legacy_id();
                 let state_id = self.legacy_id();
+                let catalog_id = self.legacy_id();
                 self.pending_attach_id = Some((state_id, api_id));
+                self.pending_model_probe = Some(catalog_id);
                 let working_dir =
                     request["working_dir"]
                         .as_str()
@@ -72,9 +78,12 @@ impl BridgeState {
                 }
                 // The daemon assigns the session during subscribe but reports
                 // the id via `state`, so chase the subscribe with get_state.
+                // The model identity arrives the same way, via the catalog
+                // reply, so ask for it now rather than making the client poll.
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
+                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id})),
                 ]
             }
             "send_message" => {
@@ -271,6 +280,12 @@ impl BridgeState {
                 .unwrap_or_default(),
             "history" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                // The catalog probe rides the same `history` reply shape but
+                // carries no messages: it is model identity, not transcript.
+                if self.pending_model_probe == Some(id) {
+                    self.pending_model_probe = None;
+                    return vec![ServerFrame::event(self.model_info(event))];
+                }
                 let Some(api_id) = self.take_simple(id, SimpleKind::History) else {
                     return vec![];
                 };
@@ -294,6 +309,19 @@ impl BridgeState {
                     },
                 )]
             }
+            // The model can change mid-session (`/model`, a cycle, or an auth
+            // change re-resolving the route), so both pushes are forwarded.
+            "model_changed" => {
+                if event["error"].is_string() {
+                    return vec![];
+                }
+                vec![ServerFrame::event(ApiEvent::ModelInfo {
+                    session_id: session(self),
+                    provider: event["provider_name"].as_str().map(str::to_string),
+                    model: event["model"].as_str().map(str::to_string),
+                })]
+            }
+            "available_models_updated" => vec![ServerFrame::event(self.model_info(event))],
             "ack" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 self.take_simple(id, SimpleKind::Ok)
@@ -321,6 +349,17 @@ impl BridgeState {
             // Everything else on the legacy stream is not part of the stable
             // API surface yet; drop it.
             _ => vec![],
+        }
+    }
+
+    /// Read provider/model identity out of any legacy event that carries the
+    /// `provider_name`/`provider_model` pair (the catalog reply and the
+    /// available-models push both do).
+    fn model_info(&self, event: &Value) -> ApiEvent {
+        ApiEvent::ModelInfo {
+            session_id: self.session_id.clone().unwrap_or_default(),
+            provider: event["provider_name"].as_str().map(str::to_string),
+            model: event["provider_model"].as_str().map(str::to_string),
         }
     }
 
