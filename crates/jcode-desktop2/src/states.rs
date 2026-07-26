@@ -17,6 +17,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("mid_input_caret_inside", mid_input_caret_inside),
     ("caret_hidden", caret_hidden),
     ("streaming", streaming),
+    ("streaming_reveal", streaming_reveal),
     ("turn_done", turn_done),
     ("scrolled_back", scrolled_back),
     ("notice", notice),
@@ -45,6 +46,7 @@ fn connecting() -> Model {
         busy: false,
         scroll: 0,
         notice: None,
+        reveal: crate::stream::Reveal::default(),
     }
 }
 
@@ -65,6 +67,7 @@ fn attached_empty() -> Model {
         busy: false,
         scroll: 0,
         notice: None,
+        reveal: crate::stream::Reveal::default(),
     }
 }
 
@@ -131,6 +134,22 @@ fn streaming() -> Model {
         busy: true,
         ..attached_empty()
     }
+}
+
+/// Mid-animation streaming frame: the newest text is still fading and rising
+/// into place. Pinned to a fixed point in the fade so the capture is
+/// reproducible.
+fn streaming_reveal() -> Model {
+    let mut model = streaming();
+    let start = std::time::Instant::now();
+    let mut reveal = crate::stream::Reveal::default();
+    // The last sentence is treated as the freshly arrived chunk.
+    let tail = 90.min(model.transcript.len());
+    reveal.push_at(model.transcript.len() - tail, start);
+    reveal.push_at(tail, start + crate::stream::FADE);
+    reveal.freeze_at(start + crate::stream::FADE + crate::stream::FADE / 3);
+    model.reveal = reveal;
+    model
 }
 
 fn turn_done() -> Model {
