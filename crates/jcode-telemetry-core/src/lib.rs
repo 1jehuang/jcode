@@ -2154,8 +2154,8 @@ fn show_first_run_notice() {
     };
     eprintln!("{dim}");
     eprintln!("  jcode collects anonymous usage statistics (install count, version, OS,");
-    eprintln!("  session activity, tool counts, and crash/exit reasons). This build sends no");
-    eprintln!("  code, filenames, or prompts. Collected data may be shared, licensed, or sold.");
+    eprintln!("  session activity, tool counts, and crash/exit reasons). No code, filenames,");
+    eprintln!("  prompts, or personal data is sent.");
     eprintln!("  To opt out: export JCODE_NO_TELEMETRY=1");
     eprintln!("  Details: https://github.com/1jehuang/jcode/blob/master/TELEMETRY.md");
     eprintln!("{reset}");
