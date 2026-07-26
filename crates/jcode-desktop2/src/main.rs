@@ -153,6 +153,16 @@ fn run_e2e(message: &str) -> Result<()> {
                 outgoing.send(message.to_string())?;
                 sent = true;
             }
+            harness::HarnessUpdate::Model {
+                provider,
+                model: id,
+            } => {
+                println!("[e2e] model: {provider:?} {id:?}");
+                model.model = Some(ModelId {
+                    provider,
+                    model: id,
+                });
+            }
             harness::HarnessUpdate::Text(text) => {
                 print!("{text}");
                 model.transcript.push_str(&text);
@@ -340,6 +350,32 @@ pub struct Model {
     /// Which ghost hint the empty composer shows. An index rather than a
     /// string, so the model stays trivially comparable and captures can pin it.
     pub hint: usize,
+    /// Provider and model serving this session, once the harness reports it.
+    /// `None` until then, so the caption appears rather than showing a guess
+    /// that could be wrong.
+    pub model: Option<ModelId>,
+}
+
+/// The provider and model answering this session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelId {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+impl ModelId {
+    /// One-line caption, or `None` when there is nothing to say.
+    ///
+    /// The model id alone is the useful fact ("sonnet-4.5"), so the provider is
+    /// only shown when the model is unknown: `anthropic / claude-sonnet-4` is
+    /// mostly the same word twice.
+    pub fn caption(&self) -> Option<String> {
+        match (self.model.as_deref(), self.provider.as_deref()) {
+            (Some(model), _) if !model.is_empty() => Some(model.to_string()),
+            (_, Some(provider)) if !provider.is_empty() => Some(provider.to_string()),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Model {
@@ -359,6 +395,7 @@ impl Default for Model {
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
+            model: None,
         }
     }
 }
@@ -446,6 +483,9 @@ impl App {
                 harness::HarnessUpdate::Attached { session_id } => {
                     self.model.status = format!("attached: {session_id}");
                     self.model.session_id = Some(session_id);
+                }
+                harness::HarnessUpdate::Model { provider, model } => {
+                    self.model.model = Some(ModelId { provider, model });
                 }
                 harness::HarnessUpdate::Text(text) => self.model.transcript.push_str(&text),
                 harness::HarnessUpdate::TurnDone => {

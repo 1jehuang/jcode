@@ -1065,3 +1065,81 @@ mod hero {
         );
     }
 }
+
+/// The model caption must actually reach the pixels, on the trailing end of the
+/// footnote row, and must not collide with a footnote sharing that row. A
+/// unit-tested label that the renderer forgets to draw is the failure mode this
+/// guards. Thresholds are luminance-based: the caption is deliberately faint,
+/// so a strict ink test would report an absence that is really just low
+/// contrast.
+#[test]
+#[ignore = "requires a GPU"]
+fn the_model_caption_is_drawn_on_the_right_of_the_footnote_row() {
+    let mut model = states::by_name("attached_empty").expect("node");
+    model.notice = None;
+    model.model = Some(crate::ModelId {
+        provider: Some("anthropic".into()),
+        model: Some("claude-sonnet-4-5".into()),
+    });
+    assert!(
+        model.footnote().is_none(),
+        "this case wants the caption alone on the row"
+    );
+    let Some(shot) = Rendered::new(&model) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let f = shot.frame;
+    let mid = (f.left + f.right) / 2.0;
+    let top = f.footnote_top;
+    let bottom = f.footnote_bottom;
+    assert!(
+        shot.darkest_in(mid, top, f.right, bottom) < 0.9,
+        "no model caption on the right of the footnote row"
+    );
+
+    // With no footnote to share the row, the left half must stay clear, so the
+    // caption reads as trailing metadata rather than drifting into the middle.
+    assert!(
+        shot.darkest_in(f.left, top, mid - 4.0, bottom) > 0.95,
+        "the model caption is not right-aligned"
+    );
+}
+
+/// A model caption and a footnote must coexist without overlapping: both are
+/// elided to fit their own half of the row.
+#[test]
+#[ignore = "requires a GPU"]
+fn a_footnote_and_the_model_caption_do_not_collide() {
+    let mut model = states::by_name("attached_empty").expect("node");
+    model.notice = Some("nothing to undo".into());
+    model.model = Some(crate::ModelId {
+        provider: Some("anthropic".into()),
+        model: Some("claude-sonnet-4-5".into()),
+    });
+    assert!(
+        model.footnote().is_some(),
+        "this case wants both captions on the row"
+    );
+    let Some(shot) = Rendered::new(&model) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let f = shot.frame;
+    let top = f.footnote_top;
+    let bottom = f.footnote_bottom;
+    let mid = (f.left + f.right) / 2.0;
+    assert!(
+        shot.darkest_in(f.left, top, mid - 8.0, bottom) < 0.9,
+        "the footnote vanished when a model caption shared the row"
+    );
+    assert!(
+        shot.darkest_in(mid + 8.0, top, f.right, bottom) < 0.9,
+        "the model caption vanished when a footnote shared the row"
+    );
+    // A gutter in the middle proves neither ran into the other.
+    assert!(
+        shot.darkest_in(mid - 6.0, top, mid + 6.0, bottom) > 0.95,
+        "the footnote and the model caption ran together"
+    );
+}

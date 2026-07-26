@@ -375,8 +375,21 @@ pub fn build_scene(
     // decides how wide it may be. Status and build alerts live here instead of
     // a masthead, so the top of the page stays clear while a failure to attach
     // is still visible.
+    // Elided to a third of the column: a route-prefixed model id can be long,
+    // and it must never crowd out the footnote, which is the actionable half.
+    let model_caption = model.model.as_ref().and_then(|id| id.caption()).map(|id| {
+        let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72) / 3.0) as usize;
+        elide(&id, chars.max(10))
+    });
     let footnote = model.footnote().map(|line| {
         let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72)) as usize;
+        // Halve the budget when the model caption shares the row, so the two
+        // captions cannot overlap in the middle.
+        let chars = if model_caption.is_some() {
+            chars / 2
+        } else {
+            chars
+        };
         elide(&line, chars.max(12))
     });
     if let Some(footnote) = footnote {
@@ -389,6 +402,27 @@ pub fn build_scene(
                 font_size: layout::CAPTION_SIZE,
                 color: theme.faint,
                 letter_spacing_em: 0.1,
+                ..Default::default()
+            },
+            scale,
+        );
+    }
+
+    // Which model is answering, as a caption on the trailing end of the
+    // footnote row. Right-aligned so it reads as metadata about the session
+    // rather than as another message to the user, and drawn after the footnote
+    // so a long notice is the thing that gets elided, not this.
+    if let Some(caption) = model_caption {
+        text.draw_paragraph_scaled(
+            scene,
+            &caption,
+            (frame.left, frame.footnote_top),
+            frame.column() as f32,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: theme.faint,
+                letter_spacing_em: 0.1,
+                align: text::Align::End,
                 ..Default::default()
             },
             scale,
