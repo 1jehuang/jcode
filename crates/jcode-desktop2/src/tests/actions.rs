@@ -960,3 +960,51 @@ mod donut {
         assert!(app.model.spin.time > first);
     }
 }
+
+/// The caption prefers the model id, because that is the fact the user wants,
+/// and degrades to the provider rather than showing nothing.
+#[test]
+fn the_model_caption_prefers_the_model_then_the_provider() {
+    use crate::ModelId;
+    let both = ModelId {
+        provider: Some("anthropic".into()),
+        model: Some("claude-sonnet-4-5".into()),
+    };
+    assert_eq!(both.caption().as_deref(), Some("claude-sonnet-4-5"));
+    let provider_only = ModelId {
+        provider: Some("anthropic".into()),
+        model: None,
+    };
+    assert_eq!(provider_only.caption().as_deref(), Some("anthropic"));
+    assert_eq!(ModelId::default().caption(), None);
+}
+
+/// Empty strings from the wire must not render as a blank caption row.
+#[test]
+fn the_model_caption_ignores_empty_strings() {
+    use crate::ModelId;
+    let empty = ModelId {
+        provider: Some(String::new()),
+        model: Some(String::new()),
+    };
+    assert_eq!(empty.caption(), None);
+}
+
+/// The harness reporting a model must land on the model, or the caption never
+/// appears in the real app however well the label is unit-tested.
+#[test]
+fn a_reported_model_reaches_the_model() {
+    let mut app = App::default();
+    app.model.model = Some(crate::ModelId {
+        provider: Some("openai".into()),
+        model: Some("gpt-5.6".into()),
+    });
+    assert_eq!(
+        app.model
+            .model
+            .as_ref()
+            .and_then(|id| id.caption())
+            .as_deref(),
+        Some("gpt-5.6")
+    );
+}

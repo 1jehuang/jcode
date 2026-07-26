@@ -72,6 +72,8 @@ fn connecting() -> Model {
         // Captures pin the hint, so the ghost line is a tested state rather
         // than whatever the clock happened to pick.
         hint: 0,
+        // Detached: nothing has told us the model yet, so the caption is absent.
+        model: None,
     }
 }
 
@@ -82,6 +84,15 @@ fn fixed_donut() -> crate::donut::Donut {
     let mut donut = crate::donut::Donut::new(crate::DONUT_GRID);
     donut.render(DONUT_TIME, 0.0);
     donut
+}
+
+/// Attached sessions report a model, so captures pin one rather than reading
+/// whatever the local config happens to select.
+fn fixed_model() -> crate::ModelId {
+    crate::ModelId {
+        provider: Some("anthropic".into()),
+        model: Some("claude-sonnet-4-5".into()),
+    }
 }
 
 fn fixed_spin() -> crate::donut::Spin {
@@ -120,6 +131,7 @@ fn attached_empty() -> Model {
         // Captures pin the hint, so the ghost line is a tested state rather
         // than whatever the clock happened to pick.
         hint: 0,
+        model: Some(fixed_model()),
     }
 }
 

@@ -21,7 +21,14 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub enum HarnessUpdate {
     Status(String),
-    Attached { session_id: String },
+    Attached {
+        session_id: String,
+    },
+    /// The provider and model serving the session.
+    Model {
+        provider: Option<String>,
+        model: Option<String>,
+    },
     Text(String),
     TurnDone,
 }
@@ -175,6 +182,9 @@ fn run(
                 });
             }
             ApiEvent::TextDelta { text, .. } => send(HarnessUpdate::Text(text)),
+            ApiEvent::ModelInfo {
+                provider, model, ..
+            } => send(HarnessUpdate::Model { provider, model }),
             ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
             ApiEvent::Error { message, .. } => {
                 send(HarnessUpdate::Status(format!("error: {message}")));

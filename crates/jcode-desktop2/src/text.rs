@@ -48,6 +48,8 @@ pub enum Align {
     #[default]
     Start,
     Center,
+    /// Trailing edge of the wrap width (right, for LTR text).
+    End,
 }
 
 impl Align {
@@ -55,6 +57,7 @@ impl Align {
         match self {
             Self::Start => Alignment::Start,
             Self::Center => Alignment::Center,
+            Self::End => Alignment::End,
         }
     }
 }
