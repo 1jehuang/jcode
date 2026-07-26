@@ -2092,10 +2092,10 @@ pub(super) fn handle_pre_control_shortcuts(
                 app.set_status_notice("Swarm view closed");
             }
             super::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice("Swarm: alt+n full page · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             super::tui_state::SwarmPanelView::FullPage => {
-                app.set_status_notice("Swarm page: alt+n chat · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_page_hint());
             }
         }
         return true;

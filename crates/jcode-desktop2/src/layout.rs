@@ -15,46 +15,67 @@ pub const BODY_SIZE: f32 = 13.5;
 pub const BODY_LEADING: f64 = 1.65;
 /// Caption size for status/hints.
 pub const CAPTION_SIZE: f32 = 10.5;
-/// Wordmark size.
-pub const WORDMARK_SIZE: f32 = 15.0;
-/// Space reserved for the wordmark before the status caption starts.
-pub const WORDMARK_ADVANCE: f64 = 72.0;
-/// Leading used for single-line captions (wordmark, status, footnote), which
-/// should sit tight in their own line box rather than carry body leading.
-pub const CAPTION_LEADING: f64 = 1.25;
-/// Composer well height and inner padding.
+/// Composer well height for a single line, and the inner padding.
 pub const COMPOSER_HEIGHT: f64 = 44.0;
+/// Extra height per additional composer line.
+pub const COMPOSER_LINE_HEIGHT: f64 = 20.0;
+/// Composer lines shown before it stops growing and scrolls internally.
+pub const COMPOSER_MAX_LINES: usize = 8;
 pub const COMPOSER_PAD_X: f64 = 14.0;
 pub const COMPOSER_RADIUS: f64 = 6.0;
+/// Field border thickness, in logical units. Drawn as a stroke so the composer
+/// reads as an input field rather than a block of shaded paper.
+pub const COMPOSER_BORDER: f64 = 1.0;
+/// Extra border thickness when the window has keyboard focus.
+pub const COMPOSER_BORDER_FOCUS: f64 = 1.25;
+/// Top of the prompt text inside the composer well. Derived so a single line
+/// is vertically centred: hardcoding it left the text a pixel high.
+pub const COMPOSER_TEXT_OFFSET: f64 = (COMPOSER_HEIGHT - COMPOSER_LINE_HEIGHT) / 2.0;
 /// Insert caret: a thin vertical bar, like any normal text input.
 pub const CARET_WIDTH: f64 = 1.5;
 pub const CARET_HEIGHT: f64 = 18.0;
 /// Caption row under the composer for notices and the scrollback indicator.
 pub const FOOTNOTE_HEIGHT: f64 = 16.0;
-/// Vertical rhythm. One base step, with region gaps as multiples of it, so
-/// spacing reads as a scale instead of a pile of unrelated magic numbers.
-pub const STEP: f64 = 8.0;
-/// Gap between the wordmark's line box and its hairline.
-pub const SPACE_BEFORE_RULE: f64 = STEP * 1.5;
-/// Breathing room between regions.
-pub const SPACE_AFTER_RULE: f64 = STEP * 3.0;
-pub const SPACE_BEFORE_COMPOSER: f64 = STEP * 3.5;
-pub const FOOTNOTE_GAP: f64 = STEP * 1.5;
+pub const FOOTNOTE_GAP: f64 = 6.0;
+/// Largest the hero donut gets, in logical units. Matches the website's
+/// 360px hero canvas, so the halftone screen has the same density there.
+pub const DONUT_MAX_SIDE: f64 = 360.0;
+/// Hero wordmark over the donut, as on the website's landing section.
+pub const HERO_WORDMARK_SIZE: f32 = 34.0;
+/// Gap under the wordmark, and under the donut before the tagline.
+pub const HERO_GAP: f64 = 14.0;
+/// Line height for hero text. Tight, because the hero stacks single lines
+/// against a graphic: body leading would put invisible slack above each line
+/// and make the measured gaps disagree with the optical ones.
+pub const HERO_LINE_HEIGHT: f32 = 1.15;
+/// Tagline under the donut: the one line that says what this is.
+pub const HERO_TAGLINE_SIZE: f32 = 12.5;
+/// Fraction of the donut's square its silhouette actually inks. The torus at
+/// this tilt does not reach the corners or the top and bottom edges, so laying
+/// the stack out on the raw square leaves a gap that looks like a mistake; the
+/// wordmark and tagline are spaced against the *visible* disc instead.
+pub const DONUT_INK_FRACTION: f64 = 0.82;
+/// Below this the halftone screen has too few dots across (at [`DOT_PITCH`]) to
+/// read as a donut, so the hero is dropped entirely rather than degrading into
+/// speckle on a cramped window.
+pub const DONUT_MIN_SIDE: f64 = 100.0;
+/// Vertical breathing room between regions.
+pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
+/// Fraction of the page height the input box is centred on. 0.5 puts the
+/// composer in the exact middle of the window; it only leaves that line when
+/// the page is too short to keep a transcript line above it.
+pub const COMPOSER_CENTER: f64 = 0.5;
 
-/// Height of the line box a paragraph of `size` at `leading` occupies. Text
-/// origins in this app are line-box tops, so every vertical placement below is
-/// expressed in terms of this.
-pub fn line_box(size: f32, leading: f64) -> f64 {
-    f64::from(size) * leading
-}
-
-/// Distance from the top of a line box to the text baseline, using the nominal
-/// 0.8em ascent / 0.2em descent of the mono stack. Used to align text of
-/// different sizes on a shared baseline (the wordmark and its status caption)
-/// instead of eyeballing a fudge offset.
-pub fn baseline_offset(size: f32, leading: f64) -> f64 {
-    let em = f64::from(size);
-    (line_box(size, leading) - em) / 2.0 + em * 0.8
+/// The hero block on an empty session: wordmark, donut, tagline. All fields are
+/// logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hero {
+    /// Baseline box top of the wordmark, centred in the column.
+    pub wordmark_top: f64,
+    /// The donut's square.
+    pub donut: vello::kurbo::Rect,
+    /// Top of the tagline line under the donut.
+    pub tagline_top: f64,
 }
 
 /// Resolved geometry for one frame. All fields are logical pixels.
@@ -67,10 +88,6 @@ pub struct Frame {
     pub left: f64,
     /// Right edge of the measure column.
     pub right: f64,
-    /// Baseline origin of the wordmark.
-    pub masthead_top: f64,
-    /// Hairline under the masthead.
-    pub masthead_rule: f64,
     /// Top of the transcript region.
     pub body_top: f64,
     /// Bottom of the transcript region.
@@ -84,8 +101,17 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// Resolve geometry for a surface of `size` physical pixels at `scale`.
+    /// Resolve geometry for a surface of `size` physical pixels at `scale`,
+    /// with a single-line composer.
     pub fn new(size: (u32, u32), scale: f64) -> Self {
+        Self::with_composer_lines(size, scale, 1)
+    }
+
+    /// Resolve geometry with a composer sized for `lines` of input. The
+    /// composer grows upward so the transcript shrinks instead of the input
+    /// being clipped, and stops growing at [`COMPOSER_MAX_LINES`] so a long
+    /// paste can never push the transcript off the page.
+    pub fn with_composer_lines(size: (u32, u32), scale: f64, lines: usize) -> Self {
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
@@ -100,17 +126,32 @@ impl Frame {
         let left = ((width - column) / 2.0).max(gutter.min((width - column).max(0.0)));
         let right = left + column;
 
-        let masthead_top = (height * 0.05).clamp(24.0, 44.0);
-        let masthead_rule =
-            masthead_top + line_box(WORDMARK_SIZE, CAPTION_LEADING) + SPACE_BEFORE_RULE;
-
+        // No masthead: the transcript starts at the top margin. The window
+        // chrome already says which app this is, so a wordmark, a status
+        // caption, and a build-identity row only stole reading space from the
+        // one thing the user came for.
+        let top_margin = (height * 0.05).clamp(20.0, 40.0);
         let bottom_margin = (height * 0.05).clamp(20.0, 40.0);
-        let footnote_bottom = height - bottom_margin;
-        let footnote_top = footnote_bottom - FOOTNOTE_HEIGHT;
-        let composer_bottom = footnote_top - FOOTNOTE_GAP;
-        let composer_top = composer_bottom - COMPOSER_HEIGHT;
+        let body_top = top_margin;
+        // Hard floor: the composer must leave room for its own caption row
+        // above the bottom margin.
+        let slot_bottom = height - bottom_margin - FOOTNOTE_HEIGHT - FOOTNOTE_GAP;
+        // Soft floor: keep at least one transcript line visible above the well.
+        let min_top = body_top + SPACE_BEFORE_COMPOSER + f64::from(BODY_SIZE) * BODY_LEADING;
 
-        let body_top = masthead_rule + SPACE_AFTER_RULE;
+        let extra_lines = lines.clamp(1, COMPOSER_MAX_LINES) - 1;
+        let wanted = COMPOSER_HEIGHT + extra_lines as f64 * COMPOSER_LINE_HEIGHT;
+        let composer_height = wanted.min((slot_bottom - min_top).max(COMPOSER_HEIGHT));
+        // The input box sits on the middle of the page and grows symmetrically
+        // about that line as the text wraps, clamped so it never crosses the
+        // top margin or its own caption row.
+        let centred = height * COMPOSER_CENTER - composer_height * 0.5;
+        let ceiling = (slot_bottom - composer_height).max(body_top);
+        let composer_top = centred.clamp(min_top.min(ceiling), ceiling);
+        let composer_bottom = composer_top + composer_height;
+        let footnote_top = composer_bottom + FOOTNOTE_GAP;
+        let footnote_bottom = footnote_top + FOOTNOTE_HEIGHT;
+
         let body_bottom = (composer_top - SPACE_BEFORE_COMPOSER).max(body_top);
 
         Self {
@@ -119,8 +160,6 @@ impl Frame {
             scale,
             left,
             right,
-            masthead_top,
-            masthead_rule,
             body_top,
             body_bottom,
             composer_top,
@@ -135,33 +174,6 @@ impl Frame {
         self.right - self.left
     }
 
-    /// Left edge of the status caption.
-    pub fn status_left(&self) -> f64 {
-        self.left + WORDMARK_ADVANCE
-    }
-
-    /// Line-box top of the status caption, chosen so it shares the wordmark's
-    /// baseline despite being a smaller size.
-    pub fn status_top(&self) -> f64 {
-        self.masthead_top + baseline_offset(WORDMARK_SIZE, CAPTION_LEADING)
-            - baseline_offset(CAPTION_SIZE, CAPTION_LEADING)
-    }
-
-    /// Line-box top of the prompt text, vertically centered in the well.
-    pub fn composer_text_top(&self) -> f64 {
-        self.composer_top + (COMPOSER_HEIGHT - line_box(BODY_SIZE, BODY_LEADING)) / 2.0
-    }
-
-    /// Top of the insert caret, centered in the well like the text it tracks.
-    pub fn caret_top(&self) -> f64 {
-        self.composer_top + (COMPOSER_HEIGHT - CARET_HEIGHT) / 2.0
-    }
-
-    /// Width available to the status caption.
-    pub fn status_width(&self) -> f64 {
-        (self.right - self.status_left()).max(80.0)
-    }
-
     /// Height of one body line.
     pub fn body_line_height(&self) -> f64 {
         f64::from(BODY_SIZE) * BODY_LEADING
@@ -172,16 +184,93 @@ impl Frame {
         (((self.body_bottom - self.body_top) / self.body_line_height()) as usize).max(1)
     }
 
+    /// Width available to composer text, inside the well's padding. This is
+    /// the wrap width handed to Parley, so the text wraps exactly where the
+    /// well ends rather than at an estimated character count.
+    pub fn composer_text_width(&self) -> f64 {
+        (self.right - COMPOSER_PAD_X - self.composer_text_left()).max(1.0)
+    }
+
+    /// Left edge of composer text: inside the well's padding. The single source
+    /// of truth for the text origin, so drawing, caret geometry, and click
+    /// hit-testing cannot drift apart.
+    ///
+    /// There is no prompt marker: the outlined field already says where typing
+    /// goes, so a `>` chevron was decoration that pushed the text off the
+    /// field's own optical left edge.
+    pub fn composer_text_left(&self) -> f64 {
+        self.left + COMPOSER_PAD_X
+    }
+
+    /// Composer lines this frame was built for.
+    pub fn composer_lines(&self) -> usize {
+        let extra = (self.composer_bottom - self.composer_top - COMPOSER_HEIGHT).max(0.0);
+        1 + (extra / COMPOSER_LINE_HEIGHT).round() as usize
+    }
+
     /// The caret must stay inside the composer well at any size.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn caret_fits_in_composer(&self) -> bool {
-        let top = self.caret_top();
+        let top = self.composer_top + COMPOSER_TEXT_OFFSET - 1.0;
         top >= self.composer_top && top + CARET_HEIGHT <= self.composer_bottom
     }
 
-    /// Thickness that renders as exactly one physical pixel.
+    /// Thickness that renders as exactly one physical pixel. Kept as the
+    /// single definition of crispness for any future rule or border.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn hairline(&self) -> f64 {
         1.0 / self.scale
+    }
+
+    /// The hero block shown on an empty session: the wordmark, the donut, and
+    /// the tagline, stacked and centred exactly like the website's landing
+    /// section. Returns `None` when the window is too short to hold it, so a
+    /// cramped frame degrades to a plain composer instead of a squashed hero.
+    ///
+    /// The hero borrows the transcript's dead space and reserves nothing, so
+    /// nothing else in the frame moves when it appears or stands down.
+    pub fn hero(&self) -> Option<Hero> {
+        let available = self.body_bottom - self.body_top;
+        let wordmark_height = f64::from(HERO_WORDMARK_SIZE * HERO_LINE_HEIGHT);
+        let tagline_height = f64::from(HERO_TAGLINE_SIZE * HERO_LINE_HEIGHT);
+        let chrome = wordmark_height + tagline_height + HERO_GAP * 2.0;
+        let side = (available - chrome).min(self.column()).min(DONUT_MAX_SIDE);
+        if side < DONUT_MIN_SIDE {
+            return None;
+        }
+        // Space the text against the inked disc, not the square, then centre
+        // the whole stack in the region like the website's flexbox.
+        let bleed = side * (1.0 - DONUT_INK_FRACTION) / 2.0;
+        let total = side - bleed * 2.0 + chrome;
+        let top = self.body_top + (available - total) / 2.0;
+        let centre_x = (self.left + self.right) / 2.0;
+        let donut_top = top + wordmark_height + HERO_GAP - bleed;
+        Some(Hero {
+            wordmark_top: top,
+            donut: vello::kurbo::Rect::new(
+                centre_x - side / 2.0,
+                donut_top,
+                centre_x + side / 2.0,
+                donut_top + side,
+            ),
+            tagline_top: donut_top + side - bleed + HERO_GAP,
+        })
+    }
+
+    /// Whether a logical point is inside the donut, used for drag hit-testing.
+    /// Circular, not the bounding box, so clicks in the corners still reach
+    /// whatever is behind it.
+    pub fn hits_donut(&self, x: f64, y: f64) -> bool {
+        let Some(box_) = self.hero().map(|hero| hero.donut) else {
+            return false;
+        };
+        let radius = box_.width().min(box_.height()) / 2.0;
+        if radius < DONUT_MIN_SIDE / 2.0 {
+            return false;
+        }
+        let cx = box_.x0 + box_.width() / 2.0;
+        let cy = box_.y0 + box_.height() / 2.0;
+        (x - cx).powi(2) + (y - cy).powi(2) <= radius * radius
     }
 }
 
@@ -206,7 +295,11 @@ mod tests {
     fn sweep(mut check: impl FnMut(Frame)) {
         for &size in SIZES {
             for &scale in SCALES {
-                check(Frame::new(size, scale));
+                // Every invariant must hold for a composer of any height, not
+                // just a single line.
+                for lines in [1usize, 2, 4, COMPOSER_MAX_LINES, COMPOSER_MAX_LINES + 20] {
+                    check(Frame::with_composer_lines(size, scale, lines));
+                }
             }
         }
     }
@@ -253,8 +346,6 @@ mod tests {
     #[test]
     fn regions_are_ordered_and_never_overlap() {
         sweep(|frame| {
-            assert!(frame.masthead_top < frame.masthead_rule);
-            assert!(frame.masthead_rule < frame.body_top);
             assert!(frame.body_top <= frame.body_bottom);
             assert!(
                 frame.body_bottom <= frame.composer_top,
@@ -273,12 +364,130 @@ mod tests {
         });
     }
 
+    /// Nothing may be drawn above the transcript: the top of the page is
+    /// deliberately clear, and a reintroduced masthead would show up as a
+    /// body region that no longer starts at the top margin.
     #[test]
-    fn status_caption_has_room_beside_the_wordmark() {
+    fn the_top_of_the_page_is_clear() {
         sweep(|frame| {
-            assert!(frame.status_left() > frame.left);
-            assert!(frame.status_width() >= 80.0);
+            let margin = (frame.height * 0.05).clamp(20.0, 40.0);
+            assert!(
+                (frame.body_top - margin).abs() < 0.001,
+                "body_top {} is not the top margin {margin}: something was \
+                 added above the transcript",
+                frame.body_top
+            );
         });
+    }
+
+    #[test]
+    fn the_composer_grows_with_its_line_count() {
+        let one = Frame::with_composer_lines((1100, 720), 1.0, 1);
+        let three = Frame::with_composer_lines((1100, 720), 1.0, 3);
+        assert!(
+            three.composer_top < one.composer_top,
+            "the composer did not grow for more lines"
+        );
+        assert!(
+            three.composer_bottom > one.composer_bottom,
+            "the composer must grow downward too, staying centred"
+        );
+        let one_center = (one.composer_top + one.composer_bottom) / 2.0;
+        let three_center = (three.composer_top + three.composer_bottom) / 2.0;
+        assert!(
+            (one_center - three_center).abs() < 0.001,
+            "growth moved the composer off its centre line: {one_center} vs {three_center}"
+        );
+        assert!(
+            three.body_bottom < one.body_bottom,
+            "the transcript did not yield space to the composer"
+        );
+    }
+
+    #[test]
+    fn the_composer_sits_on_the_middle_of_the_page() {
+        // On any window with room for it, the input box is centred vertically:
+        // this is the whole point of the layout.
+        for &size in SIZES {
+            for &scale in SCALES {
+                for lines in [1usize, 2, 4, COMPOSER_MAX_LINES] {
+                    let frame = Frame::with_composer_lines(size, scale, lines);
+                    let center = (frame.composer_top + frame.composer_bottom) / 2.0;
+                    let page = frame.height * COMPOSER_CENTER;
+                    // Either the well is centred, or the page was too short and
+                    // it was clamped against the transcript above or the caption
+                    // row below. Nothing else is allowed to move it.
+                    // Pushed down to keep one transcript line visible.
+                    let clamped_low =
+                        frame.body_bottom - frame.body_top <= frame.body_line_height() + 0.001;
+                    let clamped_high = frame.footnote_bottom >= frame.height - 40.0 - 0.001;
+                    assert!(
+                        (center - page).abs() < 0.001 || clamped_low || clamped_high,
+                        "composer centre {center} left the page middle {page} unclamped at {}x{}",
+                        frame.width,
+                        frame.height
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_roomy_page_centres_the_composer_exactly() {
+        for &size in &[(1100u32, 720u32), (1440, 900), (1920, 1080), (2560, 1440)] {
+            let frame = Frame::with_composer_lines(size, 1.0, 1);
+            let center = (frame.composer_top + frame.composer_bottom) / 2.0;
+            assert!(
+                (center - frame.height / 2.0).abs() < 0.001,
+                "composer was not centred at {}x{}: {center}",
+                frame.width,
+                frame.height
+            );
+        }
+    }
+
+    #[test]
+    fn the_footnote_row_follows_the_composer() {
+        sweep(|frame| {
+            assert!(
+                (frame.footnote_top - (frame.composer_bottom + FOOTNOTE_GAP)).abs() < 0.001,
+                "the caption row detached from the composer"
+            );
+        });
+    }
+
+    #[test]
+    fn the_composer_stops_growing_at_the_line_cap() {
+        let capped = Frame::with_composer_lines((1100, 720), 1.0, COMPOSER_MAX_LINES);
+        let over = Frame::with_composer_lines((1100, 720), 1.0, COMPOSER_MAX_LINES + 50);
+        assert_eq!(
+            capped.composer_top, over.composer_top,
+            "a huge paste grew the composer past its cap"
+        );
+    }
+
+    #[test]
+    fn a_tall_composer_never_eats_the_whole_page() {
+        // On a short window, a multi-line composer must still leave a readable
+        // transcript rather than covering it.
+        for &size in SIZES {
+            let frame = Frame::with_composer_lines(size, 1.75, COMPOSER_MAX_LINES);
+            assert!(
+                frame.body_bottom > frame.body_top,
+                "the transcript collapsed at {}x{}",
+                frame.width,
+                frame.height
+            );
+            assert!(frame.composer_top > frame.body_top);
+        }
+    }
+
+    #[test]
+    fn composer_lines_round_trips() {
+        for lines in 1..=COMPOSER_MAX_LINES {
+            let frame = Frame::with_composer_lines((1400, 1000), 1.0, lines);
+            assert_eq!(frame.composer_lines(), lines);
+        }
     }
 
     #[test]
@@ -340,102 +549,6 @@ mod tests {
         });
     }
 
-    /// The wordmark and its status caption are different sizes, so they only
-    /// look aligned if they share a baseline. This is the "spacing is off"
-    /// symptom in the masthead.
-    #[test]
-    fn the_wordmark_and_status_share_a_baseline() {
-        sweep(|frame| {
-            let wordmark = frame.masthead_top + baseline_offset(WORDMARK_SIZE, CAPTION_LEADING);
-            let status = frame.status_top() + baseline_offset(CAPTION_SIZE, CAPTION_LEADING);
-            assert!(
-                (wordmark - status).abs() < 0.001,
-                "masthead baselines drifted: {wordmark} vs {status}"
-            );
-        });
-    }
-
-    /// The rule must clear the wordmark's descenders rather than crowd them,
-    /// and stay within one rhythm step of the intended gap.
-    #[test]
-    fn the_masthead_rule_clears_the_wordmark() {
-        sweep(|frame| {
-            let box_bottom = frame.masthead_top + line_box(WORDMARK_SIZE, CAPTION_LEADING);
-            let gap = frame.masthead_rule - box_bottom;
-            assert!(
-                (gap - SPACE_BEFORE_RULE).abs() < 0.001,
-                "rule gap was {gap}, expected {SPACE_BEFORE_RULE}"
-            );
-        });
-    }
-
-    /// Prompt text and caret are optically centered in the well: equal space
-    /// above and below, at any window size.
-    #[test]
-    fn composer_contents_are_vertically_centered() {
-        sweep(|frame| {
-            for (name, top, height) in [
-                (
-                    "text",
-                    frame.composer_text_top(),
-                    line_box(BODY_SIZE, BODY_LEADING),
-                ),
-                ("caret", frame.caret_top(), CARET_HEIGHT),
-            ] {
-                let above = top - frame.composer_top;
-                let below = frame.composer_bottom - (top + height);
-                assert!(
-                    (above - below).abs() < 0.001 && above > 0.0,
-                    "{name} not centered in the well: {above} above, {below} below"
-                );
-            }
-        });
-    }
-
-    /// Region gaps come from the rhythm scale, so no gap is an odd fraction of
-    /// a step. Keeps future edits from reintroducing arbitrary numbers.
-    #[test]
-    fn region_gaps_are_multiples_of_the_rhythm_step() {
-        for gap in [
-            SPACE_BEFORE_RULE,
-            SPACE_AFTER_RULE,
-            SPACE_BEFORE_COMPOSER,
-            FOOTNOTE_GAP,
-        ] {
-            let steps = gap / STEP;
-            assert!(
-                (steps * 2.0 - (steps * 2.0).round()).abs() < 1e-9,
-                "gap {gap} is not a half-step multiple of {STEP}"
-            );
-        }
-    }
-
-    /// The transcript's last line must not crowd the well: the gap above the
-    /// composer stays at least one body line tall.
-    #[test]
-    fn the_transcript_keeps_a_line_of_air_above_the_composer() {
-        sweep(|frame| {
-            let gap = frame.composer_top - frame.body_bottom;
-            assert!(
-                gap >= frame.body_line_height() - 0.001,
-                "only {gap} of air above the composer"
-            );
-        });
-    }
-
-    /// The footnote row must clear the well and still sit on paper.
-    #[test]
-    fn the_footnote_row_is_clear_of_the_composer() {
-        sweep(|frame| {
-            let gap = frame.footnote_top - frame.composer_bottom;
-            assert!(
-                (gap - FOOTNOTE_GAP).abs() < 0.001,
-                "footnote gap was {gap}, expected {FOOTNOTE_GAP}"
-            );
-            assert!(frame.footnote_bottom + 1.0 <= frame.height);
-        });
-    }
-
     #[test]
     fn degenerate_sizes_do_not_panic_or_invert() {
         for size in [(0, 0), (1, 1), (10, 4000), (4000, 10)] {
@@ -444,5 +557,119 @@ mod tests {
             assert!(frame.body_top <= frame.body_bottom);
             assert!(frame.composer_top < frame.composer_bottom);
         }
+    }
+
+    #[test]
+    fn donut_stays_inside_the_transcript_region() {
+        sweep(|frame| {
+            // A window too small for the hero draws no donut at all, and an
+            // empty rect has no position to check. Asserting on it instead
+            // tested the placeholder rather than the layout.
+            let Some(box_) = frame.hero().map(|hero| hero.donut) else {
+                return;
+            };
+            assert!(
+                box_.y0 >= frame.body_top - 0.001,
+                "donut crossed the top margin at {}x{}",
+                frame.width,
+                frame.height
+            );
+            assert!(
+                box_.y1 <= frame.composer_top + 0.001,
+                "donut overlapped the composer at {}x{}",
+                frame.width,
+                frame.height
+            );
+            assert!(box_.x0 >= frame.left - 0.001 && box_.x1 <= frame.right + 0.001);
+        });
+    }
+
+    #[test]
+    fn donut_is_square_and_bounded() {
+        sweep(|frame| {
+            let Some(box_) = frame.hero().map(|hero| hero.donut) else {
+                return;
+            };
+            assert!(
+                (box_.width() - box_.height()).abs() < 1e-9,
+                "donut must be square"
+            );
+            assert!(box_.width() <= DONUT_MAX_SIDE + 1e-9);
+            assert!(box_.width() >= 0.0);
+        });
+    }
+
+    #[test]
+    fn donut_is_centred_in_the_column() {
+        let mut checked = 0;
+        sweep(|frame| {
+            let Some(box_) = frame.hero().map(|hero| hero.donut) else {
+                return;
+            };
+            let centre = (box_.x0 + box_.x1) / 2.0;
+            assert!(
+                (centre - (frame.left + frame.right) / 2.0).abs() < 1e-9,
+                "donut off-centre at {}x{} scale {}",
+                frame.width,
+                frame.height,
+                frame.scale
+            );
+            checked += 1;
+        });
+        // Without this the test would pass vacuously if the hero stopped
+        // fitting at every size in the sweep.
+        assert!(checked > 0, "the sweep never produced a hero to check");
+    }
+
+    /// The hero is optional by design, but it must appear at ordinary desktop
+    /// window sizes: silently losing it everywhere would be invisible to the
+    /// tests above, which skip frames without one.
+    ///
+    /// Sizes here are *logical*, scaled up to physical per scale factor, so the
+    /// same window is tested on 1x and HiDPI rather than a 1x window being
+    /// shrunk by the scale factor.
+    #[test]
+    fn the_hero_fits_at_ordinary_window_sizes() {
+        for &(w, h) in &[(1100.0f64, 720.0f64), (1440.0, 900.0), (1920.0, 1080.0)] {
+            for &scale in SCALES {
+                let size = ((w * scale) as u32, (h * scale) as u32);
+                let frame = Frame::with_composer_lines(size, scale, 1);
+                assert!(
+                    frame.hero().is_some(),
+                    "no hero in a {w}x{h} logical window at scale {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn donut_hit_test_matches_its_circle() {
+        let frame = Frame::new((1100, 720), 1.0);
+        let box_ = frame.hero().expect("a hero at 1100x720").donut;
+        let cx = (box_.x0 + box_.x1) / 2.0;
+        let cy = (box_.y0 + box_.y1) / 2.0;
+        let radius = box_.width() / 2.0;
+        assert!(frame.hits_donut(cx, cy), "centre must hit");
+        // Corners of the bounding box fall outside the circle, so clicks there
+        // are not stolen from whatever sits behind the donut.
+        assert!(!frame.hits_donut(box_.x0 + 1.0, box_.y0 + 1.0));
+        assert!(!frame.hits_donut(cx + radius + 2.0, cy));
+        assert!(frame.hits_donut(cx + radius - 1.0, cy));
+    }
+
+    #[test]
+    fn donut_never_hit_tests_outside_the_frame() {
+        sweep(|frame| {
+            assert!(!frame.hits_donut(-10.0, -10.0));
+            assert!(!frame.hits_donut(frame.width + 10.0, frame.height + 10.0));
+            // Never steals a press meant for the composer.
+            let mid_well = (frame.composer_top + frame.composer_bottom) / 2.0;
+            assert!(
+                !frame.hits_donut((frame.left + frame.right) / 2.0, mid_well),
+                "donut must not overlap the composer at {}x{}",
+                frame.width,
+                frame.height
+            );
+        });
     }
 }

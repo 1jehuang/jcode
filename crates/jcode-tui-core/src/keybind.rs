@@ -2,6 +2,35 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 pub const LINE_SCROLL_AMOUNT: i32 = 3;
 
+/// The macOS keycap for the Option/Alt modifier. Mac keyboards have no key
+/// labelled "Alt", so hints must show `⌥` there instead.
+pub const MACOS_OPTION_SYMBOL: &str = "⌥";
+
+/// Platform label for the Alt/Option modifier: `⌥` on macOS, `Alt` elsewhere.
+pub fn alt_label() -> &'static str {
+    alt_label_for_platform(cfg!(target_os = "macos"))
+}
+
+pub fn alt_label_for_platform(is_macos: bool) -> &'static str {
+    if is_macos { MACOS_OPTION_SYMBOL } else { "Alt" }
+}
+
+/// Build a title-case Alt chord label, e.g. `Alt+N` or `⌥+N`.
+pub fn alt_chord(keys: &str) -> String {
+    format!("{}+{}", alt_label(), keys)
+}
+
+/// Build a lowercase Alt chord label for compact inline hints, e.g. `alt+n`
+/// or `⌥+n`.
+pub fn alt_chord_lower(keys: &str) -> String {
+    let label = alt_label();
+    if label == MACOS_OPTION_SYMBOL {
+        format!("{label}+{keys}")
+    } else {
+        format!("{}+{keys}", label.to_ascii_lowercase())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct KeyBinding {
     pub code: KeyCode,
@@ -464,7 +493,7 @@ pub fn format_binding(binding: &KeyBinding) -> String {
         parts.push("Ctrl".to_string());
     }
     if binding.modifiers.contains(KeyModifiers::ALT) {
-        parts.push("Alt".to_string());
+        parts.push(alt_label().to_string());
     }
     if binding.modifiers.contains(KeyModifiers::SUPER) {
         let label = if cfg!(target_os = "macos") {
@@ -534,6 +563,12 @@ mod tests {
             mods |= KeyModifiers::SUPER;
         }
         mods
+    }
+
+    #[test]
+    fn alt_label_uses_option_keycap_on_macos() {
+        assert_eq!(alt_label_for_platform(true), MACOS_OPTION_SYMBOL);
+        assert_eq!(alt_label_for_platform(false), "Alt");
     }
 
     #[test]

@@ -951,7 +951,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 }
 
                 spans.push(Span::styled(
-                    " · Alt+B bg",
+                    format!(" · {} bg", jcode_tui_core::keybind::alt_chord("B")),
                     Style::default().fg(rgb(100, 100, 100)),
                 ));
 

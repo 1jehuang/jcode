@@ -834,9 +834,10 @@ pub(crate) fn draw_pinned_diagram(
 
     let poor_fit = is_diagram_poor_fit(diagram, area, pane_position);
     if poor_fit {
+        let alt_t = jcode_tui_core::keybind::alt_chord("T");
         let hint = match pane_position {
-            crate::config::DiagramPanePosition::Side => " Alt+T \u{21c4} top",
-            crate::config::DiagramPanePosition::Top => " Alt+T \u{21c4} side",
+            crate::config::DiagramPanePosition::Side => format!(" {alt_t} ⇄ top"),
+            crate::config::DiagramPanePosition::Top => format!(" {alt_t} ⇄ side"),
         };
         title_parts.push(Span::styled(
             hint,

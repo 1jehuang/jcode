@@ -3555,7 +3555,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.58.0"
+version = "0.59.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3859,9 +3859,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "jcode-build-meta",
  "jcode-harness-api",
  "parley",
  "pollster",
+ "serde_json",
  "vello",
  "winit 0.30.13",
 ]

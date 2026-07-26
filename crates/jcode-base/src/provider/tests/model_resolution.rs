@@ -2284,3 +2284,50 @@ fn runtime_display_name_tracks_active_openai_compatible_profile() {
         .expect("switch back to openrouter aggregator");
     assert_eq!(Provider::display_name(&provider), "OpenRouter");
 }
+
+/// A bare model id from an OpenAI-compatible catalog must route to the profile
+/// that serves it, not to whichever provider happens to be active.
+///
+/// Regression: `/model celeris-1` while Anthropic was active failed with
+/// "Model celeris-1 not supported by Anthropic provider", because bare ids
+/// match none of the built-in model-name heuristics and fell through to the
+/// active provider.
+#[test]
+fn bare_openai_compatible_model_id_routes_to_its_profile_not_the_active_provider() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _runtime_guard = rt.enter();
+        crate::env::set_var("CELERIS_API_KEY", "test-celeris-key");
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            // The failing case: a Claude-family provider is active, so the old
+            // fallthrough handed the bare id to Anthropic.
+            active: RwLock::new(ActiveProvider::Claude),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            initial_provider: None,
+            routes_memo: std::sync::Mutex::new(None),
+            post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+
+        provider
+            .set_model("celeris-1")
+            .expect("bare Celeris model id should resolve to the Celeris profile");
+        assert_eq!(provider.model(), "celeris-1");
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        assert_eq!(
+            provider.fork_model_switch_request(provider.active_provider(), &provider.model()),
+            "celeris:celeris-1"
+        );
+    });
+}

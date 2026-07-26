@@ -13,11 +13,18 @@ type NodeBuilder = fn() -> Model;
 pub const NODES: &[(&str, NodeBuilder)] = &[
     ("connecting", connecting),
     ("attached_empty", attached_empty),
+    ("donut_dragged", donut_dragged),
+    ("donut_off", donut_off),
     ("mid_input", mid_input),
     ("mid_input_caret_inside", mid_input_caret_inside),
     ("caret_hidden", caret_hidden),
+    ("unfocused", unfocused),
+    ("selection", selection),
+    ("multiline", multiline),
+    ("wrapped_long_line", wrapped_long_line),
+    ("multiline_selection", multiline_selection),
+    ("selection_all", selection_all),
     ("streaming", streaming),
-    ("streaming_reveal", streaming_reveal),
     ("turn_done", turn_done),
     ("scrolled_back", scrolled_back),
     ("notice", notice),
@@ -35,20 +42,57 @@ pub fn names() -> Vec<&'static str> {
     NODES.iter().map(|(name, _)| *name).collect()
 }
 
+/// Captures must be deterministic, so nodes pin the build identity instead of
+/// reading the real version, update channels, and auth store.
+fn fixed_meta() -> crate::meta::Meta {
+    crate::meta::Meta {
+        version: "v0.0.0-demo (0000000)".into(),
+        update: crate::meta::UpdateState::Current,
+        account: Some("demo@jcode.dev (anthropic)".into()),
+    }
+}
+
 fn connecting() -> Model {
     Model {
         theme: crate::theme::Theme::from_env(),
+        meta: fixed_meta(),
         status: "connecting to ~/.jcode/jcode-api.sock...".into(),
         session_id: None,
         transcript: String::new(),
         editor: crate::editor::Editor::default(),
         caret: fixed_caret(),
+        // Nodes render the focused case: an unfocused window hides the caret,
+        // which would make most caret nodes indistinguishable.
+        focused: true,
         busy: false,
         scroll: 0,
         notice: None,
-        reveal: crate::stream::Reveal::default(),
+        donut: Some(fixed_donut()),
+        spin: fixed_spin(),
+        // Captures pin the hint, so the ghost line is a tested state rather
+        // than whatever the clock happened to pick.
+        hint: 0,
     }
 }
+
+/// The donut is animated in the app, so nodes pin its clock: the field is
+/// rendered once, at a fixed time, which keeps captures byte-reproducible while
+/// still exercising the halftone path.
+fn fixed_donut() -> crate::donut::Donut {
+    let mut donut = crate::donut::Donut::new(crate::DONUT_GRID);
+    donut.render(DONUT_TIME, 0.0);
+    donut
+}
+
+fn fixed_spin() -> crate::donut::Spin {
+    crate::donut::Spin {
+        time: DONUT_TIME,
+        ..Default::default()
+    }
+}
+
+/// A flattering pose for captures: the hole is clearly visible.
+const DONUT_TIME: f32 = 0.8;
 
 /// Captures must be a pure function of the model, so nodes pin the caret
 /// instead of letting it blink on wall-clock time.
@@ -59,15 +103,48 @@ fn fixed_caret() -> crate::caret::Caret {
 fn attached_empty() -> Model {
     Model {
         theme: crate::theme::Theme::from_env(),
+        meta: fixed_meta(),
         status: "attached: session_demo_0000".into(),
         session_id: Some("session_demo_0000".into()),
         transcript: String::new(),
         editor: crate::editor::Editor::default(),
         caret: fixed_caret(),
+        // Nodes render the focused case: an unfocused window hides the caret,
+        // which would make most caret nodes indistinguishable.
+        focused: true,
         busy: false,
         scroll: 0,
         notice: None,
-        reveal: crate::stream::Reveal::default(),
+        donut: Some(fixed_donut()),
+        spin: fixed_spin(),
+        // Captures pin the hint, so the ghost line is a tested state rather
+        // than whatever the clock happened to pick.
+        hint: 0,
+    }
+}
+
+/// The hero donut after a drag: same tilt, rotated yaw. Proves the drag path
+/// changes only the spin, so the pose stays flattering however hard it is spun.
+fn donut_dragged() -> Model {
+    let mut donut = crate::donut::Donut::new(crate::DONUT_GRID);
+    let offset = 1.2;
+    donut.render(DONUT_TIME, offset);
+    Model {
+        donut: Some(donut),
+        spin: crate::donut::Spin {
+            offset,
+            ..fixed_spin()
+        },
+        ..attached_empty()
+    }
+}
+
+/// The donut turned off (`JCODE_DESKTOP2_DONUT=0`): the empty screen must still
+/// read as a finished frame with nothing missing.
+fn donut_off() -> Model {
+    Model {
+        donut: None,
+        ..attached_empty()
     }
 }
 
@@ -105,6 +182,74 @@ fn caret_hidden() -> Model {
     }
 }
 
+/// The window without keyboard focus: the field border goes quiet and no
+/// caret is drawn, so the frame cannot claim keystrokes it will not receive.
+fn unfocused() -> Model {
+    Model {
+        editor: editor_with("window lost focus", None),
+        focused: false,
+        ..attached_empty()
+    }
+}
+
+/// A mouse or shift-arrow selection: proves the band renders and that text on
+/// top of it stays readable.
+fn selection() -> Model {
+    let mut editor = editor_with("select this middle part", None);
+    editor.place_cursor(7);
+    editor.extend_to(11);
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+fn selection_all() -> Model {
+    let mut editor = editor_with("everything is selected", None);
+    editor.select_all();
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// A multi-line message: the composer grows and the caret sits on the last
+/// line, not the first.
+fn multiline() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str("first line\nsecond line\nthird line");
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// One very long logical line: must wrap inside the well rather than running
+/// past its right edge.
+fn wrapped_long_line() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str(
+        "this is a single very long line with no newlines at all that has to wrap \
+         inside the composer well instead of spilling past its right edge",
+    );
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// A selection spanning a line break.
+fn multiline_selection() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str("alpha beta\ngamma delta");
+    editor.place_cursor(6);
+    editor.extend_to(16);
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
 fn scrolled_back() -> Model {
     Model {
         transcript: (1..=60)
@@ -134,22 +279,6 @@ fn streaming() -> Model {
         busy: true,
         ..attached_empty()
     }
-}
-
-/// Mid-animation streaming frame: the newest text is still fading and rising
-/// into place. Pinned to a fixed point in the fade so the capture is
-/// reproducible.
-fn streaming_reveal() -> Model {
-    let mut model = streaming();
-    let start = std::time::Instant::now();
-    let mut reveal = crate::stream::Reveal::default();
-    // The last sentence is treated as the freshly arrived chunk.
-    let tail = 90.min(model.transcript.len());
-    reveal.push_at(model.transcript.len() - tail, start);
-    reveal.push_at(tail, start + crate::stream::FADE);
-    reveal.freeze_at(start + crate::stream::FADE + crate::stream::FADE / 3);
-    model.reveal = reveal;
-    model
 }
 
 fn turn_done() -> Model {
