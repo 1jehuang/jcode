@@ -2162,9 +2162,14 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/mod.rs": {
-      "dot_ok": 2,
+      "dot_ok": 1,
       "let_underscore": 1,
       "unwrap_or_default": 1
+    },
+    "crates/jcode-tui/src/tui/redraw_schedule.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/remote_diff.rs": {
       "dot_ok": 0,

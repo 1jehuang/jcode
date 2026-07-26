@@ -36,6 +36,10 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 #[path = "ui_animations.rs"]
 mod animations;
+pub(crate) use animations::{
+    idle_donut_reserved_height, last_idle_animation_area, record_idle_animation_area,
+    render_idle_animation_into,
+};
 #[path = "ui_box.rs"]
 mod box_utils;
 #[path = "ui_changelog.rs"]
@@ -2492,6 +2496,7 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
+    record_idle_animation_area(None);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
@@ -2508,25 +2513,6 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // is reclaimed even when no image widget renders again.
     crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
 }
-/// Rows reserved below the input for the decorative idle donut.
-///
-/// The donut only shows on an (effectively) empty idle screen, which means it
-/// is pure negative space. When the composer grows past its resting one-row
-/// height (multi-line input, or the `/` command menu adding suggestion rows),
-/// take that growth out of the donut's reservation instead of shrinking the
-/// transcript above: this keeps the header/tips text and info widgets
-/// perfectly still when the slash menu opens on a fresh session. The donut
-/// simply renders shorter for as long as the composer is expanded.
-fn idle_donut_reserved_height(show_donut: bool, input_height: u16) -> u16 {
-    const IDLE_DONUT_HEIGHT: u16 = 14;
-    if show_donut {
-        let composer_growth = input_height.saturating_sub(1);
-        IDLE_DONUT_HEIGHT.saturating_sub(composer_growth)
-    } else {
-        0
-    }
-}
-
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
