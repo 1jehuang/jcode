@@ -284,7 +284,7 @@ impl BridgeState {
                 // carries no messages: it is model identity, not transcript.
                 if self.pending_model_probe == Some(id) {
                     self.pending_model_probe = None;
-                    return vec![ServerFrame::event(self.model_info(event))];
+                    return vec![ServerFrame::event(self.model_info(session(self), event))];
                 }
                 let Some(api_id) = self.take_simple(id, SimpleKind::History) else {
                     return vec![];
@@ -321,7 +321,9 @@ impl BridgeState {
                     model: event["model"].as_str().map(str::to_string),
                 })]
             }
-            "available_models_updated" => vec![ServerFrame::event(self.model_info(event))],
+            "available_models_updated" => {
+                vec![ServerFrame::event(self.model_info(session(self), event))]
+            }
             "ack" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 self.take_simple(id, SimpleKind::Ok)
@@ -355,9 +357,9 @@ impl BridgeState {
     /// Read provider/model identity out of any legacy event that carries the
     /// `provider_name`/`provider_model` pair (the catalog reply and the
     /// available-models push both do).
-    fn model_info(&self, event: &Value) -> ApiEvent {
+    fn model_info(&self, session_id: String, event: &Value) -> ApiEvent {
         ApiEvent::ModelInfo {
-            session_id: self.session_id.clone().unwrap_or_default(),
+            session_id,
             provider: event["provider_name"].as_str().map(str::to_string),
             model: event["provider_model"].as_str().map(str::to_string),
         }
