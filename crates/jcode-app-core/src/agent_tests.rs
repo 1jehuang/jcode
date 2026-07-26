@@ -1389,4 +1389,34 @@ fn tool_use_stop_with_no_tool_calls_is_an_unfinished_turn() {
     // `cyber` usage policy), and it must never be retried as if truncated.
     assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
     assert!(!Agent::should_continue_after_stop_reason("refusal"));
+
+    // The existing notice path DOES cover this shape: a tool_use stop that
+    // produced no visible text is surfaced rather than passing as a clean turn.
+    // That is the seam a fix should build on, so pin that it fires here.
+    let notice = Agent::provider_guardrail_notice(Some("tool_use"), true, false);
+    assert!(
+        notice.is_some(),
+        "a tool_use stop with no visible output must surface a notice, not look like a finished turn"
+    );
+    let notice = notice.unwrap();
+    assert!(notice.contains("tool_use"), "notice should name the stop reason: {notice}");
+
+    // A normal tool_use turn that produced visible text must stay silent.
+    assert!(Agent::provider_guardrail_notice(Some("tool_use"), false, false).is_none());
+
+    // WHAT IS STILL UNEXPLAINED, recorded so the next investigation starts here
+    // rather than re-deriving it:
+    //
+    // Both failing trials ended with zero text deltas after their final
+    // tool_done, so `visible_text_is_empty` was true and the notice above should
+    // have fired. It did not: neither trial's final output contains
+    // "[provider guardrail]". So the turn did not exit through the
+    // `turn_loops.rs` no-tool-calls branch that surfaces the notice, and the
+    // real exit path is elsewhere (a different loop, or an earlier return).
+    //
+    // Note also that even when that branch IS taken it `break`s and returns the
+    // final text: it explains the anomaly to the user but still ends the run.
+    // For a benchmark harness that means the work is silently discarded, which
+    // is exactly what happened. A fix needs to either continue the turn or fail
+    // loudly with a non-zero exit, not just annotate the answer.
 }
