@@ -61,7 +61,10 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
-    let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    // The decorative idle animation is deliberately excluded here: the run
+    // loops repaint it with an animation-only partial update, so reporting it as
+    // "needs a redraw" would force a full frame at animation FPS.
+    let mut needs_redraw = crate::tui::periodic_redraw_required_excluding_idle_animation(app);
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();

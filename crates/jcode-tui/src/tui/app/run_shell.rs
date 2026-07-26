@@ -197,6 +197,81 @@ impl StatusSpinnerRenderer {
         self.last_frame = None;
     }
 
+    /// Whether the decorative idle-animation rows can be repainted on their own,
+    /// reusing the rest of the previous frame.
+    ///
+    /// Available only when the previous full frame actually drew the animation
+    /// and nothing else in the app needs a repaint this tick. On an idle screen
+    /// the animation is the sole moving element, so a full render at animation
+    /// FPS re-derives the transcript, header, status, and composer into
+    /// byte-identical cells. That was measured at a ~50ms median per tick on an
+    /// 8-core laptop, which is what made the animation visibly lag.
+    pub(super) fn idle_animation_only_available(&self, app: &App) -> bool {
+        self.last_frame.is_some()
+            && crate::tui::idle_donut_active(app)
+            && crate::tui::ui::last_idle_animation_area().is_some()
+            && !app.force_full_redraw
+            && !app.force_full_repaint
+            && !crate::tui::periodic_redraw_required_excluding_idle_animation(app)
+    }
+
+    /// Repaint just the idle-animation rows over the previous frame.
+    ///
+    /// Returns `false` when the fast path cannot be used, in which case the
+    /// caller must fall back to a full redraw.
+    pub(super) fn draw_idle_animation_only(
+        &mut self,
+        app: &App,
+        terminal: &mut DefaultTerminal,
+    ) -> Result<bool> {
+        let Some(previous_frame) = self.last_frame.as_ref() else {
+            return Ok(false);
+        };
+        let Some(area) = crate::tui::ui::last_idle_animation_area() else {
+            return Ok(false);
+        };
+        // The terminal may have been resized since that frame was captured.
+        if !previous_frame.area.contains((area.x, area.y).into())
+            || area.right() > previous_frame.area.right()
+            || area.bottom() > previous_frame.area.bottom()
+        {
+            return Ok(false);
+        }
+
+        let next_frame = {
+            let current_buffer = terminal.current_buffer_mut();
+            if current_buffer.area != previous_frame.area {
+                return Ok(false);
+            }
+            current_buffer.clone_from(previous_frame);
+            crate::tui::ui::render_idle_animation_into(
+                current_buffer,
+                area,
+                crate::tui::TuiState::animation_elapsed(app),
+            );
+            current_buffer.clone()
+        };
+
+        // Same protocol as the one-cell spinner fast path: keep ratatui's
+        // virtual buffers authoritative, flush the diff inside a synchronized
+        // update, and preserve the user's cursor position.
+        crossterm::queue!(
+            terminal.backend_mut(),
+            BeginSynchronizedUpdate,
+            SavePosition
+        )?;
+        terminal.flush()?;
+        crossterm::queue!(
+            terminal.backend_mut(),
+            RestorePosition,
+            EndSynchronizedUpdate
+        )?;
+        terminal.swap_buffers();
+        terminal.backend_mut().flush()?;
+        self.last_frame = Some(next_frame);
+        Ok(true)
+    }
+
     pub(super) fn draw_full(
         &mut self,
         app: &mut App,
@@ -404,6 +479,13 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= local::handle_tick(&mut self);
+                        if !needs_redraw
+                            && status_spinner_renderer.idle_animation_only_available(&self)
+                            && !status_spinner_renderer
+                                .draw_idle_animation_only(&self, &mut terminal)?
+                        {
+                            needs_redraw = true;
+                        }
                     }
                     event = event_stream.next() => {
                         if event.is_some() {
@@ -602,6 +684,13 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
+                        if !needs_redraw
+                            && status_spinner_renderer.idle_animation_only_available(&self)
+                            && !status_spinner_renderer
+                                .draw_idle_animation_only(&self, &mut terminal)?
+                        {
+                            needs_redraw = true;
+                        }
                     }
                     event = remote_conn.next_event() => {
                         let (outcome, event_redraw) = remote::handle_remote_event(
