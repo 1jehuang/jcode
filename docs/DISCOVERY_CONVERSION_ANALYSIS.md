@@ -57,8 +57,10 @@ and the agent sees no `discover_tools` at all (`tool/mod.rs:293` skips registrat
 | databases | 17 | 0 | 14 | 3 |
 | payments | 15 | 1 | 10 | 4 |
 
-13 of 18 categories are empty in the catalog, so 60%+ of all browses return zero results.
-Even the five stocked categories convert in the single digits.
+13 of 18 categories were empty in the catalog when this data was collected, so 60%+ of all
+browses returned zero results. Even the five stocked categories convert in the single digits.
+A `financial-data` category was added after this analysis (it is stocked server-side as
+empty), which does not change the ratio: the deployed catalog now has 5 stocked of 19.
 
 ## 4. Why the three stocked categories do not convert
 
@@ -122,8 +124,10 @@ The agent is asking for infrastructure and integration MCPs, not for sponsored p
 1. Repair the 168 stuck configs. Treat a persisted `sponsors.enabled = false` written before
    the opt-out flip as unset, or migrate it once on load. Also stop `Config::save()` from
    writing default-valued sections back to disk, which is what froze the flag.
-2. Fill the empty categories or shrink the category list. 13 empty categories mean most
+2. Fill the empty categories or shrink the category list. 14 empty categories mean most
    browses are guaranteed misses, and the agent then spends a second call on `suggest`.
+   Adding a category without a listing makes the miss rate worse, not better: every new
+   empty category is another guaranteed zero-result browse plus a follow-up `suggest`.
 3. Broaden payments beyond agent-issued cards. Merchant billing is 60% of payments demand
    and currently has no listing at all.
 4. Split code-review from Git host access. Most code-review browses are auth/access asks;
