@@ -112,6 +112,14 @@ impl TextSystem {
         self.draw_paragraph_scaled(&mut scratch, text, (0.0, 0.0), max_width, style, scale)
     }
 
+    /// Width of a single unwrapped line in logical units. Used where an
+    /// element must sit immediately after some text (the strip's bars after
+    /// their group label), so the gap is the real one rather than a guess.
+    pub fn measure_width(&mut self, text: &str, style: ParagraphStyle, scale: f64) -> f64 {
+        let layout = self.layout_paragraph(text, f32::MAX, style, scale);
+        f64::from(layout.width()) / scale
+    }
+
     /// Build a wrapped paragraph layout without drawing it, so callers can read
     /// caret and selection geometry from the very layout that will be drawn.
     /// `max_width` is in logical units.

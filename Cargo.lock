@@ -3861,9 +3861,11 @@ dependencies = [
  "arboard",
  "jcode-build-meta",
  "jcode-harness-api",
+ "jcode-render-core",
  "parley",
  "pollster",
  "serde_json",
+ "unicode-width 0.2.2",
  "vello",
  "winit 0.30.13",
 ]
