@@ -99,7 +99,8 @@ impl TextSystem {
     }
 
     /// Measure a paragraph without drawing it. Returns the wrapped height in
-    /// logical pixels, so callers can bottom-align or paginate text.
+    /// logical pixels.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn measure_paragraph(
         &mut self,
         text: &str,
@@ -126,6 +127,33 @@ impl TextSystem {
             .layouts
             .ranged_builder(&mut self.fonts, text, scale32, true);
         Self::push_defaults(&mut builder, style);
+        let mut layout: Layout<Brush> = builder.build(text);
+        layout.break_all_lines(Some((max_width * scale32).max(1.0)));
+        layout.align(style.align.to_parley(), parley::AlignmentOptions::default());
+        layout
+    }
+
+    /// Build a layout with per-range styling applied on top of the paragraph
+    /// defaults. `apply` receives the builder so callers can push ranged
+    /// properties (colour, weight, italic) for individual spans.
+    ///
+    /// This is what makes rich transcript text possible in a *single* layout:
+    /// wrapping has to see the whole paragraph, so drawing each styled span as
+    /// its own paragraph would break lines at every style boundary.
+    pub fn layout_rich(
+        &mut self,
+        text: &str,
+        max_width: f32,
+        style: ParagraphStyle,
+        scale: f64,
+        apply: &mut dyn FnMut(&mut parley::RangedBuilder<'_, Brush>),
+    ) -> Layout<Brush> {
+        let scale32 = scale as f32;
+        let mut builder = self
+            .layouts
+            .ranged_builder(&mut self.fonts, text, scale32, true);
+        Self::push_defaults(&mut builder, style);
+        apply(&mut builder);
         let mut layout: Layout<Brush> = builder.build(text);
         layout.break_all_lines(Some((max_width * scale32).max(1.0)));
         layout.align(style.align.to_parley(), parley::AlignmentOptions::default());

@@ -131,6 +131,142 @@ fn draw_hero(
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
+/// Body paragraph style for transcript prose. One definition, so measuring in
+/// [`crate::viewport`] and drawing here can never disagree.
+pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
+    ParagraphStyle {
+        font_size: layout::BODY_SIZE,
+        color: model.theme.text,
+        line_height: layout::BODY_LEADING as f32,
+        ..Default::default()
+    }
+}
+
+/// Draw the conversation.
+///
+/// Roles are distinguished structurally rather than by a marker glyph: your
+/// message is a tinted card with the composer's own corner radius, so it reads
+/// as the thing you typed, and the reply is plain ink on paper. That is why
+/// there is no `>` here; a prompt marker was standing in for structure the
+/// model did not have.
+fn draw_transcript(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_PAD_Y, USER_RADIUS};
+    use jcode_render_core::BlockKind;
+
+    let theme = &model.theme;
+    let region_height = (frame.body_bottom - frame.body_top).max(0.0);
+    // A user card is inset by its own padding, so both roles wrap to the same
+    // text column and the conversation keeps one measure.
+    let width = (frame.column() - USER_PAD_X * 2.0).max(1.0);
+    let view = crate::viewport::Viewport::new(
+        text,
+        &model.transcript,
+        width,
+        region_height,
+        model.scroll,
+        theme,
+        transcript_body_style(model),
+        scale,
+    );
+
+    for placed in &view.visible {
+        let message_top = frame.body_top + placed.top;
+        let is_user = placed.message.role == Role::User;
+        // The user's card: the same fill and radius as the composer, so the
+        // message and the field it came from are visibly one object.
+        if is_user {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.wash,
+                None,
+                &RoundedRect::new(
+                    frame.left,
+                    message_top,
+                    frame.right,
+                    message_top + placed.message.height,
+                    USER_RADIUS,
+                ),
+            );
+        }
+        let text_left = frame.left + USER_PAD_X;
+        let text_top = message_top + if is_user { USER_PAD_Y } else { 0.0 };
+
+        for block in &placed.message.blocks {
+            let block_top = text_top + block.top;
+            match &block.kind {
+                // A code block gets a wash and an inset, so it reads as a
+                // quoted artefact rather than as more prose.
+                BlockKind::CodeBlock { .. } => {
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        Affine::scale(scale),
+                        theme.wash,
+                        None,
+                        &RoundedRect::new(
+                            text_left,
+                            block_top,
+                            frame.right - USER_PAD_X,
+                            block_top + block.height,
+                            layout::COMPOSER_RADIUS,
+                        ),
+                    );
+                }
+                // A quote gets a rule down its left edge, the print
+                // convention, instead of a repeated `>` on every line.
+                BlockKind::BlockQuote => {
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        Affine::scale(scale),
+                        theme.rule,
+                        None,
+                        &Rect::new(
+                            text_left,
+                            block_top,
+                            text_left + frame.hairline() * 2.0,
+                            block_top + block.height,
+                        ),
+                    );
+                }
+                BlockKind::ThematicBreak => {
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        Affine::scale(scale),
+                        theme.rule,
+                        None,
+                        &Rect::new(
+                            text_left,
+                            block_top + block.height / 2.0,
+                            frame.right - USER_PAD_X,
+                            block_top + block.height / 2.0 + frame.hairline(),
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            let inset_y = match block.kind {
+                BlockKind::CodeBlock { .. } => CODE_PAD_Y,
+                _ => 0.0,
+            };
+            // The inset the layout wrapped to, so the drawn text cannot sit at
+            // a different x than the width it was measured against.
+            let inset_x = block.inset;
+            text::TextSystem::draw_layout(
+                scene,
+                &block.layout,
+                (text_left + inset_x, block_top + inset_y),
+                scale,
+            );
+        }
+    }
+}
+
 /// The one style used for composer text. Wrapping, drawing, caret placement,
 /// and hit-testing must all use the same style or their geometry diverges, so
 /// there is exactly one definition of it.
@@ -159,8 +295,6 @@ pub fn build_scene(
     // frame than the renderer.
     let frame = crate::App::frame_for_model_with(size, scale, model, text);
     let scale = frame.scale;
-    let column = frame.column() as f32;
-
     let fill = |scene: &mut Scene, color: Color, shape: &Rect| {
         scene.fill(
             vello::peniko::Fill::NonZero,
@@ -214,7 +348,7 @@ pub fn build_scene(
 
     // Transcript: ink on paper, bottom-aligned against the composer so new
     // lines rise from the well rather than dangling from the masthead.
-    let placeholder = model.transcript.trim().is_empty();
+    let placeholder = model.transcript.is_empty();
 
     // On an empty session the transcript region is dead space, so the hero
     // donut from the website lives there: the same halftone torus, and
@@ -227,47 +361,7 @@ pub fn build_scene(
     // On an empty session the hero says everything, so there is no filler
     // transcript line: a "type a message" caption next to a field that already
     // invites you to type was the same sentence twice.
-    let transcript = if placeholder {
-        ""
-    } else {
-        model.transcript.trim_start_matches('\n')
-    };
-    let body_style = ParagraphStyle {
-        font_size: layout::BODY_SIZE,
-        color: if placeholder { theme.faint } else { theme.text },
-        line_height: layout::BODY_LEADING as f32,
-        ..Default::default()
-    };
-    // Measure the *wrapped* height so long replies never bleed into the well.
-    let available = frame.body_bottom - frame.body_top;
-    let lines: Vec<&str> = transcript.lines().collect();
-    // `scroll` counts lines held back from the tail, so 0 follows live output.
-    let end = lines
-        .len()
-        .saturating_sub(model.scroll)
-        .max(1)
-        .min(lines.len().max(1));
-    // `end` is clamped to at least 1 for the scroll maths, so an empty
-    // transcript must not index past the (empty) slice.
-    let lines = &lines[..end.min(lines.len())];
-    let mut first_line = lines.len().saturating_sub(frame.visible_body_lines());
-    let mut tail = lines[first_line..].join("\n");
-    let mut tail_height = text.measure_paragraph(&tail, column, body_style, scale);
-    while tail_height > available && first_line < lines.len().saturating_sub(1) {
-        first_line += 1;
-        tail = lines[first_line..].join("\n");
-        tail_height = text.measure_paragraph(&tail, column, body_style, scale);
-    }
-    // Bottom-aligned against the composer. When even a single logical line
-    // wraps taller than the region (one long streamed paragraph), the origin
-    // goes above `body_top` so the *newest* rows stay visible, and the clip
-    // below keeps the overflow off the composer instead of drawing over it.
-    let origin_y = if placeholder {
-        frame.body_top
-    } else {
-        frame.body_bottom - tail_height
-    };
-    {
+    if !placeholder {
         // The transcript is the one region whose content is not bounded by the
         // layout, so it is the one region that must be clipped: without this a
         // reply too tall for its region paints straight down over the composer.
@@ -278,14 +372,7 @@ pub fn build_scene(
             frame.body_bottom.max(frame.body_top),
         );
         scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &region);
-        text.draw_paragraph_scaled(
-            scene,
-            &tail,
-            (frame.left, origin_y),
-            column,
-            body_style,
-            scale,
-        );
+        draw_transcript(scene, text, model, &frame, scale);
         scene.pop_layer();
     }
 

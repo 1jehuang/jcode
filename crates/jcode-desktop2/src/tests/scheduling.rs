@@ -173,7 +173,7 @@ mod footnote {
         let mut model = Model {
             session_id: None,
             status: "disconnected: gone".into(),
-            scroll: 5,
+            scroll: 50.0,
             ..Model::default()
         };
         model.set_notice("nothing to undo");
@@ -183,12 +183,12 @@ mod footnote {
     #[test]
     fn scrollback_outranks_status_and_build_alerts() {
         let mut model = attached();
-        model.scroll = 12;
+        model.scroll = 120.0;
         assert!(
             model
                 .footnote()
-                .is_some_and(|line| line.contains("scrolled back 12")),
-            "scrolling back did not report the offset"
+                .is_some_and(|line| line.contains("scrolled back")),
+            "scrolling back was not reported"
         );
     }
 

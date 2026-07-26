@@ -27,6 +27,9 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("streaming", streaming),
     ("turn_done", turn_done),
     ("scrolled_back", scrolled_back),
+    ("markdown", markdown),
+    ("latex", latex),
+    ("code_block", code_block),
     ("notice", notice),
     ("error", error),
     ("long_paragraph", long_paragraph),
@@ -59,14 +62,14 @@ fn connecting() -> Model {
         meta: fixed_meta(),
         status: "connecting to ~/.jcode/jcode-api.sock...".into(),
         session_id: None,
-        transcript: String::new(),
+        transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
         focused: true,
         busy: false,
-        scroll: 0,
+        scroll: 0.0,
         notice: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
@@ -118,14 +121,14 @@ fn attached_empty() -> Model {
         meta: fixed_meta(),
         status: "attached: session_demo_0000".into(),
         session_id: Some("session_demo_0000".into()),
-        transcript: String::new(),
+        transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
         focused: true,
         busy: false,
-        scroll: 0,
+        scroll: 0.0,
         notice: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
@@ -159,6 +162,19 @@ fn donut_off() -> Model {
         donut: None,
         ..attached_empty()
     }
+}
+
+/// Build a transcript from (user, assistant) turns. Fixtures speak in turns
+/// rather than in a formatted blob, so a capture exercises the real role
+/// structure the renderer draws.
+fn conversation(turns: Vec<(String, String)>) -> crate::transcript::Transcript {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    for (user, assistant) in turns {
+        transcript.push(Message::user(user));
+        transcript.push(Message::assistant(assistant));
+    }
+    transcript
 }
 
 fn editor_with(text: &str, cursor: Option<usize>) -> crate::editor::Editor {
@@ -265,11 +281,17 @@ fn multiline_selection() -> Model {
 
 fn scrolled_back() -> Model {
     Model {
-        transcript: (1..=60)
-            .map(|n| format!("transcript line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        scroll: 12,
+        transcript: conversation(
+            (1..=20)
+                .map(|n| {
+                    (
+                        format!("question {n}"),
+                        format!("answer {n}. transcript line {n}"),
+                    )
+                })
+                .collect(),
+        ),
+        scroll: 200.0,
         ..attached_empty()
     }
 }
@@ -284,11 +306,13 @@ fn notice() -> Model {
 
 fn streaming() -> Model {
     Model {
-        transcript: "\n> explain the harness API handshake\n\n\
-            The client opens the socket and sends a `hello` frame carrying \
-            its supported version range. The server replies with `hello_ok` \
-            and the negotiated version, after which"
-            .into(),
+        transcript: conversation(vec![(
+            "explain the harness API handshake".into(),
+            "The client opens the socket and sends a `hello` frame carrying \
+             its supported version range. The server replies with `hello_ok` \
+             and the negotiated version, after which"
+                .into(),
+        )]),
         busy: true,
         ..attached_empty()
     }
@@ -296,12 +320,62 @@ fn streaming() -> Model {
 
 fn turn_done() -> Model {
     Model {
-        transcript: "\n> explain the harness API handshake\n\n\
-            The client opens the socket and sends a `hello` frame carrying \
-            its supported version range. The server replies with `hello_ok` \
-            and the negotiated version, after which normal requests flow.\n"
-            .into(),
+        transcript: conversation(vec![(
+            "explain the harness API handshake".into(),
+            "The client opens the socket and sends a `hello` frame carrying \
+             its supported version range. The server replies with `hello_ok` \
+             and the negotiated version, after which normal requests flow."
+                .into(),
+        )]),
         busy: false,
+        ..attached_empty()
+    }
+}
+
+/// Markdown a model actually emits: headings, emphasis, inline code, lists,
+/// a quote, and a table. Proves the transcript renders structure rather than
+/// echoing punctuation.
+fn markdown() -> Model {
+    Model {
+        transcript: conversation(vec![(
+            "summarise the transport".into(),
+            "## Transport\n\nThe protocol is **line-delimited JSON** over a \
+             *Unix socket*, framed by `\\n`.\n\n\
+             - `hello` negotiates the version\n\
+             - `subscribe` attaches to a session\n\n\
+             > Framing is unchanged across transports.\n\n\
+             | frame | direction |\n|---|---|\n| hello | client |\n| hello_ok | server |\n"
+                .into(),
+        )]),
+        ..attached_empty()
+    }
+}
+
+/// Inline and display math. The transcript must render these as math, not
+/// print the LaTeX source at the user.
+fn latex() -> Model {
+    Model {
+        transcript: conversation(vec![(
+            "what is the cost".into(),
+            "The march is $O(n^2)$ per frame, with $n$ the grid side.\n\n\
+             $$\\frac{a + b}{c}$$\n\n\
+             So halving $n$ quarters the work."
+                .into(),
+        )]),
+        ..attached_empty()
+    }
+}
+
+/// A fenced code block: it must read as a quoted artefact on its own wash,
+/// not as more prose.
+fn code_block() -> Model {
+    Model {
+        transcript: conversation(vec![(
+            "show me the handler".into(),
+            "Here is the entry point:\n\n```rust\nfn main() -> Result<()> {\n    \
+             App::default().run()\n}\n```\n\nIt returns on the first error."
+                .into(),
+        )]),
         ..attached_empty()
     }
 }
@@ -317,7 +391,11 @@ fn error() -> Model {
 /// region instead of running down over the composer.
 fn long_paragraph() -> Model {
     Model {
-        transcript: format!("\n> explain everything\n\n{}", "the client opens the socket and sends a hello frame carrying its supported version range. ".repeat(24)),
+        transcript: conversation(vec![(
+            "explain everything".into(),
+            "the client opens the socket and sends a hello frame carrying its supported version range. "
+                .repeat(24),
+        )]),
         ..attached_empty()
     }
 }

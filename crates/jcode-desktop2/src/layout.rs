@@ -179,11 +179,6 @@ impl Frame {
         f64::from(BODY_SIZE) * BODY_LEADING
     }
 
-    /// Body lines that fit in the transcript region.
-    pub fn visible_body_lines(&self) -> usize {
-        (((self.body_bottom - self.body_top) / self.body_line_height()) as usize).max(1)
-    }
-
     /// Width available to composer text, inside the well's padding. This is
     /// the wrap width handed to Parley, so the text wraps exactly where the
     /// well ends rather than at an estimated character count.
@@ -542,10 +537,12 @@ mod tests {
         }
     }
 
+    /// The transcript region must always have room for at least one line of
+    /// body copy, or a reply has nowhere to go at any window size.
     #[test]
     fn transcript_always_shows_at_least_one_line() {
         sweep(|frame| {
-            assert!(frame.visible_body_lines() >= 1);
+            assert!(frame.body_bottom - frame.body_top >= frame.body_line_height());
         });
     }
 
