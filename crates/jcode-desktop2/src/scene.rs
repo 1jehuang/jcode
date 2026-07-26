@@ -258,19 +258,36 @@ pub fn build_scene(
         tail = lines[first_line..].join("\n");
         tail_height = text.measure_paragraph(&tail, column, body_style, scale);
     }
+    // Bottom-aligned against the composer. When even a single logical line
+    // wraps taller than the region (one long streamed paragraph), the origin
+    // goes above `body_top` so the *newest* rows stay visible, and the clip
+    // below keeps the overflow off the composer instead of drawing over it.
     let origin_y = if placeholder {
         frame.body_top
     } else {
-        (frame.body_bottom - tail_height).max(frame.body_top)
+        frame.body_bottom - tail_height
     };
-    text.draw_paragraph_scaled(
-        scene,
-        &tail,
-        (frame.left, origin_y),
-        column,
-        body_style,
-        scale,
-    );
+    {
+        // The transcript is the one region whose content is not bounded by the
+        // layout, so it is the one region that must be clipped: without this a
+        // reply too tall for its region paints straight down over the composer.
+        let region = Rect::new(
+            frame.left,
+            frame.body_top,
+            frame.right,
+            frame.body_bottom.max(frame.body_top),
+        );
+        scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &region);
+        text.draw_paragraph_scaled(
+            scene,
+            &tail,
+            (frame.left, origin_y),
+            column,
+            body_style,
+            scale,
+        );
+        scene.pop_layer();
+    }
 
     // Prompt line inside the well: a real input box. The caret is drawn at
     // the measured width of the text before the cursor, so it sits between

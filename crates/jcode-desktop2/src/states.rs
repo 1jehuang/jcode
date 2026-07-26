@@ -29,6 +29,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("scrolled_back", scrolled_back),
     ("notice", notice),
     ("error", error),
+    ("long_paragraph", long_paragraph),
 ];
 
 pub fn by_name(name: &str) -> Option<Model> {
@@ -309,5 +310,14 @@ fn error() -> Model {
     Model {
         status: "disconnected: daemon connection closed".into(),
         ..turn_done()
+    }
+}
+
+/// One very long unwrapped paragraph: the transcript must stay inside its own
+/// region instead of running down over the composer.
+fn long_paragraph() -> Model {
+    Model {
+        transcript: format!("\n> explain everything\n\n{}", "the client opens the socket and sends a hello frame carrying its supported version range. ".repeat(24)),
+        ..attached_empty()
     }
 }
