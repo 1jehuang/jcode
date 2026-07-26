@@ -27,6 +27,7 @@ CATEGORIES = {
     "analytics",
     "web-search",
     "web-data",
+    "financial-data",
     "cloud-infrastructure",
     "compliance-and-privacy",
     "integration-platforms",
