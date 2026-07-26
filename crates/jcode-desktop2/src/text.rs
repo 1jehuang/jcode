@@ -137,6 +137,106 @@ impl TextSystem {
     }
 }
 
+/// Per-character animation state supplied by the caller, keyed by byte offset
+/// within the paragraph: opacity in 0.0..=1.0 and a vertical offset in logical
+/// pixels (positive draws the glyph below its settled position).
+/// A paragraph to draw: text plus its box and style. Grouped so the revealed
+/// variant does not need a long positional argument list.
+#[derive(Clone, Copy)]
+pub struct Paragraph<'a> {
+    pub text: &'a str,
+    pub origin: (f64, f64),
+    pub max_width: f32,
+    pub style: ParagraphStyle,
+}
+
+pub struct Reveal<'a> {
+    pub at: &'a dyn Fn(usize) -> (f32, f64),
+}
+
+impl TextSystem {
+    /// Draw a paragraph whose characters are individually faded and offset by
+    /// `reveal`, used for the streaming transcript. Layout is identical to
+    /// [`TextSystem::draw_paragraph_scaled`] (same builder, same wrapping), so
+    /// animating text never reflows as it settles: only its paint changes.
+    pub fn draw_paragraph_revealed(
+        &mut self,
+        scene: &mut Scene,
+        paragraph: Paragraph<'_>,
+        scale: f64,
+        reveal: &Reveal<'_>,
+    ) -> f64 {
+        let Paragraph {
+            text,
+            origin,
+            max_width,
+            style,
+        } = paragraph;
+        let scale32 = scale as f32;
+        let mut builder = self
+            .layouts
+            .ranged_builder(&mut self.fonts, text, scale32, true);
+        Self::push_defaults(&mut builder, style);
+        let mut layout: Layout<Brush> = builder.build(text);
+        layout.break_all_lines(Some(max_width * scale32));
+        layout.align(Alignment::Start, parley::AlignmentOptions::default());
+        let origin = (origin.0 * scale, origin.1 * scale);
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                draw_revealed_run(scene, &glyph_run, origin, style.color, scale, reveal);
+            }
+        }
+        f64::from(layout.height()) / scale
+    }
+}
+
+/// Draw one glyph run cluster by cluster, so each character can carry its own
+/// alpha and rise. Clusters (not glyphs) are the unit here because they are
+/// what map back to source bytes.
+fn draw_revealed_run(
+    scene: &mut Scene,
+    glyph_run: &GlyphRun<'_, Brush>,
+    origin: (f64, f64),
+    color: Color,
+    scale: f64,
+    reveal: &Reveal<'_>,
+) {
+    let run = glyph_run.run();
+    let baseline = glyph_run.baseline();
+    let mut x = glyph_run.offset();
+    for cluster in run.visual_clusters() {
+        let advance = cluster.advance();
+        let byte = cluster.text_range().start;
+        let (alpha, rise) = (reveal.at)(byte);
+        if alpha > 0.001 {
+            let dy = (rise * scale) as f32;
+            let mut glyph_x = x;
+            scene
+                .draw_glyphs(run.font())
+                .font_size(run.font_size())
+                .transform(Affine::translate((origin.0, origin.1)))
+                .normalized_coords(run.normalized_coords())
+                .brush(&Brush::Solid(color.multiply_alpha(alpha)))
+                .draw(
+                    Fill::NonZero,
+                    cluster.glyphs().map(|glyph| {
+                        let out = vello::Glyph {
+                            id: glyph.id,
+                            x: glyph_x + glyph.x,
+                            y: baseline - glyph.y + dy,
+                        };
+                        glyph_x += glyph.advance;
+                        out
+                    }),
+                );
+        }
+        x += advance;
+    }
+}
+
 fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f64, f64)) {
     let run = glyph_run.run();
     let style = glyph_run.style();

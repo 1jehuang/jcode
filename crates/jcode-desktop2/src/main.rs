@@ -13,6 +13,7 @@ mod keymap;
 mod layout;
 mod render;
 mod states;
+mod stream;
 mod text;
 mod theme;
 
@@ -102,16 +103,21 @@ fn run_e2e(message: &str) -> Result<()> {
                 println!("[e2e] attached: {session_id}");
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);
-                model.transcript.push_str(&format!("\n> {message}\n\n"));
+                model.append_transcript(&format!("\n> {message}\n\n"));
                 outgoing.send(message.to_string())?;
                 sent = true;
             }
             harness::HarnessUpdate::Text(text) => {
                 print!("{text}");
-                model.transcript.push_str(&text);
+                model.append_transcript(&text);
             }
             harness::HarnessUpdate::TurnDone if sent => {
                 println!("\n[e2e] turn done");
+                // Capture the settled frame: the reveal animation would
+                // otherwise leave the newest text mid-fade in the PNG.
+                model
+                    .reveal
+                    .freeze_at(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 let out = std::env::temp_dir().join("jcode-desktop2-e2e.png");
                 let mut text_system = text::TextSystem::default();
                 let mut scene = Scene::new();
@@ -192,6 +198,8 @@ pub struct Model {
     pub scroll: usize,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
+    /// Fade-in schedule for streamed transcript text.
+    pub reveal: stream::Reveal,
 }
 
 impl Default for Model {
@@ -206,11 +214,18 @@ impl Default for Model {
             busy: false,
             scroll: 0,
             notice: None,
+            reveal: stream::Reveal::default(),
         }
     }
 }
 
 impl Model {
+    /// Append streamed text and schedule its reveal animation.
+    pub fn append_transcript(&mut self, text: &str) {
+        self.transcript.push_str(text);
+        self.reveal.push(text.len());
+    }
+
     /// Total transcript lines, used to clamp scrolling.
     fn transcript_lines(&self) -> usize {
         self.transcript.lines().count()
@@ -244,10 +259,10 @@ impl App {
                     self.model.status = format!("attached: {session_id}");
                     self.model.session_id = Some(session_id);
                 }
-                harness::HarnessUpdate::Text(text) => self.model.transcript.push_str(&text),
+                harness::HarnessUpdate::Text(text) => self.model.append_transcript(&text),
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
-                    self.model.transcript.push('\n');
+                    self.model.append_transcript("\n");
                 }
             }
         }
@@ -262,9 +277,7 @@ impl App {
             return;
         }
         let content = self.model.editor.take_for_submit();
-        self.model
-            .transcript
-            .push_str(&format!("\n> {content}\n\n"));
+        self.model.append_transcript(&format!("\n> {content}\n\n"));
         self.model.busy = true;
         // Submitting jumps back to the live tail; otherwise the reply streams
         // in off-screen.
@@ -453,10 +466,24 @@ impl ApplicationHandler for App {
                         eprintln!("render error: {error:#}");
                     }
                 }
-                // Wake exactly when the caret next toggles: blinking without a
-                // busy redraw loop.
-                if let Some(at) = self.model.caret.next_toggle_at(std::time::Instant::now()) {
+                // Wake at the soonest of the caret's next toggle and the next
+                // reveal frame: animation without a busy redraw loop, and no
+                // wake at all once everything has settled.
+                let now = std::time::Instant::now();
+                let wake = [
+                    self.model.caret.next_toggle_at(now),
+                    self.model.reveal.next_frame_at(now),
+                ]
+                .into_iter()
+                .flatten()
+                .min();
+                if let Some(at) = wake {
                     event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+                }
+                if self.model.reveal.animating_at(now)
+                    && let Some(state) = self.state.as_ref()
+                {
+                    state.request_redraw();
                 }
             }
             _ => {}
@@ -614,14 +641,45 @@ fn build_scene(
     } else {
         (frame.body_bottom - tail_height).max(frame.body_top)
     };
-    text.draw_paragraph_scaled(
-        scene,
-        &tail,
-        (frame.left, origin_y),
-        column,
-        body_style,
-        scale,
-    );
+    if placeholder {
+        text.draw_paragraph_scaled(
+            scene,
+            &tail,
+            (frame.left, origin_y),
+            column,
+            body_style,
+            scale,
+        );
+    } else {
+        // Byte offset of the drawn tail within the whole transcript: the
+        // reveal schedule is keyed on transcript offsets, so it must survive
+        // the head being trimmed by scrolling and pagination.
+        let base = lines
+            .get(first_line)
+            .map(|line| byte_offset_within(&model.transcript, line))
+            .unwrap_or(0);
+        let now = model.reveal.now();
+        let reveal = text::Reveal {
+            at: &|offset: usize| {
+                let absolute = base + offset;
+                (
+                    model.reveal.alpha_at(absolute, now),
+                    model.reveal.rise_at(absolute, now),
+                )
+            },
+        };
+        text.draw_paragraph_revealed(
+            scene,
+            text::Paragraph {
+                text: &tail,
+                origin: (frame.left, origin_y),
+                max_width: column,
+                style: body_style,
+            },
+            scale,
+            &reveal,
+        );
+    }
 
     // Prompt line inside the well: a real input box. The caret is drawn at
     // the measured width of the text before the cursor, so it sits between
@@ -705,6 +763,18 @@ fn build_scene(
             scale,
         );
     }
+}
+
+/// Byte offset of `part` inside `whole`. `part` must be a subslice of `whole`,
+/// which holds here because both come from the same transcript string; a
+/// foreign slice degrades to 0 rather than panicking.
+fn byte_offset_within(whole: &str, part: &str) -> usize {
+    let base = whole.as_ptr() as usize;
+    let inner = part.as_ptr() as usize;
+    if inner < base {
+        return 0;
+    }
+    (inner - base).min(whole.len())
 }
 
 /// Middle-elide `text` to at most `max_chars` characters, keeping the head and
@@ -893,6 +963,24 @@ mod action_tests {
         );
         press(&mut app, ch('b'), ModifiersState::empty(), Some("b"));
         assert_eq!(app.model.editor.text(), "abc");
+    }
+
+    /// Streamed text must be registered with the reveal, or the animation
+    /// silently does nothing in the real app while still passing unit tests.
+    #[test]
+    fn appending_transcript_schedules_the_reveal() {
+        let mut model = super::Model::default();
+        model.append_transcript("hello");
+        assert_eq!(model.transcript, "hello");
+        assert!(
+            model.reveal.animating(),
+            "appended text was not scheduled to reveal"
+        );
+        let alpha = model.reveal.alpha(0);
+        assert!(
+            alpha < 0.2,
+            "brand new text was drawn essentially opaque ({alpha})"
+        );
     }
 
     #[test]
@@ -1098,6 +1186,25 @@ mod visual_tests {
                 self.pixels[i + 2] as f64,
             ];
             (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        }
+
+        /// Mean luminance inside a logical-unit rect. Sensitive to partial
+        /// opacity across a whole region, unlike `darkest_in`, which only
+        /// reports the single most opaque pixel.
+        fn mean_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+            let s = self.frame.scale;
+            let to_px = |v: f64, max: u32| (v * s).round().clamp(0.0, f64::from(max - 1)) as u32;
+            let (px0, py0) = (to_px(x0, self.width), to_px(y0, self.height));
+            let (px1, py1) = (to_px(x1, self.width), to_px(y1, self.height));
+            let mut sum = 0.0;
+            let mut count = 0.0;
+            for y in py0..=py1 {
+                for x in px0..=px1 {
+                    sum += self.luma(x, y);
+                    count += 1.0;
+                }
+            }
+            if count == 0.0 { 1.0 } else { sum / count }
         }
 
         /// Darkest luminance inside a logical-unit rect.
@@ -1342,6 +1449,111 @@ mod visual_tests {
             );
             assert!(below > 0.9, "{name}: ink between the well and the footnote");
         }
+    }
+
+    /// Freshly streamed text must actually be lighter than settled text: this
+    /// is the whole point of the reveal, and it is invisible to unit tests
+    /// because it lives in the glyph brush.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn streaming_text_is_faded_while_it_reveals() {
+        let settled = states::by_name("streaming").expect("node");
+        let animating = states::by_name("streaming_reveal").expect("node");
+        let Some(a) = Rendered::new(&settled) else {
+            return;
+        };
+        let Some(b) = Rendered::new(&animating) else {
+            return;
+        };
+        let f = a.frame;
+        // Mean ink over the transcript: partially revealed glyphs lighten the
+        // region even though the oldest, settled glyphs stay fully opaque.
+        let settled_ink = a.mean_in(f.left, f.body_top, f.right, f.body_bottom);
+        let fading_ink = b.mean_in(f.left, f.body_top, f.right, f.body_bottom);
+        assert!(
+            a.darkest_in(f.left, f.body_top, f.right, f.body_bottom) < 0.65,
+            "settled transcript was not solid ink"
+        );
+        assert!(
+            fading_ink > settled_ink + 0.002,
+            "streaming tail was not faded: settled {settled_ink:.4} vs revealing {fading_ink:.4}"
+        );
+    }
+
+    /// Render `streaming` with its whole transcript revealing, frozen at
+    /// `offset_ms` into the animation.
+    fn revealing_at(offset_ms: u64, start: std::time::Instant) -> Option<Rendered> {
+        let mut model = states::by_name("streaming").expect("node");
+        let mut reveal = super::stream::Reveal::default();
+        reveal.push_at(model.transcript.len(), start);
+        reveal.freeze_at(start + std::time::Duration::from_millis(offset_ms));
+        model.reveal = reveal;
+        Rendered::new(&model)
+    }
+
+    /// The reveal must animate over time, not just render one dimmed frame.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn the_reveal_progresses_toward_full_opacity() {
+        let start = std::time::Instant::now();
+        let Some(early) = revealing_at(20, start) else {
+            return;
+        };
+        let Some(late) = revealing_at(3_000, start) else {
+            return;
+        };
+        let f = early.frame;
+        let early_ink = early.mean_in(f.left, f.body_top, f.right, f.body_bottom);
+        let late_ink = late.mean_in(f.left, f.body_top, f.right, f.body_bottom);
+        assert!(
+            late_ink < early_ink - 0.01,
+            "reveal did not darken over time: {early_ink:.3} -> {late_ink:.3}"
+        );
+        // The settled frame must reach normal ink, so the animation leaves no
+        // permanent tint.
+        assert!(
+            late.darkest_in(f.left, f.body_top, f.right, f.body_bottom) < 0.65,
+            "revealed text never reached readable ink"
+        );
+    }
+
+    /// Animation must not reflow text: a wobbling paragraph would be worse
+    /// than no animation at all. Glyphs that are visible mid-reveal must sit
+    /// in the same columns they occupy once settled.
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn revealing_text_does_not_reflow() {
+        let start = std::time::Instant::now();
+        let columns = |r: &Rendered| -> Vec<u32> {
+            let f = r.frame;
+            let s = f.scale;
+            let y0 = (f.body_top * s) as u32;
+            let y1 = (f.body_bottom * s) as u32;
+            ((f.left * s) as u32..(f.right * s) as u32)
+                .filter(|&x| (y0..y1).any(|y| r.luma(x, y) < 0.9))
+                .collect()
+        };
+        let Some(mid) = revealing_at(120, start) else {
+            return;
+        };
+        let Some(done) = revealing_at(3_000, start) else {
+            return;
+        };
+        let mid = columns(&mid);
+        let done = columns(&done);
+        assert!(!mid.is_empty() && !done.is_empty(), "no text drawn");
+        // Every column inked mid-reveal must also be inked when settled: any
+        // stray column means glyphs shifted horizontally.
+        let stray: Vec<u32> = mid
+            .iter()
+            .copied()
+            .filter(|x| !done.iter().any(|d| d.abs_diff(*x) <= 1))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "text moved horizontally while revealing (reflow) at columns {:?}",
+            &stray[..stray.len().min(8)]
+        );
     }
 
     #[test]
