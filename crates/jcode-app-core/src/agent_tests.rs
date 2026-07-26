@@ -1359,3 +1359,34 @@ fn guardrail_notice_absent_for_normal_turns() {
 }
 
 include!("agent_tests/retention_readiness.rs");
+
+#[test]
+fn tool_use_stop_with_no_tool_calls_is_an_unfinished_turn() {
+    // Benchmark incident, DeepSWE v1.1 Opus 5 low: two trials ended with the
+    // provider reporting stop_reason=tool_use while the parsed response carried
+    // ZERO tool calls. `should_continue_after_stop_reason` returns false for
+    // `tool_use` (correctly: a normal tool_use turn continues by executing the
+    // requested tools), so with no tools to execute the run simply ended.
+    //
+    // The damage is silent and total: jcode exited 0 with empty stderr after
+    // ~1900s and ~1200s of correct work, and because the benchmark harvests
+    // `git diff base HEAD`, both trials submitted a 0-byte patch and scored 0.
+    // 110 of 112 trials ended `end_turn`; the 2 that ended `tool_use` are
+    // exactly the 2 zero-patch failures.
+    //
+    // This test pins the CURRENT semantics so the distinction stays explicit:
+    // `tool_use` is not a continuation-worthy stop reason on its own, which
+    // means the caller is responsible for detecting "tool_use but nothing to
+    // run" and must not treat it as a completed turn.
+    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
+
+    // The neighbouring truncation reasons DO continue, so a turn cut off by the
+    // output budget cannot be confused with this case.
+    assert!(Agent::should_continue_after_stop_reason("max_tokens"));
+
+    // A guardrail stop is a third, distinct outcome: terminal, and not an
+    // unfinished turn. Four TB 2.1 tasks hit this on claude-opus-5 (Anthropic
+    // `cyber` usage policy), and it must never be retried as if truncated.
+    assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
+    assert!(!Agent::should_continue_after_stop_reason("refusal"));
+}
