@@ -82,6 +82,29 @@ impl Rendered {
         darkest
     }
 
+    /// Mean luminance inside a logical-unit rect. Sensitive to ink spread
+    /// across a whole region, unlike `darkest_in`, which reports only the
+    /// single most opaque pixel and so cannot tell bold from plain.
+    fn mean_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+        let s = self.frame.scale;
+        let to_px = |v: f64, max: u32| (v * s).round().clamp(0.0, f64::from(max - 1)) as u32;
+        let (px0, py0) = (to_px(x0, self.width), to_px(y0, self.height));
+        let (px1, py1) = (to_px(x1, self.width), to_px(y1, self.height));
+        let mut total = 0.0;
+        let mut count = 0u32;
+        for y in py0..=py1 {
+            for x in px0..=px1 {
+                total += self.luma(x, y);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            1.0
+        } else {
+            total / f64::from(count)
+        }
+    }
+
     /// Vertical extent, in logical units, of the composer wash as actually
     /// drawn. Sampled on a column just inside the right edge of the measure
     /// column, where only the well can ink, so prompt glyphs cannot be
@@ -257,7 +280,7 @@ fn body_text_has_readable_contrast() {
         let f = r.frame;
         // An empty session draws no transcript at all (the hero, or nothing, is
         // there instead), so there is no ink to hold to a contrast floor.
-        if model.transcript.trim().is_empty() {
+        if model.transcript.is_empty() {
             continue;
         }
         // Some real ink must exist in the transcript band, dark enough to
@@ -1178,4 +1201,105 @@ fn an_overflowing_reply_stays_out_of_the_composer() {
         below > 0.9,
         "transcript ink ({below:.3} luma) spilled below the footnote row"
     );
+}
+
+/// Markdown must arrive as *typography*, not as punctuation. The strongest
+/// pixel-level evidence is that bold text inks more than the same text plain:
+/// a renderer that dropped the ranged weight would pass every string-level
+/// test while drawing a uniform grey paragraph.
+#[test]
+#[ignore = "requires a GPU"]
+fn bold_markdown_inks_more_than_plain_text() {
+    use crate::transcript::{Message, Transcript};
+
+    let plain = Model {
+        transcript: {
+            let mut t = Transcript::default();
+            t.push(Message::assistant("line-delimited JSON"));
+            t
+        },
+        ..states::by_name("attached_empty").expect("base node")
+    };
+    let bold = Model {
+        transcript: {
+            let mut t = Transcript::default();
+            t.push(Message::assistant("**line-delimited JSON**"));
+            t
+        },
+        ..states::by_name("attached_empty").expect("base node")
+    };
+    let (Some(a), Some(b)) = (Rendered::new(&plain), Rendered::new(&bold)) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let f = a.frame;
+    let plain_ink = a.mean_in(f.left, f.body_top, f.right, f.body_bottom);
+    let bold_ink = b.mean_in(f.left, f.body_top, f.right, f.body_bottom);
+    assert!(
+        bold_ink < plain_ink,
+        "bold text did not ink more than plain ({bold_ink:.4} vs {plain_ink:.4}); \
+         the ranged weight was probably dropped"
+    );
+}
+
+/// A user message must be visually distinct from a reply *without* a marker
+/// glyph. The card's tint is the distinction, so the user's band must be
+/// measurably darker than paper while its text stays readable.
+#[test]
+#[ignore = "requires a GPU"]
+fn a_user_message_reads_as_a_card_rather_than_a_marker() {
+    let model = states::by_name("turn_done").expect("the turn_done node");
+    let Some(r) = Rendered::new(&model) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let f = r.frame;
+    // The user's card is the topmost placed message, so sample the right-hand
+    // end of the first inked band, past where its short text reaches: that is
+    // card tint if it is anything.
+    let mut card_row = None;
+    for row in 0..((f.body_bottom - f.body_top) as u32) {
+        let y = f.body_top + f64::from(row);
+        if r.mean_in(f.right - 60.0, y, f.right - 10.0, y + 1.0) < 0.99 {
+            card_row = Some(y);
+            break;
+        }
+    }
+    let y = card_row.expect("no tinted card band found; the user card is missing");
+    let tint = r.mean_in(f.right - 60.0, y + 2.0, f.right - 10.0, y + 8.0);
+    assert!(
+        tint < 0.99,
+        "the user message has no tint, so only a marker could distinguish it"
+    );
+    assert!(
+        tint > 0.85,
+        "the user card tint ({tint:.3}) is heavy enough to fight the text on it"
+    );
+}
+
+/// Every rich node must keep its ink inside the transcript region. This is the
+/// general form of the overflow test: markdown, math, and code all change the
+/// measured height, so each is a fresh chance to overflow.
+#[test]
+#[ignore = "requires a GPU"]
+fn rich_content_never_inks_the_composer() {
+    for name in ["markdown", "latex", "code_block", "scrolled_back"] {
+        let model = states::by_name(name).expect("node");
+        let Some(r) = Rendered::new(&model) else {
+            eprintln!("skipping: no GPU");
+            return;
+        };
+        let f = r.frame;
+        // Between the field's borders, right of where the hint reaches.
+        let darkest = r.darkest_in(
+            f.left + f.column() * 0.8,
+            f.composer_top + 3.0,
+            f.right - 4.0,
+            f.composer_bottom - 3.0,
+        );
+        assert!(
+            darkest > 0.55,
+            "{name}: transcript ink ({darkest:.3} luma) landed inside the composer"
+        );
+    }
 }

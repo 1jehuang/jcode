@@ -186,35 +186,43 @@ fn submitting_without_a_session_keeps_the_text_and_says_why() {
     assert!(app.model.notice.is_some(), "no notice explained the no-op");
 }
 
+/// A conversation long enough to overflow any test region.
+fn long_transcript(turns: usize) -> crate::transcript::Transcript {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    for n in 1..=turns {
+        transcript.push(Message::user(format!("question {n}")));
+        transcript.push(Message::assistant(format!(
+            "answer {n}. {}",
+            "prose that wraps at any sensible width ".repeat(3)
+        )));
+    }
+    transcript
+}
+
 #[test]
 fn scrolling_clamps_and_returns_to_the_tail() {
     let mut app = App::default();
-    app.model.transcript = (1..=100)
-        .map(|n| format!("line {n}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    app.model.transcript = long_transcript(60);
     app.apply(Action::ScrollTop, None);
     let top = app.model.scroll;
-    assert!(top > 0, "scrolling up did nothing");
+    assert!(top > 0.0, "scrolling up did nothing");
     app.apply(Action::ScrollUp, None);
     assert_eq!(app.model.scroll, top, "scroll ran past the top of history");
     app.apply(Action::ScrollBottom, None);
-    assert_eq!(app.model.scroll, 0, "did not return to the live tail");
+    assert_eq!(app.model.scroll, 0.0, "did not return to the live tail");
     app.apply(Action::ScrollDown, None);
-    assert_eq!(app.model.scroll, 0, "scrolled below the tail");
+    assert_eq!(app.model.scroll, 0.0, "scrolled below the tail");
 }
 
 #[test]
 fn submitting_jumps_back_to_the_live_tail() {
     let mut app = app_with("question");
-    app.model.transcript = (1..=100)
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
+    app.model.transcript = long_transcript(60);
     app.apply(Action::PageUp, None);
-    assert!(app.model.scroll > 0);
+    assert!(app.model.scroll > 0.0);
     app.submit_input();
-    assert_eq!(app.model.scroll, 0, "reply would stream in off-screen");
+    assert_eq!(app.model.scroll, 0.0, "reply would stream in off-screen");
 }
 
 #[test]
@@ -608,7 +616,7 @@ fn shift_enter_makes_a_new_line_and_enter_still_submits() {
         app.model.editor.is_empty(),
         "Enter did not submit a multi-line message"
     );
-    assert!(app.model.transcript.contains("first\nsecond"));
+    assert!(app.model.transcript.plain_text().contains("first\nsecond"));
 }
 
 #[test]
@@ -740,15 +748,12 @@ fn hit_testing_uses_the_frame_that_was_actually_drawn() {
 #[test]
 fn the_wheel_scrolls_and_clamps_like_the_keyboard() {
     let mut app = App::default();
-    app.model.transcript = (1..=100)
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let visible = app.visible_lines();
-    app.model.scroll_up(3, visible);
-    assert_eq!(app.model.scroll, 3);
-    app.model.scroll_down(99);
-    assert_eq!(app.model.scroll, 0, "wheel scrolled past the tail");
+    app.model.transcript = long_transcript(60);
+    let max = app.max_scroll();
+    app.model.scroll_up(30.0, max);
+    assert_eq!(app.model.scroll, 30.0);
+    app.model.scroll_down(9_000.0);
+    assert_eq!(app.model.scroll, 0.0, "wheel scrolled past the tail");
 }
 
 #[test]
@@ -922,7 +927,10 @@ mod donut {
     fn the_donut_stands_down_once_there_is_a_transcript() {
         let mut app = app_on_empty_session();
         assert!(app.donut_visible());
-        app.model.transcript.push_str("\n> hi\n\nhello\n");
+        app.model
+            .transcript
+            .push(crate::transcript::Message::user("hi"));
+        app.model.transcript.append_assistant("hello");
         assert!(!app.donut_visible(), "content must take the donut's space");
         // And a press where the donut was is inert, not a hidden hit target.
         let (cx, cy) = donut_centre(&app);

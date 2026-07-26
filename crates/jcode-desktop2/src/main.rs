@@ -22,6 +22,8 @@ mod states;
 mod tests;
 mod text;
 mod theme;
+mod transcript;
+mod viewport;
 mod window_state;
 
 use anyhow::Result;
@@ -149,7 +151,7 @@ fn run_e2e(message: &str) -> Result<()> {
                 println!("[e2e] attached: {session_id}");
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);
-                model.transcript.push_str(&format!("\n> {message}\n\n"));
+                model.transcript.push(transcript::Message::user(message));
                 outgoing.send(message.to_string())?;
                 sent = true;
             }
@@ -165,7 +167,7 @@ fn run_e2e(message: &str) -> Result<()> {
             }
             harness::HarnessUpdate::Text(text) => {
                 print!("{text}");
-                model.transcript.push_str(&text);
+                model.transcript.append_assistant(&text);
             }
             harness::HarnessUpdate::TurnDone if sent => {
                 println!("\n[e2e] turn done");
@@ -328,7 +330,7 @@ pub struct Model {
     pub meta: meta::Meta,
     pub status: String,
     pub session_id: Option<String>,
-    pub transcript: String,
+    pub transcript: transcript::Transcript,
     /// The composer: a real text buffer with a cursor, not an append-only
     /// string.
     pub editor: editor::Editor,
@@ -338,8 +340,12 @@ pub struct Model {
     /// both key off this: an unfocused input that still shows a blinking caret
     /// lies about where typing will go.
     pub focused: bool,
-    /// Lines scrolled up from the tail. 0 follows the newest output.
-    pub scroll: usize,
+    /// Logical pixels scrolled up from the tail. 0 follows the newest output.
+    ///
+    /// Pixels rather than lines: the screen moves in pixels, and a wrapped
+    /// paragraph has more visual rows than newlines, so a line-based scroll
+    /// and the display disagree the moment anything wraps.
+    pub scroll: f64,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
     /// The hero donut's luminance field, or `None` when the donut is off
@@ -385,12 +391,12 @@ impl Default for Model {
             meta: meta::Meta::detect(),
             status: "starting...".into(),
             session_id: None,
-            transcript: String::new(),
+            transcript: transcript::Transcript::default(),
             editor: editor::Editor::default(),
             caret: caret::Caret::default(),
             busy: false,
             focused: true,
-            scroll: 0,
+            scroll: 0.0,
             notice: None,
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
@@ -417,20 +423,15 @@ fn donut_disabled() -> bool {
 }
 
 impl Model {
-    /// Total transcript lines, used to clamp scrolling.
-    fn transcript_lines(&self) -> usize {
-        self.transcript.lines().count()
+    /// Scroll up by `amount` logical pixels, clamped to `max` so the view
+    /// cannot run past the top of the conversation into blank space.
+    fn scroll_up(&mut self, amount: f64, max: f64) {
+        self.scroll = (self.scroll + amount).clamp(0.0, max.max(0.0));
     }
 
-    /// Scroll up by `lines`, clamped so the view cannot run past the top.
-    fn scroll_up(&mut self, lines: usize, visible: usize) {
-        let max = self.transcript_lines().saturating_sub(visible);
-        self.scroll = (self.scroll + lines).min(max);
-    }
-
-    /// Scroll down by `lines`; reaching 0 re-follows the tail.
-    fn scroll_down(&mut self, lines: usize) {
-        self.scroll = self.scroll.saturating_sub(lines);
+    /// Scroll down by `amount` logical pixels; reaching 0 re-follows the tail.
+    fn scroll_down(&mut self, amount: f64) {
+        self.scroll = (self.scroll - amount).max(0.0);
     }
 
     fn set_notice(&mut self, notice: impl Into<String>) {
@@ -465,8 +466,8 @@ impl Model {
         if let Some(notice) = &self.notice {
             return Some(notice.clone());
         }
-        if self.scroll > 0 {
-            return Some(format!("scrolled back {} lines", self.scroll));
+        if self.scroll > 0.0 {
+            return Some("scrolled back".to_string());
         }
         self.status_footnote().or_else(|| self.meta.alert())
     }
@@ -487,10 +488,9 @@ impl App {
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
                 }
-                harness::HarnessUpdate::Text(text) => self.model.transcript.push_str(&text),
+                harness::HarnessUpdate::Text(text) => self.model.transcript.append_assistant(&text),
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
-                    self.model.transcript.push('\n');
                 }
             }
         }
@@ -510,11 +510,11 @@ impl App {
         self.model.hint = self.model.hint.wrapping_add(1);
         self.model
             .transcript
-            .push_str(&format!("\n> {content}\n\n"));
+            .push(transcript::Message::user(content.clone()));
         self.model.busy = true;
         // Submitting jumps back to the live tail; otherwise the reply streams
         // in off-screen.
-        self.model.scroll = 0;
+        self.model.scroll = 0.0;
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(content);
         }
@@ -671,7 +671,7 @@ impl App {
     /// Whether the donut is on screen: enabled, and the session is still empty
     /// (the same condition `build_scene` draws it under).
     fn donut_visible(&self) -> bool {
-        self.model.donut.is_some() && self.model.transcript.trim().is_empty()
+        self.model.donut.is_some() && self.model.transcript.is_empty()
     }
 
     fn on_pointer_moved(&mut self) {
@@ -757,21 +757,47 @@ impl App {
         }
     }
 
-    /// Lines of transcript currently visible, needed to clamp scrolling.
-    fn visible_lines(&self) -> usize {
-        self.state
-            .as_ref()
-            .map(|state| {
-                layout::Frame::new(state.size(), state.scale_factor()).visible_body_lines()
-            })
-            .unwrap_or(20)
+    /// Height of the transcript region in logical units.
+    fn transcript_region_height(&self) -> f64 {
+        (self.frame.body_bottom - self.frame.body_top).max(1.0)
+    }
+
+    /// Furthest the transcript may scroll, in logical pixels.
+    ///
+    /// This measures the real laid-out conversation rather than counting
+    /// newlines, so the clamp agrees with what is drawn even when a single
+    /// streamed paragraph wraps into a screenful.
+    fn max_scroll(&mut self) -> f64 {
+        let frame = self.frame;
+        let style = crate::scene::transcript_body_style(&self.model);
+        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+        let region = self.transcript_region_height();
+        // Split the borrows: the viewport needs the text system mutably while
+        // reading the model, so both are taken from `self` up front.
+        let App {
+            text, model: state, ..
+        } = self;
+        crate::viewport::Viewport::new(
+            text,
+            &state.transcript,
+            width,
+            region,
+            state.scroll,
+            &state.theme,
+            style,
+            frame.scale,
+        )
+        .max_scroll()
     }
 
     /// Apply one resolved action. Returns false when the app should exit, so
     /// quitting stays an explicit outcome rather than a side effect.
     fn apply(&mut self, action: keymap::Action, typed: Option<&str>) -> bool {
         use keymap::Action;
-        let page = self.visible_lines().saturating_sub(1).max(1);
+        // A page is the region minus one line of overlap, so scrolling keeps
+        // a row of context rather than jumping blind.
+        let page = (self.transcript_region_height() - self.frame.body_line_height()).max(1.0);
+        let line = self.frame.body_line_height();
         self.model.notice = None;
         match action {
             Action::Insert => {
@@ -852,15 +878,21 @@ impl App {
                 }
             }
 
-            Action::ScrollUp => self.model.scroll_up(1, self.visible_lines()),
-            Action::ScrollDown => self.model.scroll_down(1),
-            Action::PageUp => self.model.scroll_up(page, self.visible_lines()),
+            Action::ScrollUp => {
+                let max = self.max_scroll();
+                self.model.scroll_up(line, max);
+            }
+            Action::ScrollDown => self.model.scroll_down(line),
+            Action::PageUp => {
+                let max = self.max_scroll();
+                self.model.scroll_up(page, max);
+            }
             Action::PageDown => self.model.scroll_down(page),
             Action::ScrollTop => {
-                let visible = self.visible_lines();
-                self.model.scroll_up(usize::MAX / 2, visible);
+                let max = self.max_scroll();
+                self.model.scroll_up(max, max);
             }
-            Action::ScrollBottom => self.model.scroll = 0,
+            Action::ScrollBottom => self.model.scroll = 0.0,
 
             // Escape never quits: it cancels, then clears, then re-follows the
             // tail, matching the TUI.
@@ -871,7 +903,7 @@ impl App {
                 } else if !self.model.editor.is_empty() {
                     self.model.editor.clear();
                 } else {
-                    self.model.scroll = 0;
+                    self.model.scroll = 0.0;
                 }
             }
             // Ctrl+C interrupts while busy and only quits when idle with an
@@ -979,18 +1011,20 @@ impl ApplicationHandler for App {
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {
-                // Scrolling the transcript with the wheel, in line units.
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        pos.y / (layout::BODY_SIZE as f64 * layout::BODY_LEADING)
+                // Scrolling the transcript with the wheel, in logical pixels
+                // so a trackpad's fine-grained deltas are not quantised to
+                // whole lines.
+                let pixels = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                        f64::from(y) * self.frame.body_line_height()
                     }
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y / self.frame.scale,
                 };
-                let steps = lines.abs().round().max(1.0) as usize;
-                if lines > 0.0 {
-                    self.model.scroll_up(steps, self.visible_lines());
-                } else if lines < 0.0 {
-                    self.model.scroll_down(steps);
+                if pixels > 0.0 {
+                    let max = self.max_scroll();
+                    self.model.scroll_up(pixels, max);
+                } else if pixels < 0.0 {
+                    self.model.scroll_down(-pixels);
                 }
                 self.request_redraw();
             }
