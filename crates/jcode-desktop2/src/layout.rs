@@ -37,6 +37,26 @@ pub const CARET_HEIGHT: f64 = 18.0;
 /// Caption row under the composer for notices and the scrollback indicator.
 pub const FOOTNOTE_HEIGHT: f64 = 16.0;
 pub const FOOTNOTE_GAP: f64 = 6.0;
+/// Session strip: one row of bars at the very top, modelled on the waybar
+/// `niri-workspaces` module. Fixed height, because it is chrome rather than
+/// content and must not grow with the number of sessions.
+pub const STRIP_HEIGHT: f64 = 14.0;
+/// Gap between the strip and the transcript below it.
+pub const STRIP_GAP: f64 = 10.0;
+/// Caption size for the strip's group labels.
+pub const STRIP_LABEL_SIZE: f32 = 10.0;
+/// Width of one session bar, and the gap between bars in a group. Tuned to
+/// read as the `|` ticks of the waybar module rather than as buttons.
+pub const STRIP_BAR_WIDTH: f64 = 2.0;
+/// The focused bar is drawn wider, standing in for the module's `█` glyph.
+pub const STRIP_BAR_FOCUS_WIDTH: f64 = 6.0;
+pub const STRIP_BAR_GAP: f64 = 3.0;
+/// Height of a bar within the strip row.
+pub const STRIP_BAR_HEIGHT: f64 = 10.0;
+/// Gap between a group's label and its first bar.
+pub const STRIP_LABEL_GAP: f64 = 6.0;
+/// Gap between one group and the next.
+pub const STRIP_GROUP_GAP: f64 = 16.0;
 /// Largest the hero donut gets, in logical units. Matches the website's
 /// 360px hero canvas, so the halftone screen has the same density there.
 pub const DONUT_MAX_SIDE: f64 = 360.0;
@@ -98,6 +118,9 @@ pub struct Frame {
     /// appearing never shifts the composer or spills off-paper.
     pub footnote_top: f64,
     pub footnote_bottom: f64,
+    /// Top of the session strip row, when the strip is shown. `None` means
+    /// there is no strip and nothing above was reserved for it.
+    strip_top: Option<f64>,
 }
 
 impl Frame {
@@ -105,6 +128,20 @@ impl Frame {
     /// with a single-line composer.
     pub fn new(size: (u32, u32), scale: f64) -> Self {
         Self::with_composer_lines(size, scale, 1)
+    }
+
+    /// Resolve geometry with a session strip reserved at the top.
+    pub fn with_strip(size: (u32, u32), scale: f64, lines: usize, strip: bool) -> Self {
+        let mut frame = Self::with_composer_lines(size, scale, lines);
+        // The strip takes its row out of the transcript's top margin, which is
+        // dead space anyway, and only when there is something to show. Nothing
+        // is reserved otherwise, so a single-session window is byte-identical
+        // to one built before the strip existed.
+        if strip {
+            frame.strip_top = Some(frame.body_top);
+            frame.body_top = (frame.body_top + STRIP_HEIGHT + STRIP_GAP).min(frame.body_bottom);
+        }
+        frame
     }
 
     /// Resolve geometry with a composer sized for `lines` of input. The
@@ -166,12 +203,20 @@ impl Frame {
             composer_bottom,
             footnote_top,
             footnote_bottom,
+            strip_top: None,
         }
     }
 
     /// Width of the measure column.
     pub fn column(&self) -> f64 {
         self.right - self.left
+    }
+
+    /// The session strip's row, in logical units, or `None` when no strip is
+    /// shown. Returned as a band rather than a top so callers cannot invent
+    /// their own height and drift from the reserved space.
+    pub fn strip(&self) -> Option<(f64, f64)> {
+        self.strip_top.map(|top| (top, top + STRIP_HEIGHT))
     }
 
     /// Height of one body line.
@@ -295,6 +340,57 @@ mod tests {
                 for lines in [1usize, 2, 4, COMPOSER_MAX_LINES, COMPOSER_MAX_LINES + 20] {
                     check(Frame::with_composer_lines(size, scale, lines));
                 }
+            }
+        }
+    }
+
+    /// The same sweep, with the session strip shown.
+    fn sweep_with_strip(mut check: impl FnMut(Frame)) {
+        for &size in SIZES {
+            for &scale in SCALES {
+                for lines in [1usize, 2, 4, COMPOSER_MAX_LINES] {
+                    check(Frame::with_strip(size, scale, lines, true));
+                }
+            }
+        }
+    }
+
+    /// R1: the strip owns a band of its own at the top and can never collide
+    /// with the transcript or the composer, at any window size or DPI.
+    #[test]
+    fn strip_band_never_overlaps_body_or_composer() {
+        sweep_with_strip(|frame| {
+            let (top, bottom) = frame.strip().expect("strip was requested but absent");
+            assert!(top >= 0.0, "strip started off-paper at {top}");
+            assert!(bottom > top, "strip band inverted");
+            assert!(
+                bottom <= frame.body_top + 1e-9,
+                "strip ({bottom}) ran into the transcript ({})",
+                frame.body_top
+            );
+            assert!(
+                bottom < frame.composer_top,
+                "strip ran into the composer at {}x{}",
+                frame.width,
+                frame.height
+            );
+        });
+    }
+
+    /// R2: with nothing worth showing, the strip must not merely be invisible
+    /// but absent, leaving the rest of the frame bit-for-bit as it was.
+    #[test]
+    fn strip_is_absent_when_not_requested() {
+        for &size in SIZES {
+            for &scale in SCALES {
+                let without = Frame::with_strip(size, scale, 1, false);
+                let before = Frame::new(size, scale);
+                assert_eq!(without.strip(), None);
+                assert_eq!(
+                    without.body_top, before.body_top,
+                    "a hidden strip still stole space"
+                );
+                assert_eq!(without.body_bottom, before.body_bottom);
             }
         }
     }

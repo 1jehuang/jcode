@@ -30,6 +30,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("markdown", markdown),
     ("latex", latex),
     ("code_block", code_block),
+    ("session_strip", session_strip),
+    ("session_strip_second_group", session_strip_second_group),
     ("notice", notice),
     ("error", error),
     ("long_paragraph", long_paragraph),
@@ -78,6 +80,7 @@ fn connecting() -> Model {
         hint: 0,
         // Detached: nothing has told us the model yet, so the caption is absent.
         model: None,
+        strip: crate::strip::Strip::default(),
     }
 }
 
@@ -136,6 +139,7 @@ fn attached_empty() -> Model {
         // than whatever the clock happened to pick.
         hint: 0,
         model: Some(fixed_model()),
+        strip: crate::strip::Strip::default(),
     }
 }
 
@@ -292,6 +296,65 @@ fn scrolled_back() -> Model {
                 .collect(),
         ),
         scroll: 200.0,
+        ..attached_empty()
+    }
+}
+
+/// Several live sessions across two working directories: the case the strip
+/// exists for. Fixed ids so the bars are a pinned, testable arrangement.
+fn demo_strip(focused: &str) -> crate::strip::Strip {
+    crate::strip::Strip::build(
+        vec![
+            crate::strip::Entry {
+                session_id: "s_jcode_1".into(),
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+            },
+            crate::strip::Entry {
+                session_id: "s_jcode_2".into(),
+                working_dir: Some("/home/j/jcode".into()),
+                busy: true,
+            },
+            crate::strip::Entry {
+                session_id: "s_jcode_3".into(),
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+            },
+            crate::strip::Entry {
+                session_id: "s_site_1".into(),
+                working_dir: Some("/home/j/site".into()),
+                busy: false,
+            },
+            crate::strip::Entry {
+                session_id: "s_site_2".into(),
+                working_dir: Some("/home/j/site".into()),
+                busy: false,
+            },
+        ],
+        Some(focused),
+    )
+}
+
+fn session_strip() -> Model {
+    Model {
+        transcript: crate::transcript::Transcript::from(
+            &[
+                crate::transcript::Message::user("what is in this repo"),
+                crate::transcript::Message::assistant("A coding agent, written in Rust."),
+            ][..],
+        ),
+        session_id: Some("s_jcode_2".into()),
+        strip: demo_strip("s_jcode_2"),
+        ..attached_empty()
+    }
+}
+
+/// Focus in the second group: proves up/down really moves the highlight to
+/// another directory rather than only recolouring within one.
+fn session_strip_second_group() -> Model {
+    Model {
+        session_id: Some("s_site_1".into()),
+        strip: demo_strip("s_site_1"),
         ..attached_empty()
     }
 }

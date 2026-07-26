@@ -31,6 +31,15 @@ pub struct BridgeState {
     pending_model_probe: Option<u64>,
     /// Legacy id -> API id for simple acked requests (ping, clear, ...).
     pending_simple: Vec<(u64, u64, SimpleKind)>,
+    /// Every session the daemon has told us about, newest snapshot wins.
+    ///
+    /// The legacy protocol has no session-list request, but it volunteers the
+    /// full set on every `state` event, so the bridge remembers it rather than
+    /// answering `list_sessions` with only the one session this connection
+    /// happens to be attached to.
+    known_sessions: Vec<String>,
+    /// Working directory per session, as far as it is known.
+    session_dirs: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -141,16 +150,33 @@ impl BridgeState {
                 vec![Outbound::Legacy(json!({"type": "ping", "id": id}))]
             }
             "list_sessions" => {
-                // Not yet mapped onto the legacy protocol; answer with what we
-                // know (the attached session, if any).
-                let sessions = self
-                    .session_id
+                // The legacy protocol has no list request, but it reports the
+                // full set on every `state` event, so answer from that rather
+                // than pretending only the attached session exists.
+                let mut ids = self.known_sessions.clone();
+                if let Some(attached) = self.session_id.clone()
+                    && !ids.contains(&attached)
+                {
+                    ids.push(attached);
+                }
+                for id in &ids {
+                    if !self.session_dirs.contains_key(id)
+                        && let Some(dir) = Self::resolve_working_dir(id)
+                    {
+                        self.session_dirs.insert(id.clone(), dir);
+                    }
+                }
+                let sessions = ids
                     .iter()
                     .map(|session_id| SessionInfo {
                         session_id: session_id.clone(),
-                        working_dir: None,
+                        working_dir: self.session_dirs.get(session_id).cloned(),
                         title: None,
-                        status: "attached".into(),
+                        status: if self.session_id.as_ref() == Some(session_id) {
+                            "attached".into()
+                        } else {
+                            "idle".into()
+                        },
                     })
                     .collect();
                 vec![Outbound::Reply(ServerFrame::reply(
@@ -280,6 +306,10 @@ impl BridgeState {
                 .unwrap_or_default(),
             "history" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                // The daemon volunteers the full session set on `history`,
+                // which is the only place it appears: remember it so
+                // `list_sessions` can answer with more than this connection.
+                self.note_sessions(event);
                 // The catalog probe rides the same `history` reply shape but
                 // carries no messages: it is model identity, not transcript.
                 if self.pending_model_probe == Some(id) {
@@ -362,6 +392,46 @@ impl BridgeState {
             session_id,
             provider: event["provider_name"].as_str().map(str::to_string),
             model: event["provider_model"].as_str().map(str::to_string),
+        }
+    }
+
+    /// Working directory of a session, read from its persisted record.
+    ///
+    /// The legacy `history` event lists session *ids* only, but the strip
+    /// groups by directory, so the bridge resolves them from the same files
+    /// the daemon persists. Best-effort by design: an unreadable or missing
+    /// record simply leaves the session ungrouped rather than failing the
+    /// list, and results are cached because this is on a poll path.
+    fn resolve_working_dir(session_id: &str) -> Option<String> {
+        let home = std::env::var_os("HOME")?;
+        let path = std::path::Path::new(&home)
+            .join(".jcode")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        let text = std::fs::read_to_string(path).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        value["working_dir"].as_str().map(str::to_string)
+    }
+
+    /// Record the session set the daemon reported, plus any working
+    /// directory it mentioned. Kept separate so both the attach probe and an
+    /// explicit history request feed the same list.
+    fn note_sessions(&mut self, event: &Value) {
+        if let Some(all) = event["all_sessions"].as_array() {
+            let listed: Vec<String> = all
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect();
+            if !listed.is_empty() {
+                self.known_sessions = listed;
+            }
+        }
+        if let Some(dir) = event["working_dir"].as_str()
+            && let Some(session_id) = event["session_id"].as_str()
+        {
+            self.session_dirs
+                .insert(session_id.to_string(), dir.to_string());
         }
     }
 

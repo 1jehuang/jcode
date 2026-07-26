@@ -1016,3 +1016,175 @@ fn a_reported_model_reaches_the_model() {
         Some("gpt-5.6")
     );
 }
+
+/// R6: the session strip. Moving must actually switch the conversation, not
+/// merely recolour a bar, and it must never leak the previous session's
+/// transcript into the new one.
+mod session_strip {
+    use super::*;
+    use crate::strip::{Entry, Strip};
+
+    fn app_with_sessions(focused: &str) -> App {
+        let mut app = App::default();
+        let entries = vec![
+            Entry {
+                session_id: "s_a1".into(),
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+            },
+            Entry {
+                session_id: "s_a2".into(),
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+            },
+            Entry {
+                session_id: "s_b1".into(),
+                working_dir: Some("/home/j/site".into()),
+                busy: false,
+            },
+        ];
+        app.model.strip = Strip::build(entries, Some(focused));
+        app.model.session_id = Some(focused.into());
+        app
+    }
+
+    #[test]
+    fn moving_right_switches_the_attached_session() {
+        let mut app = app_with_sessions("s_a1");
+        app.model
+            .transcript
+            .push(crate::transcript::Message::assistant(
+                "output from the old session",
+            ));
+        app.model.busy = true;
+        app.model.scroll = 4.0;
+
+        app.apply(Action::SessionRight, None);
+
+        assert_eq!(
+            app.model.session_id.as_deref(),
+            Some("s_a2"),
+            "the highlight moved but the session did not"
+        );
+        assert!(
+            app.model.transcript.is_empty(),
+            "the previous session's transcript leaked into the new one"
+        );
+        assert!(!app.model.busy, "carried the old session's busy state");
+        assert_eq!(app.model.scroll, 0.0, "carried the old session's scroll");
+    }
+
+    #[test]
+    fn moving_down_switches_to_the_other_working_directory() {
+        let mut app = app_with_sessions("s_a1");
+        app.apply(Action::SessionDown, None);
+        assert_eq!(app.model.session_id.as_deref(), Some("s_b1"));
+        assert_eq!(app.model.strip.group_index(), 1);
+    }
+
+    /// With one session there is nowhere to go, so the keys must leave the
+    /// attached session completely alone rather than "switching" to itself
+    /// and wiping the transcript.
+    #[test]
+    fn navigation_is_inert_with_a_single_session() {
+        let mut app = App::default();
+        app.model.strip = Strip::build(
+            vec![Entry {
+                session_id: "solo".into(),
+                working_dir: Some("/tmp".into()),
+                busy: false,
+            }],
+            Some("solo"),
+        );
+        app.model.session_id = Some("solo".into());
+        app.model
+            .transcript
+            .push(crate::transcript::Message::assistant("keep me"));
+
+        for action in [
+            Action::SessionLeft,
+            Action::SessionRight,
+            Action::SessionUp,
+            Action::SessionDown,
+        ] {
+            app.apply(action, None);
+        }
+
+        assert_eq!(app.model.session_id.as_deref(), Some("solo"));
+        assert_eq!(
+            app.model.transcript.plain_text().trim(),
+            "keep me",
+            "an inert move still wiped the transcript"
+        );
+    }
+
+    /// R2 at the model level: the strip only claims a row once there is
+    /// somewhere to move to.
+    #[test]
+    fn the_strip_band_appears_only_with_more_than_one_session() {
+        let mut app = App::default();
+        assert_eq!(
+            App::frame_for_model((1400, 900), 1.0, &app.model).strip(),
+            None,
+            "an empty session list still reserved a strip row"
+        );
+
+        app.model.strip = Strip::build(
+            vec![Entry {
+                session_id: "solo".into(),
+                working_dir: Some("/tmp".into()),
+                busy: false,
+            }],
+            Some("solo"),
+        );
+        assert_eq!(
+            App::frame_for_model((1400, 900), 1.0, &app.model).strip(),
+            None,
+            "a single session still reserved a strip row"
+        );
+
+        app = app_with_sessions("s_a1");
+        assert!(
+            App::frame_for_model((1400, 900), 1.0, &app.model)
+                .strip()
+                .is_some(),
+            "several sessions did not get a strip"
+        );
+    }
+
+    /// A poll must not yank the user somewhere else: the refreshed strip has
+    /// to stay pointed at the conversation on screen.
+    #[test]
+    fn a_session_list_refresh_keeps_the_current_session_focused() {
+        let mut app = app_with_sessions("s_a1");
+        app.apply(Action::SessionDown, None);
+        assert_eq!(app.model.session_id.as_deref(), Some("s_b1"));
+
+        // A later poll reports the same sessions in the same order.
+        app.model.strip = Strip::build(
+            vec![
+                Entry {
+                    session_id: "s_a1".into(),
+                    working_dir: Some("/home/j/jcode".into()),
+                    busy: false,
+                },
+                Entry {
+                    session_id: "s_a2".into(),
+                    working_dir: Some("/home/j/jcode".into()),
+                    busy: false,
+                },
+                Entry {
+                    session_id: "s_b1".into(),
+                    working_dir: Some("/home/j/site".into()),
+                    busy: false,
+                },
+            ],
+            app.model.session_id.as_deref(),
+        );
+        assert_eq!(
+            app.model.strip.focused_session(),
+            Some("s_b1"),
+            "a refresh moved the highlight off the visible session"
+        );
+    }
+}

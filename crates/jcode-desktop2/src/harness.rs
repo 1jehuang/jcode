@@ -31,6 +31,20 @@ pub enum HarnessUpdate {
     },
     Text(String),
     TurnDone,
+    /// The daemon's current session list, for the session strip.
+    Sessions(Vec<crate::strip::Entry>),
+}
+
+/// A command from the UI thread to the connection worker.
+///
+/// Sending a message and switching sessions travel the same channel so they
+/// stay ordered with respect to each other: a switch must never overtake a
+/// message that was typed into the session being left.
+#[derive(Debug)]
+pub enum Command {
+    Send(String),
+    /// Attach to another session; the worker retargets subsequent sends.
+    Attach(String),
 }
 
 /// The API socket both this app and the bridge agree on. Shared with the
@@ -41,6 +55,9 @@ pub fn api_socket_path() -> PathBuf {
 
 /// How long to wait for a freshly spawned runtime to publish its socket.
 const RUNTIME_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the session strip is refreshed.
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 fn socket_accepts(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
@@ -108,9 +125,9 @@ fn wait_for_socket(path: &Path, what: &str) -> Result<(), Box<dyn std::error::Er
 
 /// Spawn the connection worker. Returns the receiving side for the UI and a
 /// sender for outgoing user messages.
-pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Sender<String>) {
+pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Sender<Command>) {
     let (update_tx, update_rx) = channel::<HarnessUpdate>();
-    let (outgoing_tx, outgoing_rx) = channel::<String>();
+    let (outgoing_tx, outgoing_rx) = channel::<Command>();
     std::thread::spawn(move || {
         let send = move |update: HarnessUpdate| {
             let _ = update_tx.send(update);
@@ -125,7 +142,7 @@ pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Se
 
 fn run(
     send: &impl Fn(HarnessUpdate),
-    outgoing: Receiver<String>,
+    outgoing: Receiver<Command>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = api_socket_path();
     send(HarnessUpdate::Status(format!(
@@ -150,22 +167,54 @@ fn run(
         let session_id = Arc::clone(&session_id);
         let mut writer_stream = stream.try_clone()?;
         move || {
-            while let Ok(content) = outgoing.recv() {
-                let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
-                if session.is_empty() {
-                    continue;
-                }
-                let frame = ClientFrame::new(
-                    writer_ids.fetch_add(1, Ordering::Relaxed),
-                    ApiRequest::SendMessage {
-                        session_id: session,
-                        content,
-                        images: vec![],
-                    },
-                );
+            while let Ok(command) = outgoing.recv() {
+                let request = match command {
+                    Command::Send(content) => {
+                        let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                        if session.is_empty() {
+                            continue;
+                        }
+                        ApiRequest::SendMessage {
+                            session_id: session,
+                            content,
+                            images: vec![],
+                        }
+                    }
+                    // Retarget immediately rather than waiting for the
+                    // `Attached` event: a message typed straight after a
+                    // switch must land in the session the user is looking at.
+                    Command::Attach(target) => {
+                        if let Ok(mut guard) = session_id.lock() {
+                            *guard = target.clone();
+                        }
+                        ApiRequest::AttachSession { session_id: target }
+                    }
+                };
+                let frame = ClientFrame::new(writer_ids.fetch_add(1, Ordering::Relaxed), request);
                 if write_frame(&mut writer_stream, &frame).is_err() {
                     break;
                 }
+            }
+        }
+    });
+
+    // Session-list poller. The API has no push notification for sessions
+    // appearing or disappearing, so the strip is refreshed on a slow timer;
+    // slow because a strip that is a second stale costs nothing, while a busy
+    // poll would tax the daemon for the whole life of the window.
+    std::thread::spawn({
+        let mut poll_stream = stream.try_clone()?;
+        let poll_ids = AtomicU64::new(2_000_000);
+        move || {
+            loop {
+                let frame = ClientFrame::new(
+                    poll_ids.fetch_add(1, Ordering::Relaxed),
+                    ApiRequest::ListSessions,
+                );
+                if write_frame(&mut poll_stream, &frame).is_err() {
+                    break;
+                }
+                std::thread::sleep(SESSION_POLL_INTERVAL);
             }
         }
     });
@@ -177,11 +226,29 @@ fn run(
                 if let Ok(mut guard) = session_id.lock() {
                     *guard = session.session_id.clone();
                 }
+                // The daemon reports the full session set only alongside
+                // history, so ask for it once on attach; without this the
+                // strip would only ever see the session we are attached to.
+                let _ = client.send(ApiRequest::GetHistory {
+                    session_id: session.session_id.clone(),
+                });
                 send(HarnessUpdate::Attached {
                     session_id: session.session_id,
                 });
             }
             ApiEvent::TextDelta { text, .. } => send(HarnessUpdate::Text(text)),
+            ApiEvent::Sessions { sessions } => {
+                send(HarnessUpdate::Sessions(
+                    sessions
+                        .into_iter()
+                        .map(|session| crate::strip::Entry {
+                            session_id: session.session_id,
+                            working_dir: session.working_dir,
+                            busy: session.status == "busy",
+                        })
+                        .collect(),
+                ));
+            }
             ApiEvent::ModelInfo {
                 provider, model, ..
             } => send(HarnessUpdate::Model { provider, model }),
