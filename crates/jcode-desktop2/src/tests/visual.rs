@@ -1143,3 +1143,39 @@ fn a_footnote_and_the_model_caption_do_not_collide() {
         "the footnote and the model caption ran together"
     );
 }
+
+/// A single reply too tall for the transcript region must be clipped to it,
+/// not painted straight down over the composer. Before the transcript was
+/// clipped, the fit loop could only drop whole logical lines, so one long
+/// streamed paragraph (exactly what a real answer looks like) wrapped past
+/// `body_bottom` and struck through the input field.
+#[test]
+#[ignore = "requires a GPU"]
+fn an_overflowing_reply_stays_out_of_the_composer() {
+    let model = states::by_name("long_paragraph").expect("the overflow node");
+    let Some(r) = Rendered::new(&model) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let f = r.frame;
+    // Inside the well, past where the placeholder hint and the caret can reach:
+    // the overflowing paragraph fills the whole measure column, so if it leaked
+    // into the field it inks here. Sampled between the horizontal borders so
+    // the field's own outline is not mistaken for transcript ink.
+    let darkest = r.darkest_in(
+        f.left + f.column() * 0.75,
+        f.composer_top + 3.0,
+        f.right - 4.0,
+        f.composer_bottom - 3.0,
+    );
+    assert!(
+        darkest > 0.55,
+        "transcript ink ({darkest:.3} luma) landed inside the composer well"
+    );
+    // And nothing below the well either.
+    let below = r.darkest_in(f.left, f.footnote_bottom + 4.0, f.right, f.height - 2.0);
+    assert!(
+        below > 0.9,
+        "transcript ink ({below:.3} luma) spilled below the footnote row"
+    );
+}
