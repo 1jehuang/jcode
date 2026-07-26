@@ -77,6 +77,43 @@ fn has_started_conversation(state: &dyn TuiState) -> bool {
         .any(|m| matches!(m.role.as_str(), "user" | "assistant" | "tool" | "reasoning"))
 }
 
+/// Last reason a periodic tick demanded a full frame instead of the cheap
+/// animation-only repaint, surfaced through `draw-stats`.
+///
+/// Stored as an index into [`FULL_FRAME_REDRAW_REASONS`] in an atomic, so the
+/// redraw hot path records it without locking (and without an error to ignore).
+static LAST_FULL_FRAME_REDRAW_REASON: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+const FULL_FRAME_REDRAW_REASONS: &[&str] = &[
+    "processing",
+    "streaming",
+    "tail_catchup",
+    "status_notice",
+    "learn_hint",
+    "mouse_scroll_animation",
+    "copy_autoscroll",
+    "chat_overscroll",
+    "notification",
+    "rate_limit_countdown",
+    "remote_startup",
+    "status_animation",
+    "swarm_spinner",
+    "session_picker_spinner",
+];
+
+fn record_full_frame_redraw_reason(reason: &'static str) {
+    if let Some(idx) = FULL_FRAME_REDRAW_REASONS.iter().position(|r| *r == reason) {
+        LAST_FULL_FRAME_REDRAW_REASON.store(idx, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn last_full_frame_redraw_reason() -> Option<&'static str> {
+    FULL_FRAME_REDRAW_REASONS
+        .get(LAST_FULL_FRAME_REDRAW_REASON.load(std::sync::atomic::Ordering::Relaxed))
+        .copied()
+}
+
 pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
     let policy = crate::perf::tui_policy();
     idle_donut_active_with_policy(state, &policy)
@@ -380,31 +417,123 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
     }
 
     if full_frame_status_animation_active_with_policy(state, &policy) {
+        record_full_frame_redraw_reason("status_animation");
         return true;
     }
 
     if swarm_spinner_redraw_active(state) {
+        record_full_frame_redraw_reason("swarm_spinner");
         return true;
     }
 
     if session_picker_spinner_redraw_active(state) {
+        record_full_frame_redraw_reason("session_picker_spinner");
         return true;
     }
 
-    if state.is_processing()
-        || !state.streaming_text().is_empty()
-        || ui::tail_catchup_active()
-        || state.status_notice().is_some()
-        || state.learn_hint().is_some()
-        || state.has_pending_mouse_scroll_animation()
-        || state.copy_selection_edge_autoscroll_active()
-        || state.chat_overscroll_remaining().is_some()
-        || state.has_notification()
-        || rate_limit_countdown_redraw_active(state)
-        || state.remote_startup_phase_active()
-    {
+    if let Some(reason) = live_activity_redraw_reason(state) {
+        record_full_frame_redraw_reason(reason);
         return true;
     }
 
     false
+}
+
+/// Why a tick needs a full frame beyond the decorative animation, or `None`
+/// when nothing else is live.
+///
+/// Named rather than a bare boolean chain so `draw-stats` can report the exact
+/// predicate keeping the animation on the expensive full-frame path. Without
+/// this, diagnosing "the animation ticks are still doing full renders" means
+/// bisecting a ten-term `||`.
+fn live_activity_redraw_reason(state: &dyn TuiState) -> Option<&'static str> {
+    if state.is_processing() {
+        return Some("processing");
+    }
+    if !state.streaming_text().is_empty() {
+        return Some("streaming");
+    }
+    if ui::tail_catchup_active() {
+        return Some("tail_catchup");
+    }
+    if state.status_notice().is_some() {
+        return Some("status_notice");
+    }
+    if state.learn_hint().is_some() {
+        return Some("learn_hint");
+    }
+    if state.has_pending_mouse_scroll_animation() {
+        return Some("mouse_scroll_animation");
+    }
+    if state.copy_selection_edge_autoscroll_active() {
+        return Some("copy_autoscroll");
+    }
+    if state.chat_overscroll_remaining().is_some() {
+        return Some("chat_overscroll");
+    }
+    if state.has_notification() {
+        return Some("notification");
+    }
+    if rate_limit_countdown_redraw_active(state) {
+        return Some("rate_limit_countdown");
+    }
+    if state.remote_startup_phase_active() {
+        return Some("remote_startup");
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both tests mutate the single process-wide reason slot, so they must not
+    /// interleave.
+    fn reason_slot_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Reasons are recorded by index into a fixed table, so a name that is not
+    /// in the table would silently record nothing. Pin every reason the code
+    /// actually passes so a rename cannot quietly blind the diagnostics.
+    #[test]
+    fn every_recorded_reason_is_in_the_reason_table() {
+        let _lock = reason_slot_lock();
+        for reason in [
+            "processing",
+            "streaming",
+            "tail_catchup",
+            "status_notice",
+            "learn_hint",
+            "mouse_scroll_animation",
+            "copy_autoscroll",
+            "chat_overscroll",
+            "notification",
+            "rate_limit_countdown",
+            "remote_startup",
+            "status_animation",
+            "swarm_spinner",
+            "session_picker_spinner",
+        ] {
+            assert!(
+                FULL_FRAME_REDRAW_REASONS.contains(&reason),
+                "{reason} is recorded but missing from FULL_FRAME_REDRAW_REASONS"
+            );
+            record_full_frame_redraw_reason(reason);
+            assert_eq!(
+                last_full_frame_redraw_reason(),
+                Some(reason),
+                "{reason} did not round-trip through the reason slot"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_reasons_do_not_corrupt_the_reason_slot() {
+        let _lock = reason_slot_lock();
+        record_full_frame_redraw_reason("notification");
+        record_full_frame_redraw_reason("not-a-real-reason");
+        assert_eq!(last_full_frame_redraw_reason(), Some("notification"));
+    }
 }

@@ -41,6 +41,67 @@ fn unpack_area(packed: u64) -> Option<Rect> {
     ))
 }
 
+/// Counts of how idle-animation ticks were served, so the partial-repaint fast
+/// path is observable in `draw-stats` instead of having to be inferred from a
+/// profile. A healthy idle screen shows `partial` climbing and `full` flat: a
+/// regression that pushes animation ticks back onto the full frame pipeline
+/// (~50x more expensive) shows up immediately as `full` climbing instead.
+static IDLE_ANIMATION_PARTIAL_REPAINTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static IDLE_ANIMATION_FULL_REPAINTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_idle_animation_partial_repaint() {
+    IDLE_ANIMATION_PARTIAL_REPAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_idle_animation_full_repaint() {
+    IDLE_ANIMATION_FULL_REPAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Tally of why the animation-only repaint was refused, for `draw-stats`.
+///
+/// A tally rather than a "last reason" because the fast path is consulted many
+/// times per second: a single latest value is ambiguous (it can be a rare case
+/// that happened to fire last), while counts show which predicate actually
+/// dominates.
+static IDLE_ANIMATION_FAST_PATH_BLOCKED: std::sync::Mutex<
+    Option<std::collections::BTreeMap<&'static str, u64>>,
+> = std::sync::Mutex::new(None);
+
+pub(crate) fn note_idle_animation_fast_path_blocked(reason: &'static str) {
+    if let Ok(mut slot) = IDLE_ANIMATION_FAST_PATH_BLOCKED.lock() {
+        *slot
+            .get_or_insert_with(std::collections::BTreeMap::new)
+            .entry(reason)
+            .or_insert(0) += 1;
+    }
+}
+
+pub(crate) fn idle_animation_fast_path_blocked_reasons() -> serde_json::Value {
+    match IDLE_ANIMATION_FAST_PATH_BLOCKED.lock() {
+        Ok(slot) => match slot.as_ref() {
+            Some(counts) => serde_json::to_value(counts).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        },
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
+/// Diagnostic snapshot of how idle-animation ticks are being served, embedded
+/// in `draw-stats`. Assembled here so the animation owns its own reporting and
+/// the generic frame-metrics module stays agnostic.
+pub(crate) fn idle_animation_debug_json() -> serde_json::Value {
+    serde_json::json!({
+        "partial_repaints": IDLE_ANIMATION_PARTIAL_REPAINTS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "full_repaints": IDLE_ANIMATION_FULL_REPAINTS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "last_full_frame_reason": crate::tui::last_full_frame_redraw_reason(),
+        "fast_path_blocked": idle_animation_fast_path_blocked_reasons(),
+    })
+}
+
 /// Publish the animated rectangle for the animation-only partial repaint.
 /// `None` means the last frame drew no animation, disabling the fast path.
 pub(crate) fn record_idle_animation_area(area: Option<Rect>) {

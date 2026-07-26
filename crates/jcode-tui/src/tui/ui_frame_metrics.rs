@@ -194,6 +194,7 @@ pub(crate) fn debug_draw_call_history(limit: usize) -> serde_json::Value {
     if samples.is_empty() {
         return serde_json::json!({
             "buffered_samples": 0,
+            "idle_animation": crate::tui::ui::idle_animation_debug_json(),
             "summary": serde_json::Value::Null,
             "samples": [],
         });
@@ -236,6 +237,7 @@ pub(crate) fn debug_draw_call_history(limit: usize) -> serde_json::Value {
     serde_json::json!({
         "buffered_samples": samples.len(),
         "window_ms": window_ms,
+        "idle_animation": crate::tui::ui::idle_animation_debug_json(),
         "summary": {
             "draws_per_second": draws_per_second,
             "render_ms": {

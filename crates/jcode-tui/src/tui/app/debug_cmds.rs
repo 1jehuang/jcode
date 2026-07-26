@@ -634,12 +634,14 @@ impl App {
                 .unwrap_or_else(|_| "render-stats: no frames captured".to_string()),
             }
         } else if cmd == "draw-stats" {
-            let payload = crate::tui::ui::debug_draw_call_history(32);
+            let mut payload = crate::tui::ui::debug_draw_call_history(32);
+            attach_redraw_schedule_debug(&mut payload, self);
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         } else if cmd.starts_with("draw-stats ") {
             let raw_limit = cmd.strip_prefix("draw-stats ").unwrap_or("32").trim();
             let limit = raw_limit.parse::<usize>().unwrap_or(32);
-            let payload = crate::tui::ui::debug_draw_call_history(limit);
+            let mut payload = crate::tui::ui::debug_draw_call_history(limit);
+            attach_redraw_schedule_debug(&mut payload, self);
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "render-order" {
             use crate::tui::visual_debug;
@@ -1118,4 +1120,32 @@ impl App {
         }
         false
     }
+}
+
+/// Attach the live redraw-schedule decision to a `draw-stats` payload.
+///
+/// Frame cost alone cannot explain a choppy animation: a screen can render each
+/// frame in 4ms and still look laggy because the scheduler only asks for a few
+/// frames per second. Reporting the resolved interval and the policy FPS next
+/// to the measured draw rate makes that distinction obvious.
+fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
+    let Some(map) = payload.as_object_mut() else {
+        return;
+    };
+    let policy = crate::perf::tui_policy();
+    map.insert(
+        "redraw_schedule".to_string(),
+        serde_json::json!({
+            "interval_ms": crate::tui::redraw_interval(app).as_millis() as u64,
+            "animation_fps": policy.animation_fps,
+            "redraw_fps": policy.redraw_fps,
+            "tier": format!("{:?}", policy.tier),
+            "decorative_animations": policy.enable_decorative_animations,
+            "idle_animation_active": crate::tui::idle_donut_active(app),
+            "idle_animation_area": crate::tui::ui::last_idle_animation_area()
+                .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
+            "client_focused": crate::tui::TuiState::client_focused(app),
+            "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
+        }),
+    );
 }

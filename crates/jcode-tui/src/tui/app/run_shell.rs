@@ -183,9 +183,36 @@ pub(crate) fn invalidate_previous_terminal_buffer<B: ratatui::backend::Backend>(
     terminal.swap_buffers();
 }
 
+/// Cadence for chrome that is "live" but not animated: notification/status
+/// lines, cache countdowns, and similar text. These change on the order of a
+/// second, so repainting them at the idle rate is imperceptible, while the
+/// decorative animation in between rides the cheap partial-repaint path.
+const IDLE_ANIMATION_CHROME_FULL_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Whether an animation tick may be served by the partial repaint.
+///
+/// With nothing else live this is always allowed. When other chrome also wants
+/// repaints, the naive answer ("defer to the full frame") is wrong in practice:
+/// an idle screen almost always has some slow-moving chrome up (a notification
+/// line, a status notice, a cache countdown), so deferring drags every single
+/// animation tick back onto the full-frame path and reintroduces the lag this
+/// exists to remove. Instead that chrome gets a full frame at its own
+/// human-scale cadence, and the animation frames in between come from the
+/// cheap path.
+fn idle_animation_partial_repaint_allowed(
+    other_redraw_required: bool,
+    since_last_full_frame: Option<Duration>,
+) -> bool {
+    if !other_redraw_required {
+        return true;
+    }
+    since_last_full_frame.is_some_and(|elapsed| elapsed < IDLE_ANIMATION_CHROME_FULL_FRAME_INTERVAL)
+}
+
 #[derive(Default)]
 pub(super) struct StatusSpinnerRenderer {
     last_frame: Option<Buffer>,
+    last_full_frame_at: Option<Instant>,
 }
 
 impl StatusSpinnerRenderer {
@@ -195,6 +222,7 @@ impl StatusSpinnerRenderer {
 
     pub(super) fn invalidate(&mut self) {
         self.last_frame = None;
+        self.last_full_frame_at = None;
     }
 
     /// Whether the decorative idle-animation rows can be repainted on their own,
@@ -207,12 +235,32 @@ impl StatusSpinnerRenderer {
     /// byte-identical cells. That was measured at a ~50ms median per tick on an
     /// 8-core laptop, which is what made the animation visibly lag.
     pub(super) fn idle_animation_only_available(&self, app: &App) -> bool {
-        self.last_frame.is_some()
-            && crate::tui::idle_donut_active(app)
-            && crate::tui::ui::last_idle_animation_area().is_some()
-            && !app.force_full_redraw
-            && !app.force_full_repaint
-            && !crate::tui::periodic_redraw_required_excluding_idle_animation(app)
+        let blocked = if self.last_frame.is_none() {
+            Some("no_previous_frame")
+        } else if !crate::tui::idle_donut_active(app) {
+            Some("animation_inactive")
+        } else if crate::tui::ui::last_idle_animation_area().is_none() {
+            Some("no_animation_area")
+        } else if app.force_full_redraw {
+            Some("force_full_redraw")
+        } else if app.force_full_repaint {
+            Some("force_full_repaint")
+        } else {
+            None
+        };
+        if let Some(reason) = blocked {
+            crate::tui::ui::note_idle_animation_fast_path_blocked(reason);
+            return false;
+        }
+
+        let allowed = idle_animation_partial_repaint_allowed(
+            crate::tui::periodic_redraw_required_excluding_idle_animation(app),
+            self.last_full_frame_at.map(|at| at.elapsed()),
+        );
+        if !allowed {
+            crate::tui::ui::note_idle_animation_fast_path_blocked("chrome_full_frame_due");
+        }
+        allowed
     }
 
     /// Repaint just the idle-animation rows over the previous frame.
@@ -334,7 +382,11 @@ impl StatusSpinnerRenderer {
             force_full_redraw,
             input: crate::tui::ui::frame_input_attribution_snapshot(),
         });
+        if crate::tui::ui::last_idle_animation_area().is_some() {
+            crate::tui::ui::note_idle_animation_full_repaint();
+        }
         self.last_frame = Some(completed_buffer);
+        self.last_full_frame_at = Some(Instant::now());
         Ok(())
     }
 
@@ -389,6 +441,7 @@ impl StatusSpinnerRenderer {
         terminal.swap_buffers();
         terminal.backend_mut().flush()?;
         self.last_frame = Some(next_frame);
+        crate::tui::ui::note_idle_animation_partial_repaint();
         Ok(true)
     }
 }
@@ -444,12 +497,22 @@ impl App {
             }
 
             if needs_redraw {
-                status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
-                reset_status_spinner_interval(&mut status_spinner_interval, &self);
-                if let Some(native) = handterm_native_scroll.as_mut() {
-                    native.sync_from_app(&self);
+                // On an idle animated screen, repaint just the animation rows
+                // when nothing else is due. This is the single draw site, so
+                // gating here covers every redraw source (ticks, input, bus
+                // events), not just the animation tick.
+                if status_spinner_renderer.idle_animation_only_available(&self)
+                    && status_spinner_renderer.draw_idle_animation_only(&self, &mut terminal)?
+                {
+                    needs_redraw = false;
+                } else {
+                    status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                    reset_status_spinner_interval(&mut status_spinner_interval, &self);
+                    if let Some(native) = handterm_native_scroll.as_mut() {
+                        native.sync_from_app(&self);
+                    }
+                    needs_redraw = false;
                 }
-                needs_redraw = false;
             }
 
             if self.should_quit {
@@ -479,13 +542,6 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= local::handle_tick(&mut self);
-                        if !needs_redraw
-                            && status_spinner_renderer.idle_animation_only_available(&self)
-                            && !status_spinner_renderer
-                                .draw_idle_animation_only(&self, &mut terminal)?
-                        {
-                            needs_redraw = true;
-                        }
                     }
                     event = event_stream.next() => {
                         if event.is_some() {
@@ -652,14 +708,23 @@ impl App {
                             .map(|t| t.elapsed() >= UNFOCUSED_IDLE_REDRAW_MIN_INTERVAL)
                             .unwrap_or(true);
                     if allow_redraw {
-                        status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
-                        reset_status_spinner_interval(&mut status_spinner_interval, &self);
-                        if let Some(native) = handterm_native_scroll.as_mut() {
-                            native.sync_from_app(&self);
+                        // Idle animated screen: repaint only the animation rows
+                        // when nothing else is due (see the local loop).
+                        if status_spinner_renderer.idle_animation_only_available(&self)
+                            && status_spinner_renderer
+                                .draw_idle_animation_only(&self, &mut terminal)?
+                        {
+                            needs_redraw = false;
+                        } else {
+                            status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                            reset_status_spinner_interval(&mut status_spinner_interval, &self);
+                            if let Some(native) = handterm_native_scroll.as_mut() {
+                                native.sync_from_app(&self);
+                            }
+                            last_unfocused_draw =
+                                (!self.client_focused()).then(std::time::Instant::now);
+                            needs_redraw = false;
                         }
-                        last_unfocused_draw =
-                            (!self.client_focused()).then(std::time::Instant::now);
-                        needs_redraw = false;
                     }
                     // When unfocused and throttled, leave needs_redraw set so the
                     // pending update is coalesced into the next allowed frame.
@@ -684,13 +749,6 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
-                        if !needs_redraw
-                            && status_spinner_renderer.idle_animation_only_available(&self)
-                            && !status_spinner_renderer
-                                .draw_idle_animation_only(&self, &mut terminal)?
-                        {
-                            needs_redraw = true;
-                        }
                     }
                     event = remote_conn.next_event() => {
                         let (outcome, event_redraw) = remote::handle_remote_event(
@@ -865,6 +923,64 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+
+    /// With nothing else live, every animation tick takes the cheap path.
+    #[test]
+    fn quiet_idle_screen_serves_every_animation_tick_from_the_partial_repaint() {
+        for since in [None, Some(Duration::ZERO), Some(Duration::from_secs(60))] {
+            assert!(
+                idle_animation_partial_repaint_allowed(false, since),
+                "a quiet idle screen must never pay for a full frame (since={since:?})"
+            );
+        }
+    }
+
+    /// The regression that made the animation lag: an idle screen almost always
+    /// has some slow-moving chrome up (notification line, status notice, cache
+    /// countdown). If that chrome wins every tick, the animation runs at full
+    /// frame cost. It must instead get a full frame only at its own cadence,
+    /// with the animation frames in between served cheaply.
+    #[test]
+    fn slow_chrome_gets_periodic_full_frames_without_pacing_the_animation() {
+        // Just after a full frame: chrome is already up to date, so the
+        // animation rides the cheap path.
+        assert!(idle_animation_partial_repaint_allowed(
+            true,
+            Some(Duration::ZERO)
+        ));
+        assert!(idle_animation_partial_repaint_allowed(
+            true,
+            Some(IDLE_ANIMATION_CHROME_FULL_FRAME_INTERVAL - Duration::from_millis(1))
+        ));
+
+        // Once the chrome interval lapses, it earns a full frame.
+        assert!(!idle_animation_partial_repaint_allowed(
+            true,
+            Some(IDLE_ANIMATION_CHROME_FULL_FRAME_INTERVAL)
+        ));
+        assert!(!idle_animation_partial_repaint_allowed(
+            true,
+            Some(Duration::from_secs(5))
+        ));
+
+        // No full frame drawn yet: there is nothing to patch over.
+        assert!(!idle_animation_partial_repaint_allowed(true, None));
+    }
+
+    /// The chrome cadence must stay far slower than animation FPS, otherwise the
+    /// fast path saves nothing. At 60fps animation and a 250ms chrome interval,
+    /// at most ~1 in 15 ticks is a full frame.
+    #[test]
+    fn chrome_full_frames_are_a_small_fraction_of_animation_ticks() {
+        let animation_tick = Duration::from_millis(1000 / 60);
+        let ticks_per_chrome_frame =
+            IDLE_ANIMATION_CHROME_FULL_FRAME_INTERVAL.as_secs_f64() / animation_tick.as_secs_f64();
+        assert!(
+            ticks_per_chrome_frame >= 10.0,
+            "chrome would repaint every {ticks_per_chrome_frame:.1} animation ticks, \
+             which defeats the partial-repaint path"
+        );
+    }
     use super::*;
     use ratatui::style::Color;
 
