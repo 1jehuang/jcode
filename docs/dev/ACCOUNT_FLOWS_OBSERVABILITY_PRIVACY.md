@@ -23,8 +23,8 @@ surfaces live in this repo; backend surfaces live in `solosystems-backend`.
 - Local logs: `~/.jcode/logs/jcode-YYYY-MM-DD.log`.
 - Backend telemetry store: `telemetry-worker/` (D1; subscription analytics
   columns from migration `0016_web_subscription_analytics.sql`).
-- Public privacy contract: `TELEMETRY.md` ("anonymous, minimal", no prompts
-  or code; opt-out env vars).
+- Public telemetry policy: `TELEMETRY.md` (anonymous; no prompts or code in the
+  current build; broad use/share/sell rights; opt-out env vars).
 
 ## Never-log list (both repos, enforced by tests)
 

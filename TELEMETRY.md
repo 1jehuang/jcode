@@ -1,6 +1,6 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development without collecting prompts or code.
+jcode collects **anonymous usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. The data is used to run and improve the product, and it may also be analyzed, aggregated, shared, licensed, or sold (see [How We Use and Share Data](#how-we-use-and-share-data)). The current build does not send prompts or code.
 
 Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, and schema v5 agent-time / autonomy / pain-attribution metrics.
 
@@ -232,18 +232,36 @@ Most events also carry a few coarse quality / cleanup fields:
 | `is_ci` | `true/false` | Filter CI noise |
 | `ran_from_cargo` | `true/false` | Filter local dev launches |
 
-## What We Do NOT Collect
+## What This Build Does Not Send
 
-- No file paths, project names, or directory structures
-- No code, prompts, or LLM responses, except text explicitly submitted with `/feedback ...`
-- No tool inputs or tool outputs
-- No MCP server names or configurations
-- No IP addresses (Cloudflare Workers don't log these by default)
-- No personal information of any kind
-- No error messages or stack traces in telemetry (only coarse categories and end reasons)
-- No exact wall-clock timestamps beyond coarse hour-of-day / weekday buckets
+This section describes the current implementation, not a permanent commitment. As of this version, telemetry does not include:
 
-The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id`. It is not derived from your machine, username, email, or any identifiable information.
+- File paths, project names, or directory structures
+- Code, prompts, or LLM responses, except text explicitly submitted with `/feedback ...`
+- Tool inputs or tool outputs
+- MCP server names or configurations
+- IP addresses (Cloudflare Workers don't log these by default)
+- Error messages or stack traces (only coarse categories and end reasons)
+- Exact wall-clock timestamps beyond coarse hour-of-day / weekday buckets
+
+What is collected can change in future releases. The tables above are kept in sync with the code, so read them (or [`src/telemetry.rs`](./src/telemetry.rs)) for the current version, and opt out if you would rather send nothing.
+
+The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id`. It is not derived from your machine, username, or email.
+
+## How We Use and Share Data
+
+By using jcode with telemetry enabled, you grant us a worldwide, perpetual, irrevocable, royalty-free license to use the telemetry data we receive for any lawful purpose, including:
+
+- operating, debugging, securing, and improving jcode
+- product, growth, retention, and business analytics
+- training, evaluating, and benchmarking models and agent systems
+- creating derived datasets, benchmarks, reports, and aggregate statistics
+- publishing statistics and sharing data with contractors, infrastructure providers, partners, sponsors, and other third parties
+- licensing, selling, or otherwise transferring the data, including as part of a merger, acquisition, or asset sale
+
+We do not attempt to re-identify users from telemetry, and telemetry is not linked to account identity by the client. We do not promise that shared or sold datasets are limited to aggregates.
+
+If you do not want your usage data used this way, opt out (see [How to Opt Out](#how-to-opt-out)). Opting out is the supported way to withhold consent.
 
 ## How It Works
 
@@ -258,6 +276,10 @@ The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id
 9. If a request fails (offline, firewall, etc.), jcode silently continues - no retries, no queuing
 
 The telemetry endpoint is a Cloudflare Worker that stores events in a D1 database. The source code for the worker is in [`telemetry-worker/`](./telemetry-worker/).
+
+## Changes to This Policy
+
+We may change what is collected, how long it is kept, and how it is used or shared at any time, without individual notice. The version of this document in the repository is the current policy; continued use after a change means acceptance.
 
 ### Schema v5 deployment note
 
@@ -286,6 +308,6 @@ This is open source. The entire telemetry implementation is in [`src/telemetry.r
 
 ## Data Retention
 
-Telemetry data is used in aggregate only (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
+Current retention practice: individual event records are retained for up to 12 months and then deleted, while derived aggregates, rollups, and datasets built from them may be retained indefinitely.
 
 High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.
