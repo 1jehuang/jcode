@@ -64,6 +64,15 @@ pub enum Action {
     Cancel,
     /// Ctrl+C / Ctrl+D: interrupt while busy, quit only when idle and empty.
     InterruptOrQuit,
+
+    /// Session strip navigation, mirroring niri's spatial motion: left/right
+    /// walk the sessions in the current working directory, up/down walk the
+    /// directories. Bound to Ctrl+Shift+arrows because plain and Alt arrows
+    /// are already text motion, and typing must always win over chrome.
+    SessionLeft,
+    SessionRight,
+    SessionUp,
+    SessionDown,
 }
 
 /// One row of the parity table: the chord, its action, and the TUI binding it
@@ -316,6 +325,27 @@ pub const PORTED: &[Ported] = &[
         action: Action::InterruptOrQuit,
         tui: "Ctrl+D interrupt or quit",
     },
+    // Session strip, in the spirit of niri's window/workspace motion.
+    Ported {
+        chord: "ctrl+alt+left",
+        action: Action::SessionLeft,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
+    Ported {
+        chord: "ctrl+alt+right",
+        action: Action::SessionRight,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
+    Ported {
+        chord: "ctrl+alt+up",
+        action: Action::SessionUp,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
+    Ported {
+        chord: "ctrl+alt+down",
+        action: Action::SessionDown,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
 ];
 
 /// TUI chords deliberately **not** ported, with the reason. Keeps the scope
@@ -344,6 +374,13 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
 
     match key {
         Key::Named(named) => match named {
+            // Session-strip motion is checked first: the arrow arms below
+            // would otherwise swallow it, and chrome navigation has to be
+            // reachable from any editor state.
+            NamedKey::ArrowLeft if ctrl && alt => Some(Action::SessionLeft),
+            NamedKey::ArrowRight if ctrl && alt => Some(Action::SessionRight),
+            NamedKey::ArrowUp if ctrl && alt => Some(Action::SessionUp),
+            NamedKey::ArrowDown if ctrl && alt => Some(Action::SessionDown),
             NamedKey::Enter => Some(if shift {
                 Action::InsertNewline
             } else {
@@ -496,6 +533,47 @@ mod tests {
     fn unknown_chords_are_rejected_rather_than_guessed() {
         assert!(parse_chord("ctrl+nope").is_none());
         assert!(parse_chord("ctrl").is_none(), "a chord needs a key");
+    }
+
+    /// R7: chrome navigation must never cost the user their text motion.
+    /// Bare and Alt arrows stay in the editor; only Ctrl+Shift leaves it.
+    #[test]
+    fn bare_arrows_still_edit_text() {
+        for (chord, action) in [
+            ("left", Action::MoveLeft),
+            ("right", Action::MoveRight),
+            ("up", Action::HistoryPrev),
+            ("down", Action::HistoryNext),
+            ("alt+left", Action::MoveWordLeft),
+            ("alt+right", Action::MoveWordRight),
+            ("shift+left", Action::ExtendLeft),
+            ("shift+right", Action::ExtendRight),
+            ("ctrl+left", Action::MoveWordLeft),
+            ("ctrl+right", Action::MoveWordRight),
+            ("ctrl+shift+left", Action::ExtendWordLeft),
+            ("ctrl+shift+right", Action::ExtendWordRight),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(
+                resolve(&key, mods),
+                Some(action),
+                "'{chord}' was stolen by the session strip"
+            );
+        }
+    }
+
+    /// R7: and the strip chords really do reach the strip.
+    #[test]
+    fn ctrl_alt_arrows_resolve_to_session_actions() {
+        for (chord, action) in [
+            ("ctrl+alt+left", Action::SessionLeft),
+            ("ctrl+alt+right", Action::SessionRight),
+            ("ctrl+alt+up", Action::SessionUp),
+            ("ctrl+alt+down", Action::SessionDown),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(resolve(&key, mods), Some(action), "'{chord}' did not bind");
+        }
     }
 
     /// The parity table is the contract: every documented chord must really

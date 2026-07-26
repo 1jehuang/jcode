@@ -18,6 +18,7 @@ mod meta;
 mod render;
 mod scene;
 mod states;
+mod strip;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -152,7 +153,7 @@ fn run_e2e(message: &str) -> Result<()> {
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);
                 model.transcript.push(transcript::Message::user(message));
-                outgoing.send(message.to_string())?;
+                outgoing.send(harness::Command::Send(message.to_string()))?;
                 sent = true;
             }
             harness::HarnessUpdate::Model {
@@ -181,6 +182,8 @@ fn run_e2e(message: &str) -> Result<()> {
                 return Ok(());
             }
             harness::HarnessUpdate::TurnDone => {}
+            // The e2e path drives one session, so the list is irrelevant here.
+            harness::HarnessUpdate::Sessions(_) => {}
         }
     }
     anyhow::bail!("e2e timed out")
@@ -269,7 +272,7 @@ struct App {
     state: Option<render::RenderState>,
     text: text::TextSystem,
     model: Model,
-    harness: Option<(Receiver<harness::HarnessUpdate>, Sender<String>)>,
+    harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
     clipboard: clipboard::Clipboard,
@@ -356,6 +359,8 @@ pub struct Model {
     /// Which ghost hint the empty composer shows. An index rather than a
     /// string, so the model stays trivially comparable and captures can pin it.
     pub hint: usize,
+    /// Live sessions, drawn as the strip at the top of the window.
+    pub strip: strip::Strip,
     /// Provider and model serving this session, once the harness reports it.
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
@@ -401,6 +406,7 @@ impl Default for Model {
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
+            strip: strip::Strip::default(),
             model: None,
         }
     }
@@ -483,6 +489,7 @@ impl App {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
                 harness::HarnessUpdate::Attached { session_id } => {
                     self.model.status = format!("attached: {session_id}");
+                    self.model.strip.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
                 }
                 harness::HarnessUpdate::Model { provider, model } => {
@@ -492,7 +499,37 @@ impl App {
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
                 }
+                harness::HarnessUpdate::Sessions(entries) => {
+                    // Rebuild around the session we are actually attached to,
+                    // so a refresh never silently moves the highlight off the
+                    // conversation currently on screen.
+                    self.model.strip =
+                        strip::Strip::build(entries, self.model.session_id.as_deref());
+                }
             }
+        }
+    }
+
+    /// Switch to whichever session the strip now points at.
+    ///
+    /// The transcript belongs to the session, so it is cleared rather than
+    /// carried across: appending another conversation's output to the one on
+    /// screen would be actively misleading. Reloading real history needs
+    /// `GetHistory`; until that is wired, an empty page is the honest state.
+    fn attach_focused_session(&mut self) {
+        let Some(target) = self.model.strip.focused_session().map(str::to_string) else {
+            return;
+        };
+        if self.model.session_id.as_deref() == Some(target.as_str()) {
+            return;
+        }
+        self.model.transcript = transcript::Transcript::default();
+        self.model.busy = false;
+        self.model.scroll = 0.0;
+        self.model.status = format!("attaching: {target}");
+        self.model.session_id = Some(target.clone());
+        if let Some((_, outgoing)) = self.harness.as_ref() {
+            let _ = outgoing.send(harness::Command::Attach(target));
         }
     }
 
@@ -516,7 +553,7 @@ impl App {
         // in off-screen.
         self.model.scroll = 0.0;
         if let Some((_, outgoing)) = self.harness.as_ref() {
-            let _ = outgoing.send(content);
+            let _ = outgoing.send(harness::Command::Send(content));
         }
     }
 
@@ -550,7 +587,10 @@ impl App {
             probe.scale,
         )
         .line_count();
-        layout::Frame::with_composer_lines(size, scale, lines)
+        // The strip only earns its row when there is somewhere to go: with
+        // one session it would be a widget that says "1 of 1".
+        let strip = model.strip.len() > 1;
+        layout::Frame::with_strip(size, scale, lines, strip)
     }
 
     /// Byte offset in the composer text under a logical x position, or `None`
@@ -806,6 +846,30 @@ impl App {
                 }
             }
             Action::Submit => self.submit_input(),
+
+            // Strip motion moves the highlight and attaches in one step:
+            // a selection you then have to confirm would be a second
+            // interaction for something the user already asked for.
+            Action::SessionLeft => {
+                if self.model.strip.focus_left() {
+                    self.attach_focused_session();
+                }
+            }
+            Action::SessionRight => {
+                if self.model.strip.focus_right() {
+                    self.attach_focused_session();
+                }
+            }
+            Action::SessionUp => {
+                if self.model.strip.focus_up() {
+                    self.attach_focused_session();
+                }
+            }
+            Action::SessionDown => {
+                if self.model.strip.focus_down() {
+                    self.attach_focused_session();
+                }
+            }
             Action::InsertNewline => self.model.editor.insert_char('\n'),
 
             Action::MoveLeft => self.model.editor.move_left(),

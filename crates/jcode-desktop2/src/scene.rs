@@ -128,6 +128,112 @@ fn draw_hero(
     );
 }
 
+/// Draw the session strip: a row of bars at the top of the window, one per
+/// live session, grouped by working directory.
+///
+/// Deliberately the same visual language as the author's waybar
+/// `niri-workspaces` module, because it is the language he already reads
+/// without thinking: a dim group label, then thin ticks for the sessions in
+/// it, with the focused one a wide solid block.
+fn draw_strip(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    band: (f64, f64),
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    let (top, bottom) = band;
+    let label_style = ParagraphStyle {
+        font_size: layout::STRIP_LABEL_SIZE,
+        color: model.theme.faint,
+        letter_spacing_em: 0.08,
+        line_height: 1.0,
+        ..Default::default()
+    };
+    // Measure labels through the same text system that draws them, so the bars
+    // sit where the label really ends rather than at an estimate. Measured up
+    // front because layout needs them all and the text system is exclusive.
+    let widths: Vec<(String, f64)> = model
+        .strip
+        .groups()
+        .iter()
+        .map(|group| {
+            (
+                group.label.clone(),
+                text.measure_width(&group.label, label_style, scale),
+            )
+        })
+        .collect();
+    let items = crate::strip::layout_items(&model.strip, frame.left, frame.right, |label| {
+        widths
+            .iter()
+            .find(|(name, _)| name == label)
+            .map(|(_, width)| *width)
+            .unwrap_or(0.0)
+    });
+
+    // Bars are centred in the band; the label sits on the same row.
+    let bar_top = top + (bottom - top - layout::STRIP_BAR_HEIGHT) / 2.0;
+    let label_top = top + (bottom - top - f64::from(layout::STRIP_LABEL_SIZE)) / 2.0;
+
+    for item in items {
+        match item {
+            crate::strip::Item::Label { group, x } => {
+                let Some(group) = model.strip.groups().get(group) else {
+                    continue;
+                };
+                text.draw_paragraph_scaled(
+                    scene,
+                    &group.label,
+                    (x, label_top),
+                    frame.column() as f32,
+                    label_style,
+                    scale,
+                );
+            }
+            crate::strip::Item::Bar {
+                x,
+                width,
+                focused,
+                group,
+                index,
+            } => {
+                // Unfocused bars are dim so the focused one reads instantly;
+                // a busy session is drawn at full ink even when unfocused, so
+                // work happening off-screen is visible rather than silent.
+                let busy = model
+                    .strip
+                    .groups()
+                    .get(group)
+                    .and_then(|g| g.entries.get(index))
+                    .map(|entry| entry.busy)
+                    .unwrap_or(false);
+                let color = if focused {
+                    model.theme.text
+                } else if busy {
+                    model.theme.muted
+                } else {
+                    model.theme.rule
+                };
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    Affine::scale(scale),
+                    color,
+                    None,
+                    &RoundedRect::new(
+                        x,
+                        bar_top,
+                        x + width,
+                        bar_top + layout::STRIP_BAR_HEIGHT,
+                        1.0,
+                    ),
+                );
+            }
+        }
+    }
+}
+
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
@@ -320,6 +426,11 @@ pub fn build_scene(
         theme.background,
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
+
+    // Session strip, when there is more than one session to move between.
+    if let Some(band) = frame.strip() {
+        draw_strip(scene, text, model, band, &frame, scale);
+    }
 
     // Composer: a real input field. Paper fill plus a hairline border, rather
     // than a grey slab: a filled block reads as disabled or as a code block,
