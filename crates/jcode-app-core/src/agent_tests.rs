@@ -1404,19 +1404,31 @@ fn tool_use_stop_with_no_tool_calls_is_an_unfinished_turn() {
     // A normal tool_use turn that produced visible text must stay silent.
     assert!(Agent::provider_guardrail_notice(Some("tool_use"), false, false).is_none());
 
-    // WHAT IS STILL UNEXPLAINED, recorded so the next investigation starts here
-    // rather than re-deriving it:
+    // WHERE THE FAILING TRIALS EXITED, located by elimination so the next
+    // investigation starts from the code path instead of re-deriving it.
     //
-    // Both failing trials ended with zero text deltas after their final
-    // tool_done, so `visible_text_is_empty` was true and the notice above should
-    // have fired. It did not: neither trial's final output contains
-    // "[provider guardrail]". So the turn did not exit through the
-    // `turn_loops.rs` no-tool-calls branch that surfaces the notice, and the
-    // real exit path is elsewhere (a different loop, or an earlier return).
+    // turn_loops.rs has five `break` sites. Ruled out: the two context-limit
+    // retries (neither trial hit a context error), the stream-teardown break
+    // (it ends one stream, not the turn), and the `handles_tools_internally`
+    // break (false for the Anthropic API). That leaves the
+    // `tool_calls.is_empty()` branch at the end of the turn.
     //
-    // Note also that even when that branch IS taken it `break`s and returns the
-    // final text: it explains the anomaly to the user but still ends the run.
-    // For a benchmark harness that means the work is silently discarded, which
-    // is exactly what happened. A fix needs to either continue the turn or fail
-    // loudly with a non-zero exit, not just annotate the answer.
+    // That branch DOES have a recovery: when the response is empty and the
+    // prompt ended with a tool result it injects "provide the final answer" and
+    // continues, up to MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS (5). Both
+    // failing trials show only TWO trailing empty responses, so the cap was
+    // never exhausted: the recovery was not eligible in the first place. The
+    // gate is `prompt_has_recent_tool_result`
+    // (Self::messages_end_with_tool_result). When the model reports
+    // stop_reason=tool_use but the parsed tool calls are empty, the assistant
+    // turn is appended with no following tool result, so the prompt stops ending
+    // with one and the retry is skipped.
+    //
+    // Two things worth fixing together:
+    //   1. The branch then breaks and returns normally, so the guardrail notice
+    //      is cosmetic: the process still exits 0 and a benchmark harness
+    //      records success while submitting nothing. It should fail loudly.
+    //   2. A tool_use stop carrying zero parsed tool calls is self-evidently an
+    //      unfinished turn whether or not a tool result preceded it, so it
+    //      should be continuation-eligible on its own.
 }
