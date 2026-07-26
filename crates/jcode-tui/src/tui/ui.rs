@@ -37,8 +37,9 @@ use unicode_width::UnicodeWidthStr;
 #[path = "ui_animations.rs"]
 mod animations;
 pub(crate) use animations::{
-    idle_donut_reserved_height, last_idle_animation_area, record_idle_animation_area,
-    render_idle_animation_into,
+    idle_animation_debug_json, idle_donut_reserved_height, last_idle_animation_area,
+    note_idle_animation_fast_path_blocked, note_idle_animation_full_repaint,
+    note_idle_animation_partial_repaint, record_idle_animation_area, render_idle_animation_into,
 };
 #[path = "ui_box.rs"]
 mod box_utils;

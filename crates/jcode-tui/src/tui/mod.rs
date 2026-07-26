@@ -35,8 +35,8 @@ mod redraw_schedule;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{
     REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
-    REDRAW_REMOTE_STARTUP, REDRAW_SWARM_SPINNER, idle_donut_active, periodic_redraw_required,
-    periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    REDRAW_REMOTE_STARTUP, REDRAW_SWARM_SPINNER, idle_donut_active, last_full_frame_redraw_reason,
+    periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
 mod remote_diff;
