@@ -531,6 +531,7 @@ fn build_scene(
             bold: true,
             color: theme.text,
             letter_spacing_em: 0.02,
+            line_height: layout::CAPTION_LEADING as f32,
             ..Default::default()
         },
         scale,
@@ -545,6 +546,7 @@ fn build_scene(
             theme.faint
         },
         letter_spacing_em: 0.1,
+        line_height: layout::CAPTION_LEADING as f32,
         ..Default::default()
     };
     let status_width = frame.status_width();
@@ -553,7 +555,7 @@ fn build_scene(
     text.draw_paragraph_scaled(
         scene,
         &status,
-        (frame.status_left(), frame.masthead_top + 4.0),
+        (frame.status_left(), frame.status_top()),
         status_width as f32,
         status_style,
         scale,
@@ -573,8 +575,10 @@ fn build_scene(
         ),
     );
 
-    // Transcript: ink on paper, bottom-aligned against the composer so new
-    // lines rise from the well rather than dangling from the masthead.
+    // Transcript: ink on paper. Short transcripts start at the top of the
+    // column, so a two-line exchange does not float in the middle of an empty
+    // page; once the text fills the region it pins to the bottom and scrolls
+    // up out of the composer, like a terminal.
     let placeholder = model.transcript.trim().is_empty();
     let transcript = if placeholder {
         "type a message and press enter"
@@ -605,7 +609,7 @@ fn build_scene(
         tail = lines[first_line..].join("\n");
         tail_height = text.measure_paragraph(&tail, column, body_style, scale);
     }
-    let origin_y = if placeholder {
+    let origin_y = if placeholder || tail_height < available {
         frame.body_top
     } else {
         (frame.body_bottom - tail_height).max(frame.body_top)
@@ -628,7 +632,7 @@ fn build_scene(
         ..Default::default()
     };
     let prompt_x = frame.left + layout::COMPOSER_PAD_X;
-    let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
+    let prompt_y = frame.composer_text_top();
     let prompt_width = (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32;
 
     if model.busy {
@@ -669,7 +673,7 @@ fn build_scene(
         if model.caret.visible() {
             let offset = text.measure_width(model.editor.before_cursor(), prompt_style, scale);
             let caret_x = (prompt_x + offset).min(frame.right - layout::COMPOSER_PAD_X);
-            let top = prompt_y - 1.0;
+            let top = frame.caret_top();
             let bottom = top + layout::CARET_HEIGHT;
             fill(
                 scene,
@@ -695,6 +699,7 @@ fn build_scene(
                 font_size: layout::CAPTION_SIZE,
                 color: theme.faint,
                 letter_spacing_em: 0.1,
+                line_height: layout::CAPTION_LEADING as f32,
                 ..Default::default()
             },
             scale,
@@ -1221,8 +1226,8 @@ mod visual_tests {
     fn caret_columns(r: &Rendered) -> Vec<u32> {
         let f = r.frame;
         let s = f.scale;
-        let y0 = ((f.composer_top + super::layout::COMPOSER_TEXT_OFFSET + 2.0) * s) as u32;
-        let y1 = ((f.composer_top + super::layout::COMPOSER_TEXT_OFFSET + 12.0) * s) as u32;
+        let y0 = ((f.caret_top() + 2.0) * s) as u32;
+        let y1 = ((f.caret_top() + super::layout::CARET_HEIGHT - 2.0) * s) as u32;
         let x0 = (f.left * s) as u32;
         let x1 = (f.right * s) as u32;
         (x0..x1)

@@ -19,21 +19,43 @@ pub const CAPTION_SIZE: f32 = 10.5;
 pub const WORDMARK_SIZE: f32 = 15.0;
 /// Space reserved for the wordmark before the status caption starts.
 pub const WORDMARK_ADVANCE: f64 = 72.0;
+/// Leading used for single-line captions (wordmark, status, footnote), which
+/// should sit tight in their own line box rather than carry body leading.
+pub const CAPTION_LEADING: f64 = 1.25;
 /// Composer well height and inner padding.
 pub const COMPOSER_HEIGHT: f64 = 44.0;
 pub const COMPOSER_PAD_X: f64 = 14.0;
 pub const COMPOSER_RADIUS: f64 = 6.0;
-/// Baseline offset of the prompt text inside the composer well.
-pub const COMPOSER_TEXT_OFFSET: f64 = 13.0;
 /// Insert caret: a thin vertical bar, like any normal text input.
 pub const CARET_WIDTH: f64 = 1.5;
 pub const CARET_HEIGHT: f64 = 18.0;
 /// Caption row under the composer for notices and the scrollback indicator.
 pub const FOOTNOTE_HEIGHT: f64 = 16.0;
-pub const FOOTNOTE_GAP: f64 = 6.0;
-/// Vertical breathing room between regions.
-pub const SPACE_AFTER_RULE: f64 = 22.0;
-pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
+/// Vertical rhythm. One base step, with region gaps as multiples of it, so
+/// spacing reads as a scale instead of a pile of unrelated magic numbers.
+pub const STEP: f64 = 8.0;
+/// Gap between the wordmark's line box and its hairline.
+pub const SPACE_BEFORE_RULE: f64 = STEP * 1.5;
+/// Breathing room between regions.
+pub const SPACE_AFTER_RULE: f64 = STEP * 3.0;
+pub const SPACE_BEFORE_COMPOSER: f64 = STEP * 3.5;
+pub const FOOTNOTE_GAP: f64 = STEP * 1.5;
+
+/// Height of the line box a paragraph of `size` at `leading` occupies. Text
+/// origins in this app are line-box tops, so every vertical placement below is
+/// expressed in terms of this.
+pub fn line_box(size: f32, leading: f64) -> f64 {
+    f64::from(size) * leading
+}
+
+/// Distance from the top of a line box to the text baseline, using the nominal
+/// 0.8em ascent / 0.2em descent of the mono stack. Used to align text of
+/// different sizes on a shared baseline (the wordmark and its status caption)
+/// instead of eyeballing a fudge offset.
+pub fn baseline_offset(size: f32, leading: f64) -> f64 {
+    let em = f64::from(size);
+    (line_box(size, leading) - em) / 2.0 + em * 0.8
+}
 
 /// Resolved geometry for one frame. All fields are logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,7 +101,8 @@ impl Frame {
         let right = left + column;
 
         let masthead_top = (height * 0.05).clamp(24.0, 44.0);
-        let masthead_rule = masthead_top + 28.0;
+        let masthead_rule =
+            masthead_top + line_box(WORDMARK_SIZE, CAPTION_LEADING) + SPACE_BEFORE_RULE;
 
         let bottom_margin = (height * 0.05).clamp(20.0, 40.0);
         let footnote_bottom = height - bottom_margin;
@@ -117,6 +140,23 @@ impl Frame {
         self.left + WORDMARK_ADVANCE
     }
 
+    /// Line-box top of the status caption, chosen so it shares the wordmark's
+    /// baseline despite being a smaller size.
+    pub fn status_top(&self) -> f64 {
+        self.masthead_top + baseline_offset(WORDMARK_SIZE, CAPTION_LEADING)
+            - baseline_offset(CAPTION_SIZE, CAPTION_LEADING)
+    }
+
+    /// Line-box top of the prompt text, vertically centered in the well.
+    pub fn composer_text_top(&self) -> f64 {
+        self.composer_top + (COMPOSER_HEIGHT - line_box(BODY_SIZE, BODY_LEADING)) / 2.0
+    }
+
+    /// Top of the insert caret, centered in the well like the text it tracks.
+    pub fn caret_top(&self) -> f64 {
+        self.composer_top + (COMPOSER_HEIGHT - CARET_HEIGHT) / 2.0
+    }
+
     /// Width available to the status caption.
     pub fn status_width(&self) -> f64 {
         (self.right - self.status_left()).max(80.0)
@@ -135,7 +175,7 @@ impl Frame {
     /// The caret must stay inside the composer well at any size.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn caret_fits_in_composer(&self) -> bool {
-        let top = self.composer_top + COMPOSER_TEXT_OFFSET - 1.0;
+        let top = self.caret_top();
         top >= self.composer_top && top + CARET_HEIGHT <= self.composer_bottom
     }
 
@@ -297,6 +337,102 @@ mod tests {
     fn transcript_always_shows_at_least_one_line() {
         sweep(|frame| {
             assert!(frame.visible_body_lines() >= 1);
+        });
+    }
+
+    /// The wordmark and its status caption are different sizes, so they only
+    /// look aligned if they share a baseline. This is the "spacing is off"
+    /// symptom in the masthead.
+    #[test]
+    fn the_wordmark_and_status_share_a_baseline() {
+        sweep(|frame| {
+            let wordmark = frame.masthead_top + baseline_offset(WORDMARK_SIZE, CAPTION_LEADING);
+            let status = frame.status_top() + baseline_offset(CAPTION_SIZE, CAPTION_LEADING);
+            assert!(
+                (wordmark - status).abs() < 0.001,
+                "masthead baselines drifted: {wordmark} vs {status}"
+            );
+        });
+    }
+
+    /// The rule must clear the wordmark's descenders rather than crowd them,
+    /// and stay within one rhythm step of the intended gap.
+    #[test]
+    fn the_masthead_rule_clears_the_wordmark() {
+        sweep(|frame| {
+            let box_bottom = frame.masthead_top + line_box(WORDMARK_SIZE, CAPTION_LEADING);
+            let gap = frame.masthead_rule - box_bottom;
+            assert!(
+                (gap - SPACE_BEFORE_RULE).abs() < 0.001,
+                "rule gap was {gap}, expected {SPACE_BEFORE_RULE}"
+            );
+        });
+    }
+
+    /// Prompt text and caret are optically centered in the well: equal space
+    /// above and below, at any window size.
+    #[test]
+    fn composer_contents_are_vertically_centered() {
+        sweep(|frame| {
+            for (name, top, height) in [
+                (
+                    "text",
+                    frame.composer_text_top(),
+                    line_box(BODY_SIZE, BODY_LEADING),
+                ),
+                ("caret", frame.caret_top(), CARET_HEIGHT),
+            ] {
+                let above = top - frame.composer_top;
+                let below = frame.composer_bottom - (top + height);
+                assert!(
+                    (above - below).abs() < 0.001 && above > 0.0,
+                    "{name} not centered in the well: {above} above, {below} below"
+                );
+            }
+        });
+    }
+
+    /// Region gaps come from the rhythm scale, so no gap is an odd fraction of
+    /// a step. Keeps future edits from reintroducing arbitrary numbers.
+    #[test]
+    fn region_gaps_are_multiples_of_the_rhythm_step() {
+        for gap in [
+            SPACE_BEFORE_RULE,
+            SPACE_AFTER_RULE,
+            SPACE_BEFORE_COMPOSER,
+            FOOTNOTE_GAP,
+        ] {
+            let steps = gap / STEP;
+            assert!(
+                (steps * 2.0 - (steps * 2.0).round()).abs() < 1e-9,
+                "gap {gap} is not a half-step multiple of {STEP}"
+            );
+        }
+    }
+
+    /// The transcript's last line must not crowd the well: the gap above the
+    /// composer stays at least one body line tall.
+    #[test]
+    fn the_transcript_keeps_a_line_of_air_above_the_composer() {
+        sweep(|frame| {
+            let gap = frame.composer_top - frame.body_bottom;
+            assert!(
+                gap >= frame.body_line_height() - 0.001,
+                "only {gap} of air above the composer"
+            );
+        });
+    }
+
+    /// The footnote row must clear the well and still sit on paper.
+    #[test]
+    fn the_footnote_row_is_clear_of_the_composer() {
+        sweep(|frame| {
+            let gap = frame.footnote_top - frame.composer_bottom;
+            assert!(
+                (gap - FOOTNOTE_GAP).abs() < 0.001,
+                "footnote gap was {gap}, expected {FOOTNOTE_GAP}"
+            );
+            assert!(frame.footnote_bottom + 1.0 <= frame.height);
         });
     }
 
