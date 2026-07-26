@@ -23,33 +23,10 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-pub fn api_socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_API_SOCKET") {
-        return PathBuf::from(custom);
-    }
-    jcode_home().join("jcode-api.sock")
-}
-
-pub fn legacy_socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
-        return PathBuf::from(custom);
-    }
-    jcode_home().join("jcode.sock")
-}
-
-fn jcode_home() -> PathBuf {
-    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        let runtime = PathBuf::from(dir);
-        if runtime.join("jcode.sock").exists() {
-            return runtime;
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".jcode")
-}
+// Socket paths live in `jcode-harness-api` so clients and the bridge can never
+// resolve different directories (they once did, and the desktop app could not
+// connect as a result).
+pub use jcode_harness_api::{api_socket_path, legacy_socket_path};
 
 /// Run the bridge accept loop forever.
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {

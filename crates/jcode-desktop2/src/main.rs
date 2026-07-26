@@ -7,22 +7,28 @@
 mod capture;
 mod caret;
 mod clipboard;
+mod donut;
 mod editor;
 mod harness;
+mod hints;
+mod input;
 mod keymap;
 mod layout;
+mod meta;
 mod render;
+mod scene;
 mod states;
-mod stream;
+#[cfg(test)]
+mod tests;
 mod text;
 mod theme;
+mod window_state;
 
 use anyhow::Result;
+use scene::build_scene;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use vello::Scene;
-use vello::kurbo::Affine;
-use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -31,9 +37,15 @@ use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--script") {
+        return run_script(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("--keys") {
         print_keys();
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("--bench-donut") {
+        return bench_donut();
     }
     if args.first().map(String::as_str) == Some("--capture") {
         return run_capture(&args[1..]);
@@ -49,6 +61,40 @@ fn main() -> Result<()> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
     event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+/// `--script <chord|text> ...`: drive the app with a keystroke script and
+/// print the resulting composer state. Verifies real chord sequences end to
+/// end without a compositor, which synthetic-input tools make unreliable.
+///
+///   jcode-desktop2 --script 'type:alpha beta' ctrl+a shift+right shift+right
+fn run_script(steps: &[String]) -> Result<()> {
+    let mut app = App::default();
+    app.model.session_id = Some("session_script".into());
+    for step in steps {
+        if let Some(text) = step.strip_prefix("type:") {
+            app.apply(keymap::Action::Insert, Some(text));
+            continue;
+        }
+        let (key, mods) =
+            keymap::parse_chord(step).ok_or_else(|| anyhow::anyhow!("unknown chord '{step}'"))?;
+        let action = keymap::resolve(&key, mods).unwrap_or(keymap::Action::Insert);
+        if !app.apply(action, None) {
+            println!("quit");
+            return Ok(());
+        }
+    }
+    let editor = &app.model.editor;
+    println!("text: {:?}", editor.text());
+    println!("cursor: {}", editor.cursor());
+    match editor.selected_text() {
+        Some(selected) => println!("selected: {selected:?}"),
+        None => println!("selected: none"),
+    }
+    if let Some(notice) = &app.model.notice {
+        println!("notice: {notice}");
+    }
     Ok(())
 }
 
@@ -103,21 +149,16 @@ fn run_e2e(message: &str) -> Result<()> {
                 println!("[e2e] attached: {session_id}");
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);
-                model.append_transcript(&format!("\n> {message}\n\n"));
+                model.transcript.push_str(&format!("\n> {message}\n\n"));
                 outgoing.send(message.to_string())?;
                 sent = true;
             }
             harness::HarnessUpdate::Text(text) => {
                 print!("{text}");
-                model.append_transcript(&text);
+                model.transcript.push_str(&text);
             }
             harness::HarnessUpdate::TurnDone if sent => {
                 println!("\n[e2e] turn done");
-                // Capture the settled frame: the reveal animation would
-                // otherwise leave the newest text mid-fade in the PNG.
-                model
-                    .reveal
-                    .freeze_at(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 let out = std::env::temp_dir().join("jcode-desktop2-e2e.png");
                 let mut text_system = text::TextSystem::default();
                 let mut scene = Scene::new();
@@ -131,6 +172,46 @@ fn run_e2e(message: &str) -> Result<()> {
         }
     }
     anyhow::bail!("e2e timed out")
+}
+
+/// `--bench-donut`: measure the donut's per-frame CPU cost, split between the
+/// SDF raymarch (the luminance field) and building the halftone path. The
+/// website's budget is under 9ms of main-thread time per frame; this prints the
+/// same number so a regression is a measurement, not an impression.
+fn bench_donut() -> Result<()> {
+    const FRAMES: u32 = 120;
+    let mut field = donut::Donut::new(DONUT_GRID);
+    let frame = layout::Frame::new((2200, 1440), 2.0);
+    let Some(hero) = frame.hero() else {
+        anyhow::bail!("no hero block at the bench window size");
+    };
+
+    let start = std::time::Instant::now();
+    for i in 0..FRAMES {
+        field.render(i as f32 / 60.0, 0.0);
+    }
+    let march = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
+
+    let mut text_system = text::TextSystem::default();
+    let model = Model::default();
+    let start = std::time::Instant::now();
+    for i in 0..FRAMES {
+        field.render(i as f32 / 60.0, 0.0);
+        let mut scene = Scene::new();
+        build_scene(&mut scene, &mut text_system, &model, (2200, 1440), 2.0);
+    }
+    let full = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
+
+    println!("donut grid       : {DONUT_GRID}x{DONUT_GRID}");
+    println!("halftone box     : {:.0}pt square", hero.donut.width());
+    println!("sdf raymarch     : {march:.3} ms/frame");
+    println!("full scene build : {full:.3} ms/frame");
+    println!("scene minus march: {:.3} ms/frame", full - march);
+    println!("budget           : 9.000 ms/frame (website's main-thread budget)");
+    if full > 9.0 {
+        anyhow::bail!("donut frame cost {full:.3}ms exceeds the 9ms budget");
+    }
+    Ok(())
 }
 
 /// `--capture <node|all> [out.png|out_dir]`: render state-space nodes
@@ -172,7 +253,6 @@ fn run_capture(args: &[String]) -> Result<()> {
     render_node(node, &model, &out)
 }
 
-#[derive(Default)]
 struct App {
     state: Option<render::RenderState>,
     text: text::TextSystem,
@@ -181,11 +261,61 @@ struct App {
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
     clipboard: clipboard::Clipboard,
+    /// Pointer position in logical units, tracked for click and drag.
+    pointer: (f64, f64),
+    /// True while the primary button is held inside the composer.
+    dragging: bool,
+    /// Last click time and offset, for double-click word selection.
+    last_click: Option<(std::time::Instant, usize)>,
+    /// Current mouse pointer shape, tracked so it is only set when it changes.
+    cursor_icon: winit::window::CursorIcon,
+    /// Window size and position, persisted so the app reopens as it was left.
+    geometry: window_state::Geometry,
+    /// When the geometry was last written, and what was written, so resizing
+    /// does not hit the disk on every event.
+    geometry_saved: Option<(std::time::Instant, window_state::Geometry)>,
+    /// When the last animated frame was drawn, for the donut's time step.
+    last_frame: Option<std::time::Instant>,
+    /// Geometry of the most recently built frame. Pointer hit-testing reads
+    /// this instead of the GPU state, so input handling is testable without a
+    /// window and can never disagree with what was actually drawn.
+    frame: layout::Frame,
 }
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            state: None,
+            text: text::TextSystem::default(),
+            model: Model::default(),
+            harness: None,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            clipboard: clipboard::Clipboard::default(),
+            pointer: (0.0, 0.0),
+            dragging: false,
+            last_click: None,
+            cursor_icon: winit::window::CursorIcon::Default,
+            geometry: window_state::Geometry::default(),
+            geometry_saved: None,
+            last_frame: None,
+            // A sensible frame until the first real one is built, so input
+            // before the first paint is still handled sanely.
+            frame: layout::Frame::new((1100, 720), 1.0),
+        }
+    }
+}
+
+/// Frame interval while the donut animates (~60fps).
+const DONUT_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Maximum gap between two clicks that still counts as a double click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// UI model: what the frame is built from.
 pub struct Model {
     pub theme: theme::Theme,
+    /// Build identity shown in the masthead: version, updates, account.
+    pub meta: meta::Meta,
     pub status: String,
     pub session_id: Option<String>,
     pub transcript: String,
@@ -194,38 +324,62 @@ pub struct Model {
     pub editor: editor::Editor,
     pub caret: caret::Caret,
     pub busy: bool,
+    /// Whether the window has keyboard focus. The field border and the caret
+    /// both key off this: an unfocused input that still shows a blinking caret
+    /// lies about where typing will go.
+    pub focused: bool,
     /// Lines scrolled up from the tail. 0 follows the newest output.
     pub scroll: usize,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
-    /// Fade-in schedule for streamed transcript text.
-    pub reveal: stream::Reveal,
+    /// The hero donut's luminance field, or `None` when the donut is off
+    /// (reduced motion, or a headless capture that wants a still frame).
+    pub donut: Option<donut::Donut>,
+    /// The donut's animation clock and drag momentum.
+    pub spin: donut::Spin,
+    /// Which ghost hint the empty composer shows. An index rather than a
+    /// string, so the model stays trivially comparable and captures can pin it.
+    pub hint: usize,
 }
 
 impl Default for Model {
     fn default() -> Self {
         Self {
             theme: theme::Theme::from_env(),
+            meta: meta::Meta::detect(),
             status: "starting...".into(),
             session_id: None,
             transcript: String::new(),
             editor: editor::Editor::default(),
             caret: caret::Caret::default(),
             busy: false,
+            focused: true,
             scroll: 0,
             notice: None,
-            reveal: stream::Reveal::default(),
+            donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
+            spin: donut::Spin::default(),
+            hint: hints::arbitrary_index(),
         }
     }
 }
 
-impl Model {
-    /// Append streamed text and schedule its reveal animation.
-    pub fn append_transcript(&mut self, text: &str) {
-        self.transcript.push_str(text);
-        self.reveal.push(text.len());
-    }
+/// Luminance grid resolution for the donut: twice the halftone dot count, so
+/// every dot integrates a 2x2 neighbourhood of the field (built-in spatial AA).
+/// This is the website's top quality step; the desktop can hold it because the
+/// march is parallel and the halftone screen is vector output rather than a
+/// per-pixel canvas fill.
+pub const DONUT_GRID: usize = 152;
 
+/// Escape hatch: `JCODE_DESKTOP2_DONUT=0` turns the animation off for users who
+/// do not want motion, and for benchmarking the rest of the frame.
+fn donut_disabled() -> bool {
+    matches!(
+        std::env::var("JCODE_DESKTOP2_DONUT").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
+}
+
+impl Model {
     /// Total transcript lines, used to clamp scrolling.
     fn transcript_lines(&self) -> usize {
         self.transcript.lines().count()
@@ -245,6 +399,40 @@ impl Model {
     fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
     }
+
+    /// The status line to show as a footnote, or `None` when it is not worth
+    /// the user's attention.
+    ///
+    /// A healthy connection is the expected case, so saying "attached:
+    /// session_..." forever is noise; it was the worst of the clutter the old
+    /// masthead carried. Startup progress and failures are worth showing,
+    /// because otherwise a dead runtime looks like an app that simply ignores
+    /// your input.
+    pub fn status_footnote(&self) -> Option<String> {
+        if self.session_id.is_some() {
+            return None;
+        }
+        let status = self.status.trim();
+        if status.is_empty() {
+            return None;
+        }
+        Some(status.to_string())
+    }
+
+    /// The footnote line for this frame, in priority order.
+    ///
+    /// One row, one message: a transient notice beats a scrollback indicator,
+    /// which beats a connection problem, which beats a build alert. Choosing
+    /// here rather than in the renderer keeps the decision testable.
+    pub fn footnote(&self) -> Option<String> {
+        if let Some(notice) = &self.notice {
+            return Some(notice.clone());
+        }
+        if self.scroll > 0 {
+            return Some(format!("scrolled back {} lines", self.scroll));
+        }
+        self.status_footnote().or_else(|| self.meta.alert())
+    }
 }
 
 impl App {
@@ -259,10 +447,10 @@ impl App {
                     self.model.status = format!("attached: {session_id}");
                     self.model.session_id = Some(session_id);
                 }
-                harness::HarnessUpdate::Text(text) => self.model.append_transcript(&text),
+                harness::HarnessUpdate::Text(text) => self.model.transcript.push_str(&text),
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
-                    self.model.append_transcript("\n");
+                    self.model.transcript.push('\n');
                 }
             }
         }
@@ -277,13 +465,255 @@ impl App {
             return;
         }
         let content = self.model.editor.take_for_submit();
-        self.model.append_transcript(&format!("\n> {content}\n\n"));
+        // Move to the next hint, so the set is discovered across turns instead
+        // of one line being the whole of the user's experience of it.
+        self.model.hint = self.model.hint.wrapping_add(1);
+        self.model
+            .transcript
+            .push_str(&format!("\n> {content}\n\n"));
         self.model.busy = true;
         // Submitting jumps back to the live tail; otherwise the reply streams
         // in off-screen.
         self.model.scroll = 0;
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(content);
+        }
+    }
+
+    /// Geometry for a surface. The single source of truth shared by the
+    /// renderer and pointer hit-testing: if these ever diverge, clicks land in
+    /// the wrong place after a resize.
+    /// Geometry for the current model: the composer is sized to the input's
+    /// line count, so a multi-line message is fully visible.
+    ///
+    /// The line count comes from a real Parley layout rather than a character
+    /// budget, so the well is sized by where the text actually wraps.
+    fn frame_for_model(size: (u32, u32), scale: f64, model: &Model) -> layout::Frame {
+        let mut text = text::TextSystem::default();
+        Self::frame_for_model_with(size, scale, model, &mut text)
+    }
+
+    /// As [`Self::frame_for_model`], reusing an existing text system. Font and
+    /// layout contexts are expensive, so the render path passes its own.
+    fn frame_for_model_with(
+        size: (u32, u32),
+        scale: f64,
+        model: &Model,
+        text: &mut text::TextSystem,
+    ) -> layout::Frame {
+        let probe = layout::Frame::new(size, scale);
+        let lines = crate::input::InputLayout::new(
+            text,
+            model.editor.text(),
+            probe.composer_text_width(),
+            scene::composer_text_style(model),
+            probe.scale,
+        )
+        .line_count();
+        layout::Frame::with_composer_lines(size, scale, lines)
+    }
+
+    /// Byte offset in the composer text under a logical x position, or `None`
+    /// when the pointer is outside the composer well.
+    fn composer_offset_at(&mut self, x: f64, y: f64) -> Option<usize> {
+        let frame = self.frame;
+        // Generous vertical hit area: the whole well, so clicking anywhere in
+        // the box focuses the text like a normal input.
+        if y < frame.composer_top || y > frame.composer_bottom {
+            return None;
+        }
+        if x < frame.left || x > frame.right {
+            return None;
+        }
+        // Hit-test against the same Parley layout the renderer draws, so a
+        // click lands on the glyph under the pointer even with proportional
+        // fonts, clusters, or bidi text.
+        let source = self.model.editor.text().to_string();
+        let input = crate::input::InputLayout::new(
+            &mut self.text,
+            &source,
+            frame.composer_text_width(),
+            scene::composer_text_style(&self.model),
+            frame.scale,
+        );
+        let origin_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET
+            - input.scroll_offset(self.model.editor.cursor(), frame.composer_lines());
+        Some(input.offset_at_point(x - frame.composer_text_left(), y - origin_y))
+    }
+
+    fn on_pointer_pressed(&mut self) {
+        let (x, y) = self.pointer;
+        let hit = self.composer_offset_at(x, y);
+        if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
+            eprintln!(
+                "[input] press at ({x:.1}, {y:.1}) logical; composer y {:.1}..{:.1}; hit {hit:?}",
+                self.frame.composer_top, self.frame.composer_bottom
+            );
+        }
+        let Some(offset) = hit else {
+            // Outside the well: the donut is the only other interactive thing,
+            // so a press on it starts a spin drag (as on the website).
+            if self.donut_visible() && self.frame.hits_donut(x, y) {
+                self.model.spin.press(x);
+                self.update_cursor_icon();
+                self.request_redraw();
+            }
+            return;
+        };
+        let now = std::time::Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|(at, last)| now.duration_since(at) < DOUBLE_CLICK && last == offset);
+        if double {
+            // Double click selects the word under the pointer.
+            let (start, end) = self.model.editor.word_range_at(offset);
+            self.model.editor.place_cursor(start);
+            self.model.editor.extend_to(end);
+            self.last_click = None;
+        } else {
+            // Shift+click extends from the existing cursor, like normal fields.
+            if self.modifiers.shift_key() {
+                self.model.editor.extend_to(offset);
+            } else {
+                self.model.editor.place_cursor(offset);
+            }
+            self.dragging = true;
+            self.last_click = Some((now, offset));
+        }
+        self.model.caret.touch();
+        self.request_redraw();
+    }
+
+    /// Persist the window geometry if it changed and the throttle has elapsed.
+    /// Saving as we go (rather than only on exit) means the size survives a
+    /// crash or a kill.
+    fn save_geometry(&mut self, force: bool) {
+        let now = std::time::Instant::now();
+        if !force && !self.geometry.should_save(self.geometry_saved, now) {
+            return;
+        }
+        if self.geometry_saved.map(|(_, g)| g) == Some(self.geometry.sanitized()) && !force {
+            return;
+        }
+        self.geometry.save();
+        self.geometry_saved = Some((now, self.geometry.sanitized()));
+    }
+
+    /// Whether a logical point is inside the composer well.
+    fn in_composer(&self, x: f64, y: f64) -> bool {
+        y >= self.frame.composer_top
+            && y <= self.frame.composer_bottom
+            && x >= self.frame.left
+            && x <= self.frame.right
+    }
+
+    /// Show a text caret over the composer and the default arrow elsewhere, so
+    /// the input box looks editable before it is clicked.
+    fn update_cursor_icon(&mut self) {
+        let (x, y) = self.pointer;
+        let wanted = if self.in_composer(x, y) {
+            winit::window::CursorIcon::Text
+        } else if self.model.spin.dragging {
+            winit::window::CursorIcon::Grabbing
+        } else if self.donut_visible() && self.frame.hits_donut(x, y) {
+            winit::window::CursorIcon::Grab
+        } else {
+            winit::window::CursorIcon::Default
+        };
+        if self.cursor_icon != wanted {
+            self.cursor_icon = wanted;
+            if let Some(state) = self.state.as_ref() {
+                state.set_cursor_icon(wanted);
+            }
+        }
+    }
+
+    /// Whether the donut is on screen: enabled, and the session is still empty
+    /// (the same condition `build_scene` draws it under).
+    fn donut_visible(&self) -> bool {
+        self.model.donut.is_some() && self.model.transcript.trim().is_empty()
+    }
+
+    fn on_pointer_moved(&mut self) {
+        if self.model.spin.dragging {
+            self.model.spin.drag_to(self.pointer.0);
+            self.request_redraw();
+            return;
+        }
+        self.update_cursor_icon();
+        if !self.dragging {
+            return;
+        }
+        let (x, y) = self.pointer;
+        // Clamp to the well vertically so dragging out of the box keeps
+        // extending rather than dropping the selection.
+        let y = y.clamp(
+            self.frame.composer_top + 1.0,
+            self.frame.composer_bottom - 1.0,
+        );
+        if let Some(offset) = self.composer_offset_at(x, y) {
+            self.model.editor.extend_to(offset);
+            self.model.caret.touch();
+            self.request_redraw();
+        }
+    }
+
+    /// Whether the donut should be driving frames. Decorative motion is not
+    /// worth waking the GPU for when the window is not focused or the donut is
+    /// not on screen, which is what keeps an idle window off the CPU.
+    fn donut_animating(&self) -> bool {
+        self.donut_visible() && self.model.focused
+    }
+
+    /// Advance the donut one frame and rebuild its luminance field. Skipped
+    /// entirely when the donut is not being drawn, so a busy session pays
+    /// nothing for it.
+    fn animate_donut(&mut self) {
+        if !self.donut_animating() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let dt = self
+            .last_frame
+            .map(|last| now.duration_since(last).as_secs_f32())
+            // Clamp so a stall (or a laptop resuming from sleep) does not jump
+            // the animation forward by a visible lurch.
+            .map_or(DONUT_FRAME.as_secs_f32(), |dt| dt.min(0.1));
+        self.last_frame = Some(now);
+        self.model.spin.advance(dt);
+        let (time, offset) = (self.model.spin.time, self.model.spin.offset);
+        if let Some(field) = self.model.donut.as_mut() {
+            field.render(time, offset);
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(state) = self.state.as_ref() {
+            state.request_redraw();
+        }
+    }
+
+    /// When the loop must next wake to repaint, or `None` when nothing on
+    /// screen is animating.
+    ///
+    /// Two things want frames: the blinking caret, and the donut while it is on
+    /// screen. Both go through this one function so they cannot fight over
+    /// `ControlFlow`, and the earlier deadline wins.
+    ///
+    /// `None` matters as much as `Some`: an idle window must sleep rather than
+    /// spin, so the states that animate nothing (no window focus, a turn in
+    /// flight, a pinned caret with no donut) return `None` here.
+    pub fn animation_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        if !self.model.focused {
+            return None;
+        }
+        let caret = (!self.model.busy)
+            .then(|| self.model.caret.next_toggle_at(now))
+            .flatten();
+        let donut = self.donut_animating().then(|| now + DONUT_FRAME);
+        match (caret, donut) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
         }
     }
 
@@ -310,7 +740,7 @@ impl App {
                 }
             }
             Action::Submit => self.submit_input(),
-            Action::InsertNewline => self.model.editor.insert_char(' '),
+            Action::InsertNewline => self.model.editor.insert_char('\n'),
 
             Action::MoveLeft => self.model.editor.move_left(),
             Action::MoveRight => self.model.editor.move_right(),
@@ -318,6 +748,14 @@ impl App {
             Action::MoveWordRight => self.model.editor.move_word_right(),
             Action::MoveHome => self.model.editor.move_home(),
             Action::MoveEnd => self.model.editor.move_end(),
+
+            Action::ExtendLeft => self.model.editor.extend_left(),
+            Action::ExtendRight => self.model.editor.extend_right(),
+            Action::ExtendWordLeft => self.model.editor.extend_word_left(),
+            Action::ExtendWordRight => self.model.editor.extend_word_right(),
+            Action::ExtendHome => self.model.editor.extend_home(),
+            Action::ExtendEnd => self.model.editor.extend_end(),
+            Action::SelectAll => self.model.editor.select_all(),
 
             Action::DeleteBack => self.model.editor.delete_back(),
             Action::DeleteForward => self.model.editor.delete_forward(),
@@ -332,7 +770,11 @@ impl App {
                 self.clipboard.set(&killed);
             }
             Action::CutLine => {
-                let cut = self.model.editor.cut_line();
+                // Cut the selection when there is one, matching normal fields.
+                let cut = match self.model.editor.delete_selection() {
+                    Some(selected) => selected,
+                    None => self.model.editor.cut_line(),
+                };
                 self.clipboard.set(&cut);
             }
 
@@ -341,19 +783,33 @@ impl App {
                     self.model.set_notice("nothing to undo");
                 }
             }
-            Action::Copy => self.clipboard.set(self.model.editor.text()),
+            Action::Copy => {
+                // Copy the selection when there is one, else the whole line.
+                let text = self
+                    .model
+                    .editor
+                    .selected_text()
+                    .unwrap_or_else(|| self.model.editor.text())
+                    .to_string();
+                self.clipboard.set(&text);
+            }
             Action::Paste => match self.clipboard.get() {
                 Some(text) => self.model.editor.insert_str(&text),
                 None => self.model.set_notice("clipboard is empty"),
             },
 
+            // In a multi-line input, Up/Down move between lines first and only
+            // fall through to history recall at the edges, like a normal
+            // multi-line composer.
             Action::HistoryPrev => {
-                if !self.model.editor.history_prev() {
+                if !self.model.editor.move_line(-1) && !self.model.editor.history_prev() {
                     self.model.set_notice("no earlier input");
                 }
             }
             Action::HistoryNext => {
-                self.model.editor.history_next();
+                if !self.model.editor.move_line(1) {
+                    self.model.editor.history_next();
+                }
             }
 
             Action::ScrollUp => self.model.scroll_up(1, self.visible_lines()),
@@ -401,15 +857,19 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("jcode desktop2")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0)),
-                )
-                .expect("create window"),
-        );
+        // Reopen where the user left off.
+        let geometry = window_state::Geometry::load();
+        let mut attributes = Window::default_attributes()
+            .with_title("jcode desktop2")
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                geometry.width,
+                geometry.height,
+            ));
+        if let Some((x, y)) = geometry.position {
+            attributes = attributes.with_position(winit::dpi::LogicalPosition::new(x, y));
+        }
+        self.geometry = geometry;
+        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
         let redraw_window = Arc::clone(&window);
         self.harness = Some(harness::spawn(move || redraw_window.request_redraw()));
         let state = pollster::block_on(render::RenderState::new(window)).expect("init gpu");
@@ -426,14 +886,85 @@ impl ApplicationHandler for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save_geometry(true);
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(state) = self.state.as_mut() {
                     state.resize(size.width, size.height);
+                    let scale = state.scale_factor();
+                    self.geometry.width = f64::from(size.width) / scale;
+                    self.geometry.height = f64::from(size.height) / scale;
                 }
+                self.save_geometry(false);
+            }
+            WindowEvent::Moved(position) => {
+                let scale = self
+                    .state
+                    .as_ref()
+                    .map(|state| state.scale_factor())
+                    .unwrap_or(1.0);
+                self.geometry.position =
+                    Some((f64::from(position.x) / scale, f64::from(position.y) / scale));
+                self.save_geometry(false);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self
+                    .state
+                    .as_ref()
+                    .map(|state| state.scale_factor())
+                    .unwrap_or(1.0);
+                self.pointer = (position.x / scale, position.y / scale);
+                if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
+                    eprintln!(
+                        "[input] move to ({:.1}, {:.1}) logical",
+                        self.pointer.0, self.pointer.1
+                    );
+                }
+                self.on_pointer_moved();
+            }
+            WindowEvent::MouseInput {
+                state: element_state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => match element_state {
+                ElementState::Pressed => self.on_pointer_pressed(),
+                ElementState::Released => {
+                    self.dragging = false;
+                    // Releasing hands the donut its momentum; it keeps
+                    // spinning down on its own.
+                    self.model.spin.release();
+                    self.update_cursor_icon();
+                }
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Scrolling the transcript with the wheel, in line units.
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        pos.y / (layout::BODY_SIZE as f64 * layout::BODY_LEADING)
+                    }
+                };
+                let steps = lines.abs().round().max(1.0) as usize;
+                if lines > 0.0 {
+                    self.model.scroll_up(steps, self.visible_lines());
+                } else if lines < 0.0 {
+                    self.model.scroll_down(steps);
+                }
+                self.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+            }
+            WindowEvent::Focused(focused) => {
+                self.model.focused = focused;
+                // Restart the blink phase on focus so the caret is immediately
+                // solid rather than appearing mid-off-phase.
+                if focused {
+                    self.model.caret.touch();
+                }
+                self.request_redraw();
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -449,6 +980,7 @@ impl ApplicationHandler for App {
                     keymap::resolve(&logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
                 let typed = text.as_ref().map(|t| t.as_str());
                 if !self.apply(action, typed) {
+                    self.save_geometry(true);
                     event_loop.exit();
                     return;
                 }
@@ -458,1118 +990,43 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
+                self.animate_donut();
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();
-                    build_scene(&mut scene, &mut self.text, &self.model, state.size(), scale);
+                    let size = state.size();
+                    // Record the geometry the frame was built with, so pointer
+                    // hit-testing uses exactly what the user sees.
+                    self.frame = Self::frame_for_model(size, scale, &self.model);
+                    build_scene(&mut scene, &mut self.text, &self.model, size, scale);
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");
                     }
-                }
-                // Wake at the soonest of the caret's next toggle and the next
-                // reveal frame: animation without a busy redraw loop, and no
-                // wake at all once everything has settled.
-                let now = std::time::Instant::now();
-                let wake = [
-                    self.model.caret.next_toggle_at(now),
-                    self.model.reveal.next_frame_at(now),
-                ]
-                .into_iter()
-                .flatten()
-                .min();
-                if let Some(at) = wake {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(at));
-                }
-                if self.model.reveal.animating_at(now)
-                    && let Some(state) = self.state.as_ref()
-                {
-                    state.request_redraw();
                 }
             }
             _ => {}
         }
     }
-}
 
-/// Build the frame. `size` is the surface size in physical pixels and
-/// `scale` is the window scale factor; all layout below is in logical units
-/// so the design reads identically on 1x and HiDPI displays.
-/// Build the frame. `size` is the surface size in physical pixels and `scale`
-/// is the window scale factor; geometry comes from [`layout::Frame`] in logical
-/// units, so the design reads identically on 1x and HiDPI displays.
-fn build_scene(
-    scene: &mut Scene,
-    text: &mut text::TextSystem,
-    model: &Model,
-    size: (u32, u32),
-    scale: f64,
-) {
-    use layout::Frame;
-    use text::ParagraphStyle;
-    use vello::kurbo::{Rect, RoundedRect};
-
-    let theme = &model.theme;
-    let frame = Frame::new(size, scale);
-    let scale = frame.scale;
-    let column = frame.column() as f32;
-
-    let fill = |scene: &mut Scene, color: Color, shape: &Rect| {
-        scene.fill(
-            vello::peniko::Fill::NonZero,
-            Affine::scale(scale),
-            color,
-            None,
-            shape,
-        );
-    };
-    let fill_round = |scene: &mut Scene, color: Color, shape: &RoundedRect| {
-        scene.fill(
-            vello::peniko::Fill::NonZero,
-            Affine::scale(scale),
-            color,
-            None,
-            shape,
-        );
-    };
-    // Hairlines stay one physical pixel regardless of scale.
-    let hairline = |scene: &mut Scene, y: f64| {
-        fill(
-            scene,
-            theme.rule,
-            &Rect::new(frame.left, y, frame.right, y + frame.hairline()),
-        );
-    };
-
-    // Paper.
-    fill(
-        scene,
-        theme.background,
-        &Rect::new(0.0, 0.0, frame.width, frame.height),
-    );
-
-    // Masthead: wordmark, then status as a caption beside it.
-    text.draw_paragraph_scaled(
-        scene,
-        "jcode",
-        (frame.left, frame.masthead_top),
-        column,
-        ParagraphStyle {
-            font_size: layout::WORDMARK_SIZE,
-            bold: true,
-            color: theme.text,
-            letter_spacing_em: 0.02,
-            line_height: layout::CAPTION_LEADING as f32,
-            ..Default::default()
-        },
-        scale,
-    );
-    // Elide rather than wrap, so the masthead stays one line and never
-    // crosses its own rule.
-    let status_style = ParagraphStyle {
-        font_size: layout::CAPTION_SIZE,
-        color: if model.session_id.is_some() {
-            theme.muted
-        } else {
-            theme.faint
-        },
-        letter_spacing_em: 0.1,
-        line_height: layout::CAPTION_LEADING as f32,
-        ..Default::default()
-    };
-    let status_width = frame.status_width();
-    let status_chars = (status_width / (f64::from(status_style.font_size) * 0.72)) as usize;
-    let status = elide(&model.status, status_chars.max(12));
-    text.draw_paragraph_scaled(
-        scene,
-        &status,
-        (frame.status_left(), frame.status_top()),
-        status_width as f32,
-        status_style,
-        scale,
-    );
-    hairline(scene, frame.masthead_rule);
-
-    // Composer: a quiet well pinned to the bottom.
-    fill_round(
-        scene,
-        theme.wash,
-        &RoundedRect::new(
-            frame.left,
-            frame.composer_top,
-            frame.right,
-            frame.composer_bottom,
-            layout::COMPOSER_RADIUS,
-        ),
-    );
-
-    // Transcript: ink on paper. Short transcripts start at the top of the
-    // column, so a two-line exchange does not float in the middle of an empty
-    // page; once the text fills the region it pins to the bottom and scrolls
-    // up out of the composer, like a terminal.
-    let placeholder = model.transcript.trim().is_empty();
-    let transcript = if placeholder {
-        "type a message and press enter"
-    } else {
-        model.transcript.trim_start_matches('\n')
-    };
-    let body_style = ParagraphStyle {
-        font_size: layout::BODY_SIZE,
-        color: if placeholder { theme.faint } else { theme.text },
-        line_height: layout::BODY_LEADING as f32,
-        ..Default::default()
-    };
-    // Measure the *wrapped* height so long replies never bleed into the well.
-    let available = frame.body_bottom - frame.body_top;
-    let lines: Vec<&str> = transcript.lines().collect();
-    // `scroll` counts lines held back from the tail, so 0 follows live output.
-    let end = lines
-        .len()
-        .saturating_sub(model.scroll)
-        .max(1)
-        .min(lines.len().max(1));
-    let lines = &lines[..end];
-    let mut first_line = lines.len().saturating_sub(frame.visible_body_lines());
-    let mut tail = lines[first_line..].join("\n");
-    let mut tail_height = text.measure_paragraph(&tail, column, body_style, scale);
-    while tail_height > available && first_line < lines.len().saturating_sub(1) {
-        first_line += 1;
-        tail = lines[first_line..].join("\n");
-        tail_height = text.measure_paragraph(&tail, column, body_style, scale);
+    /// An animation deadline expired, so the window has to be repainted.
+    /// Setting a `WaitUntil` deadline only wakes the loop, it does not draw
+    /// anything, which is why the caret used to sit static and never blink.
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            self.request_redraw();
+        }
     }
-    let origin_y = if placeholder || tail_height < available {
-        frame.body_top
-    } else {
-        (frame.body_bottom - tail_height).max(frame.body_top)
-    };
-    if placeholder {
-        text.draw_paragraph_scaled(
-            scene,
-            &tail,
-            (frame.left, origin_y),
-            column,
-            body_style,
-            scale,
-        );
-    } else {
-        // Byte offset of the drawn tail within the whole transcript: the
-        // reveal schedule is keyed on transcript offsets, so it must survive
-        // the head being trimmed by scrolling and pagination.
-        let base = lines
-            .get(first_line)
-            .map(|line| byte_offset_within(&model.transcript, line))
-            .unwrap_or(0);
-        let now = model.reveal.now();
-        let reveal = text::Reveal {
-            at: &|offset: usize| {
-                let absolute = base + offset;
-                (
-                    model.reveal.alpha_at(absolute, now),
-                    model.reveal.rise_at(absolute, now),
-                )
-            },
+
+    /// Schedule the next animation tick before the loop sleeps.
+    ///
+    /// Done here rather than in the redraw handler so the deadline is refreshed
+    /// after *any* event, and so an idle window sleeps indefinitely instead of
+    /// waking forever.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let flow = match self.animation_deadline(std::time::Instant::now()) {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
         };
-        text.draw_paragraph_revealed(
-            scene,
-            text::Paragraph {
-                text: &tail,
-                origin: (frame.left, origin_y),
-                max_width: column,
-                style: body_style,
-            },
-            scale,
-            &reveal,
-        );
-    }
-
-    // Prompt line inside the well: a real input box. The caret is drawn at
-    // the measured width of the text before the cursor, so it sits between
-    // glyphs and moves with Ctrl+A/E, word motion, and the arrows.
-    let prompt_style = ParagraphStyle {
-        font_size: layout::BODY_SIZE,
-        color: theme.text,
-        ..Default::default()
-    };
-    let prompt_x = frame.left + layout::COMPOSER_PAD_X;
-    let prompt_y = frame.composer_text_top();
-    let prompt_width = (frame.column() - layout::COMPOSER_PAD_X * 2.0) as f32;
-
-    if model.busy {
-        text.draw_paragraph_scaled(
-            scene,
-            "working...",
-            (prompt_x, prompt_y),
-            prompt_width,
-            ParagraphStyle {
-                color: theme.muted,
-                ..prompt_style
-            },
-            scale,
-        );
-    } else {
-        if model.editor.is_empty() {
-            text.draw_paragraph_scaled(
-                scene,
-                "message jcode",
-                (prompt_x, prompt_y),
-                prompt_width,
-                ParagraphStyle {
-                    color: theme.faint,
-                    ..prompt_style
-                },
-                scale,
-            );
-        } else {
-            text.draw_paragraph_scaled(
-                scene,
-                model.editor.text(),
-                (prompt_x, prompt_y),
-                prompt_width,
-                prompt_style,
-                scale,
-            );
-        }
-        if model.caret.visible() {
-            let offset = text.measure_width(model.editor.before_cursor(), prompt_style, scale);
-            let caret_x = (prompt_x + offset).min(frame.right - layout::COMPOSER_PAD_X);
-            let top = frame.caret_top();
-            let bottom = top + layout::CARET_HEIGHT;
-            fill(
-                scene,
-                theme.text,
-                &Rect::new(caret_x, top, caret_x + layout::CARET_WIDTH, bottom),
-            );
-        }
-    }
-
-    // A transient notice, or a scrollback indicator, as a caption under the
-    // well. Never covers content.
-    let footnote = model
-        .notice
-        .clone()
-        .or_else(|| (model.scroll > 0).then(|| format!("scrolled back {} lines", model.scroll)));
-    if let Some(footnote) = footnote {
-        text.draw_paragraph_scaled(
-            scene,
-            &footnote,
-            (frame.left, frame.footnote_top),
-            frame.column() as f32,
-            ParagraphStyle {
-                font_size: layout::CAPTION_SIZE,
-                color: theme.faint,
-                letter_spacing_em: 0.1,
-                line_height: layout::CAPTION_LEADING as f32,
-                ..Default::default()
-            },
-            scale,
-        );
-    }
-}
-
-/// Byte offset of `part` inside `whole`. `part` must be a subslice of `whole`,
-/// which holds here because both come from the same transcript string; a
-/// foreign slice degrades to 0 rather than panicking.
-fn byte_offset_within(whole: &str, part: &str) -> usize {
-    let base = whole.as_ptr() as usize;
-    let inner = part.as_ptr() as usize;
-    if inner < base {
-        return 0;
-    }
-    (inner - base).min(whole.len())
-}
-
-/// Middle-elide `text` to at most `max_chars` characters, keeping the head and
-/// tail (the informative ends of paths, ids, and error strings).
-fn elide(text: &str, max_chars: usize) -> String {
-    let text = text.trim();
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
-        return text.to_string();
-    }
-    if max_chars <= 3 {
-        return "...".to_string();
-    }
-    let keep = max_chars - 3;
-    let head = keep.div_ceil(2);
-    let tail = keep - head;
-    let mut out: String = chars[..head].iter().collect();
-    out.push_str("...");
-    out.extend(&chars[chars.len() - tail..]);
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::elide;
-
-    #[test]
-    fn elide_keeps_short_text() {
-        assert_eq!(elide("attached", 20), "attached");
-    }
-
-    #[test]
-    fn elide_respects_budget_and_keeps_ends() {
-        let out = elide("disconnected: no such file or directory (os error 2)", 24);
-        assert_eq!(out.chars().count(), 24);
-        assert!(out.starts_with("disconn"));
-        assert!(out.ends_with("2)"));
-    }
-
-    #[test]
-    fn elide_handles_tiny_budget() {
-        assert_eq!(elide("abcdef", 2), "...");
-    }
-}
-
-/// Action-level tests: drive the real `App::apply` dispatch so the wiring
-/// between keymap, editor, scrolling, and interrupt semantics is covered, not
-/// just the pure modules.
-#[cfg(test)]
-mod action_tests {
-    use super::keymap::Action;
-    use super::{App, keymap};
-    use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
-
-    fn app_with(text: &str) -> App {
-        let mut app = App::default();
-        app.model.session_id = Some("session_test".into());
-        app.apply(Action::Insert, Some(text));
-        app
-    }
-
-    /// Press a chord the way the window event handler does: resolve it, then
-    /// apply it. Returns false when the app would exit.
-    fn press(app: &mut App, key: Key, mods: ModifiersState, typed: Option<&str>) -> bool {
-        let action = keymap::resolve(&key, mods).unwrap_or(Action::Insert);
-        app.apply(action, typed)
-    }
-
-    fn ch(c: char) -> Key {
-        Key::Character(SmolStr::new(c.to_string()))
-    }
-
-    #[test]
-    fn escape_clears_the_input_instead_of_quitting() {
-        // The starter quit the app on Escape, silently losing typed work.
-        let mut app = app_with("a draft message");
-        assert!(
-            press(
-                &mut app,
-                Key::Named(NamedKey::Escape),
-                ModifiersState::empty(),
-                None
-            ),
-            "Escape asked the app to exit"
-        );
-        assert!(
-            app.model.editor.is_empty(),
-            "Escape did not clear the input"
-        );
-    }
-
-    #[test]
-    fn escape_on_an_empty_composer_still_does_not_quit() {
-        let mut app = App::default();
-        assert!(press(
-            &mut app,
-            Key::Named(NamedKey::Escape),
-            ModifiersState::empty(),
-            None
-        ));
-    }
-
-    #[test]
-    fn escape_interrupts_a_running_turn_before_clearing_input() {
-        let mut app = app_with("keep me");
-        app.model.busy = true;
-        press(
-            &mut app,
-            Key::Named(NamedKey::Escape),
-            ModifiersState::empty(),
-            None,
-        );
-        assert!(!app.model.busy, "Escape did not interrupt the turn");
-        assert_eq!(
-            app.model.editor.text(),
-            "keep me",
-            "Escape cleared the input while interrupting"
-        );
-    }
-
-    #[test]
-    fn ctrl_c_quits_only_when_idle_and_empty() {
-        // While busy: interrupt.
-        let mut app = App::default();
-        app.model.busy = true;
-        assert!(press(&mut app, ch('c'), ModifiersState::CONTROL, None));
-        assert!(!app.model.busy);
-
-        // With typed text: clear rather than discard the session.
-        let mut app = app_with("unsent");
-        assert!(press(&mut app, ch('c'), ModifiersState::CONTROL, None));
-        assert!(app.model.editor.is_empty());
-
-        // Idle and empty: quit.
-        let mut app = App::default();
-        assert!(
-            !press(&mut app, ch('c'), ModifiersState::CONTROL, None),
-            "Ctrl+C on an idle empty composer should quit"
-        );
-    }
-
-    #[test]
-    fn editing_chords_reach_the_editor() {
-        let mut app = app_with("alpha beta");
-        press(&mut app, ch('a'), ModifiersState::CONTROL, None);
-        assert_eq!(app.model.editor.cursor(), 0, "Ctrl+A did not go home");
-        press(&mut app, ch('e'), ModifiersState::CONTROL, None);
-        assert_eq!(
-            app.model.editor.cursor(),
-            10,
-            "Ctrl+E did not go to the end"
-        );
-        press(&mut app, ch('w'), ModifiersState::CONTROL, None);
-        assert_eq!(
-            app.model.editor.text(),
-            "alpha ",
-            "Ctrl+W did not cut a word"
-        );
-        press(&mut app, ch('u'), ModifiersState::CONTROL, None);
-        assert!(app.model.editor.is_empty(), "Ctrl+U did not kill to start");
-        press(&mut app, ch('z'), ModifiersState::CONTROL, None);
-        assert_eq!(app.model.editor.text(), "alpha ", "Ctrl+Z did not undo");
-    }
-
-    #[test]
-    fn cut_then_paste_round_trips_through_the_clipboard() {
-        let mut app = app_with("cut me");
-        press(&mut app, ch('x'), ModifiersState::CONTROL, None);
-        assert!(app.model.editor.is_empty());
-        press(&mut app, ch('v'), ModifiersState::CONTROL, None);
-        assert_eq!(
-            app.model.editor.text(),
-            "cut me",
-            "paste did not restore the cut"
-        );
-    }
-
-    #[test]
-    fn typing_inserts_at_the_caret_after_moving() {
-        let mut app = app_with("ac");
-        press(
-            &mut app,
-            Key::Named(NamedKey::ArrowLeft),
-            ModifiersState::empty(),
-            None,
-        );
-        press(&mut app, ch('b'), ModifiersState::empty(), Some("b"));
-        assert_eq!(app.model.editor.text(), "abc");
-    }
-
-    /// Streamed text must be registered with the reveal, or the animation
-    /// silently does nothing in the real app while still passing unit tests.
-    #[test]
-    fn appending_transcript_schedules_the_reveal() {
-        let mut model = super::Model::default();
-        model.append_transcript("hello");
-        assert_eq!(model.transcript, "hello");
-        assert!(
-            model.reveal.animating(),
-            "appended text was not scheduled to reveal"
-        );
-        let alpha = model.reveal.alpha(0);
-        assert!(
-            alpha < 0.2,
-            "brand new text was drawn essentially opaque ({alpha})"
-        );
-    }
-
-    #[test]
-    fn typing_keeps_the_caret_solid() {
-        let mut app = App::default();
-        press(&mut app, ch('x'), ModifiersState::empty(), Some("x"));
-        assert!(
-            app.model.caret.visible(),
-            "caret was not solid while typing"
-        );
-    }
-
-    #[test]
-    fn history_recall_walks_submitted_messages() {
-        let mut app = app_with("first message");
-        app.submit_input();
-        app.apply(Action::Insert, Some("draft"));
-        press(
-            &mut app,
-            Key::Named(NamedKey::ArrowUp),
-            ModifiersState::empty(),
-            None,
-        );
-        assert_eq!(app.model.editor.text(), "first message");
-        press(
-            &mut app,
-            Key::Named(NamedKey::ArrowDown),
-            ModifiersState::empty(),
-            None,
-        );
-        assert_eq!(app.model.editor.text(), "draft", "live draft was lost");
-    }
-
-    #[test]
-    fn submitting_without_a_session_keeps_the_text_and_says_why() {
-        let mut app = App::default();
-        app.apply(Action::Insert, Some("hello"));
-        app.apply(Action::Submit, None);
-        assert_eq!(
-            app.model.editor.text(),
-            "hello",
-            "text was discarded while detached"
-        );
-        assert!(app.model.notice.is_some(), "no notice explained the no-op");
-    }
-
-    #[test]
-    fn scrolling_clamps_and_returns_to_the_tail() {
-        let mut app = App::default();
-        app.model.transcript = (1..=100)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.apply(Action::ScrollTop, None);
-        let top = app.model.scroll;
-        assert!(top > 0, "scrolling up did nothing");
-        app.apply(Action::ScrollUp, None);
-        assert_eq!(app.model.scroll, top, "scroll ran past the top of history");
-        app.apply(Action::ScrollBottom, None);
-        assert_eq!(app.model.scroll, 0, "did not return to the live tail");
-        app.apply(Action::ScrollDown, None);
-        assert_eq!(app.model.scroll, 0, "scrolled below the tail");
-    }
-
-    #[test]
-    fn submitting_jumps_back_to_the_live_tail() {
-        let mut app = app_with("question");
-        app.model.transcript = (1..=100)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.apply(Action::PageUp, None);
-        assert!(app.model.scroll > 0);
-        app.submit_input();
-        assert_eq!(app.model.scroll, 0, "reply would stream in off-screen");
-    }
-
-    #[test]
-    fn a_notice_is_cleared_by_the_next_keypress() {
-        let mut app = App::default();
-        app.apply(Action::Undo, None);
-        assert!(
-            app.model.notice.is_some(),
-            "undo with empty stack said nothing"
-        );
-        press(&mut app, ch('a'), ModifiersState::empty(), Some("a"));
-        assert!(app.model.notice.is_none(), "stale notice persisted");
-    }
-
-    /// Every action must be dispatchable without panicking, including on an
-    /// empty model: a crash on an edge key is worse than a no-op.
-    #[test]
-    fn every_action_is_safe_on_an_empty_model() {
-        let actions = [
-            Action::Insert,
-            Action::Submit,
-            Action::InsertNewline,
-            Action::MoveLeft,
-            Action::MoveRight,
-            Action::MoveWordLeft,
-            Action::MoveWordRight,
-            Action::MoveHome,
-            Action::MoveEnd,
-            Action::DeleteBack,
-            Action::DeleteForward,
-            Action::DeleteWordBack,
-            Action::DeleteWordForward,
-            Action::KillToStart,
-            Action::KillToEnd,
-            Action::CutLine,
-            Action::Undo,
-            Action::Copy,
-            Action::Paste,
-            Action::HistoryPrev,
-            Action::HistoryNext,
-            Action::ScrollUp,
-            Action::ScrollDown,
-            Action::PageUp,
-            Action::PageDown,
-            Action::ScrollTop,
-            Action::ScrollBottom,
-            Action::Cancel,
-        ];
-        for action in actions {
-            let mut app = App::default();
-            app.apply(action, Some("x"));
-        }
-    }
-
-    /// Every chord in the parity table must survive real dispatch.
-    #[test]
-    fn every_ported_chord_dispatches_without_panicking() {
-        for row in keymap::PORTED {
-            let mut app = app_with("alpha beta gamma");
-            app.apply(row.action, Some("x"));
-        }
-    }
-}
-
-/// Pixel-level visual tests: render every state-space node offscreen and
-/// assert the invariants from `docs/DESKTOP2_VISUAL_CHECKLIST.md` that only
-/// the real rendered output can prove (regions stay clear, text is legible,
-/// nothing is clipped). Requires a GPU, so these are ignored by default and
-/// run with `cargo test -p jcode-desktop2 -- --ignored`.
-#[cfg(test)]
-mod visual_tests {
-    use super::{Model, build_scene, layout::Frame, states, text::TextSystem};
-    use vello::Scene;
-
-    const WIDTH: u32 = 1400;
-    const HEIGHT: u32 = 900;
-    const SCALE: f64 = 1.75;
-
-    struct Rendered {
-        pixels: Vec<u8>,
-        width: u32,
-        height: u32,
-        frame: Frame,
-    }
-
-    impl Rendered {
-        fn new(model: &Model) -> Option<Self> {
-            Self::at(model, WIDTH, HEIGHT, SCALE)
-        }
-
-        /// Render one model at an explicit surface size and scale factor.
-        fn at(model: &Model, width: u32, height: u32, scale: f64) -> Option<Self> {
-            let mut text = TextSystem::default();
-            let mut scene = Scene::new();
-            build_scene(&mut scene, &mut text, model, (width, height), scale);
-            let pixels = super::capture::capture_scene_to_rgba(&scene, width, height).ok()?;
-            Some(Self {
-                pixels,
-                width,
-                height,
-                frame: Frame::new((width, height), scale),
-            })
-        }
-
-        /// Height in physical pixels of the inked rows within a logical rect.
-        /// Used to verify text is rasterized at physical size (HiDPI), not
-        /// laid out at 1x and left tiny on a scaled display.
-        fn ink_rows(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> u32 {
-            let s = self.frame.scale;
-            let cx = |v: f64| (v * s).round().clamp(0.0, f64::from(self.width - 1)) as u32;
-            let cy = |v: f64| (v * s).round().clamp(0.0, f64::from(self.height - 1)) as u32;
-            let (px0, px1) = (cx(x0), cx(x1));
-            let mut rows = 0;
-            for y in cy(y0)..=cy(y1) {
-                if (px0..=px1).any(|x| self.luma(x, y) < 0.6) {
-                    rows += 1;
-                }
-            }
-            rows
-        }
-
-        /// Luminance at a physical pixel, 0.0 (black) to 1.0 (white).
-        fn luma(&self, x: u32, y: u32) -> f64 {
-            let i = ((y * self.width + x) * 4) as usize;
-            let [r, g, b] = [
-                self.pixels[i] as f64,
-                self.pixels[i + 1] as f64,
-                self.pixels[i + 2] as f64,
-            ];
-            (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
-        }
-
-        /// Mean luminance inside a logical-unit rect. Sensitive to partial
-        /// opacity across a whole region, unlike `darkest_in`, which only
-        /// reports the single most opaque pixel.
-        fn mean_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
-            let s = self.frame.scale;
-            let to_px = |v: f64, max: u32| (v * s).round().clamp(0.0, f64::from(max - 1)) as u32;
-            let (px0, py0) = (to_px(x0, self.width), to_px(y0, self.height));
-            let (px1, py1) = (to_px(x1, self.width), to_px(y1, self.height));
-            let mut sum = 0.0;
-            let mut count = 0.0;
-            for y in py0..=py1 {
-                for x in px0..=px1 {
-                    sum += self.luma(x, y);
-                    count += 1.0;
-                }
-            }
-            if count == 0.0 { 1.0 } else { sum / count }
-        }
-
-        /// Darkest luminance inside a logical-unit rect.
-        fn darkest_in(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
-            let s = self.frame.scale;
-            let to_px = |v: f64, max: u32| (v * s).round().clamp(0.0, f64::from(max - 1)) as u32;
-            let (px0, py0) = (to_px(x0, self.width), to_px(y0, self.height));
-            let (px1, py1) = (to_px(x1, self.width), to_px(y1, self.height));
-            let mut darkest = 1.0f64;
-            for y in py0..=py1 {
-                for x in px0..=px1 {
-                    darkest = darkest.min(self.luma(x, y));
-                }
-            }
-            darkest
-        }
-    }
-
-    fn nodes() -> Vec<(&'static str, Model)> {
-        states::names()
-            .into_iter()
-            .map(|name| (name, states::by_name(name).expect("listed node")))
-            .collect()
-    }
-
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn nothing_draws_in_the_gap_above_the_composer() {
-        for (name, model) in nodes() {
-            let Some(r) = Rendered::new(&model) else {
-                eprintln!("skipping {name}: no GPU");
-                return;
-            };
-            let f = r.frame;
-            // The band between the transcript and the well must stay paper:
-            // this is the overlap bug that made long replies collide.
-            let darkest = r.darkest_in(f.left, f.body_bottom + 2.0, f.right, f.composer_top - 2.0);
-            assert!(
-                darkest > 0.9,
-                "{name}: ink ({darkest:.3} luma) in the composer gap"
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn masthead_rule_is_clear_of_text() {
-        for (name, model) in nodes() {
-            let Some(r) = Rendered::new(&model) else {
-                return;
-            };
-            let f = r.frame;
-            // Just below the rule must be paper: status text that wraps past
-            // its own rule was the second bug.
-            let darkest = r.darkest_in(f.left, f.masthead_rule + 3.0, f.right, f.body_top - 3.0);
-            assert!(darkest > 0.9, "{name}: text crossed the masthead rule");
-        }
-    }
-
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn body_text_has_readable_contrast() {
-        for (name, model) in nodes() {
-            let Some(r) = Rendered::new(&model) else {
-                return;
-            };
-            let f = r.frame;
-            // Some real ink must exist in the transcript band, dark enough to
-            // read. Catches invisible text and silent layout collapse.
-            let darkest = r.darkest_in(f.left, f.body_top, f.right, f.body_bottom);
-            assert!(
-                darkest < 0.65,
-                "{name}: transcript is too faint to read (darkest {darkest:.3})"
-            );
-        }
-    }
-
-    /// The founding bug: layout in physical pixels with text laid out at 1x
-    /// made everything render tiny and blurry on a 1.75x display. Physical
-    /// text height must scale with the scale factor.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn text_is_rasterized_at_physical_size() {
-        let model = states::by_name("turn_done").expect("node");
-        const W: u32 = 1100;
-        const H: u32 = 720;
-        let Some(one) = Rendered::at(&model, W, H, 1.0) else {
-            return;
-        };
-        let Some(two) = Rendered::at(&model, W * 2, H * 2, 2.0) else {
-            return;
-        };
-        let f = one.frame;
-        let base = one.ink_rows(f.left, f.body_top, f.right, f.body_bottom);
-        let scaled = two.ink_rows(f.left, f.body_top, f.right, f.body_bottom);
-        assert!(base > 0 && scaled > 0, "no text was drawn");
-        let ratio = f64::from(scaled) / f64::from(base);
-        assert!(
-            (1.7..=2.3).contains(&ratio),
-            "text did not scale with DPI: {base} rows at 1x vs {scaled} at 2x (ratio {ratio:.2})"
-        );
-    }
-
-    /// A node must render identically no matter when it is rendered, or every
-    /// pixel test becomes timing-dependent and flaky.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn state_nodes_render_deterministically() {
-        for (name, model) in nodes() {
-            let Some(first) = Rendered::new(&model) else {
-                return;
-            };
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            let Some(second) = Rendered::new(&model) else {
-                return;
-            };
-            assert!(
-                first.pixels == second.pixels,
-                "{name} rendered differently 700ms later (time-dependent frame)"
-            );
-        }
-    }
-
-    /// Columns of ink inside the composer well, as physical x positions.
-    /// Used to find the caret without knowing font metrics.
-    fn caret_columns(r: &Rendered) -> Vec<u32> {
-        let f = r.frame;
-        let s = f.scale;
-        let y0 = ((f.caret_top() + 2.0) * s) as u32;
-        let y1 = ((f.caret_top() + super::layout::CARET_HEIGHT - 2.0) * s) as u32;
-        let x0 = (f.left * s) as u32;
-        let x1 = (f.right * s) as u32;
-        (x0..x1)
-            .filter(|&x| (y0..=y1).all(|y| r.luma(x, y) < 0.5))
-            .collect()
-    }
-
-    /// A caret is a full-height vertical bar, so it inks every sampled row in
-    /// its column. Empty input has no glyphs, so any such column is the caret.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn an_insert_caret_is_drawn_in_the_empty_composer() {
-        let model = states::by_name("attached_empty").expect("node");
-        let Some(r) = Rendered::new(&model) else {
-            return;
-        };
-        let columns = caret_columns(&r);
-        assert!(
-            !columns.is_empty(),
-            "no insert caret was drawn in the empty composer"
-        );
-        let f = r.frame;
-        let expected = ((f.left + super::layout::COMPOSER_PAD_X) * f.scale) as u32;
-        assert!(
-            columns.iter().any(|&x| x.abs_diff(expected) <= 4),
-            "caret was not at the start of the empty input (columns {:?}, expected ~{expected})",
-            &columns[..columns.len().min(8)]
-        );
-    }
-
-    /// The caret must track the cursor index, which is what makes this a real
-    /// input box rather than a trailing underscore. Compared against a caret
-    /// rendered on the *same* text with the cursor at the end, so the only
-    /// difference is the cursor position.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn the_caret_moves_with_the_cursor() {
-        let mut inside = states::by_name("mid_input_caret_inside").expect("node");
-        let mut at_end = states::by_name("mid_input_caret_inside").expect("node");
-        at_end.editor.set_cursor_public(at_end.editor.text().len());
-        // Same text, same node, different cursor.
-        assert_eq!(inside.editor.text(), at_end.editor.text());
-        assert!(inside.editor.cursor() < at_end.editor.cursor());
-        inside.caret = super::caret::Caret::pinned(true);
-        at_end.caret = super::caret::Caret::pinned(true);
-
-        let Some(a) = Rendered::new(&inside) else {
-            return;
-        };
-        let Some(b) = Rendered::new(&at_end) else {
-            return;
-        };
-        let mid = caret_columns(&a);
-        let tail = caret_columns(&b);
-        assert!(!mid.is_empty(), "no caret drawn with the cursor mid-text");
-        assert!(
-            !tail.is_empty(),
-            "no caret drawn with the cursor at the end"
-        );
-        let mid_x = *mid.iter().max().expect("columns");
-        let tail_x = *tail.iter().max().expect("columns");
-        assert!(
-            tail_x > mid_x + 20,
-            "caret did not follow the cursor: mid-text at {mid_x}, at end {tail_x}"
-        );
-    }
-
-    /// The blink must actually blink: the off phase draws no caret.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn the_caret_disappears_on_the_blink_off_phase() {
-        let hidden = states::by_name("caret_hidden").expect("node");
-        assert!(
-            !hidden.caret.visible(),
-            "the caret_hidden node is not actually in an off phase"
-        );
-        let Some(r) = Rendered::new(&hidden) else {
-            return;
-        };
-        // Sample past the end of the text, where only a caret could ink.
-        let f = r.frame;
-        let text_end = f.left + super::layout::COMPOSER_PAD_X + 200.0;
-        let darkest = r.darkest_in(
-            text_end,
-            f.composer_top + 4.0,
-            f.right - 2.0,
-            f.composer_bottom - 4.0,
-        );
-        assert!(
-            darkest > 0.85,
-            "something was drawn past the text on the blink off phase ({darkest:.3})"
-        );
-    }
-
-    /// The caret must never escape its well, at any window size.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn the_caret_stays_inside_the_composer_well() {
-        for (name, model) in nodes() {
-            let Some(r) = Rendered::new(&model) else {
-                return;
-            };
-            let f = r.frame;
-            // Bands immediately above and below the well must stay paper.
-            let above = r.darkest_in(f.left, f.composer_top - 6.0, f.right, f.composer_top - 2.0);
-            assert!(above > 0.9, "{name}: ink just above the composer well");
-            let below = r.darkest_in(
-                f.left,
-                f.composer_bottom + 1.0,
-                f.right,
-                f.footnote_top - 1.0,
-            );
-            assert!(below > 0.9, "{name}: ink between the well and the footnote");
-        }
-    }
-
-    /// Freshly streamed text must actually be lighter than settled text: this
-    /// is the whole point of the reveal, and it is invisible to unit tests
-    /// because it lives in the glyph brush.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn streaming_text_is_faded_while_it_reveals() {
-        let settled = states::by_name("streaming").expect("node");
-        let animating = states::by_name("streaming_reveal").expect("node");
-        let Some(a) = Rendered::new(&settled) else {
-            return;
-        };
-        let Some(b) = Rendered::new(&animating) else {
-            return;
-        };
-        let f = a.frame;
-        // Mean ink over the transcript: partially revealed glyphs lighten the
-        // region even though the oldest, settled glyphs stay fully opaque.
-        let settled_ink = a.mean_in(f.left, f.body_top, f.right, f.body_bottom);
-        let fading_ink = b.mean_in(f.left, f.body_top, f.right, f.body_bottom);
-        assert!(
-            a.darkest_in(f.left, f.body_top, f.right, f.body_bottom) < 0.65,
-            "settled transcript was not solid ink"
-        );
-        assert!(
-            fading_ink > settled_ink + 0.002,
-            "streaming tail was not faded: settled {settled_ink:.4} vs revealing {fading_ink:.4}"
-        );
-    }
-
-    /// Render `streaming` with its whole transcript revealing, frozen at
-    /// `offset_ms` into the animation.
-    fn revealing_at(offset_ms: u64, start: std::time::Instant) -> Option<Rendered> {
-        let mut model = states::by_name("streaming").expect("node");
-        let mut reveal = super::stream::Reveal::default();
-        reveal.push_at(model.transcript.len(), start);
-        reveal.freeze_at(start + std::time::Duration::from_millis(offset_ms));
-        model.reveal = reveal;
-        Rendered::new(&model)
-    }
-
-    /// The reveal must animate over time, not just render one dimmed frame.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn the_reveal_progresses_toward_full_opacity() {
-        let start = std::time::Instant::now();
-        let Some(early) = revealing_at(20, start) else {
-            return;
-        };
-        let Some(late) = revealing_at(3_000, start) else {
-            return;
-        };
-        let f = early.frame;
-        let early_ink = early.mean_in(f.left, f.body_top, f.right, f.body_bottom);
-        let late_ink = late.mean_in(f.left, f.body_top, f.right, f.body_bottom);
-        assert!(
-            late_ink < early_ink - 0.01,
-            "reveal did not darken over time: {early_ink:.3} -> {late_ink:.3}"
-        );
-        // The settled frame must reach normal ink, so the animation leaves no
-        // permanent tint.
-        assert!(
-            late.darkest_in(f.left, f.body_top, f.right, f.body_bottom) < 0.65,
-            "revealed text never reached readable ink"
-        );
-    }
-
-    /// Animation must not reflow text: a wobbling paragraph would be worse
-    /// than no animation at all. Glyphs that are visible mid-reveal must sit
-    /// in the same columns they occupy once settled.
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn revealing_text_does_not_reflow() {
-        let start = std::time::Instant::now();
-        let columns = |r: &Rendered| -> Vec<u32> {
-            let f = r.frame;
-            let s = f.scale;
-            let y0 = (f.body_top * s) as u32;
-            let y1 = (f.body_bottom * s) as u32;
-            ((f.left * s) as u32..(f.right * s) as u32)
-                .filter(|&x| (y0..y1).any(|y| r.luma(x, y) < 0.9))
-                .collect()
-        };
-        let Some(mid) = revealing_at(120, start) else {
-            return;
-        };
-        let Some(done) = revealing_at(3_000, start) else {
-            return;
-        };
-        let mid = columns(&mid);
-        let done = columns(&done);
-        assert!(!mid.is_empty() && !done.is_empty(), "no text drawn");
-        // Every column inked mid-reveal must also be inked when settled: any
-        // stray column means glyphs shifted horizontally.
-        let stray: Vec<u32> = mid
-            .iter()
-            .copied()
-            .filter(|x| !done.iter().any(|d| d.abs_diff(*x) <= 1))
-            .collect();
-        assert!(
-            stray.is_empty(),
-            "text moved horizontally while revealing (reflow) at columns {:?}",
-            &stray[..stray.len().min(8)]
-        );
-    }
-
-    #[test]
-    #[ignore = "requires a GPU"]
-    fn margins_stay_empty() {
-        for (name, model) in nodes() {
-            let Some(r) = Rendered::new(&model) else {
-                return;
-            };
-            let f = r.frame;
-            // Nothing may be drawn outside the measure column: proves text is
-            // wrapped to the column and not clipped by the window edge.
-            let left_margin = r.darkest_in(0.0, 0.0, f.left - 3.0, f.height - 1.0);
-            assert!(left_margin > 0.9, "{name}: ink in the left margin");
-            let bottom = r.darkest_in(0.0, f.footnote_bottom + 2.0, f.width - 1.0, f.height - 1.0);
-            assert!(bottom > 0.9, "{name}: ink below the footnote row");
-        }
+        event_loop.set_control_flow(flow);
     }
 }

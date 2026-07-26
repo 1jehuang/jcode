@@ -31,9 +31,21 @@ pub struct Theme {
     pub rule: Color,
     /// Quiet fill for code blocks and wells.
     pub wash: Color,
+    /// Fill of an input field. The composer is a field, not a code block, so
+    /// it gets its own role: a grey slab reads as disabled, paper with a
+    /// hairline reads as somewhere to type.
+    pub field: Color,
+    /// Hairline around an unfocused field.
+    pub field_border: Color,
+    /// Hairline around the focused field. Stronger than `field_border` so
+    /// focus is visible without a colour accent.
+    pub field_border_focus: Color,
     /// Errors. The print theme keeps this ink-only per the style guide;
     /// other themes may use hue.
     pub error: Color,
+    /// Text selection band. Ink density, not hue, so selected text stays
+    /// readable against it.
+    pub selection: Color,
 }
 
 impl Theme {
@@ -47,7 +59,11 @@ impl Theme {
             faint: Color::from_rgb8(0x99, 0x99, 0x99),
             rule: Color::from_rgb8(0xcc, 0xcc, 0xcc),
             wash: Color::from_rgb8(0xf4, 0xf4, 0xf4),
+            field: Color::from_rgb8(0xff, 0xff, 0xff),
+            field_border: Color::from_rgb8(0xd4, 0xd4, 0xd4),
+            field_border_focus: Color::from_rgb8(0x77, 0x77, 0x77),
             error: Color::from_rgb8(0x11, 0x11, 0x11),
+            selection: Color::from_rgb8(0xd8, 0xd8, 0xd8),
         }
     }
 
@@ -61,7 +77,11 @@ impl Theme {
             faint: Color::from_rgb8(0x66, 0x66, 0x66),
             rule: Color::from_rgb8(0x33, 0x33, 0x33),
             wash: Color::from_rgb8(0x1a, 0x1a, 0x1a),
+            field: Color::from_rgb8(0x16, 0x16, 0x16),
+            field_border: Color::from_rgb8(0x3a, 0x3a, 0x3a),
+            field_border_focus: Color::from_rgb8(0x88, 0x88, 0x88),
             error: Color::from_rgb8(0xee, 0xee, 0xee),
+            selection: Color::from_rgb8(0x3a, 0x3a, 0x3a),
         }
     }
 
@@ -106,6 +126,7 @@ mod tests {
                 ("faint", theme.faint),
                 ("rule", theme.rule),
                 ("error", theme.error),
+                ("selection", theme.selection),
             ] {
                 assert_ne!(
                     role.components, theme.background.components,
@@ -141,6 +162,31 @@ mod tests {
             assert!(
                 contrast(theme.faint) > contrast(theme.rule),
                 "faint is not stronger than a hairline in {:?}",
+                theme.mode
+            );
+        }
+    }
+
+    /// Selected text must stay readable: the band has to contrast with the
+    /// text drawn on top of it, not just with the page.
+    #[test]
+    fn selected_text_stays_readable() {
+        let luma = |color: Color| {
+            let [r, g, b, _] = color.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for theme in [Theme::print_light(), Theme::print_dark()] {
+            let contrast = (luma(theme.text) - luma(theme.selection)).abs();
+            assert!(
+                contrast > 0.35,
+                "text on the selection band is unreadable in {:?} (contrast {contrast:.2})",
+                theme.mode
+            );
+            // The band must also be visible against the page.
+            let against_page = (luma(theme.selection) - luma(theme.background)).abs();
+            assert!(
+                against_page > 0.03,
+                "the selection band is invisible in {:?}",
                 theme.mode
             );
         }
