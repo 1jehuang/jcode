@@ -704,22 +704,50 @@ fn native_messaging_hosts_dir() -> Result<PathBuf> {
     }
 }
 
+/// How long to wait for the browser CLI before declaring the bridge dead.
+///
+/// The CLI round-trips to the Firefox extension over `ws://127.0.0.1:8766`. If
+/// the extension is missing, disabled, or Firefox is closed, nothing ever
+/// answers and an unbounded `.output().await` hangs `browser status` and
+/// `browser setup` for minutes. See #602.
+const BRIDGE_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run the browser CLI with a hard timeout, killing the child if it overruns.
+///
+/// `Ok(None)` means the call timed out, which callers treat as "not
+/// responding" so they fail fast instead of hanging.
+async fn run_browser_cli_capped(
+    bin: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<Option<std::process::Output>> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args).kill_on_drop(true);
+
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(output) => Ok(Some(output?)),
+        Err(_) => {
+            crate::logging::warn(&format!(
+                "browser CLI '{}' timed out after {}s; treating the bridge as not responding",
+                args.first().copied().unwrap_or("(no action)"),
+                timeout.as_secs()
+            ));
+            Ok(None)
+        }
+    }
+}
+
 async fn check_browser_ping() -> Result<bool> {
     let bin = browser_binary_path();
     if !bin.exists() {
         return Ok(false);
     }
 
-    let output = tokio::process::Command::new(&bin)
-        .arg("ping")
-        .output()
-        .await?;
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.contains("pong"))
-    } else {
-        Ok(false)
+    match run_browser_cli_capped(&bin, &["ping"], BRIDGE_PING_TIMEOUT).await? {
+        Some(output) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).contains("pong"))
+        }
+        _ => Ok(false),
     }
 }
 
@@ -729,11 +757,13 @@ async fn probe_bridge_action_support(action: &str, params_json: &str) -> Result<
         return Ok(false);
     }
 
-    let output = tokio::process::Command::new(&bin)
-        .arg(action)
-        .arg(params_json)
-        .output()
-        .await?;
+    let Some(output) =
+        run_browser_cli_capped(&bin, &[action, params_json], BRIDGE_PING_TIMEOUT).await?
+    else {
+        // A dead bridge cannot tell us whether the action exists; report it as
+        // unsupported rather than hanging the caller (#602).
+        return Ok(false);
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -825,8 +855,19 @@ async fn wait_for_ready(timeout_secs: u64) -> Result<bool> {
     Ok(false)
 }
 
+/// Whether `browser setup` should offer to (re)install the bridge extension.
+///
+/// Keying only off the persistent `.setup-complete` marker meant that once a
+/// past setup succeeded, setup could never recover if the extension later
+/// vanished from the live Firefox profile: it just printed "already completed".
+/// Also re-prompt when the binary is installed but the bridge is not
+/// responding, which is the only signal that a previously-working setup lost
+/// its extension. A healthy responding bridge stays inert. See #602.
 fn should_prompt_extension_install(status: &BrowserStatus) -> bool {
-    !status.setup_complete
+    if !status.setup_complete {
+        return true;
+    }
+    status.binary_installed && !status.responding
 }
 
 async fn install_extension() -> Result<String> {
