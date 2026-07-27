@@ -91,7 +91,7 @@ jcode-usage-types = { path = "../jcode-usage-types" }
 # heavier presentation deps (ratatui widgets, arboard clipboard) were dropped
 # from this foundation layer; they are unused here and live only in `jcode-tui`.
 crossterm = { version = "0.29", features = ["event-stream"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico"] }  # PNG/JPEG plus BMP/ICO so favicons can be transcoded (skip avif/rav1e, exr, gif, tiff, etc)
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
 # (tool/read.rs), not here.

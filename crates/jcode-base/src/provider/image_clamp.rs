@@ -33,6 +33,17 @@
 //! cap (e.g. a large, high-detail PNG). When that happens we re-encode the
 //! image as JPEG and progressively downscale it until its base64 payload fits
 //! within budget.
+//!
+//! Finally, providers only accept a small set of image formats
+//! (`image/jpeg`, `image/png`, `image/gif`, `image/webp`). Reading a favicon
+//! (`image/x-icon`) or a `.bmp` used to send an unsupported payload straight
+//! through and the request failed with:
+//!
+//! ```text
+//! The image data you provided does not represent a valid image.
+//! ```
+//!
+//! Those blocks are transcoded to PNG here instead.
 
 use base64::Engine as _;
 use jcode_message_types::{ContentBlock, Message};
@@ -49,6 +60,39 @@ const IMAGE_BASE64_BYTE_LIMIT: usize = 10 * 1024 * 1024;
 /// Target base64 size we re-encode oversized images down to. Kept a little
 /// under the hard limit so we always land safely inside the cap.
 const IMAGE_BASE64_BYTE_TARGET: usize = 9 * 1024 * 1024;
+/// Image media types every supported provider accepts on the wire.
+const PROVIDER_SUPPORTED_MEDIA_TYPES: [&str; 4] =
+    ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// True when `media_type` is not one of the formats providers accept, so the
+/// block must be transcoded before it can be sent.
+fn media_type_unsupported(media_type: &str) -> bool {
+    !PROVIDER_SUPPORTED_MEDIA_TYPES
+        .iter()
+        .any(|ok| media_type.eq_ignore_ascii_case(ok))
+}
+
+/// Transcode an unsupported image (ICO, BMP, ...) to PNG in place. Returns
+/// `true` only when the block was rewritten; a payload we cannot decode is left
+/// untouched so behaviour never regresses versus sending it as-is.
+fn transcode_unsupported_format(media_type: &mut String, data: &mut String) -> bool {
+    if !media_type_unsupported(media_type) {
+        return false;
+    }
+    let Some(bytes) = decode_b64(data) else {
+        return false;
+    };
+    let Some(img) = decode_image(&bytes) else {
+        return false;
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    if img.write_to(&mut out, image::ImageFormat::Png).is_err() {
+        return false;
+    }
+    *media_type = "image/png".to_string();
+    *data = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+    true
+}
 
 /// Inspect `messages` and, if any `ContentBlock::Image` exceeds the per-image
 /// edge limit implied by the total image count, or the per-image base64 byte
@@ -86,6 +130,7 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
             data.len() > IMAGE_BASE64_BYTE_LIMIT
                 || image_exceeds_edge(data, max_edge)
                 || media_type_mismatch(media_type, data)
+                || media_type_unsupported(media_type)
         });
     if !needs_change {
         return None;
@@ -103,6 +148,11 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
                 if reconcile_media_type(media_type, data) {
                     changed = true;
                 }
+                // Then transcode anything providers cannot accept at all
+                // (favicons, BMPs, ...) into PNG.
+                if transcode_unsupported_format(media_type, data) {
+                    changed = true;
+                }
                 if clamp_image_block(media_type, data, max_edge) {
                     changed = true;
                 }
@@ -111,6 +161,49 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
     }
 
     changed.then_some(clamped)
+}
+
+/// Decode an image, with a fallback for ICO files that wrap a PNG whose colour
+/// type the `image` crate's ICO decoder rejects (a very common favicon shape).
+/// In that case we decode the embedded PNG directly.
+fn decode_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    if let Ok(img) = image::load_from_memory(bytes) {
+        return Some(img);
+    }
+    embedded_ico_png(bytes).and_then(|png| image::load_from_memory(png).ok())
+}
+
+/// Return the embedded PNG payload of the first entry of an ICO file, if any.
+fn embedded_ico_png(bytes: &[u8]) -> Option<&[u8]> {
+    // ICONDIR: reserved(2) type(2) count(2), then 16-byte ICONDIRENTRYs.
+    if bytes.len() < 22 || bytes[0..4] != [0x00, 0x00, 0x01, 0x00] {
+        return None;
+    }
+    let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+    for i in 0..count {
+        let entry = 6 + i * 16;
+        if entry + 16 > bytes.len() {
+            break;
+        }
+        let size = u32::from_le_bytes([
+            bytes[entry + 8],
+            bytes[entry + 9],
+            bytes[entry + 10],
+            bytes[entry + 11],
+        ]) as usize;
+        let offset = u32::from_le_bytes([
+            bytes[entry + 12],
+            bytes[entry + 13],
+            bytes[entry + 14],
+            bytes[entry + 15],
+        ]) as usize;
+        let end = offset.checked_add(size)?;
+        let payload = bytes.get(offset..end)?;
+        if payload.len() >= 8 && payload[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+            return Some(payload);
+        }
+    }
+    None
 }
 
 /// Detect an image's true media type from its leading magic bytes. Returns
@@ -128,6 +221,12 @@ fn sniff_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some("image/webp");
+    }
+    if bytes.len() >= 4 && bytes[0..4] == [0x00, 0x00, 0x01, 0x00] {
+        return Some("image/x-icon");
+    }
+    if bytes.len() >= 2 && &bytes[0..2] == b"BM" {
+        return Some("image/bmp");
     }
     None
 }
@@ -427,6 +526,28 @@ mod tests {
     fn no_images_returns_none() {
         let messages = vec![Message::user("hello")];
         assert!(clamp_outbound_images(&messages).is_none());
+    }
+
+    /// Reading a favicon used to send `image/x-icon` straight to the provider,
+    /// which rejects it as "not a valid image". It must be transcoded to PNG.
+    #[test]
+    fn unsupported_format_is_transcoded_to_png() {
+        let img = RgbImage::from_pixel(32, 32, image::Rgb([1, 2, 3]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, ImageFormat::Ico)
+            .unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+
+        let messages = vec![image_message_with("image/x-icon", data)];
+        let clamped = clamp_outbound_images(&messages).expect("favicon should be transcoded");
+        match &clamped[0].content[0] {
+            ContentBlock::Image { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(dims(data), (32, 32));
+            }
+            other => panic!("expected image block, got {other:?}"),
+        }
     }
 
     #[test]
