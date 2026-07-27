@@ -1359,7 +1359,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
             {
                 if app.schedule_pending_remote_retry_with_limit(
-                    "⚠ Remote request failed with a likely non-retryable error.",
+                    "⚠ The request failed in a way a retry probably won't fix. Trying once more anyway.",
                     2,
                 ) {
                     return false;
