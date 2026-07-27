@@ -47,10 +47,12 @@ fn app() -> App {
             weight: 1_200.0,
         },
     ];
-    let mut app = App::default();
     // The gesture is benched by default; these tests keep the machinery
     // honest for the day the flag flips back on.
-    app.alt_overview = true;
+    let mut app = App {
+        alt_overview: true,
+        ..App::default()
+    };
     app.model.session_id = Some("session_mushroom_2_b".into());
     app.model.strip = Strip::build(entries, Some("session_mushroom_2_b"));
     app

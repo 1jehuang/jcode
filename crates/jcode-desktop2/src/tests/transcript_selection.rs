@@ -311,7 +311,7 @@ fn finishing_a_transcript_drag_auto_copies_it() {
 #[test]
 fn auto_copy_never_touches_the_ordinary_clipboard() {
     let mut app = app_with_transcript();
-    app.clipboard.set("deliberately copied earlier");
+    let _ = app.clipboard.set("deliberately copied earlier");
     let from = point_for(&mut app, at(1, 0, 0));
     let to = point_for(&mut app, at(1, 0, 10));
     drag_and_release(&mut app, from, to);
