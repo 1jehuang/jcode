@@ -34,6 +34,13 @@ const INITIAL_SWEEP_DELAY: Duration = Duration::from_secs(10);
 
 static SCHEDULER_STARTED: OnceLock<()> = OnceLock::new();
 
+/// Invalidate every memoized route catalog in the process. Called when
+/// catalogs change out-of-band (refresh completion, auth changes), which is
+/// what keeps the route memo TTL a backstop rather than the mechanism.
+pub fn bump_catalog_generation() {
+    super::CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Start the background catalog sweeper once per process.
 ///
 /// Safe and cheap to call from hot paths (route building calls it): after the
@@ -61,6 +68,22 @@ pub(crate) fn ensure_started() {
     });
 }
 
+/// Whether a profile's on-disk catalog cache is missing, mismatched, or stale
+/// and therefore worth a background refresh.
+///
+/// This is the pure predicate the sweeper acts on. Route building deliberately
+/// does not call it: rendering must never schedule I/O.
+pub(crate) fn profile_catalog_cache_needs_refresh(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+) -> bool {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    match super::cached_live_models_for_openai_compatible_profile(&resolved) {
+        Some((_, cache_is_stale)) => cache_is_stale,
+        // Missing or endpoint-mismatched cache: nothing usable to serve.
+        None => true,
+    }
+}
+
 /// Schedule refreshes for every configured profile whose catalog cache is
 /// stale or missing. Returns the number of refreshes actually scheduled, which
 /// is typically zero on most sweeps.
@@ -74,7 +97,7 @@ fn sweep_stale_profile_catalogs() -> usize {
         if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
             continue;
         }
-        if !super::profile_catalog_cache_needs_refresh(profile) {
+        if !profile_catalog_cache_needs_refresh(profile) {
             continue;
         }
         if super::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
