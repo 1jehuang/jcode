@@ -383,8 +383,13 @@ export -f cargo
                             &repo_dir,
                             &source_after_build,
                         )?;
-                        let published = if Self::build_command_is_desktop_only(&command) {
-                            Self::validate_desktop_selfdev_binary(&repo_dir, &source_after_build)?;
+                        let desktop_binary = Self::desktop_binary_name(&command);
+                        let published = if let Some(binary_name) = desktop_binary {
+                            Self::validate_desktop_selfdev_binary(
+                                &repo_dir,
+                                &source_after_build,
+                                binary_name,
+                            )?;
                             None
                         } else {
                             let published = build::publish_local_current_build_for_source(
@@ -460,16 +465,39 @@ export -f cargo
         Ok(result)
     }
 
-    fn build_command_is_desktop_only(command: &SelfDevBuildCommand) -> bool {
-        command.display.contains("-p jcode-desktop") && !command.display.contains("-p jcode ")
+    /// Which desktop binary this build produced, or `None` when it is not a
+    /// desktop-only build.
+    ///
+    /// Derived from the command rather than assumed, because `jcode-desktop`
+    /// and `jcode-desktop2` are different binaries: validating a desktop2
+    /// build against `jcode-desktop` reads a stale artefact from some earlier
+    /// build and fails a build that actually succeeded.
+    fn desktop_binary_name(command: &SelfDevBuildCommand) -> Option<&'static str> {
+        if command.display.contains("-p jcode ") {
+            return None;
+        }
+        if command.display.contains("-p jcode-desktop2") {
+            return Some(if cfg!(windows) {
+                "jcode-desktop2.exe"
+            } else {
+                "jcode-desktop2"
+            });
+        }
+        if command.display.contains("-p jcode-desktop") {
+            return Some(if cfg!(windows) {
+                "jcode-desktop.exe"
+            } else {
+                "jcode-desktop"
+            });
+        }
+        None
     }
 
-    fn validate_desktop_selfdev_binary(repo_dir: &Path, source: &build::SourceState) -> Result<()> {
-        let binary_name = if cfg!(windows) {
-            "jcode-desktop.exe"
-        } else {
-            "jcode-desktop"
-        };
+    fn validate_desktop_selfdev_binary(
+        repo_dir: &Path,
+        source: &build::SourceState,
+        binary_name: &str,
+    ) -> Result<()> {
         let binary = repo_dir
             .join("target")
             .join(build::SELFDEV_CARGO_PROFILE)
@@ -1109,5 +1137,59 @@ export -f cargo
             "cancelled": true,
             "cancelled_task": cancelled_task,
         })))
+    }
+}
+
+#[cfg(test)]
+mod desktop_binary_tests {
+    use super::*;
+
+    fn command(display: &str) -> SelfDevBuildCommand {
+        SelfDevBuildCommand {
+            program: "scripts/dev_cargo.sh".to_string(),
+            args: Vec::new(),
+            display: display.to_string(),
+        }
+    }
+
+    /// The bug this guards: a desktop2 build was validated against the
+    /// `jcode-desktop` artefact, so it read whatever some earlier build had
+    /// left there and failed a build that had actually succeeded. The two are
+    /// different binaries and must be matched exactly.
+    #[test]
+    fn each_desktop_build_validates_its_own_binary() {
+        let desktop2 = SelfDevTool::desktop_binary_name(&command(
+            "scripts/dev_cargo.sh build --profile selfdev -p jcode-desktop2 --bin jcode-desktop2",
+        ));
+        assert!(
+            desktop2.is_some_and(|name| name.starts_with("jcode-desktop2")),
+            "desktop2 build resolved to {desktop2:?}"
+        );
+
+        let desktop = SelfDevTool::desktop_binary_name(&command(
+            "scripts/dev_cargo.sh build --profile selfdev -p jcode-desktop --bin jcode-desktop",
+        ));
+        assert!(
+            desktop.is_some_and(
+                |name| name.starts_with("jcode-desktop") && !name.starts_with("jcode-desktop2")
+            ),
+            "desktop build resolved to {desktop:?}"
+        );
+    }
+
+    /// A TUI build, or a combined build that includes the TUI, publishes
+    /// normally rather than going down the desktop validation path.
+    #[test]
+    fn tui_and_combined_builds_are_not_desktop_only() {
+        for display in [
+            "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode",
+            "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode -p jcode-desktop2",
+        ] {
+            assert_eq!(
+                SelfDevTool::desktop_binary_name(&command(display)),
+                None,
+                "{display} was treated as desktop-only"
+            );
+        }
     }
 }
