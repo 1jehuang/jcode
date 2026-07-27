@@ -388,7 +388,71 @@ fn run_auto_poke_prefers_incomplete_todos_over_the_gate_digest() {
     ));
 }
 
+/// Regression: the digest is consumed from the log before the follow-up is
+/// chosen, so a turn with open todos must not destroy it. Auto-poke iterates
+/// many times with open todos on a long run, and each pass used to silently
+/// discard the observations, meaning the reminder never survived to delivery.
+#[test]
+fn open_todos_do_not_consume_the_pending_gate_digest() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let session = "run-gate-digest-open-todos";
+
+    crate::todo::append_gate_observations(
+        session,
+        &[crate::todo::GateObservation {
+            kind: crate::todo::GateObservationKind::IntentUnderstanding,
+            group: None,
+            score: Some(70),
+        }],
+    )
+    .expect("append");
+
+    let open = vec![test_todo("a", "in_progress", "high", Some(80), None)];
+    assert!(matches!(
+        build_run_auto_poke_follow_up_from_todos(
+            &open,
+            false,
+            take_run_gate_digest_if_turn_ended(session, false, &open),
+        ),
+        Some(RunAutoPokeFollowUp::Incomplete { .. })
+    ));
+    assert!(
+        !crate::todo::load_gate_observations(session)
+            .expect("reload")
+            .is_empty(),
+        "observations must survive a poke iteration that still has open work"
+    );
+
+    // Once the work closes, the reminder is still there to deliver.
+    let done = vec![test_todo("a", "completed", "high", Some(80), Some(100))];
+    match build_run_auto_poke_follow_up_from_todos(
+        &done,
+        false,
+        take_run_gate_digest_if_turn_ended(session, false, &done),
+    ) {
+        Some(RunAutoPokeFollowUp::GateDigest { message }) => {
+            assert!(message.starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+        }
+        other => panic!("expected the preserved digest to be delivered, got {other:?}"),
+    }
+    assert!(
+        crate::todo::load_gate_observations(session)
+            .expect("reload")
+            .is_empty(),
+        "delivering the digest should consume the log"
+    );
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
 /// The log must be consumed even when everything resolved, or stale
+/// observations would leak into the next turn and re-raise settled points./// The log must be consumed even when everything resolved, or stale
 /// observations would leak into the next turn and re-raise settled points.
 #[test]
 fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
