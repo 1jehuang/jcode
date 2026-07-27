@@ -2524,6 +2524,7 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
 
 const RUN_TODO_CONFIDENCE_THRESHOLD: u8 = 90;
 
+#[derive(Debug)]
 enum RunAutoPokeFollowUp {
     Incomplete {
         count: usize,
@@ -2564,6 +2565,26 @@ fn take_run_gate_digest(session_id: &str, already_delivered: bool) -> Option<Str
     let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
     let _ = crate::todo::clear_gate_observations(session_id);
     digest
+}
+
+/// Consume the observation log only once the turn has actually ended.
+///
+/// `take_run_gate_digest` clears the log, so calling it while todos are still
+/// open would destroy the reminder: auto-poke iterates many times with open work
+/// on a long run, and the incomplete-todo follow-up takes precedence, so the
+/// digest string would be dropped on the floor with the log already emptied.
+fn take_run_gate_digest_if_turn_ended(
+    session_id: &str,
+    already_delivered: bool,
+    todos: &[crate::todo::TodoItem],
+) -> Option<String> {
+    let work_remains = todos
+        .iter()
+        .any(|todo| todo.status != "completed" && todo.status != "cancelled");
+    if work_remains {
+        return None;
+    }
+    take_run_gate_digest(session_id, already_delivered)
 }
 
 fn build_run_auto_poke_follow_up_from_todos(
@@ -2660,7 +2681,8 @@ async fn run_single_message_command_plain_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        let gate_digest = take_run_gate_digest(agent.session_id(), gate_digest_delivered);
+        let gate_digest =
+            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
         match build_run_auto_poke_follow_up_from_todos(
             &todos,
             confidence_spike_challenged,
@@ -2741,7 +2763,8 @@ async fn run_single_message_command_capture_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        let gate_digest = take_run_gate_digest(agent.session_id(), gate_digest_delivered);
+        let gate_digest =
+            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
         match build_run_auto_poke_follow_up_from_todos(
             &todos,
             confidence_spike_challenged,
@@ -2876,7 +2899,8 @@ async fn run_single_message_command_ndjson(
             break;
         }
         let todos = run_todos(&session_id);
-        let gate_digest = take_run_gate_digest(agent.session_id(), gate_digest_delivered);
+        let gate_digest =
+            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
         match build_run_auto_poke_follow_up_from_todos(
             &todos,
             confidence_spike_challenged,
