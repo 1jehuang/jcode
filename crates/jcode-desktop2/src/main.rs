@@ -1411,7 +1411,7 @@ impl ApplicationHandler for App {
                 self.drain_harness_updates();
                 self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
-        self.model.stream.advance(std::time::Instant::now());
+                self.model.stream.advance(std::time::Instant::now());
                 self.model.smooth.advance(std::time::Instant::now());
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
