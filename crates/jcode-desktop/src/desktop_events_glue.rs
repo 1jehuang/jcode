@@ -53,10 +53,28 @@ pub(crate) fn desktop_wire_session_event_to_runtime_event(
         DesktopSessionEventWire::AssistantTextDelta { text } => {
             Some(session_launch::DesktopSessionEvent::TextDelta(text))
         }
-        DesktopSessionEventWire::ToolStarted { id, title } => {
-            Some(session_launch::DesktopSessionEvent::ToolStarted {
+        DesktopSessionEventWire::ReasoningDelta { text } => {
+            Some(session_launch::DesktopSessionEvent::ReasoningDelta(text))
+        }
+        DesktopSessionEventWire::ReasoningDone { duration_ms } => {
+            Some(session_launch::DesktopSessionEvent::ReasoningDone { duration_ms })
+        }
+        DesktopSessionEventWire::ToolStarted {
+            id,
+            title,
+            executing,
+        } => {
+            let id = (!id.is_empty()).then_some(id);
+            Some(if executing {
+                session_launch::DesktopSessionEvent::ToolExecuting { id, name: title }
+            } else {
+                session_launch::DesktopSessionEvent::ToolStarted { id, name: title }
+            })
+        }
+        DesktopSessionEventWire::ToolInput { id, delta } => {
+            Some(session_launch::DesktopSessionEvent::ToolInput {
                 id: (!id.is_empty()).then_some(id),
-                name: title,
+                delta,
             })
         }
         DesktopSessionEventWire::ToolFinished { id, title, success } => {
@@ -166,11 +184,32 @@ pub(crate) fn desktop_session_event_to_wire(
         | session_launch::DesktopSessionEvent::TextReplace(text) => {
             DesktopSessionEventWire::AssistantTextDelta { text: text.clone() }
         }
-        session_launch::DesktopSessionEvent::ToolStarted { id, name }
-        | session_launch::DesktopSessionEvent::ToolExecuting { id, name } => {
+        session_launch::DesktopSessionEvent::ReasoningDelta(text) => {
+            DesktopSessionEventWire::ReasoningDelta { text: text.clone() }
+        }
+        session_launch::DesktopSessionEvent::ReasoningDone { duration_ms } => {
+            DesktopSessionEventWire::ReasoningDone {
+                duration_ms: *duration_ms,
+            }
+        }
+        session_launch::DesktopSessionEvent::ToolStarted { id, name } => {
             DesktopSessionEventWire::ToolStarted {
                 id: id.clone().unwrap_or_default(),
                 title: name.clone(),
+                executing: false,
+            }
+        }
+        session_launch::DesktopSessionEvent::ToolExecuting { id, name } => {
+            DesktopSessionEventWire::ToolStarted {
+                id: id.clone().unwrap_or_default(),
+                title: name.clone(),
+                executing: true,
+            }
+        }
+        session_launch::DesktopSessionEvent::ToolInput { id, delta } => {
+            DesktopSessionEventWire::ToolInput {
+                id: id.clone().unwrap_or_default(),
+                delta: delta.clone(),
             }
         }
         session_launch::DesktopSessionEvent::ToolFinished {
@@ -199,6 +238,8 @@ pub(crate) fn desktop_session_event_type_name(
         session_launch::DesktopSessionEvent::SessionRenamed { .. } => "session_renamed",
         session_launch::DesktopSessionEvent::TextDelta(_) => "text_delta",
         session_launch::DesktopSessionEvent::TextReplace(_) => "text_replace",
+        session_launch::DesktopSessionEvent::ReasoningDelta(_) => "reasoning_delta",
+        session_launch::DesktopSessionEvent::ReasoningDone { .. } => "reasoning_done",
         session_launch::DesktopSessionEvent::ToolStarted { .. } => "tool_started",
         session_launch::DesktopSessionEvent::ToolExecuting { .. } => "tool_executing",
         session_launch::DesktopSessionEvent::ToolInput { .. } => "tool_input",

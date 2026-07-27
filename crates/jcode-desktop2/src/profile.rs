@@ -131,7 +131,6 @@ pub const WARM_BUDGET_US: u64 = 4_000;
 /// is done by [`wasteful`], which counts layout work rather than time and
 /// needs no slack at all: it fires identically on the fastest laptop and the
 /// slowest shared runner.
-#[cfg_attr(not(test), allow(dead_code))]
 pub const GATE_BUDGET_US: u64 = 40_000;
 
 /// Nodes whose steady-state frame exceeds the budget.
@@ -211,7 +210,26 @@ pub fn report(costs: &[NodeCost], budget_us: u64) -> bool {
             cost.name, cost.warm_relayouts, cost.messages
         );
     }
-    slow.is_empty() && wasteful.is_empty()
+
+    // Only exact or gross problems fail the command. The advisory budget is a
+    // reading aid: it is wall-clock, so on a machine that is busy compiling
+    // (or on an unoptimised build) it flags states that are perfectly healthy.
+    // Failing on it would make the command cry wolf, and a tool that cries
+    // wolf gets ignored, which is the failure mode this whole harness exists
+    // to avoid.
+    let gross = over_budget(costs, GATE_BUDGET_US);
+    if !slow.is_empty() && gross.is_empty() && wasteful.is_empty() {
+        println!();
+        println!(
+            "note: over the advisory {:.1}ms budget but under the {:.1}ms failure \
+             threshold, and no state is redoing layout. On a loaded machine or an \
+             unoptimised build this is expected; compare relayout counts, not \
+             milliseconds.",
+            budget_us as f64 / 1000.0,
+            GATE_BUDGET_US as f64 / 1000.0
+        );
+    }
+    gross.is_empty() && wasteful.is_empty()
 }
 
 #[cfg(test)]

@@ -285,6 +285,68 @@ fn draw_strip(
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
+/// Draw the working directory on the trailing end of the top chrome row.
+///
+/// Right-aligned against the strip's bars so the row reads as "these sessions,
+/// this place": the answer to "which checkout am I talking to" was previously
+/// only inferable from the strip's leaf labels, and not available at all in a
+/// single-session window. Head-elided rather than middle-elided because the
+/// tail of a path is the part that identifies it.
+fn draw_place(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    band: (f64, f64),
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    let Some(dir) = model.working_dir.as_deref() else {
+        return;
+    };
+    let path = crate::place::display_path(dir, crate::place::home().as_deref());
+    if path.is_empty() {
+        return;
+    }
+    let (top, bottom) = band;
+    let style = ParagraphStyle {
+        font_size: layout::STRIP_LABEL_SIZE,
+        color: model.theme.faint,
+        letter_spacing_em: 0.08,
+        line_height: 1.0,
+        align: text::Align::End,
+        ..Default::default()
+    };
+    // Never more than half the row: the strip is the interactive half and must
+    // not be pushed off the page by a deep path.
+    let budget = (frame.column() / (f64::from(layout::STRIP_LABEL_SIZE) * 0.62) / 2.0) as usize;
+    let path = elide_head(&path, budget.max(8));
+    let label_top = top + (bottom - top - f64::from(layout::STRIP_LABEL_SIZE)) / 2.0;
+    text.draw_paragraph_scaled(
+        scene,
+        &path,
+        (frame.left, label_top),
+        frame.column() as f32,
+        style,
+        scale,
+    );
+}
+
+/// Elide `text` from the left, keeping the tail: `.../crates/jcode-desktop2`.
+pub fn elide_head(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+    let keep = max_chars - 3;
+    let mut out = String::from("...");
+    out.extend(&chars[chars.len() - keep..]);
+    out
+}
+
 /// Body paragraph style for transcript prose. One definition, so measuring in
 /// [`crate::viewport`] and drawing here can never disagree.
 pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
@@ -509,9 +571,11 @@ pub fn build_scene(
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
 
-    // Session strip, when there is more than one session to move between.
+    // Top chrome row: the session strip on the left, and where this window is
+    // on the right.
     if let Some(band) = frame.strip() {
         draw_strip(scene, text, model, band, &frame, scale);
+        draw_place(scene, text, model, band, &frame, scale);
     }
 
     // Composer: a real input field. Paper fill plus a hairline border, rather

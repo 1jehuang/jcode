@@ -5,6 +5,7 @@
 //! connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
 mod activity;
+mod app_selection;
 mod capture;
 mod caret;
 mod cli;
@@ -18,6 +19,7 @@ mod keymap;
 mod layout;
 mod meta;
 mod paint;
+mod place;
 mod profile;
 mod render;
 mod scene;
@@ -75,6 +77,9 @@ struct App {
     selecting: bool,
     /// Last click time and offset, for double-click word selection.
     last_click: Option<(std::time::Instant, usize)>,
+    /// Consecutive clicks at one spot in the transcript, which decide whether
+    /// a press selects a caret, a word, or a line.
+    click_streak: select::ClickStreak,
     /// Current mouse pointer shape, tracked so it is only set when it changes.
     cursor_icon: winit::window::CursorIcon,
     /// Window size and position, persisted so the app reopens as it was left.
@@ -103,6 +108,7 @@ impl Default for App {
             dragging: false,
             selecting: false,
             last_click: None,
+            click_streak: select::ClickStreak::default(),
             cursor_icon: winit::window::CursorIcon::Default,
             geometry: window_state::Geometry::default(),
             geometry_saved: None,
@@ -163,6 +169,10 @@ pub struct Model {
     pub hint: usize,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
+    /// Working directory of the attached session, as the daemon reports it.
+    /// `None` until attach, because a guess here is worse than silence: it is
+    /// the fact that decides whether an answer applies to your project.
+    pub working_dir: Option<String>,
     /// Provider and model serving this session, once the harness reports it.
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
@@ -211,6 +221,7 @@ impl Default for Model {
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
             strip: strip::Strip::default(),
+            working_dir: None,
             model: None,
         }
     }
@@ -301,10 +312,15 @@ impl App {
         while let Ok(update) = updates.try_recv() {
             match update {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
-                harness::HarnessUpdate::Attached { session_id } => {
+                harness::HarnessUpdate::Attached {
+                    session_id,
+                    working_dir,
+                } => {
                     self.model.status = format!("attached: {session_id}");
                     self.model.strip.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
+                    self.model.working_dir = working_dir;
+                    self.retitle();
                 }
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
@@ -350,6 +366,11 @@ impl App {
         self.model.scroll = 0.0;
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
+        // The new session's directory arrives with its `Attached` event; until
+        // then show the strip's entry rather than the previous session's path,
+        // which would name the wrong project.
+        self.model.working_dir = self.model.strip.focused_working_dir().map(str::to_string);
+        self.retitle();
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Attach(target));
         }
@@ -417,9 +438,11 @@ impl App {
             probe.scale,
         )
         .line_count();
-        // The strip only earns its row when there is somewhere to go: with
-        // one session it would be a widget that says "1 of 1".
-        let strip = model.strip.len() > 1;
+        // The top chrome row is reserved when it has something to say: more
+        // than one session to move between (the strip proper), or a working
+        // directory to name. With neither it would be a widget saying "1 of 1"
+        // about nowhere, so nothing is reserved and the page is unchanged.
+        let strip = model.strip.len() > 1 || model.working_dir.is_some();
         // Measure the conversation so the composer can sit just under the
         // last reply while it is short, instead of floating at the middle of
         // the page with a gap above it. Content height is a function of the
@@ -479,17 +502,7 @@ impl App {
             // In the transcript: start a text selection there. The
             // conversation is the part of the window worth quoting from, so a
             // drag over it has to select rather than do nothing.
-            if self.in_transcript(x, y)
-                && let Some(position) = self.transcript_position_at(x, y)
-            {
-                // Shift+click extends the existing selection, as anywhere else.
-                let anchor = match self.model.selection {
-                    Some(existing) if self.modifiers.shift_key() => existing.anchor,
-                    _ => position,
-                };
-                self.model.selection = Some(select::Selection::new(anchor, position));
-                self.selecting = true;
-                self.request_redraw();
+            if self.in_transcript(x, y) && self.press_in_transcript(x, y) {
                 return;
             }
             // Outside the well: the donut is the only other interactive thing,
@@ -555,68 +568,6 @@ impl App {
             && y <= self.frame.composer_bottom
             && x >= self.frame.left
             && x <= self.frame.right
-    }
-
-    /// Whether a logical point is inside the transcript region.
-    fn in_transcript(&self, x: f64, y: f64) -> bool {
-        !self.model.transcript.is_empty()
-            && y >= self.frame.body_top
-            && y <= self.frame.body_bottom
-            && x >= self.frame.left
-            && x <= self.frame.right
-    }
-
-    /// The transcript position under a logical point.
-    fn transcript_position_at(&mut self, x: f64, y: f64) -> Option<select::Position> {
-        select::position_at_in_frame(&mut self.painter, &self.model, self.frame, x, y)
-    }
-
-    /// The selected transcript text, if any.
-    fn selected_transcript_text(&mut self) -> Option<String> {
-        select::selection_text_in_frame(&mut self.painter, &self.model, self.frame)
-    }
-
-    /// The text currently highlighted on either surface, transcript first
-    /// because it is the one drawn as a band over the conversation.
-    fn any_selected_text(&mut self) -> Option<String> {
-        self.selected_transcript_text()
-            .or_else(|| self.model.editor.selected_text().map(str::to_string))
-    }
-
-    /// Copy to a system buffer, reporting a failure rather than losing it
-    /// silently. A copy that quietly did nothing is the bug users describe as
-    /// "the app ate my clipboard"; the in-process fallback still holds the
-    /// text, so paste within the app keeps working either way.
-    fn copy_to(&mut self, target: clipboard::Target, text: &str) {
-        if let Err(error) = self.clipboard.set_to(target, text) {
-            self.model
-                .set_notice(&format!("clipboard unavailable: {error}"));
-        }
-    }
-
-    /// Publish the live selection to the primary selection, so middle click
-    /// pastes what was just highlighted.
-    ///
-    /// Deliberately *not* the ordinary clipboard: this fires on every drag, so
-    /// writing there would mean highlighting a word silently destroys whatever
-    /// the user had copied. On platforms without a primary selection this is a
-    /// no-op, which is the honest behaviour rather than a surprising one.
-    fn publish_primary_selection(&mut self) {
-        let Some(text) = self.any_selected_text() else {
-            return;
-        };
-        self.copy_to(clipboard::Target::Primary, &text);
-    }
-
-    /// Paste the primary selection at the composer's cursor. Middle click is
-    /// the paste half of the select-to-copy convention.
-    fn paste_primary_selection(&mut self) {
-        let Some(text) = self.clipboard.get_from(clipboard::Target::Primary) else {
-            return;
-        };
-        self.model.editor.insert_str(&text);
-        self.model.caret.touch();
-        self.request_redraw();
     }
 
     /// The primary button was released: end the gesture, drop an empty
@@ -690,6 +641,9 @@ impl App {
         }
         self.update_cursor_icon();
         if self.selecting {
+            // Dragging at the edge scrolls the conversation under the pointer,
+            // so a selection is not capped at one screenful.
+            let scrolled = self.autoscroll_for_drag(self.pointer.1);
             // Clamp into the region so dragging past the top or bottom keeps
             // extending to the nearest text instead of dropping the gesture.
             let (x, y) = self.pointer;
@@ -697,7 +651,15 @@ impl App {
             if let Some(position) = self.transcript_position_at(x, y)
                 && let Some(selection) = self.model.selection.as_mut()
             {
+                // A drag is a gesture in its own right, so it ends the click
+                // streak: pressing again afterwards is a fresh click, not the
+                // second half of a double click that would grab a word.
+                if selection.focus != position {
+                    self.click_streak.interrupt();
+                }
                 selection.focus = position;
+                self.request_redraw();
+            } else if scrolled {
                 self.request_redraw();
             }
             return;
@@ -745,6 +707,14 @@ impl App {
         let (time, offset) = (self.model.spin.time, self.model.spin.offset);
         if let Some(field) = self.model.donut.as_mut() {
             field.render(time, offset);
+        }
+    }
+
+    /// Put the session's directory in the window title, so the compositor's
+    /// window list distinguishes two jcode windows on different checkouts.
+    fn retitle(&self) {
+        if let Some(state) = self.state.as_ref() {
+            state.set_title(&place::window_title(self.model.working_dir.as_deref()));
         }
     }
 
@@ -998,7 +968,7 @@ impl ApplicationHandler for App {
         // Reopen where the user left off.
         let geometry = window_state::Geometry::load();
         let mut attributes = Window::default_attributes()
-            .with_title("jcode desktop2")
+            .with_title(place::window_title(self.model.working_dir.as_deref()))
             .with_inner_size(winit::dpi::LogicalSize::new(
                 geometry.width,
                 geometry.height,

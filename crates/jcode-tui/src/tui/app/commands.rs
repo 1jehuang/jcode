@@ -3383,14 +3383,6 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
-pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
-    super::debug::handle_debug_command(app, trimmed)
-}
-
-pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
-    super::model_context::handle_model_command(app, trimmed)
-}
-
 pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/usage") else {
         return false;
@@ -3430,10 +3422,6 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     ));
     app.set_status_notice("Feedback recorded");
     true
-}
-
-pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
-    super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
 }
 
 /// `/telemetry [everything|no-prompts|nothing]` - show or change the same

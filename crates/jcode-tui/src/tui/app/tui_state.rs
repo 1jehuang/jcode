@@ -1628,6 +1628,16 @@ impl crate::tui::TuiState for App {
         crate::auth::AuthStatus::check_fast()
     }
 
+    fn active_dual_credential(
+        &self,
+        provider: jcode_provider_core::ActiveProvider,
+    ) -> Option<crate::auth::ActiveCredential> {
+        // Reuse the same resolution the info widget uses so the header tag and
+        // the widget's auth line can never disagree.
+        let route = self.widget_route_info(None);
+        self.dual_credential_active(route, provider)
+    }
+
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
         self.diagram_mode
     }

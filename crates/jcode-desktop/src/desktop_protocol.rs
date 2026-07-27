@@ -4,7 +4,7 @@ use crate::desktop_app_driver::DesktopUiSnapshot;
 use crate::desktop_scene::DesktopScene;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const DESKTOP_HOST_WORKER_PROTOCOL_VERSION: u16 = 1;
+pub(crate) const DESKTOP_HOST_WORKER_PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DesktopProtocolEnvelope<T> {
@@ -92,9 +92,25 @@ pub(crate) enum DesktopSessionEventWire {
     AssistantTextDelta {
         text: String,
     },
+    /// Streaming reasoning text. Forwarded so worker-hosted sessions show
+    /// thinking live, exactly like the in-process path.
+    ReasoningDelta {
+        text: String,
+    },
+    ReasoningDone {
+        duration_ms: Option<u64>,
+    },
     ToolStarted {
         id: String,
         title: String,
+        /// True once the tool is executing rather than still receiving args.
+        #[serde(default)]
+        executing: bool,
+    },
+    /// Streaming tool-argument JSON, which carries the call's `intent`.
+    ToolInput {
+        id: String,
+        delta: String,
     },
     ToolFinished {
         id: String,

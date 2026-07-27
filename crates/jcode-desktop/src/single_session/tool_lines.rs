@@ -325,6 +325,13 @@ pub(crate) fn formatted_tool_input_lines(tool_name: &str, raw_input: &str) -> Ve
     }
 
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        // Tool arguments arrive as raw JSON deltas, so nothing parses until the
+        // final chunk. Every tool states an `intent` up front, so scrape it out
+        // of the partial JSON: a plain-English headline beats both a truncated
+        // JSON fragment and an empty card while the call streams in.
+        if let Some(intent) = partial_json_string_field(raw_input, "intent") {
+            return vec![intent];
+        }
         return vec![format!("input: {}", compact_tool_text(raw_input, 132))];
     };
 
@@ -363,6 +370,102 @@ pub(crate) fn formatted_tool_input_lines(tool_name: &str, raw_input: &str) -> Ve
         rendered.push(format!("… {} more", total - MAX_INPUT_LINES));
     }
     rendered
+}
+
+/// Extract a top-level JSON string field from possibly-incomplete JSON.
+///
+/// Tool arguments stream in as raw JSON deltas, so `serde_json` cannot parse
+/// them until the final chunk. This scans for `"<field>": "..."` at depth 1 and
+/// tolerates a truncated closing quote so the value can be shown mid-stream.
+pub(crate) fn partial_json_string_field(raw_input: &str, field: &str) -> Option<String> {
+    let bytes = raw_input.as_bytes();
+    let needle = format!("\"{field}\"");
+    let mut search_from = 0usize;
+    while let Some(offset) = raw_input[search_from..].find(&needle) {
+        let key_start = search_from + offset;
+        search_from = key_start + needle.len();
+        if !json_key_is_at_top_level(raw_input, key_start) {
+            continue;
+        }
+        let mut cursor = search_from;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b':' {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'"' {
+            continue;
+        }
+        cursor += 1;
+        let mut value = String::new();
+        let mut escaped = false;
+        while cursor < bytes.len() {
+            let ch = bytes[cursor] as char;
+            if escaped {
+                value.push(match ch {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    other => other,
+                });
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                break;
+            } else {
+                // Push from the source so multi-byte characters stay intact.
+                let rest = &raw_input[cursor..];
+                let next = rest.chars().next()?;
+                value.push(next);
+                cursor += next.len_utf8();
+                continue;
+            }
+            cursor += 1;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        return Some(compact_tool_text(value, 132));
+    }
+    None
+}
+
+/// True when the JSON key starting at `key_start` sits directly in the root
+/// object, so nested objects (for example `batch` sub-calls) do not hijack the
+/// headline.
+fn json_key_is_at_top_level(raw_input: &str, key_start: usize) -> bool {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in raw_input.char_indices() {
+        if index >= key_start {
+            break;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth == 1 && !in_string
 }
 
 pub(crate) fn looks_like_json_value(text: &str) -> bool {
@@ -509,6 +612,7 @@ pub(crate) fn tool_input_key_priority(key: &str) -> usize {
         "url" => 4,
         "action" => 5,
         "task" | "prompt" | "description" => 6,
+        // Rendered as the card headline instead of a trailing key-value pair.
         "intent" => 90,
         _ => 100,
     }

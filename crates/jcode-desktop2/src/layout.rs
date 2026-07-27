@@ -57,9 +57,12 @@ pub const STRIP_BAR_HEIGHT: f64 = 10.0;
 pub const STRIP_LABEL_GAP: f64 = 6.0;
 /// Gap between one group and the next.
 pub const STRIP_GROUP_GAP: f64 = 16.0;
-/// Largest the hero donut gets, in logical units. Matches the website's
-/// 360px hero canvas, so the halftone screen has the same density there.
-pub const DONUT_MAX_SIDE: f64 = 360.0;
+/// The hero donut's side, in logical units. Matches the website's 360px hero
+/// canvas, so the halftone screen has the same density there. It is one fixed
+/// number rather than a cap: the donut is a mark, and a mark that breathes
+/// with the window (or twitches when the top chrome row appears) reads as a
+/// bug. A window that cannot hold it drops the hero instead of shrinking it.
+pub const DONUT_SIDE: f64 = 360.0;
 /// Hero wordmark over the donut, as on the website's landing section.
 pub const HERO_WORDMARK_SIZE: f32 = 34.0;
 /// Gap under the wordmark, and under the donut before the tagline.
@@ -75,9 +78,10 @@ pub const HERO_TAGLINE_SIZE: f32 = 12.5;
 /// the stack out on the raw square leaves a gap that looks like a mistake; the
 /// wordmark and tagline are spaced against the *visible* disc instead.
 pub const DONUT_INK_FRACTION: f64 = 0.82;
-/// Below this the halftone screen has too few dots across (at [`DOT_PITCH`]) to
-/// read as a donut, so the hero is dropped entirely rather than degrading into
-/// speckle on a cramped window.
+/// Smallest square that still reads as a donut at [`DOT_PITCH`]. Nothing is
+/// drawn between this and [`DONUT_SIDE`] now that the hero is fixed size, but
+/// the renderer and the hit test keep it as their floor so a degenerate box
+/// can never paint speckle.
 pub const DONUT_MIN_SIDE: f64 = 100.0;
 /// Vertical breathing room between regions.
 pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
@@ -330,14 +334,21 @@ impl Frame {
         let wordmark_height = f64::from(HERO_WORDMARK_SIZE * HERO_LINE_HEIGHT);
         let tagline_height = f64::from(HERO_TAGLINE_SIZE * HERO_LINE_HEIGHT);
         let chrome = wordmark_height + tagline_height + HERO_GAP * 2.0;
-        let side = (available - chrome).min(self.column()).min(DONUT_MAX_SIDE);
-        if side < DONUT_MIN_SIDE {
-            return None;
-        }
+        // Fixed side: the hero either fits at its one true size or is not
+        // drawn. Fitting it by scaling made the donut jump whenever the frame
+        // changed height, e.g. when the top chrome row appeared.
+        let side = DONUT_SIDE;
         // Space the text against the inked disc, not the square, then centre
         // the whole stack in the region like the website's flexbox.
         let bleed = side * (1.0 - DONUT_INK_FRACTION) / 2.0;
         let total = side - bleed * 2.0 + chrome;
+        // Fit is judged on the inked stack, not the raw square: the square's
+        // top and bottom `bleed` bands are empty, so demanding room for them
+        // would drop the hero on ordinary laptop windows for the sake of
+        // whitespace.
+        if total > available || self.column() < side {
+            return None;
+        }
         let top = self.body_top + (available - total) / 2.0;
         let centre_x = (self.left + self.right) / 2.0;
         let donut_top = top + wordmark_height + HERO_GAP - bleed;
@@ -805,7 +816,10 @@ mod tests {
                 (box_.width() - box_.height()).abs() < 1e-9,
                 "donut must be square"
             );
-            assert!(box_.width() <= DONUT_MAX_SIDE + 1e-9);
+            assert!(
+                (box_.width() - DONUT_SIDE).abs() < 1e-9,
+                "the donut must always be DONUT_SIDE"
+            );
             assert!(box_.width() >= 0.0);
         });
     }

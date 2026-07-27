@@ -207,6 +207,15 @@ impl Config {
                 self.display.set_reasoning_display(mode);
             }
         }
+        // A front-end default, applied only when the user has not made an
+        // explicit choice. The desktop uses this so its transcript shows live
+        // thinking out of the box without silently overriding config.
+        if !self.display.has_explicit_reasoning_display()
+            && let Ok(v) = std::env::var("JCODE_DEFAULT_REASONING_DISPLAY")
+            && let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v)
+        {
+            self.display.set_reasoning_display(mode);
+        }
         if let Ok(v) = std::env::var("JCODE_MARKDOWN_SPACING") {
             match v.trim().to_lowercase().as_str() {
                 "compact" => self.display.markdown_spacing = MarkdownSpacingMode::Compact,

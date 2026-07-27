@@ -60,6 +60,7 @@ impl SingleSessionApp {
                 // Same gap as the TUI (issue #605): a cleared session's side
                 // panel pages are orphaned, and nothing else resets them.
                 self.side_panel = DesktopSidePanelState::default();
+                self.reasoning.clear();
                 self.error = None;
                 self.is_processing = false;
                 self.draft.clear();
@@ -151,6 +152,27 @@ impl SingleSessionApp {
                     ));
                     KeyOutcome::Redraw
                 }
+            }
+            "/thinking" | "/reasoning" | "/thinking-display" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.composer.input_undo_stack.clear();
+                // `/effort` controls how hard the model thinks; this reports
+                // whether the desktop transcript shows that thinking live.
+                // The desktop cannot safely rewrite the shared config file, so
+                // this explains where the setting lives rather than guessing.
+                let current = crate::desktop_config::desktop_reasoning_display_mode();
+                self.messages.push(SingleSessionMessage::meta(format!(
+                    "thinking display: {current}. \
+                     The desktop defaults to `current` (live thinking, collapsed once a tool runs \
+                     or the answer commits). Change it with `/thinking-display <off|current|full>` \
+                     in the terminal client, or set `display.reasoning_display` in ~/.jcode/config.toml. \
+                     Use /effort to change how hard the model thinks."
+                )));
+                self.set_status(SingleSessionStatus::Info(format!(
+                    "thinking display: {current}"
+                )));
+                KeyOutcome::Redraw
             }
             "/font" | "/fonts" => {
                 self.draft.clear();

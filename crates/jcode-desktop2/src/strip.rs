@@ -147,6 +147,13 @@ impl Strip {
             .map(|entry| entry.session_id.as_str())
     }
 
+    /// The focused session's working directory, if the strip knows one.
+    pub fn focused_working_dir(&self) -> Option<&str> {
+        self.focused_group()
+            .and_then(|group| group.entries.get(self.index))
+            .and_then(|entry| entry.working_dir.as_deref())
+    }
+
     /// Move focus one bar left, wrapping within the group. Wrapping rather
     /// than stopping because a strip is a ring of a handful of items, and
     /// hitting an invisible wall at the end reads as the key being broken.

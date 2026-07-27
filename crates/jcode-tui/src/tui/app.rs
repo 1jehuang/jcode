@@ -53,6 +53,7 @@ mod auth;
 mod auth_account_picker_saved_accounts;
 mod catchup;
 mod commands;
+mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
 mod commands_plan;
