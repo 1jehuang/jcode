@@ -1317,6 +1317,7 @@ use frame_metrics::{
     note_body_cache_lookup, note_body_cache_miss, note_body_incremental_reuse, note_body_request,
     note_chat_layout, note_full_prep_built, note_full_prep_cache_hit, note_full_prep_cache_lookup,
     note_full_prep_cache_miss, note_full_prep_phase_metrics, note_full_prep_request,
+    note_prep_aspect, note_prep_overflow, note_prep_prepare_at, note_prep_restage,
     note_viewport_metrics, reset_frame_perf_stats, viewport_stability_hash,
 };
 pub(crate) use frame_metrics::{
@@ -2873,6 +2874,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
         diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
+    let aspect_start = Instant::now();
     // Aspect-ratio goal for transcript mermaid renders (deferred and
     // synchronous): the pinned pane's aspect wins when the pane is open so
     // inline and pane share one cached PNG; otherwise a terminal-friendly
@@ -2883,10 +2885,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         wide_prepare_width,
         chat_area.height,
     );
+    note_prep_aspect(aspect_start.elapsed());
     let prepare_at = |width: u16| {
-        mermaid::with_preferred_aspect_ratio(transcript_mermaid_aspect_ratio, || {
-            prepare::prepare_messages(app, width, chat_area.height)
-        })
+        let started = Instant::now();
+        let prepared =
+            mermaid::with_preferred_aspect_ratio(transcript_mermaid_aspect_ratio, || {
+                prepare::prepare_messages(app, width, chat_area.height)
+            });
+        note_prep_prepare_at(started.elapsed());
+        prepared
     };
 
     let onboarding_welcome = app.onboarding_welcome_active();
@@ -2947,7 +2954,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         fixed_height - overscroll_height
     };
     let overflows = |prepared: &PreparedChatFrame| {
-        (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height
+        let started = Instant::now();
+        let result =
+            (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height;
+        note_prep_overflow(started.elapsed());
+        result
     };
 
     // Resolving native-scrollbar overflow can require wrapping the transcript at

@@ -653,7 +653,9 @@ pub(super) fn prepare_messages(
     // A cached prepared frame intentionally owns only image ids. Recover any
     // staged source evicted by the byte budget or a visibility toggle before an
     // exact frame-cache hit can bypass the normal anchored-image resolver.
+    let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
+    super::note_prep_restage(restage_start.elapsed());
     if cfg!(test) {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
