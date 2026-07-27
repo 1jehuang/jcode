@@ -950,3 +950,39 @@ async fn bash_does_not_interfere_with_ordinary_commands() {
             .unwrap_or_else(|e| panic!("{command:?} should run untouched: {e}"));
     }
 }
+
+#[tokio::test]
+async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
+    // batch, and every other caller, dispatch through Tool::execute rather than
+    // reimplementing it, so the gate lives at the only chokepoint. Assert that
+    // directly: calling execute for a background job (the one path that returns
+    // early) is still gated.
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = temp.path().to_string_lossy().to_string();
+    let previous = std::env::var("HOME").ok();
+    // SAFETY: single-threaded test setup; restored below.
+    unsafe { std::env::set_var("HOME", &home) };
+    let canary = temp.path().join("precious.txt");
+    std::fs::write(&canary, "user data").expect("canary");
+
+    let result = BashTool::new()
+        .execute(
+            serde_json::json!({
+                "command": format!("rm -rf {home}"),
+                "run_in_background": true,
+            }),
+            gate_ctx("/tmp"),
+        )
+        .await;
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("HOME", value) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    assert!(
+        result.is_err(),
+        "background dispatch must be gated too, not just foreground"
+    );
+    assert!(canary.exists(), "the file must survive a backgrounded call");
+}
