@@ -46,6 +46,11 @@ pub struct Theme {
     /// Text selection band. Ink density, not hue, so selected text stays
     /// readable against it.
     pub selection: Color,
+    /// Selection band drawn on a washed surface: a user card, or a code
+    /// block. One density darker than [`Self::selection`], because a band
+    /// tuned to contrast with paper nearly vanishes on a wash, and a
+    /// highlight you cannot see is the same as no highlight.
+    pub selection_on_wash: Color,
 }
 
 impl Theme {
@@ -64,6 +69,7 @@ impl Theme {
             field_border_focus: Color::from_rgb8(0x77, 0x77, 0x77),
             error: Color::from_rgb8(0x11, 0x11, 0x11),
             selection: Color::from_rgb8(0xd8, 0xd8, 0xd8),
+            selection_on_wash: Color::from_rgb8(0xc4, 0xc4, 0xc4),
         }
     }
 
@@ -82,6 +88,7 @@ impl Theme {
             field_border_focus: Color::from_rgb8(0x88, 0x88, 0x88),
             error: Color::from_rgb8(0xee, 0xee, 0xee),
             selection: Color::from_rgb8(0x3a, 0x3a, 0x3a),
+            selection_on_wash: Color::from_rgb8(0x4c, 0x4c, 0x4c),
         }
     }
 
@@ -187,6 +194,40 @@ mod tests {
             assert!(
                 against_page > 0.03,
                 "the selection band is invisible in {:?}",
+                theme.mode
+            );
+        }
+    }
+
+    /// The band on a washed surface (a user card, a code block) has the same
+    /// two jobs, against a different backdrop. A band tuned only for paper is
+    /// almost invisible on a wash, which is exactly the case a user hits first:
+    /// their own message is a card.
+    #[test]
+    fn a_selection_on_a_wash_stays_visible_and_readable() {
+        let luma = |color: Color| {
+            let [r, g, b, _] = color.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for theme in [Theme::print_light(), Theme::print_dark()] {
+            let band = luma(theme.selection_on_wash);
+            assert!(
+                (luma(theme.text) - band).abs() > 0.35,
+                "text on a washed selection band is unreadable in {:?}",
+                theme.mode
+            );
+            let against_wash = (band - luma(theme.wash)).abs();
+            assert!(
+                against_wash > 0.03,
+                "the selection band vanishes on a wash in {:?} (contrast {against_wash:.3})",
+                theme.mode
+            );
+            // And it must be the stronger of the two, or it would be doing
+            // less work than the band it replaces.
+            assert!(
+                (band - luma(theme.wash)).abs()
+                    > (luma(theme.selection) - luma(theme.wash)).abs(),
+                "the washed band is weaker than the paper band in {:?}",
                 theme.mode
             );
         }
