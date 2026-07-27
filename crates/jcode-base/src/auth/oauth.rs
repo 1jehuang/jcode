@@ -1175,7 +1175,19 @@ pub async fn refresh_claude_tokens_for_account(
             let _ = crate::auth::refresh_state::record_success("claude");
         }
         Err(err) => {
-            let _ = crate::auth::refresh_state::record_failure("claude", err.to_string());
+            let message = err.to_string();
+            // A permanently rejected refresh token cannot recover, so remember
+            // it and stop paying a doomed network round-trip on every turn.
+            // Transient failures still record normally and keep retrying.
+            if crate::auth::refresh_state::error_is_permanent_rejection(&message) {
+                let _ = crate::auth::refresh_state::record_permanent_rejection(
+                    "claude",
+                    refresh_token,
+                    &message,
+                );
+            } else {
+                let _ = crate::auth::refresh_state::record_failure("claude", &message);
+            }
         }
     }
 

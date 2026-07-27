@@ -285,8 +285,37 @@ fn auth_dot_char(state: AuthState) -> &'static str {
     }
 }
 
+/// Authoritative active credential per dual-auth provider, resolved by the app
+/// from the live provider/remote server. `None` entries mean "unknown, fall
+/// back to the cached `AuthStatus` + env heuristic".
+#[derive(Clone, Copy, Default)]
+pub(super) struct ActiveCredentialOverrides {
+    anthropic: Option<crate::auth::ActiveCredential>,
+    openai: Option<crate::auth::ActiveCredential>,
+}
+
+impl ActiveCredentialOverrides {
+    fn from_app(app: &dyn TuiState) -> Self {
+        Self {
+            anthropic: app.active_dual_credential(jcode_provider_core::ActiveProvider::Claude),
+            openai: app.active_dual_credential(jcode_provider_core::ActiveProvider::OpenAI),
+        }
+    }
+
+    fn get(
+        &self,
+        provider: jcode_provider_core::ActiveProvider,
+    ) -> Option<crate::auth::ActiveCredential> {
+        match provider {
+            jcode_provider_core::ActiveProvider::Claude => self.anthropic,
+            jcode_provider_core::ActiveProvider::OpenAI => self.openai,
+            _ => None,
+        }
+    }
+}
+
 /// Configured providers with their full labels, in display order.
-fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
+fn auth_full_specs(auth: &AuthStatus, active: ActiveCredentialOverrides) -> Vec<(String, AuthState)> {
     fn provider_label(name: &str, state: AuthState, method: Option<&str>) -> String {
         match (state, method) {
             (AuthState::NotConfigured, _) => name.to_string(),
@@ -304,12 +333,15 @@ fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
     fn dual_method_label(
         provider: jcode_provider_core::ActiveProvider,
         auth: &AuthStatus,
+        active: ActiveCredentialOverrides,
     ) -> Option<&'static str> {
         use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
         let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
         let resolved = resolve_dual_credential_auth(provider, auth, runtime_provider.as_deref())?;
+        // Prefer the app's authoritative answer over the env heuristic.
+        let active = active.get(provider).unwrap_or(resolved.active);
         Some(match (resolved.has_oauth, resolved.has_api_key) {
-            (true, true) => match resolved.active {
+            (true, true) => match active {
                 ActiveCredential::OAuth => "oauth*+key",
                 ActiveCredential::ApiKey => "oauth+key*",
             },
@@ -322,13 +354,13 @@ fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
     let anthropic_label = provider_label(
         "anthropic",
         auth.anthropic.state,
-        dual_method_label(jcode_provider_core::ActiveProvider::Claude, auth),
+        dual_method_label(jcode_provider_core::ActiveProvider::Claude, auth, active),
     );
 
     let openai_label = provider_label(
         "openai",
         auth.openai,
-        dual_method_label(jcode_provider_core::ActiveProvider::OpenAI, auth),
+        dual_method_label(jcode_provider_core::ActiveProvider::OpenAI, auth, active),
     );
 
     let gemini_label = if auth.gemini != AuthState::NotConfigured {
@@ -354,8 +386,11 @@ fn auth_full_specs(auth: &AuthStatus) -> Vec<(String, AuthState)> {
 /// Vertical auth inventory: one line per provider. Configured providers get
 /// green/yellow dots; unconfigured ones get a dim hollow dot so they read as
 /// available-to-add without cluttering the `/login` heading.
-pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
-    let specs = auth_full_specs(auth);
+pub(super) fn build_auth_status_lines(
+    auth: &AuthStatus,
+    active: ActiveCredentialOverrides,
+) -> Vec<Line<'static>> {
+    let specs = auth_full_specs(auth, active);
     // Only list providers the user actually has credentials for. When nothing
     // is configured at all, fall back to the full list so the `/login` heading
     // still shows what can be added.
@@ -383,7 +418,11 @@ pub(super) fn build_auth_status_lines(auth: &AuthStatus) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn header_provider_auth_tag(name: &str, auth: &AuthStatus) -> &'static str {
+fn header_provider_auth_tag(
+    name: &str,
+    auth: &AuthStatus,
+    active: ActiveCredentialOverrides,
+) -> &'static str {
     let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
 
     // Anthropic and OpenAI share one credential-resolution source of truth so
@@ -395,12 +434,15 @@ fn header_provider_auth_tag(name: &str, auth: &AuthStatus) -> &'static str {
         use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
         match resolve_dual_credential_auth(provider, auth, runtime_provider.as_deref()) {
             Some(resolved) => {
+                // The app's live answer wins over the env heuristic; the env
+                // var is frequently absent in the TUI client process.
+                let credential = active.get(provider).unwrap_or(resolved.active);
                 // Report exactly the credential the next request will use. The
                 // "both configured" inventory now lives in the auth status line
                 // (`oauth*+key`), so this tag never claims two credentials at
                 // once -- that ambiguity is how "Claude OAuth" and "API key"
                 // used to contradict each other across surfaces.
-                return match resolved.active {
+                return match credential {
                     ActiveCredential::OAuth => "oauth",
                     ActiveCredential::ApiKey => "api-key",
                 };
@@ -441,13 +483,17 @@ fn header_provider_auth_tag(name: &str, auth: &AuthStatus) -> &'static str {
     }
 }
 
-fn header_provider_label(provider_name: &str, auth: &AuthStatus) -> String {
+fn header_provider_label(
+    provider_name: &str,
+    auth: &AuthStatus,
+    active: ActiveCredentialOverrides,
+) -> String {
     let trimmed = provider_name.trim();
     if trimmed.is_empty() {
         return String::new();
     }
     let name = trimmed.to_lowercase();
-    let auth_tag = header_provider_auth_tag(&name, auth);
+    let auth_tag = header_provider_auth_tag(&name, auth, active);
     if auth_tag.is_empty() {
         name
     } else {
@@ -556,13 +602,15 @@ fn configured_auth_count(auth: &AuthStatus) -> usize {
 #[cfg(test)]
 pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let auth = app.auth_status();
-    build_persistent_header_with_auth(app, width, &auth)
+    let active = ActiveCredentialOverrides::from_app(app);
+    build_persistent_header_with_auth(app, width, &auth, active)
 }
 
 fn build_persistent_header_with_auth(
     app: &dyn TuiState,
     width: u16,
     auth: &AuthStatus,
+    active: ActiveCredentialOverrides,
 ) -> Vec<Line<'static>> {
     let model = app.provider_model();
     let session_name = app.session_display_name().unwrap_or_default();
@@ -709,7 +757,7 @@ fn build_persistent_header_with_auth(
     let provider_label = if model_is_placeholder {
         String::new()
     } else {
-        header_provider_label(&app.provider_name(), auth)
+        header_provider_label(&app.provider_name(), auth, active)
     };
     let upstream = if model_is_placeholder {
         None
@@ -779,13 +827,15 @@ fn build_persistent_header_with_auth(
 #[cfg(test)]
 pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let auth = app.auth_status();
-    build_header_lines_with_auth(app, width, &auth)
+    let active = ActiveCredentialOverrides::from_app(app);
+    build_header_lines_with_auth(app, width, &auth, active)
 }
 
 fn build_header_lines_with_auth(
     app: &dyn TuiState,
     width: u16,
     auth: &AuthStatus,
+    active: ActiveCredentialOverrides,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     let align = ratatui::layout::Alignment::Left;
@@ -793,7 +843,7 @@ fn build_header_lines_with_auth(
 
     // Auth inventory: `/login` heading, then one provider per line (dim
     // hollow dot for unconfigured providers).
-    let auth_lines = build_auth_status_lines(auth);
+    let auth_lines = build_auth_status_lines(auth, active);
     let login_heading = "/login to add provider".to_string();
     lines.push(
         Line::from(Span::styled(
@@ -934,9 +984,10 @@ pub(super) fn build_header_sections(
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let auth = app.auth_status();
+    let active = ActiveCredentialOverrides::from_app(app);
     (
-        build_persistent_header_with_auth(app, width, &auth),
-        build_header_lines_with_auth(app, width, &auth),
+        build_persistent_header_with_auth(app, width, &auth, active),
+        build_header_lines_with_auth(app, width, &auth, active),
     )
 }
 
@@ -1373,7 +1424,47 @@ mod tests {
 
         // Auto mode prefers OAuth; the tag must report only the credential in
         // use (the auth inventory line carries the "both configured" detail).
-        assert_eq!(header_provider_auth_tag("openai", &auth), "oauth");
+        assert_eq!(header_provider_auth_tag("openai", &auth, ActiveCredentialOverrides::default()), "oauth");
+        if let Some(value) = prev {
+            crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+        }
+    }
+
+    #[test]
+    fn header_provider_auth_tag_prefers_app_resolved_credential_over_env() {
+        let _guard = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+        // The TUI client process usually does *not* inherit
+        // JCODE_RUNTIME_PROVIDER, so the env heuristic would answer "oauth"
+        // here. The app's authoritative resolution must win, otherwise the
+        // header claims OAuth while the info widget reports an API key.
+        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        let both = AuthStatus {
+            anthropic: ProviderAuth {
+                has_oauth: true,
+                has_api_key: true,
+                ..Default::default()
+            },
+            ..AuthStatus::default()
+        };
+        let overrides = ActiveCredentialOverrides {
+            anthropic: Some(crate::auth::ActiveCredential::ApiKey),
+            openai: None,
+        };
+        assert_eq!(
+            header_provider_auth_tag("anthropic", &both, overrides),
+            "api-key"
+        );
+        let rendered = build_auth_status_lines(&both, overrides)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            rendered.contains("anthropic(oauth+key*)"),
+            "rendered: {rendered}"
+        );
+
         if let Some(value) = prev {
             crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
         }
@@ -1395,20 +1486,20 @@ mod tests {
 
         // Explicit API-key selection wins even when OAuth is available.
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
-        assert_eq!(header_provider_auth_tag("anthropic", &both), "api-key");
+        assert_eq!(header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()), "api-key");
 
         // Explicit OAuth selection.
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
-        assert_eq!(header_provider_auth_tag("anthropic", &both), "oauth");
+        assert_eq!(header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()), "oauth");
 
         // Auto (unset) prefers OAuth when both credentials are present.
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
-        assert_eq!(header_provider_auth_tag("anthropic", &both), "oauth");
+        assert_eq!(header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()), "oauth");
 
         // The "claude" display name resolves to the same Anthropic tagging.
-        assert_eq!(header_provider_auth_tag("claude", &both), "oauth");
+        assert_eq!(header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()), "oauth");
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
-        assert_eq!(header_provider_auth_tag("claude", &both), "api-key");
+        assert_eq!(header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()), "api-key");
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
 
         // Auto falls back to the API key when no OAuth credential exists.
@@ -1420,7 +1511,7 @@ mod tests {
             },
             ..AuthStatus::default()
         };
-        assert_eq!(header_provider_auth_tag("anthropic", &api_only), "api-key");
+        assert_eq!(header_provider_auth_tag("anthropic", &api_only, ActiveCredentialOverrides::default()), "api-key");
 
         if let Some(value) = prev {
             crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
@@ -1539,7 +1630,7 @@ mod tests {
             ..AuthStatus::default()
         };
 
-        let rendered = build_auth_status_lines(&auth)
+        let rendered = build_auth_status_lines(&auth, ActiveCredentialOverrides::default())
             .iter()
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
@@ -1559,7 +1650,7 @@ mod tests {
 
     #[test]
     fn auth_status_lines_list_all_providers_when_nothing_configured() {
-        let lines = build_auth_status_lines(&AuthStatus::default());
+        let lines = build_auth_status_lines(&AuthStatus::default(), ActiveCredentialOverrides::default());
         assert!(
             !lines.is_empty(),
             "all providers should be listed: {lines:?}"
@@ -1585,7 +1676,7 @@ mod tests {
                 Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
                 None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
             }
-            build_auth_status_lines(&auth)
+            build_auth_status_lines(&auth, ActiveCredentialOverrides::default())
                 .iter()
                 .flat_map(|line| line.spans.iter())
                 .map(|span| span.content.as_ref())

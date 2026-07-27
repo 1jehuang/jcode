@@ -100,6 +100,12 @@ impl RenderState {
         self.window.request_redraw();
     }
 
+    /// Retitle the window, so a compositor's window list can tell two jcode
+    /// windows on different checkouts apart.
+    pub fn set_title(&self, title: &str) {
+        self.window.set_title(title);
+    }
+
     /// Set the mouse pointer shape.
     pub fn set_cursor_icon(&self, icon: winit::window::CursorIcon) {
         self.window.set_cursor(icon);

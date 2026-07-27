@@ -168,4 +168,13 @@ pub struct ProviderRefreshRecord {
     pub last_success_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Fingerprint of a refresh token the provider rejected *permanently*
+    /// (`invalid_grant`, revoked, or otherwise unrecoverable).
+    ///
+    /// A permanently dead token cannot become valid again, so re-attempting it
+    /// only costs a network round-trip on the critical path of every turn.
+    /// Storing the fingerprint (never the token) lets callers skip that retry
+    /// while still refreshing immediately once re-login mints a new token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_refresh_fingerprint: Option<String>,
 }

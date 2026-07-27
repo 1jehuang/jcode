@@ -428,6 +428,9 @@ struct SingleSessionSelectionState {
 struct SingleSessionRuntimeState {
     session_handle: Option<DesktopSessionHandle>,
     reload_phase: ReloadPhase,
+    /// Whether the "thinking display is off" hint has already been shown, so
+    /// reconnects do not repeat it.
+    thinking_display_notice_shown: bool,
 }
 
 impl Default for SingleSessionRuntimeState {
@@ -435,6 +438,7 @@ impl Default for SingleSessionRuntimeState {
         Self {
             session_handle: None,
             reload_phase: ReloadPhase::Stable,
+            thinking_display_notice_shown: false,
         }
     }
 }

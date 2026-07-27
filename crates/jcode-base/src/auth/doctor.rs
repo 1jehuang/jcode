@@ -239,6 +239,7 @@ mod tests {
             last_attempt_ms: chrono::Utc::now().timestamp_millis(),
             last_success_ms: Some(chrono::Utc::now().timestamp_millis() - 1000),
             last_error: Some("invalid_grant: refresh token invalid".to_string()),
+            rejected_refresh_fingerprint: None,
         });
 
         assert!(needs_attention(&assessment, None));
