@@ -16,7 +16,10 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn body_styled_lines_without_inline_widgets(&self) -> Vec<SingleSessionStyledLine> {
-        if !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
+        if !self.messages.is_empty()
+            || !self.streaming_response.is_empty()
+            || !self.reasoning.live.trim().is_empty()
+            || self.error.is_some()
         {
             return self.transcript_styled_lines(true);
         }
@@ -61,7 +64,10 @@ impl SingleSessionApp {
         {
             return None;
         }
-        if self.messages.is_empty() && self.streaming_response.is_empty() {
+        if self.messages.is_empty()
+            && self.streaming_response.is_empty()
+            && self.reasoning.live.trim().is_empty()
+        {
             return None;
         }
         Some(self.transcript_styled_lines(false))
@@ -141,6 +147,20 @@ impl SingleSessionApp {
             append_chat_message_lines(&mut lines, message, &mut user_turn, false, None, None);
             message_index += 1;
         }
+        if include_streaming_response {
+            let reasoning_tail = self.reasoning.visible_tail();
+            if !reasoning_tail.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(blank_styled_line());
+                }
+                for tail_line in reasoning_tail {
+                    lines.push(styled_line(
+                        format!("  {tail_line}"),
+                        SingleSessionLineStyle::Meta,
+                    ));
+                }
+            }
+        }
         if include_streaming_response && !self.streaming_response.is_empty() {
             if !lines.is_empty() {
                 lines.push(blank_styled_line());
@@ -177,6 +197,8 @@ impl SingleSessionApp {
             .hash(&mut hasher);
         hash_messages_cache_fingerprint(&self.messages, &mut hasher);
         hash_text_cache_fingerprint(&self.streaming_response, &mut hasher);
+        hash_text_cache_fingerprint(&self.reasoning.live, &mut hasher);
+        self.reasoning.streaming.hash(&mut hasher);
         hash_tool_cache_fingerprint(&self.tool, &mut hasher);
         self.status.hash(&mut hasher);
         self.error.hash(&mut hasher);
@@ -339,8 +361,20 @@ impl SingleSessionApp {
             }
             DesktopSessionEvent::TextDelta(text) => {
                 self.runtime.reload_phase = ReloadPhase::Stable;
+                // Answer text supersedes the live thinking tail for this step.
+                self.finish_reasoning(None);
                 self.streaming_response.push_str(&text);
                 self.set_status(SingleSessionStatus::Receiving);
+            }
+            DesktopSessionEvent::ReasoningDelta(text) => {
+                self.runtime.reload_phase = ReloadPhase::Stable;
+                self.reasoning.live.push_str(&text);
+                self.reasoning.streaming = true;
+                self.set_status(SingleSessionStatus::Thinking);
+            }
+            DesktopSessionEvent::ReasoningDone { duration_ms } => {
+                self.runtime.reload_phase = ReloadPhase::Stable;
+                self.finish_reasoning(duration_ms);
             }
             DesktopSessionEvent::TextReplace(text) => {
                 self.runtime.reload_phase = ReloadPhase::Stable;
@@ -349,6 +383,7 @@ impl SingleSessionApp {
             }
             DesktopSessionEvent::ToolStarted { id, name } => {
                 self.runtime.reload_phase = ReloadPhase::Stable;
+                self.finish_reasoning(None);
                 self.finish_streaming_response();
                 self.collapse_active_tool_message();
                 self.tool.input_buffer.clear();
@@ -754,6 +789,23 @@ impl SingleSessionApp {
         self.set_status(SingleSessionStatus::Sending);
         self.error = None;
         self.is_processing = true;
+    }
+
+    /// Close the live reasoning region, leaving a collapsed trace in the
+    /// transcript so the user can still see that the model thought here.
+    pub(crate) fn finish_reasoning(&mut self, duration_ms: Option<u64>) {
+        if self.reasoning.live.trim().is_empty() {
+            self.reasoning.clear();
+            return;
+        }
+        let trace = match duration_ms {
+            Some(millis) if millis >= 50 => {
+                format!("thought for {:.1}s", millis as f64 / 1000.0)
+            }
+            _ => "thought".to_string(),
+        };
+        self.messages.push(SingleSessionMessage::meta(trace));
+        self.reasoning.clear();
     }
 
     pub(crate) fn finish_streaming_response(&mut self) {

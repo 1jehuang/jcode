@@ -384,3 +384,110 @@ fn safe_utf8_prefix_len_rounds_down_to_char_boundary() {
     assert_eq!(safe_utf8_prefix_len(text, 6), 3);
     assert_eq!(safe_utf8_prefix_len(text, usize::MAX), text.len());
 }
+
+#[test]
+fn reasoning_deltas_stream_into_the_transcript_before_any_answer_text() {
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(DesktopSessionEvent::ReasoningDelta(
+        "checking the event plumbing\n".to_string(),
+    ));
+
+    let body = app.body_lines();
+    assert!(
+        body.iter()
+            .any(|line| line.contains("checking the event plumbing")),
+        "live reasoning should be visible immediately, got {body:?}"
+    );
+    assert_eq!(app.status.as_deref(), Some("thinking"));
+}
+
+#[test]
+fn reasoning_tail_is_bounded_and_collapses_to_a_trace_when_done() {
+    let mut app = SingleSessionApp::new(None);
+    for index in 0..8 {
+        app.apply_session_event(DesktopSessionEvent::ReasoningDelta(format!(
+            "step-{index}\n"
+        )));
+    }
+
+    let body = app.body_lines();
+    assert!(
+        !body.iter().any(|line| line.contains("step-0")),
+        "old reasoning lines should scroll out of the live tail, got {body:?}"
+    );
+    assert!(body.iter().any(|line| line.contains("step-7")));
+
+    app.apply_session_event(DesktopSessionEvent::ReasoningDone {
+        duration_ms: Some(4200),
+    });
+    let body = app.body_lines();
+    assert!(
+        body.iter().any(|line| line.contains("thought for 4.2s")),
+        "finished reasoning should leave a collapsed trace, got {body:?}"
+    );
+    assert!(!body.iter().any(|line| line.contains("step-7")));
+}
+
+#[test]
+fn answer_text_and_tool_calls_close_an_open_reasoning_region() {
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(DesktopSessionEvent::ReasoningDelta("pondering".to_string()));
+    app.apply_session_event(DesktopSessionEvent::TextDelta("the answer".to_string()));
+    let body = app.body_lines();
+    assert!(!body.iter().any(|line| line.contains("pondering")));
+    assert!(body.iter().any(|line| line.contains("thought")));
+
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(DesktopSessionEvent::ReasoningDelta("pondering".to_string()));
+    app.apply_session_event(DesktopSessionEvent::ToolStarted {
+        id: Some("tool-a".to_string()),
+        name: "bash".to_string(),
+    });
+    let body = app.body_lines();
+    assert!(!body.iter().any(|line| line.contains("pondering")));
+    assert!(body.iter().any(|line| line.contains("thought")));
+}
+
+#[test]
+fn completed_tool_args_keep_their_concrete_summary_over_the_intent() {
+    // Once the full arguments parse, the tool-specific summary is more
+    // informative than the model's prose intent.
+    let lines = formatted_tool_input_lines(
+        "bash",
+        r#"{"intent": "run the desktop tests", "command": "cargo test"}"#,
+    );
+    assert_eq!(lines.first().map(String::as_str), Some("$ cargo test"));
+}
+
+#[test]
+fn tool_intent_is_visible_from_partially_streamed_json() {
+    let lines = formatted_tool_input_lines("bash", r#"{"intent": "run the desktop tests", "comm"#);
+    assert_eq!(
+        lines,
+        vec!["run the desktop tests".to_string()],
+        "a streaming intent should preview before the args finish arriving"
+    );
+}
+
+#[test]
+fn nested_intent_fields_do_not_hijack_the_tool_headline() {
+    assert_eq!(
+        partial_json_string_field(r#"{"tool_calls": [{"intent": "inner"}]}"#, "intent"),
+        None
+    );
+    assert_eq!(
+        partial_json_string_field(
+            r#"{"tool_calls": [{"intent": "inner"}], "intent": "outer"}"#,
+            "intent"
+        ),
+        Some("outer".to_string())
+    );
+}
+
+#[test]
+fn partial_json_intent_handles_escapes_and_multibyte_text() {
+    assert_eq!(
+        partial_json_string_field(r#"{"intent": "say \"héllo\" now"#, "intent"),
+        Some("say \"héllo\" now".to_string())
+    );
+}
