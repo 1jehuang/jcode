@@ -1,9 +1,9 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, SkillRegistry,
-    commands, ctrl_bracket_fallback_to_esc, is_context_limit_error,
-    is_request_payload_too_large_error, remote,
+    App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
+    ctrl_bracket_fallback_to_esc, is_context_limit_error, is_request_payload_too_large_error,
+    remote,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -3646,19 +3646,19 @@ impl App {
             return;
         }
 
-        // A terminal file drop is user input even when its absolute path starts
-        // with `/`. Check the filesystem-aware drop parser before slash routing
-        // so a real file can never collide with a skill name.
+        // File drops remain ordinary input. Registry-aware resolution supports
+        // multi-word skill names without weakening that guard.
+        let initial_snapshot = self.current_skills_snapshot();
         let skill_invocation = parse_dropped_paths(&input)
             .is_none()
-            .then(|| SkillRegistry::parse_invocation(&input))
+            .then(|| initial_snapshot.resolve_invocation(&input))
             .flatten();
 
         // Check for skill invocation.
         if let Some(invocation) = skill_invocation {
             let skill_name = invocation.name.to_string();
             let trailing_prompt = invocation.prompt.map(str::to_string);
-            let mut skill = self.current_skills_snapshot().get(&skill_name).cloned();
+            let mut skill = initial_snapshot.get(&skill_name).cloned();
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
             // daemon-side `skill_manage reload_all` can update a different process.
