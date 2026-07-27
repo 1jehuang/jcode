@@ -1310,6 +1310,28 @@ fn output_budget_truncation_requests_a_continuation() {
 }
 
 #[test]
+fn stranded_tool_use_stop_is_detected() {
+    // Second half of the Opus 5 DeepSWE incident: the provider reported
+    // stop_reason="tool_use" while the parsed tool-call list was empty, so the
+    // turn loop had nothing to execute and broke out mid-task, discarding every
+    // uncommitted edit. `tool_use` is a normal completion reason, so
+    // `should_continue_after_stop_reason` must keep rejecting it; the stranded
+    // case is only recoverable when it is paired with zero tool calls, which is
+    // exactly what this predicate is for.
+    assert!(Agent::is_stranded_tool_use_stop(Some("tool_use")));
+    assert!(Agent::is_stranded_tool_use_stop(Some("TOOL_USE")));
+    assert!(Agent::is_stranded_tool_use_stop(Some(" tool_use ")));
+
+    assert!(!Agent::is_stranded_tool_use_stop(Some("end_turn")));
+    assert!(!Agent::is_stranded_tool_use_stop(Some("max_tokens")));
+    assert!(!Agent::is_stranded_tool_use_stop(Some("")));
+    assert!(!Agent::is_stranded_tool_use_stop(None));
+    // Must stay disjoint from the truncation path so a turn never takes both
+    // continuation branches for one stop reason.
+    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
+}
+
+#[test]
 fn guardrail_stop_reason_detection() {
     assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
     assert!(Agent::is_guardrail_stop_reason(Some("REFUSAL")));

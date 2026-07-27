@@ -1897,3 +1897,40 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     // Opus 5 rejects `thinking.type.enabled`; it requires adaptive thinking.
     assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
 }
+
+/// A `content_block_start` carrying an unrecognized block type must still
+/// deserialize. Before the `Unknown` catch-all the whole event failed to parse
+/// and was dropped, so an unknown *tool* block produced a turn that reported
+/// `stop_reason: tool_use` with no tool call for the agent to run.
+#[test]
+fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
+    for block_type in [
+        "server_tool_use",
+        "web_search_tool_result",
+        "some_future_block",
+    ] {
+        let mut state = SseStreamState::default();
+        let event = SseEvent {
+            event_type: "content_block_start".to_string(),
+            data: serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": block_type, "id": "srvtoolu_1", "name": "web_search"}
+            })
+            .to_string(),
+        };
+        let events = process_sse_event(&event, &mut state, false);
+        assert!(
+            events.is_empty(),
+            "{block_type}: unknown block must not synthesize stream events"
+        );
+        assert!(
+            state.current_tool_use.is_none(),
+            "{block_type}: unknown block must not start tool accumulation"
+        );
+        assert!(
+            !state.current_thinking_block,
+            "{block_type}: unknown block must not start a thinking block"
+        );
+    }
+}

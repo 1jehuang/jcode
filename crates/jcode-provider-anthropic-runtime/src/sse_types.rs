@@ -46,6 +46,12 @@ pub(crate) enum ApiContentBlockStart {
     },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
+    /// A block type this build does not recognize (for example a newer
+    /// server-side tool block). Kept as an explicit catch-all so the
+    /// surrounding `content_block_start` event still deserializes instead of
+    /// being dropped whole.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Deserialize)]
