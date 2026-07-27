@@ -1215,3 +1215,66 @@ fn the_busy_line_is_indented_clear_of_the_spinner() {
         "the phase text ran into the spinner ({darkest:.3})"
     );
 }
+
+/// The streaming reveal must actually hold text back, and must converge on the
+/// same frame the non-streaming path draws.
+///
+/// This is the one thing unit tests over [`crate::stream`] cannot prove: the
+/// arithmetic could be perfect while the renderer ignored it entirely, which is
+/// exactly the bug an "animation" is most likely to ship with.
+mod streaming {
+    use super::*;
+
+    fn model_with_reply(fraction: Option<f64>) -> Model {
+        let mut model = states::by_name("attached_empty").expect("attached_empty node");
+        model.transcript = crate::transcript::Transcript::default();
+        model
+            .transcript
+            .push(crate::transcript::Message::user("hi"));
+        model.transcript.append_assistant(
+            "This is a streamed reply long enough to wrap across several \
+             lines of the transcript column, so a partial reveal is visible \
+             as missing text rather than as a single missing word.",
+        );
+        model.donut = None;
+        model.stream = match fraction {
+            Some(fraction) => crate::stream::Stream::pinned(fraction),
+            None => crate::stream::Stream::default(),
+        };
+        model
+    }
+
+    fn body_ink(rendered: &Rendered) -> u32 {
+        let frame = rendered.frame;
+        rendered.ink_rows(frame.left, frame.body_top, frame.right, frame.body_bottom)
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn a_partial_reveal_draws_less_than_a_finished_one() {
+        let Some(partial) = Rendered::new(&model_with_reply(Some(0.25))) else {
+            return;
+        };
+        let full = Rendered::new(&model_with_reply(None)).expect("full render");
+        assert!(
+            body_ink(&partial) < body_ink(&full),
+            "the reveal drew everything: partial {} vs full {}",
+            body_ink(&partial),
+            body_ink(&full)
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn a_completed_reveal_matches_the_unanimated_frame() {
+        let Some(done) = Rendered::new(&model_with_reply(Some(1.0))) else {
+            return;
+        };
+        let full = Rendered::new(&model_with_reply(None)).expect("full render");
+        assert_eq!(
+            body_ink(&done),
+            body_ink(&full),
+            "a finished reveal must land exactly on the static frame"
+        );
+    }
+}

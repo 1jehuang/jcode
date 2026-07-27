@@ -25,6 +25,7 @@ mod render;
 mod scene;
 mod select;
 mod states;
+mod stream;
 mod strip;
 #[cfg(test)]
 mod tests;
@@ -167,6 +168,9 @@ pub struct Model {
     /// Which ghost hint the empty composer shows. An index rather than a
     /// string, so the model stays trivially comparable and captures can pin it.
     pub hint: usize,
+    /// The streaming reveal: how much of the arriving reply is on screen, and
+    /// the glide that keeps a growing transcript from jumping.
+    pub stream: stream::Stream,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
     /// Working directory of the attached session, as the daemon reports it.
@@ -220,6 +224,7 @@ impl Default for Model {
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
+            stream: stream::Stream::default(),
             strip: strip::Strip::default(),
             working_dir: None,
             model: None,
@@ -325,7 +330,15 @@ impl App {
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
                 }
-                harness::HarnessUpdate::Text(text) => self.model.transcript.append_assistant(&text),
+                harness::HarnessUpdate::Text(text) => {
+                    self.model.transcript.append_assistant(&text);
+                    // Chase the new length rather than jumping to it: the
+                    // reveal is what turns a burst of tokens into a sweep.
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
                 harness::HarnessUpdate::Activity(label) => {
                     self.model.busy = true;
                     self.model
@@ -361,6 +374,7 @@ impl App {
             return;
         }
         self.model.transcript = transcript::Transcript::default();
+        self.model.stream.reveal_all();
         self.model.busy = false;
         self.model.activity.finish();
         self.model.scroll = 0.0;
@@ -391,6 +405,9 @@ impl App {
         self.model
             .transcript
             .push(transcript::Message::user(content.clone()));
+        // The user's own message was typed, not streamed: revealing it would
+        // animate text they are already looking at.
+        self.model.stream.reveal_all();
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
         // Submitting jumps back to the live tail; otherwise the reply streams
@@ -746,7 +763,11 @@ impl App {
         // A running turn animates the activity spinner; this is what keeps the
         // window from looking frozen while the agent works.
         let spinner = self.model.activity.next_frame_at(now);
-        [caret, donut, spinner].into_iter().flatten().min()
+        // The reveal and the scroll glide are the only animations that must
+        // keep running while the window is busy, and they stop themselves the
+        // moment the text has caught up.
+        let stream = self.model.stream.next_frame_at(now);
+        [caret, donut, spinner, stream].into_iter().flatten().min()
     }
 
     /// Height of the transcript region in logical units.
@@ -1104,6 +1125,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
                 self.animate_donut();
+                self.model.stream.advance(std::time::Instant::now());
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();
