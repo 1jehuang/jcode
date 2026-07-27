@@ -328,6 +328,86 @@ opt-level = 3
 [profile.release.package."jcode-fuzzy"]
 opt-level = 3
 
+# Keep the terminal render stack optimized even in dev/selfdev/test builds.
+#
+# Every TUI frame walks ratatui buffers cell-by-cell and re-measures visible
+# text with unicode-width/unicode-segmentation. At opt-level = 0 those inner
+# loops dominated live-client profiles (perf showed str_width, grapheme
+# bsearch, and Buffer::index_of_opt as the top symbols) and pushed a routine
+# full frame to ~12ms p50 / 21ms p95, which reads as input-line lag while
+# streaming saturates the redraw loop. These are stable third-party crates
+# that almost never recompile, so pinning them is a one-time compile cost
+# (same rationale as jcode-tui-anim above).
+[profile.dev.package.ratatui]
+opt-level = 3
+[profile.selfdev.package.ratatui]
+opt-level = 3
+[profile.test.package.ratatui]
+opt-level = 3
+
+[profile.dev.package.ratatui-core]
+opt-level = 3
+[profile.selfdev.package.ratatui-core]
+opt-level = 3
+[profile.test.package.ratatui-core]
+opt-level = 3
+
+[profile.dev.package.ratatui-widgets]
+opt-level = 3
+[profile.selfdev.package.ratatui-widgets]
+opt-level = 3
+[profile.test.package.ratatui-widgets]
+opt-level = 3
+
+[profile.dev.package.ratatui-crossterm]
+opt-level = 3
+[profile.selfdev.package.ratatui-crossterm]
+opt-level = 3
+[profile.test.package.ratatui-crossterm]
+opt-level = 3
+
+[profile.dev.package.crossterm]
+opt-level = 3
+[profile.selfdev.package.crossterm]
+opt-level = 3
+[profile.test.package.crossterm]
+opt-level = 3
+
+[profile.dev.package.unicode-width]
+opt-level = 3
+[profile.selfdev.package.unicode-width]
+opt-level = 3
+[profile.test.package.unicode-width]
+opt-level = 3
+
+[profile.dev.package.unicode-segmentation]
+opt-level = 3
+[profile.selfdev.package.unicode-segmentation]
+opt-level = 3
+[profile.test.package.unicode-segmentation]
+opt-level = 3
+
+[profile.dev.package.unicode-truncate]
+opt-level = 3
+[profile.selfdev.package.unicode-truncate]
+opt-level = 3
+[profile.test.package.unicode-truncate]
+opt-level = 3
+
+[profile.dev.package.unicode-linebreak]
+opt-level = 3
+[profile.selfdev.package.unicode-linebreak]
+opt-level = 3
+[profile.test.package.unicode-linebreak]
+opt-level = 3
+
+[profile.dev.package.compact_str]
+opt-level = 3
+[profile.selfdev.package.compact_str]
+opt-level = 3
+[profile.test.package.compact_str]
+opt-level = 3
+
 # Keep the text-shaping stack optimized even in dev/selfdev/test builds.
 #
 # cosmic-text + rustybuzz + ttf-parser + swash + yazi do all of the desktop
