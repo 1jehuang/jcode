@@ -18,6 +18,7 @@ mod input;
 mod keymap;
 mod layout;
 mod meta;
+mod overview;
 mod paint;
 mod place;
 mod profile;
@@ -25,6 +26,7 @@ mod render;
 mod scene;
 mod select;
 mod states;
+mod stream;
 mod strip;
 #[cfg(test)]
 mod tests;
@@ -66,6 +68,10 @@ struct App {
     harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
+    /// When Alt went down with nothing else pressed since, or `None` when Alt
+    /// is up or has already been used as part of a chord. Holding it past
+    /// [`OVERVIEW_HOLD`] opens the session overview.
+    alt_held_since: Option<std::time::Instant>,
     clipboard: clipboard::Clipboard,
     /// Pointer position in logical units, tracked for click and drag.
     pointer: (f64, f64),
@@ -89,6 +95,9 @@ struct App {
     geometry_saved: Option<(std::time::Instant, window_state::Geometry)>,
     /// When the last animated frame was drawn, for the donut's time step.
     last_frame: Option<std::time::Instant>,
+    /// When the overview's zoom last stepped. Separate from `last_frame`
+    /// because the donut's clock stops once there is a transcript.
+    overview_frame: Option<std::time::Instant>,
     /// Geometry of the most recently built frame. Pointer hit-testing reads
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
@@ -103,6 +112,7 @@ impl Default for App {
             model: Model::default(),
             harness: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
+            alt_held_since: None,
             clipboard: clipboard::Clipboard::default(),
             pointer: (0.0, 0.0),
             dragging: false,
@@ -113,6 +123,7 @@ impl Default for App {
             geometry: window_state::Geometry::default(),
             geometry_saved: None,
             last_frame: None,
+            overview_frame: None,
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
@@ -125,6 +136,17 @@ const DONUT_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Maximum gap between two clicks that still counts as a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How long Alt must be held, alone, before the session overview opens.
+///
+/// A threshold rather than an instant trigger: Alt is the first half of a
+/// dozen editing chords (Alt+B, Alt+F, Alt+Backspace), and a field that
+/// flashed up on the way to every one of them would make the composer feel
+/// haunted. Short enough that a deliberate hold still feels immediate.
+const OVERVIEW_HOLD: std::time::Duration = std::time::Duration::from_millis(180);
+
+/// Frame interval while the overview zooms (~60fps).
+const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// UI model: what the frame is built from.
 pub struct Model {
@@ -167,8 +189,15 @@ pub struct Model {
     /// Which ghost hint the empty composer shows. An index rather than a
     /// string, so the model stays trivially comparable and captures can pin it.
     pub hint: usize,
+    /// The streaming reveal: how much of the arriving reply is on screen, and
+    /// the glide that keeps a growing transcript from jumping.
+    pub stream: stream::Stream,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
+    /// The session overview: the blob field held Alt zooms out into. Part of
+    /// the model so a frame stays a pure function of it and every phase of
+    /// the zoom is capturable.
+    pub overview: overview::Overview,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
@@ -220,7 +249,9 @@ impl Default for Model {
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
+            stream: stream::Stream::default(),
             strip: strip::Strip::default(),
+            overview: overview::Overview::default(),
             working_dir: None,
             model: None,
         }
@@ -325,7 +356,25 @@ impl App {
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
                 }
-                harness::HarnessUpdate::Text(text) => self.model.transcript.append_assistant(&text),
+                harness::HarnessUpdate::Text(text) => {
+                    self.model.transcript.append_assistant(&text);
+                    // Chase the new length rather than jumping to it: the
+                    // reveal is what turns a burst of tokens into a sweep.
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
+                harness::HarnessUpdate::Reasoning(text) => {
+                    self.model.transcript.append_reasoning(&text);
+                    // Reasoning is revealed by the same sweep as the reply, so
+                    // a thought does not appear as an instant wall of text
+                    // while the answer below it types itself out.
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
                 harness::HarnessUpdate::Activity(label) => {
                     self.model.busy = true;
                     self.model
@@ -361,6 +410,7 @@ impl App {
             return;
         }
         self.model.transcript = transcript::Transcript::default();
+        self.model.stream.reveal_all();
         self.model.busy = false;
         self.model.activity.finish();
         self.model.scroll = 0.0;
@@ -373,6 +423,136 @@ impl App {
         self.retitle();
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Attach(target));
+        }
+    }
+
+    /// Lay out the blob field for the current model.
+    ///
+    /// Rebuilt per call rather than cached: it is pure arithmetic over a
+    /// handful of sessions, and a cache here would be one more thing that can
+    /// disagree with what was drawn when a poll changes the session set
+    /// mid-gesture.
+    fn overview_field(&self) -> overview::Field {
+        overview::layout(
+            &self.model.strip.entries(),
+            self.model
+                .overview
+                .focus()
+                .or(self.model.session_id.as_deref()),
+            self.model.session_id.as_deref(),
+            overview::area(&self.frame),
+        )
+    }
+
+    /// Open the overview, highlighting the session we are in so the gesture
+    /// starts from where the user already is.
+    fn open_overview(&mut self) {
+        if self.model.overview.is_open() {
+            return;
+        }
+        self.model.overview.open(self.model.session_id.as_deref());
+        self.request_redraw();
+    }
+
+    /// Close the field, attaching to the highlighted session when `commit`.
+    ///
+    /// Commit and cancel share one path so they can never drift: the only
+    /// difference is whether the highlight is acted on.
+    fn close_overview(&mut self, commit: bool) {
+        if !self.model.overview.is_visible() {
+            return;
+        }
+        if commit
+            && let Some(target) = self.model.overview.focus().map(str::to_string)
+            && self.model.session_id.as_deref() != Some(target.as_str())
+            && self.model.strip.focus_session(&target)
+        {
+            self.attach_focused_session();
+        }
+        self.model.overview.close();
+        self.request_redraw();
+    }
+
+    /// Move the highlight across the field.
+    fn move_overview(&mut self, dir: overview::Dir) {
+        let field = self.overview_field();
+        let from = self
+            .model
+            .overview
+            .focus()
+            .or(self.model.session_id.as_deref())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(target) = field.neighbor(&from, dir) {
+            let id = target.session_id.clone();
+            self.model.overview.set_focus(&id);
+            self.request_redraw();
+        }
+    }
+
+    /// Step the highlight through the field in reading order.
+    fn cycle_overview(&mut self, step: isize) {
+        let field = self.overview_field();
+        let from = self
+            .model
+            .overview
+            .focus()
+            .or(self.model.session_id.as_deref())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(target) = field.next_in_order(&from, step) {
+            let id = target.to_string();
+            self.model.overview.set_focus(&id);
+            self.request_redraw();
+        }
+    }
+
+    /// Alt went down or came up.
+    ///
+    /// Held alone past [`OVERVIEW_HOLD`] this opens the session overview, and
+    /// releasing it commits to the highlighted session. Tracked from the
+    /// modifier event rather than from a key event because a bare modifier
+    /// never produces one of its own.
+    ///
+    /// A named method rather than an inline arm so the tests drive the same
+    /// code the window does: a test that reimplemented this gesture would keep
+    /// passing after the real handler stopped opening anything.
+    fn on_alt_changed(&mut self, down: bool, now: std::time::Instant) {
+        if down {
+            if self.alt_held_since.is_none() && !self.model.overview.is_open() {
+                self.alt_held_since = Some(now);
+                self.request_redraw();
+            }
+            return;
+        }
+        self.alt_held_since = None;
+        // Releasing Alt flies into whichever blob is highlighted.
+        self.close_overview(true);
+    }
+
+    /// Advance the overview one frame: ripen a pending Alt hold into an open
+    /// field, then step the zoom.
+    ///
+    /// Done on the frame rather than on a timer thread so the zoom is driven
+    /// by the same clock as everything else on screen, and so a window that is
+    /// not drawing is not silently animating either.
+    fn tick_overview(&mut self, now: std::time::Instant) {
+        if let Some(since) = self.alt_held_since
+            && now.duration_since(since) >= OVERVIEW_HOLD
+        {
+            self.alt_held_since = None;
+            self.open_overview();
+        }
+        // Its own clock, not the donut's: the donut stops advancing the
+        // moment there is a transcript, and a zoom driven by a stopped clock
+        // would freeze halfway in exactly the sessions worth switching to.
+        let dt = self
+            .overview_frame
+            .map(|last| now.duration_since(last).as_secs_f32().min(0.1))
+            .unwrap_or(OVERVIEW_FRAME.as_secs_f32());
+        self.overview_frame = Some(now);
+        if self.model.overview.advance(dt) {
+            self.request_redraw();
         }
     }
 
@@ -391,6 +571,9 @@ impl App {
         self.model
             .transcript
             .push(transcript::Message::user(content.clone()));
+        // The user's own message was typed, not streamed: revealing it would
+        // animate text they are already looking at.
+        self.model.stream.reveal_all();
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
         // Submitting jumps back to the live tail; otherwise the reply streams
@@ -491,6 +674,19 @@ impl App {
 
     fn on_pointer_pressed(&mut self) {
         let (x, y) = self.pointer;
+        // The field is modal: a click in it picks a session, and a click on
+        // the paper between blobs dismisses, like any overview.
+        if self.model.overview.is_open() {
+            match self.overview_field().hit(x, y) {
+                Some(blob) => {
+                    let id = blob.session_id.clone();
+                    self.model.overview.set_focus(&id);
+                    self.close_overview(true);
+                }
+                None => self.close_overview(false),
+            }
+            return;
+        }
         let hit = self.composer_offset_at(x, y);
         if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
             eprintln!(
@@ -634,6 +830,21 @@ impl App {
     }
 
     fn on_pointer_moved(&mut self) {
+        // Hovering the field moves the highlight, so the mouse and the arrows
+        // drive one selection rather than two competing ones. A hover off the
+        // blobs leaves the highlight where it was: sliding across the gap
+        // between two sessions must not deselect the one you were on.
+        if self.model.overview.is_open() {
+            let (x, y) = self.pointer;
+            if let Some(blob) = self.overview_field().hit(x, y) {
+                let id = blob.session_id.clone();
+                if self.model.overview.focus() != Some(id.as_str()) {
+                    self.model.overview.set_focus(&id);
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
         if self.model.spin.dragging {
             self.model.spin.drag_to(self.pointer.0);
             self.request_redraw();
@@ -736,8 +947,22 @@ impl App {
     /// spin, so the states that animate nothing (no window focus, a pinned
     /// caret with no donut and no turn in flight) return `None` here.
     pub fn animation_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        // The overview is the one animation that must run whether or not the
+        // window thinks it is focused: a compositor that steals focus while
+        // Alt is held would otherwise freeze the field mid-zoom.
+        let overview = self
+            .model
+            .overview
+            .is_animating()
+            .then(|| now + OVERVIEW_FRAME);
+        // A pending Alt hold has to wake the loop when it ripens, or the field
+        // would only appear on the next unrelated event.
+        let hold = self
+            .alt_held_since
+            .filter(|_| !self.model.overview.is_open())
+            .map(|since| since + OVERVIEW_HOLD);
         if !self.model.focused {
-            return None;
+            return [overview, hold].into_iter().flatten().min();
         }
         let caret = (!self.model.busy)
             .then(|| self.model.caret.next_toggle_at(now))
@@ -746,7 +971,14 @@ impl App {
         // A running turn animates the activity spinner; this is what keeps the
         // window from looking frozen while the agent works.
         let spinner = self.model.activity.next_frame_at(now);
-        [caret, donut, spinner].into_iter().flatten().min()
+        // The reveal and the scroll glide are the only animations that must
+        // keep running while the window is busy, and they stop themselves the
+        // moment the text has caught up.
+        let stream = self.model.stream.next_frame_at(now);
+        [caret, donut, spinner, stream, overview, hold]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Height of the transcript region in logical units.
@@ -826,6 +1058,18 @@ impl App {
                     self.attach_focused_session();
                 }
             }
+
+            // The overview owns the keyboard while it is up, so these are the
+            // only actions that can reach here from that state.
+            Action::OverviewLeft => self.move_overview(overview::Dir::Left),
+            Action::OverviewRight => self.move_overview(overview::Dir::Right),
+            Action::OverviewUp => self.move_overview(overview::Dir::Up),
+            Action::OverviewDown => self.move_overview(overview::Dir::Down),
+            Action::OverviewNext => self.cycle_overview(1),
+            Action::OverviewPrev => self.cycle_overview(-1),
+            Action::OverviewCommit => self.close_overview(true),
+            Action::OverviewCancel => self.close_overview(false),
+
             Action::InsertNewline => self.model.editor.insert_char('\n'),
 
             Action::MoveLeft => self.model.editor.move_left(),
@@ -1069,6 +1313,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                self.on_alt_changed(self.modifiers.alt_key(), std::time::Instant::now());
             }
             WindowEvent::Focused(focused) => {
                 self.model.focused = focused;
@@ -1089,6 +1334,28 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
+                // While the field is up it owns the keyboard: an unbound key
+                // is swallowed rather than typed into a composer the user
+                // cannot see. Shift+Tab steps backwards, the Alt+Tab habit.
+                if self.model.overview.is_open() {
+                    let action = if self.modifiers.shift_key()
+                        && logical_key
+                            == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
+                    {
+                        Some(keymap::Action::OverviewPrev)
+                    } else {
+                        keymap::resolve_overview(&logical_key)
+                    };
+                    if let Some(action) = action {
+                        self.apply(action, None);
+                        self.request_redraw();
+                    }
+                    return;
+                }
+                // Alt is the first half of a dozen editing chords, so any key
+                // pressed with it cancels the pending overview: the user is
+                // typing, not gesturing.
+                self.alt_held_since = None;
                 let action =
                     keymap::resolve(&logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
                 let typed = text.as_ref().map(|t| t.as_str());
@@ -1103,7 +1370,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
+                self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
+                self.model.stream.advance(std::time::Instant::now());
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();

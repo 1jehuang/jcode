@@ -560,10 +560,12 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
         hill_climbability: Some(95),
         feedback_loop: Some("Inspect a debug frame".to_string()),
         end_to_end_ownership: Some(90),
+        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some("Keep the agent aligned with the user's request".to_string()),
         understands_user_intent: Some(98),
+        ..Default::default()
     };
     let msg = DisplayMessage::todos(
         serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
@@ -612,10 +614,12 @@ fn render_todos_message_uses_readable_semantic_colors() {
         hill_climbability: Some(95),
         feedback_loop: None,
         end_to_end_ownership: None,
+        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some("Readable metadata".to_string()),
         understands_user_intent: Some(98),
+        ..Default::default()
     };
     let msg = DisplayMessage::todos(
         serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
@@ -656,6 +660,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         hill_climbability: Some(95),
         feedback_loop: None,
         end_to_end_ownership: Some(90),
+        ..Default::default()
     }];
     let msg =
         DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
@@ -713,6 +718,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         hill_climbability: Some(95),
         feedback_loop: Some("Inspect the rendered frame".to_string()),
         end_to_end_ownership: Some(92),
+        ..Default::default()
     }];
     let content = format!(
         "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nGoals:\n{}\n\n{}",
@@ -775,6 +781,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         hill_climbability: Some(90),
         feedback_loop: Some("Inspect one frame".to_string()),
         end_to_end_ownership: None,
+        ..Default::default()
     };
     let after = crate::todo::TodoGoal {
         hill_climbability: Some(98),
@@ -849,6 +856,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
     let before = crate::todo::TodoPlan {
         user_intention: Some("Ship the plan-level intent gate".to_string()),
         understands_user_intent: Some(80),
+        ..Default::default()
     };
     let after = crate::todo::TodoPlan {
         understands_user_intent: Some(97),
@@ -958,6 +966,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         let plan = crate::todo::TodoPlan {
             user_intention: Some(intention.to_string()),
             understands_user_intent: Some(96),
+            ..Default::default()
         };
         let mut content = format!(
             "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nPlan:\n{}\n\nGoals:\n{}",
@@ -990,6 +999,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             hill_climbability: Some(90),
             feedback_loop: Some(INITIAL_FEEDBACK.to_string()),
             end_to_end_ownership: None,
+            ..Default::default()
         },
         "Make a pelican riding a bike animation that clearly works in a browser",
         Some(crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE),
@@ -1015,6 +1025,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             hill_climbability: Some(98),
             feedback_loop: Some(REVISED_FEEDBACK.to_string()),
             end_to_end_ownership: None,
+            ..Default::default()
         },
         REVISED_OBJECTIVE,
         None,
@@ -1069,10 +1080,12 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         hill_climbability: Some(98),
         feedback_loop: Some(FEEDBACK.to_string()),
         end_to_end_ownership: None,
+        ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(OBJECTIVE.to_string()),
         understands_user_intent: Some(97),
+        ..Default::default()
     };
     let todo_output = format!(
         "{}\n\nPlan:\n{}\n\nGoals:\n{}",

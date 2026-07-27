@@ -136,6 +136,15 @@ pub struct SessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: String,
+    /// Size of the session's stored record, in bytes.
+    ///
+    /// A cheap, monotonic proxy for "how much conversation is in here": a
+    /// client can size or sort by it without fetching every transcript, which
+    /// is the difference between an instant overview and one that stalls on a
+    /// dozen history requests. Approximate by design; `None` when the server
+    /// could not determine it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

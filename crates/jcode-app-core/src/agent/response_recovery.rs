@@ -215,6 +215,55 @@ impl Agent {
         Ok(true)
     }
 
+    /// True when the provider said it stopped to call a tool but no tool call
+    /// survived parsing.
+    ///
+    /// `stop_reason: tool_use` with zero tool calls is a contradiction: the
+    /// model intended to act and the harness has nothing to run. Breaking out
+    /// of the turn there strands the agent mid-task, which on a benchmark run
+    /// looks like an ordinary "the agent stopped early" failure and silently
+    /// discards all of its uncommitted work. Treat it like any other
+    /// incomplete response and ask for a continuation instead.
+    pub(crate) fn is_stranded_tool_use_stop(stop_reason: Option<&str>) -> bool {
+        stop_reason
+            .map(str::trim)
+            .map(|reason| reason.eq_ignore_ascii_case("tool_use"))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn maybe_continue_stranded_tool_use(
+        &mut self,
+        stop_reason: Option<&str>,
+        attempts: &mut u32,
+    ) -> Result<bool> {
+        if !Self::is_stranded_tool_use_stop(stop_reason) {
+            return Ok(false);
+        }
+        if *attempts >= Self::MAX_INCOMPLETE_CONTINUATION_ATTEMPTS {
+            logging::warn(&format!(
+                "Provider reported stop_reason='tool_use' with no parsed tool call after {} continuation attempts; ending turn",
+                attempts
+            ));
+            return Ok(false);
+        }
+        *attempts += 1;
+        logging::warn(&format!(
+            "Provider reported stop_reason='tool_use' but no tool call was parsed; requesting continuation (attempt {}/{})",
+            attempts,
+            Self::MAX_INCOMPLETE_CONTINUATION_ATTEMPTS
+        ));
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "[System reminder: your previous response ended with stop_reason \"tool_use\" but no tool call arrived. Nothing was executed. Re-issue the tool call you intended, do not repeat completed work, and continue the task.]"
+                    .to_string(),
+                cache_control: None,
+            }],
+        );
+        self.session.save()?;
+        Ok(true)
+    }
+
     pub(super) fn filter_truncated_tool_calls(
         &mut self,
         stop_reason: Option<&str>,

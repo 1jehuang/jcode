@@ -1031,16 +1031,19 @@ mod session_strip {
                 session_id: "s_a1".into(),
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
+                weight: 0.0,
             },
             Entry {
                 session_id: "s_a2".into(),
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
+                weight: 0.0,
             },
             Entry {
                 session_id: "s_b1".into(),
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
+                weight: 0.0,
             },
         ];
         app.model.strip = Strip::build(entries, Some(focused));
@@ -1123,6 +1126,7 @@ mod session_strip {
                 session_id: "solo".into(),
                 working_dir: Some("/tmp".into()),
                 busy: false,
+                weight: 0.0,
             }],
             Some("solo"),
         );
@@ -1164,6 +1168,7 @@ mod session_strip {
                 session_id: "solo".into(),
                 working_dir: Some("/tmp".into()),
                 busy: false,
+                weight: 0.0,
             }],
             Some("solo"),
         );
@@ -1197,16 +1202,19 @@ mod session_strip {
                     session_id: "s_a1".into(),
                     working_dir: Some("/home/j/jcode".into()),
                     busy: false,
+                    weight: 0.0,
                 },
                 Entry {
                     session_id: "s_a2".into(),
                     working_dir: Some("/home/j/jcode".into()),
                     busy: false,
+                    weight: 0.0,
                 },
                 Entry {
                     session_id: "s_b1".into(),
                     working_dir: Some("/home/j/site".into()),
                     busy: false,
+                    weight: 0.0,
                 },
             ],
             app.model.session_id.as_deref(),

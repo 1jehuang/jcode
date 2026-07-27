@@ -142,11 +142,13 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         hill_climbability: Some(score),
         feedback_loop: Some("inspect the frame".to_string()),
         end_to_end_ownership: Some(90),
+        ..Default::default()
     };
 
     let plan = crate::todo::TodoPlan {
         user_intention: Some("keep the plan state visible".to_string()),
         understands_user_intent: Some(95),
+        ..Default::default()
     };
 
     crate::todo::save_todos(&session_id, &todos).unwrap();

@@ -14,8 +14,8 @@
 //! rules, so all of that is testable without a GPU or a live daemon; the
 //! renderer and the harness only consume it.
 
-/// One session, as the strip needs to know it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One session, as the strip and the overview need to know it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub session_id: String,
     /// Working directory, which is what the strip groups on.
@@ -23,6 +23,10 @@ pub struct Entry {
     /// Whether the session is currently generating, so a bar can show that a
     /// session you are *not* looking at is doing work.
     pub busy: bool,
+    /// How much conversation the session holds, in characters of transcript.
+    /// The strip ignores it; the overview sizes its blobs by it, which is what
+    /// makes a long-running session recognisable at a glance.
+    pub weight: f64,
 }
 
 impl Entry {
@@ -32,12 +36,13 @@ impl Entry {
             session_id: session_id.to_string(),
             working_dir: working_dir.map(str::to_string),
             busy: false,
+            weight: 0.0,
         }
     }
 }
 
 /// A group of sessions sharing a working directory: one "workspace".
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Group {
     /// Short label shown before the bars, like the workspace number in the
     /// waybar module. The final path component, because the full path is far
@@ -47,7 +52,7 @@ pub struct Group {
 }
 
 /// The strip's state: the grouped sessions plus where focus sits.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Strip {
     groups: Vec<Group>,
     group: usize,
@@ -116,6 +121,16 @@ impl Strip {
 
     pub fn groups(&self) -> &[Group] {
         &self.groups
+    }
+
+    /// Every session, flat, in strip order. The overview lays out the whole
+    /// set rather than one group at a time, and reads it through here so the
+    /// two surfaces can never disagree about which sessions exist.
+    pub fn entries(&self) -> Vec<Entry> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.entries.iter().cloned())
+            .collect()
     }
 
     pub fn group_index(&self) -> usize {
