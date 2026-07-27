@@ -13,13 +13,15 @@
 //! additionally clips to it, so an arithmetic mistake degrades to cropped text
 //! rather than text painted across the input box.
 
-use crate::text::{ParagraphStyle, TextSystem};
-use crate::theme::Theme;
-use crate::transcript::{LaidMessage, MESSAGE_GAP, Transcript, lay_out_message};
+use crate::transcript::{LaidMessage, MESSAGE_GAP};
 
 /// One message placed in the region's coordinate space.
-pub struct Placed {
-    pub message: LaidMessage,
+pub struct Placed<'a> {
+    /// Index of this message within the laid slice. Carried so a pointer hit
+    /// can name a position that outlives the frame: which messages are visible
+    /// changes with every scroll, but the index does not.
+    pub index: usize,
+    pub message: &'a LaidMessage,
     /// Top of the message in logical units, in the region's own coordinates
     /// (that is, relative to `region_top`). May be negative when a tall
     /// message is partly scrolled off the top.
@@ -27,54 +29,36 @@ pub struct Placed {
 }
 
 /// The laid-out, positioned transcript for one frame.
-pub struct Viewport {
+pub struct Viewport<'a> {
     /// Messages that intersect the region, in order.
-    pub visible: Vec<Placed>,
+    pub visible: Vec<Placed<'a>>,
     /// Total height of the whole conversation in logical units.
     pub content_height: f64,
     /// Height of the region the transcript may occupy.
     pub region_height: f64,
-    /// Top of the *first* message in region coordinates, whether or not it is
-    /// visible. Read by the scrolling tests, which need a stable reference
-    /// point: which message is last on screen changes as the view moves.
-    #[cfg_attr(not(test), allow(dead_code))]
     /// Top of the first message in region coordinates, whether or not it is
     /// visible. This is the conversation's absolute position on screen, and
     /// the only stable thing to reason about while scrolling: which message
     /// happens to be last on screen changes as the view moves.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub content_top: f64,
 }
 
-impl Viewport {
-    /// Lay out `transcript` at `width` and place it in a region of
-    /// `region_height`, scrolled up by `scroll` logical pixels from the tail.
+impl<'a> Viewport<'a> {
+    /// Place already-laid messages in a region of `region_height`, scrolled up
+    /// by `scroll` logical pixels from the tail.
     ///
-    /// The argument list is long because a viewport is genuinely a function of
-    /// all of them, and bundling them into a struct would only move the same
-    /// fields behind a name that adds nothing.
-    #[allow(clippy::too_many_arguments)]
+    /// Layout is *not* done here. Measuring a message is the most expensive
+    /// thing the app does and the transcript barely changes between frames, so
+    /// the caller owns a [`crate::paint::TranscriptCache`] and this module is
+    /// left as pure arithmetic over measured heights: testable without a GPU,
+    /// and free to run on every frame.
     ///
     /// Scrolling is in pixels, not lines, because the screen is in pixels: a
     /// line-based scroll disagrees with the display the moment anything wraps,
     /// which is most of the time.
-    pub fn new(
-        text: &mut TextSystem,
-        transcript: &Transcript,
-        width: f64,
-        region_height: f64,
-        scroll: f64,
-        theme: &Theme,
-        base: ParagraphStyle,
-        scale: f64,
-    ) -> Self {
-        let laid: Vec<LaidMessage> = transcript
-            .messages()
-            .iter()
-            .filter(|message| !message.source.trim().is_empty())
-            .map(|message| lay_out_message(text, message, width, theme, base, scale))
-            .collect();
-
-        let content_height = total_height(&laid);
+    pub fn new(laid: &'a [LaidMessage], region_height: f64, scroll: f64) -> Self {
+        let content_height = total_height(laid);
         let scroll = clamp_scroll(scroll, content_height, region_height);
 
         // Bottom-align: the newest message sits against the bottom of the
@@ -85,10 +69,14 @@ impl Viewport {
         let content_top = top;
 
         let mut visible = Vec::new();
-        for message in laid {
+        for (index, message) in laid.iter().enumerate() {
             let height = message.height;
             if top + height > 0.0 && top < region_height {
-                visible.push(Placed { message, top });
+                visible.push(Placed {
+                    index,
+                    message,
+                    top,
+                });
             }
             top += height + MESSAGE_GAP;
         }
@@ -125,7 +113,10 @@ pub fn clamp_scroll(scroll: f64, content_height: f64, region_height: f64) -> f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::Message;
+    use crate::paint::TranscriptCache;
+    use crate::text::{ParagraphStyle, TextSystem};
+    use crate::theme::Theme;
+    use crate::transcript::{Message, Transcript};
 
     const WIDTH: f64 = 600.0;
     const REGION: f64 = 240.0;
@@ -136,20 +127,6 @@ mod tests {
             line_height: crate::layout::BODY_LEADING as f32,
             ..Default::default()
         }
-    }
-
-    fn viewport(transcript: &Transcript, scroll: f64) -> Viewport {
-        let mut text = TextSystem::default();
-        Viewport::new(
-            &mut text,
-            transcript,
-            WIDTH,
-            REGION,
-            scroll,
-            &Theme::print_light(),
-            base(),
-            1.75,
-        )
     }
 
     fn long_conversation(turns: usize) -> Transcript {
@@ -164,6 +141,31 @@ mod tests {
         transcript
     }
 
+    /// Run `check` against a viewport over `transcript` at `scroll`, keeping
+    /// the cache alive for the borrow.
+    fn with_viewport(transcript: &Transcript, scroll: f64, check: impl FnOnce(&Viewport<'_>)) {
+        with_viewport_sized(transcript, scroll, REGION, check);
+    }
+
+    fn with_viewport_sized(
+        transcript: &Transcript,
+        scroll: f64,
+        region: f64,
+        check: impl FnOnce(&Viewport<'_>),
+    ) {
+        let mut cache = TranscriptCache::default();
+        let mut text = TextSystem::default();
+        let laid = cache.lay_out(
+            &mut text,
+            transcript,
+            WIDTH,
+            &Theme::print_light(),
+            base(),
+            1.75,
+        );
+        check(&Viewport::new(laid, region, scroll));
+    }
+
     /// The invariant the old renderer broke: no placed message may start below
     /// the region, and the visible set must never extend past its bottom.
     /// This is what stopped the transcript painting over the composer.
@@ -171,17 +173,18 @@ mod tests {
     fn nothing_is_placed_outside_the_region() {
         for turns in [0, 1, 2, 10, 40] {
             for scroll in [0.0, 50.0, 400.0, 10_000.0] {
-                let view = viewport(&long_conversation(turns), scroll);
-                for placed in &view.visible {
-                    assert!(
-                        placed.top < view.region_height,
-                        "{turns} turns at scroll {scroll}: message placed below the region"
-                    );
-                    assert!(
-                        placed.top + placed.message.height > 0.0,
-                        "{turns} turns at scroll {scroll}: message placed above the region"
-                    );
-                }
+                with_viewport(&long_conversation(turns), scroll, |view| {
+                    for placed in &view.visible {
+                        assert!(
+                            placed.top < view.region_height,
+                            "{turns} turns at scroll {scroll}: message placed below the region"
+                        );
+                        assert!(
+                            placed.top + placed.message.height > 0.0,
+                            "{turns} turns at scroll {scroll}: message placed above the region"
+                        );
+                    }
+                });
             }
         }
     }
@@ -192,14 +195,15 @@ mod tests {
     fn a_short_conversation_is_bottom_aligned() {
         let mut transcript = Transcript::default();
         transcript.push(Message::assistant("short"));
-        let view = viewport(&transcript, 0.0);
-        let placed = view.visible.first().expect("one visible message");
-        let bottom = placed.top + placed.message.height;
-        assert!(
-            (bottom - view.region_height).abs() < 0.5,
-            "not bottom-aligned: bottom {bottom:.1} vs region {:.1}",
-            view.region_height
-        );
+        with_viewport(&transcript, 0.0, |view| {
+            let placed = view.visible.first().expect("one visible message");
+            let bottom = placed.top + placed.message.height;
+            assert!(
+                (bottom - view.region_height).abs() < 0.5,
+                "not bottom-aligned: bottom {bottom:.1} vs region {:.1}",
+                view.region_height
+            );
+        });
     }
 
     /// Scrolling is clamped at both ends: past the tail is the tail, and past
@@ -208,21 +212,28 @@ mod tests {
     #[test]
     fn scrolling_clamps_at_both_ends() {
         let transcript = long_conversation(20);
-        let tail = viewport(&transcript, 0.0);
-        let over = viewport(&transcript, -500.0);
-        assert_eq!(
-            tail.visible.len(),
-            over.visible.len(),
-            "negative scroll moved the view"
-        );
-
-        let head = viewport(&transcript, tail.max_scroll());
-        let past = viewport(&transcript, tail.max_scroll() + 5_000.0);
-        assert_eq!(
-            head.visible.len(),
-            past.visible.len(),
-            "scrolling past the head kept moving"
-        );
+        let mut tail_len = 0;
+        let mut max = 0.0;
+        with_viewport(&transcript, 0.0, |view| {
+            tail_len = view.visible.len();
+            max = view.max_scroll();
+        });
+        with_viewport(&transcript, -500.0, |view| {
+            assert_eq!(
+                tail_len,
+                view.visible.len(),
+                "negative scroll moved the view"
+            );
+        });
+        let mut head_len = 0;
+        with_viewport(&transcript, max, |view| head_len = view.visible.len());
+        with_viewport(&transcript, max + 5_000.0, |view| {
+            assert_eq!(
+                head_len,
+                view.visible.len(),
+                "scrolling past the head kept moving"
+            );
+        });
     }
 
     /// Scrolling up moves content down the screen, monotonically. If this
@@ -231,57 +242,52 @@ mod tests {
     fn scrolling_up_moves_content_down_monotonically() {
         let transcript = long_conversation(20);
         let mut previous = f64::NEG_INFINITY;
-        let max = viewport(&transcript, 0.0).max_scroll();
+        let mut max = 0.0;
+        with_viewport(&transcript, 0.0, |view| max = view.max_scroll());
         assert!(max > 0.0, "test conversation does not overflow the region");
         for step in 0..10 {
             let scroll = max * f64::from(step) / 10.0;
-            let view = viewport(&transcript, scroll);
-            assert!(
-                view.content_top >= previous - 0.5,
-                "content moved up while scrolling up at {scroll:.1}"
-            );
-            previous = view.content_top;
+            with_viewport(&transcript, scroll, |view| {
+                assert!(
+                    view.content_top >= previous - 0.5,
+                    "content moved up while scrolling up at {scroll:.1}"
+                );
+                previous = view.content_top;
+            });
         }
     }
 
-    /// Only what fits is laid out for drawing: a huge conversation must not
+    /// Only what fits is placed for drawing: a huge conversation must not
     /// place thousands of messages, or every frame pays for history nobody can
     /// see.
     #[test]
     fn a_huge_conversation_only_places_what_fits() {
-        let view = viewport(&long_conversation(400), 0.0);
-        assert!(
-            view.visible.len() < 20,
-            "{} messages placed for a {REGION}pt region",
-            view.visible.len()
-        );
-        assert!(!view.visible.is_empty(), "nothing was placed");
+        with_viewport(&long_conversation(400), 0.0, |view| {
+            assert!(
+                view.visible.len() < 20,
+                "{} messages placed for a {REGION}pt region",
+                view.visible.len()
+            );
+            assert!(!view.visible.is_empty(), "nothing was placed");
+        });
     }
 
     /// A degenerate region must not panic or place anything absurd.
     #[test]
     fn a_degenerate_region_is_safe() {
-        let mut text = TextSystem::default();
         for region in [0.0, 1.0, 5.0] {
-            let view = Viewport::new(
-                &mut text,
-                &long_conversation(5),
-                WIDTH,
-                region,
-                0.0,
-                &Theme::print_light(),
-                base(),
-                1.75,
-            );
-            assert!(view.max_scroll() >= 0.0);
+            with_viewport_sized(&long_conversation(5), 0.0, region, |view| {
+                assert!(view.max_scroll() >= 0.0);
+            });
         }
     }
 
     /// An empty transcript places nothing, leaving the hero its space.
     #[test]
     fn an_empty_transcript_places_nothing() {
-        let view = viewport(&Transcript::default(), 0.0);
-        assert!(view.visible.is_empty());
-        assert_eq!(view.content_height, 0.0);
+        with_viewport(&Transcript::default(), 0.0, |view| {
+            assert!(view.visible.is_empty());
+            assert_eq!(view.content_height, 0.0);
+        });
     }
 }

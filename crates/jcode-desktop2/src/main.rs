@@ -15,8 +15,10 @@ mod input;
 mod keymap;
 mod layout;
 mod meta;
+mod paint;
 mod render;
 mod scene;
+mod select;
 mod states;
 mod strip;
 #[cfg(test)]
@@ -173,9 +175,9 @@ fn run_e2e(message: &str) -> Result<()> {
             harness::HarnessUpdate::TurnDone if sent => {
                 println!("\n[e2e] turn done");
                 let out = std::env::temp_dir().join("jcode-desktop2-e2e.png");
-                let mut text_system = text::TextSystem::default();
+                let mut painter = paint::Painter::default();
                 let mut scene = Scene::new();
-                build_scene(&mut scene, &mut text_system, &model, (1100, 720), 1.0);
+                build_scene(&mut scene, &mut painter, &model, (1100, 720), 1.0);
                 capture::capture_scene_to_png(&scene, 1100, 720, &out)?;
                 println!("[e2e] final frame -> {}", out.display());
                 println!("[e2e] OK");
@@ -207,13 +209,13 @@ fn bench_donut() -> Result<()> {
     }
     let march = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
 
-    let mut text_system = text::TextSystem::default();
+    let mut painter = paint::Painter::default();
     let model = Model::default();
     let start = std::time::Instant::now();
     for i in 0..FRAMES {
         field.render(i as f32 / 60.0, 0.0);
         let mut scene = Scene::new();
-        build_scene(&mut scene, &mut text_system, &model, (2200, 1440), 2.0);
+        build_scene(&mut scene, &mut painter, &model, (2200, 1440), 2.0);
     }
     let full = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
 
@@ -237,10 +239,10 @@ fn run_capture(args: &[String]) -> Result<()> {
     const WIDTH: u32 = 2200;
     const HEIGHT: u32 = 1440;
     let node = args.first().map(String::as_str).unwrap_or("all");
-    let mut text = text::TextSystem::default();
+    let mut painter = paint::Painter::default();
     let mut render_node = |name: &str, model: &Model, path: &std::path::Path| -> Result<()> {
         let mut scene = Scene::new();
-        build_scene(&mut scene, &mut text, model, (WIDTH, HEIGHT), SCALE);
+        build_scene(&mut scene, &mut painter, model, (WIDTH, HEIGHT), SCALE);
         capture::capture_scene_to_png(&scene, WIDTH, HEIGHT, path)?;
         println!("captured {name} -> {}", path.display());
         Ok(())
@@ -270,7 +272,7 @@ fn run_capture(args: &[String]) -> Result<()> {
 
 struct App {
     state: Option<render::RenderState>,
-    text: text::TextSystem,
+    painter: paint::Painter,
     model: Model,
     harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
     /// Latest modifier state; winit reports it separately from key events.
@@ -280,6 +282,10 @@ struct App {
     pointer: (f64, f64),
     /// True while the primary button is held inside the composer.
     dragging: bool,
+    /// True while the primary button is held over the transcript, extending a
+    /// transcript selection. Distinct from `dragging`: the two surfaces have
+    /// separate selections, and one gesture must only ever drive one of them.
+    selecting: bool,
     /// Last click time and offset, for double-click word selection.
     last_click: Option<(std::time::Instant, usize)>,
     /// Current mouse pointer shape, tracked so it is only set when it changes.
@@ -301,13 +307,14 @@ impl Default for App {
     fn default() -> Self {
         Self {
             state: None,
-            text: text::TextSystem::default(),
+            painter: paint::Painter::default(),
             model: Model::default(),
             harness: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             clipboard: clipboard::Clipboard::default(),
             pointer: (0.0, 0.0),
             dragging: false,
+            selecting: false,
             last_click: None,
             cursor_icon: winit::window::CursorIcon::Default,
             geometry: window_state::Geometry::default(),
@@ -349,6 +356,11 @@ pub struct Model {
     /// paragraph has more visual rows than newlines, so a line-based scroll
     /// and the display disagree the moment anything wraps.
     pub scroll: f64,
+    /// The transcript selection, when the user has dragged over the
+    /// conversation. Held in the model rather than in `App` so a frame stays a
+    /// pure function of the model and the highlight can be captured in a
+    /// pixel test without a window.
+    pub selection: Option<select::Selection>,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
     /// The hero donut's luminance field, or `None` when the donut is off
@@ -402,6 +414,7 @@ impl Default for Model {
             busy: false,
             focused: true,
             scroll: 0.0,
+            selection: None,
             notice: None,
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
@@ -565,19 +578,26 @@ impl App {
     ///
     /// The line count comes from a real Parley layout rather than a character
     /// budget, so the well is sized by where the text actually wraps.
+    /// Only reached from tests and captures now; the live path measures
+    /// through the app's warm painter so the transcript is not laid out twice.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn frame_for_model(size: (u32, u32), scale: f64, model: &Model) -> layout::Frame {
-        let mut text = text::TextSystem::default();
-        Self::frame_for_model_with(size, scale, model, &mut text)
+        let mut painter = paint::Painter::default();
+        Self::frame_for_model_with(size, scale, model, &mut painter)
     }
 
     /// As [`Self::frame_for_model`], reusing an existing text system. Font and
     /// layout contexts are expensive, so the render path passes its own.
-    fn frame_for_model_with(
+    pub fn frame_for_model_with(
         size: (u32, u32),
         scale: f64,
         model: &Model,
-        text: &mut text::TextSystem,
+        painter: &mut paint::Painter,
     ) -> layout::Frame {
+        let paint::Painter {
+            text,
+            transcript: cache,
+        } = painter;
         let probe = layout::Frame::new(size, scale);
         let lines = crate::input::InputLayout::new(
             text,
@@ -596,17 +616,15 @@ impl App {
         // measure column only, which does not depend on where the well ends
         // up, so there is no circularity here.
         let width = (probe.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
-        let content = crate::viewport::Viewport::new(
+        let laid = cache.lay_out(
             text,
             &model.transcript,
             width,
-            0.0,
-            0.0,
             &model.theme,
             scene::transcript_body_style(model),
             probe.scale,
-        )
-        .content_height;
+        );
+        let content = crate::viewport::Viewport::new(laid, 0.0, 0.0).content_height;
         layout::Frame::with_content(size, scale, lines, strip, content)
     }
 
@@ -627,7 +645,7 @@ impl App {
         // fonts, clusters, or bidi text.
         let source = self.model.editor.text().to_string();
         let input = crate::input::InputLayout::new(
-            &mut self.text,
+            &mut self.painter.text,
             &source,
             frame.composer_text_width(),
             scene::composer_text_style(&self.model),
@@ -648,6 +666,22 @@ impl App {
             );
         }
         let Some(offset) = hit else {
+            // In the transcript: start a text selection there. The
+            // conversation is the part of the window worth quoting from, so a
+            // drag over it has to select rather than do nothing.
+            if self.in_transcript(x, y)
+                && let Some(position) = self.transcript_position_at(x, y)
+            {
+                // Shift+click extends the existing selection, as anywhere else.
+                let anchor = match self.model.selection {
+                    Some(existing) if self.modifiers.shift_key() => existing.anchor,
+                    _ => position,
+                };
+                self.model.selection = Some(select::Selection::new(anchor, position));
+                self.selecting = true;
+                self.request_redraw();
+                return;
+            }
             // Outside the well: the donut is the only other interactive thing,
             // so a press on it starts a spin drag (as on the website).
             if self.donut_visible() && self.frame.hits_donut(x, y) {
@@ -657,6 +691,12 @@ impl App {
             }
             return;
         };
+        // A press in the composer drops any transcript selection: two live
+        // highlights would leave Ctrl+C with no honest answer about which one
+        // it copies.
+        if self.model.selection.take().is_some() {
+            self.request_redraw();
+        }
         let now = std::time::Instant::now();
         let double = self
             .last_click
@@ -704,11 +744,90 @@ impl App {
             && x <= self.frame.right
     }
 
+    /// Whether a logical point is inside the transcript region.
+    fn in_transcript(&self, x: f64, y: f64) -> bool {
+        !self.model.transcript.is_empty()
+            && y >= self.frame.body_top
+            && y <= self.frame.body_bottom
+            && x >= self.frame.left
+            && x <= self.frame.right
+    }
+
+    /// The transcript position under a logical point, hit-tested against the
+    /// very layouts the renderer draws (the shared [`paint::TranscriptCache`]),
+    /// so a click lands on the glyph the user aimed at.
+    fn transcript_position_at(&mut self, x: f64, y: f64) -> Option<select::Position> {
+        let frame = self.frame;
+        let style = crate::scene::transcript_body_style(&self.model);
+        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+        let region = self.transcript_region_height();
+        let App {
+            painter,
+            model: state,
+            ..
+        } = self;
+        let paint::Painter {
+            text,
+            transcript: cache,
+        } = painter;
+        let laid = cache.lay_out(
+            text,
+            &state.transcript,
+            width,
+            &state.theme,
+            style,
+            frame.scale,
+        );
+        let view = crate::viewport::Viewport::new(laid, region, state.scroll);
+        // Transcript coordinates: y from the top of the region, x from the
+        // message's text left edge, which is inset by the user card's padding
+        // so both roles share one measure.
+        select::position_at(
+            &view,
+            x - (frame.left + crate::transcript::USER_PAD_X),
+            y - frame.body_top,
+            frame.scale,
+        )
+    }
+
+    /// The selected transcript text, if any. Reads the same cached layouts the
+    /// renderer drew, so copy returns exactly the characters that were
+    /// highlighted.
+    fn selected_transcript_text(&mut self) -> Option<String> {
+        let selection = self.model.selection.filter(|s| !s.is_empty())?;
+        let frame = self.frame;
+        let style = crate::scene::transcript_body_style(&self.model);
+        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+        let App {
+            painter,
+            model: state,
+            ..
+        } = self;
+        let paint::Painter {
+            text,
+            transcript: cache,
+        } = painter;
+        let laid = cache.lay_out(
+            text,
+            &state.transcript,
+            width,
+            &state.theme,
+            style,
+            frame.scale,
+        );
+        let copied = select::selected_text(laid, &selection);
+        (!copied.is_empty()).then_some(copied)
+    }
+
     /// Show a text caret over the composer and the default arrow elsewhere, so
     /// the input box looks editable before it is clicked.
     fn update_cursor_icon(&mut self) {
         let (x, y) = self.pointer;
         let wanted = if self.in_composer(x, y) {
+            winit::window::CursorIcon::Text
+        } else if self.in_transcript(x, y) {
+            // The transcript is selectable, so it must say so before it is
+            // dragged; an arrow over selectable text reads as inert.
             winit::window::CursorIcon::Text
         } else if self.model.spin.dragging {
             winit::window::CursorIcon::Grabbing
@@ -738,6 +857,19 @@ impl App {
             return;
         }
         self.update_cursor_icon();
+        if self.selecting {
+            // Clamp into the region so dragging past the top or bottom keeps
+            // extending to the nearest text instead of dropping the gesture.
+            let (x, y) = self.pointer;
+            let y = y.clamp(self.frame.body_top + 1.0, self.frame.body_bottom - 1.0);
+            if let Some(position) = self.transcript_position_at(x, y)
+                && let Some(selection) = self.model.selection.as_mut()
+            {
+                selection.focus = position;
+                self.request_redraw();
+            }
+            return;
+        }
         if !self.dragging {
             return;
         }
@@ -832,19 +964,23 @@ impl App {
         // Split the borrows: the viewport needs the text system mutably while
         // reading the model, so both are taken from `self` up front.
         let App {
-            text, model: state, ..
+            painter,
+            model: state,
+            ..
         } = self;
-        crate::viewport::Viewport::new(
+        let paint::Painter {
+            text,
+            transcript: cache,
+        } = painter;
+        let laid = cache.lay_out(
             text,
             &state.transcript,
             width,
-            region,
-            state.scroll,
             &state.theme,
             style,
             frame.scale,
-        )
-        .max_scroll()
+        );
+        crate::viewport::Viewport::new(laid, region, state.scroll).max_scroll()
     }
 
     /// Apply one resolved action. Returns false when the app should exit, so
@@ -931,6 +1067,13 @@ impl App {
                 }
             }
             Action::Copy => {
+                // A transcript highlight wins: it is the visible selection, and
+                // copying the composer instead would silently paste something
+                // the user never highlighted.
+                if let Some(text) = self.selected_transcript_text() {
+                    self.clipboard.set(&text);
+                    return true;
+                }
                 // Copy the selection when there is one, else the whole line.
                 let text = self
                     .model
@@ -978,7 +1121,11 @@ impl App {
             // Escape never quits: it cancels, then clears, then re-follows the
             // tail, matching the TUI.
             Action::Cancel => {
-                if self.model.busy {
+                // A visible highlight is the most recent thing the user did,
+                // so Escape dismisses that first rather than reaching past it
+                // to clear typed work.
+                if self.model.selection.take().is_some() {
+                } else if self.model.busy {
                     self.model.busy = false;
                     self.model.set_notice("interrupting...");
                 } else if !self.model.editor.is_empty() {
@@ -1085,6 +1232,13 @@ impl ApplicationHandler for App {
                 ElementState::Pressed => self.on_pointer_pressed(),
                 ElementState::Released => {
                     self.dragging = false;
+                    self.selecting = false;
+                    // A click that selected nothing clears the highlight, so a
+                    // stale band cannot outlive the gesture that made it.
+                    if self.model.selection.is_some_and(|s| s.is_empty()) {
+                        self.model.selection = None;
+                        self.request_redraw();
+                    }
                     // Releasing hands the donut its momentum; it keeps
                     // spinning down on its own.
                     self.model.spin.release();
@@ -1151,9 +1305,14 @@ impl ApplicationHandler for App {
                     let scale = state.scale_factor();
                     let size = state.size();
                     // Record the geometry the frame was built with, so pointer
-                    // hit-testing uses exactly what the user sees.
-                    self.frame = Self::frame_for_model(size, scale, &self.model);
-                    build_scene(&mut scene, &mut self.text, &self.model, size, scale);
+                    // hit-testing uses exactly what the user sees. Measured
+                    // through the app's own painter: a throwaway one would
+                    // start with a cold cache and re-lay the whole transcript
+                    // every frame, which is the cost this cache exists to
+                    // remove.
+                    self.frame =
+                        Self::frame_for_model_with(size, scale, &self.model, &mut self.painter);
+                    build_scene(&mut scene, &mut self.painter, &self.model, size, scale);
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");
                     }
