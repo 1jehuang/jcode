@@ -527,6 +527,11 @@ impl Bus {
     }
 
     pub fn publish_models_updated(&self) {
+        // A models-updated publish means some provider catalog changed
+        // out-of-band. Invalidate memoized route catalogs so the next render
+        // rebuilds from the new cache instead of serving a stale memo.
+        crate::provider::catalog_scheduler::bump_catalog_generation();
+
         let delay = {
             let now = Instant::now();
             let mut state = self

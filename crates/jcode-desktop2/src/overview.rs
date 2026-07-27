@@ -25,14 +25,26 @@ const MIN_RADIUS: f64 = 30.0;
 /// down to specks: the overview is for comparing sessions, not for rendering a
 /// truthful bar chart.
 const MAX_RADIUS: f64 = 105.0;
-/// Breathing room between two blobs, in logical units.
-const BLOB_GAP: f64 = 14.0;
-/// Extra room around a cluster, so two projects read as two galaxies rather
-/// than as one smear.
-const CLUSTER_GAP: f64 = 46.0;
+/// Breathing room between two blobs, in logical units. Tight: sessions in one
+/// project should read as a clutch of eggs, not as scattered planets, and the
+/// eye groups by proximity long before it reads a label.
+const BLOB_GAP: f64 = 4.0;
+/// Room around a cluster. Wider than [`BLOB_GAP`] so two projects still read
+/// as two groups, but only just: what separates them is the *contrast* between
+/// the two spacings, not the absolute size of either.
+const CLUSTER_GAP: f64 = 22.0;
 /// Relaxation passes. Enough to separate a realistic field, few enough that
 /// layout stays trivially cheap to run every frame.
 const RELAX_PASSES: usize = 60;
+/// Compaction passes run after relaxation, pulling every circle back toward
+/// the group's centre until it is just touching. Relaxation alone only ever
+/// pushes apart, so the spiral's initial spread was preserved forever and a
+/// sparse cluster stayed sparse however much room it did not need.
+const COMPACT_PASSES: usize = 40;
+/// How far a compaction pass moves a circle toward the centre, as a fraction
+/// of the slack it has. Below 1 so the group settles rather than oscillating
+/// between overshooting and being pushed back out.
+const COMPACT_RATE: f64 = 0.35;
 /// Golden angle: the seeding spiral's turn per item. Gives an even, non-
 /// repeating packing without any random numbers.
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
@@ -270,6 +282,46 @@ fn relax(subjects: &[usize], radii: &[f64], centers: &mut [(f64, f64)], gap: f64
     }
 }
 
+/// Pull circles toward their common centre until they are just touching.
+///
+/// The other half of [`relax`]. Relaxation resolves overlaps but never
+/// reclaims space, so a group seeded on a generous spiral stayed exactly as
+/// spread out as it was seeded, however much empty paper sat between its
+/// members. Alternating the two settles a group into a tight clutch: pull
+/// everything in, push apart whatever now collides, repeat.
+fn compact(subjects: &[usize], radii: &[f64], centers: &mut [(f64, f64)], gap: f64) {
+    if subjects.len() < 2 {
+        return;
+    }
+    for _ in 0..COMPACT_PASSES {
+        let count = subjects.len() as f64;
+        let centre = subjects.iter().fold((0.0, 0.0), |acc, index| {
+            (
+                acc.0 + centers[*index].0 / count,
+                acc.1 + centers[*index].1 / count,
+            )
+        });
+        for index in subjects {
+            let dx = centre.0 - centers[*index].0;
+            let dy = centre.1 - centers[*index].1;
+            let distance = (dx * dx + dy * dy).sqrt();
+            if distance <= f64::EPSILON {
+                continue;
+            }
+            // Never step past the centre: a circle that overshoots would be
+            // pushed back out next pass, and the group would shimmer instead
+            // of settling.
+            let step = (distance * COMPACT_RATE).min(distance);
+            centers[*index].0 += dx / distance * step;
+            centers[*index].1 += dy / distance * step;
+        }
+        // Re-separate whatever the pull just pushed together. This is what
+        // makes the result tight rather than merely smaller: the circles end
+        // up resting against one another.
+        relax(subjects, radii, centers, gap);
+    }
+}
+
 /// Lay out the field inside `area`.
 ///
 /// `focus` is the highlighted session and `current` the one the window is
@@ -328,6 +380,7 @@ pub fn layout(
             placed[*index] = (distance * angle.cos(), distance * angle.sin());
         }
         relax(&order, &radii, &mut placed, BLOB_GAP);
+        compact(&order, &radii, &mut placed, BLOB_GAP);
         // Recentre on the members' bounding circle so the cluster's own origin
         // is where it looks like it is, which is what the label hangs off.
         let count = order.len() as f64;
@@ -352,13 +405,18 @@ pub fn layout(
     let mut origins: Vec<(f64, f64)> = (0..members.len())
         .map(|cluster| {
             let angle = GOLDEN_ANGLE * cluster as f64;
-            let spread = cluster_radius.iter().fold(0.0f64, |acc, r| acc.max(*r));
-            let distance = (spread * 2.0 + CLUSTER_GAP) * (cluster as f64).sqrt();
+            // Seed off this cluster's own size rather than the biggest one in
+            // the field: using the maximum spaced every pair as if both were
+            // the largest, which pushed a couple of small projects to opposite
+            // corners of the page for no reason.
+            let spread = cluster_radius[cluster];
+            let distance = (spread + CLUSTER_GAP) * (cluster as f64).sqrt();
             (distance * angle.cos(), distance * angle.sin())
         })
         .collect();
     let all_clusters: Vec<usize> = (0..members.len()).collect();
     relax(&all_clusters, &cluster_radius, &mut origins, CLUSTER_GAP);
+    compact(&all_clusters, &cluster_radius, &mut origins, CLUSTER_GAP);
     for (cluster, group) in members.iter().enumerate() {
         for index in group {
             placed[*index].0 += origins[cluster].0;
@@ -388,13 +446,61 @@ pub fn layout(
     // Never scale *up*: a single session blown up to fill a 4K window would
     // read as an error page rather than as one small conversation.
     let scale = (fit_w / span.0).min(fit_h / span.1).min(1.0);
-    let field_center = ((bounds.0 + bounds.2) / 2.0, (bounds.1 + bounds.3) / 2.0);
+    // The session you zoomed out of goes in the middle of the window, and
+    // everything else arranges itself around it. Centring the field's bounding
+    // box instead put the current session wherever the packing happened to
+    // leave it, so the conversation you were reading slid off under your eye
+    // at the exact moment the field appeared. This is the anchor that makes
+    // the zoom feel like the window pulling back rather than a screen change.
+    let anchor = current
+        .and_then(|id| entries.iter().position(|entry| entry.session_id == id))
+        .map(|index| placed[index])
+        .unwrap_or(((bounds.0 + bounds.2) / 2.0, (bounds.1 + bounds.3) / 2.0));
     let area_center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-    let to_screen = |position: (f64, f64)| {
+    // Anchoring on the current session can hang the far side of a lopsided
+    // field off the page, and a session drawn off-screen is one the user
+    // cannot reach. So the anchor is a *preference*: honoured while the field
+    // still fits, and slid back inside the margins when it does not.
+    //
+    // Measured from the field's real extent after scaling rather than from a
+    // re-projection of the raw bounds: the radii are scaled too, and counting
+    // them at full size left the correction short by exactly the margin it was
+    // supposed to reclaim.
+    let anchored = |position: (f64, f64)| {
         (
-            area_center.0 + (position.0 - field_center.0) * scale,
-            area_center.1 + (position.1 - field_center.1) * scale,
+            area_center.0 + (position.0 - anchor.0) * scale,
+            area_center.1 + (position.1 - anchor.1) * scale,
         )
+    };
+    let mut extent = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (index, position) in placed.iter().enumerate() {
+        let (cx, cy) = anchored(*position);
+        let r = radii[index] * scale;
+        extent.0 = extent.0.min(cx - r);
+        extent.1 = extent.1.min(cy - r);
+        extent.2 = extent.2.max(cx + r);
+        extent.3 = extent.3.max(cy + r);
+    }
+    /// Slide a span back inside its edges, or centre it when it cannot fit.
+    fn shift(low: f64, high: f64, edge_low: f64, edge_high: f64) -> f64 {
+        if high - low >= edge_high - edge_low {
+            // Too big for the page even after fitting: centre the field so the
+            // overflow is shared, rather than letting one whole end fall off.
+            return (edge_low + edge_high) / 2.0 - (low + high) / 2.0;
+        }
+        if low < edge_low {
+            edge_low - low
+        } else if high > edge_high {
+            edge_high - high
+        } else {
+            0.0
+        }
+    }
+    let dx = shift(extent.0, extent.2, x0 + margin, x1 - margin);
+    let dy = shift(extent.1, extent.3, y0 + margin, y1 - margin);
+    let to_screen = |position: (f64, f64)| {
+        let (cx, cy) = anchored(position);
+        (cx + dx, cy + dy)
     };
 
     let blobs: Vec<Blob> = entries
@@ -475,9 +581,10 @@ pub fn breath(now: std::time::Instant, period: f32) -> f64 {
     f64::from(turn.sin())
 }
 
-/// How long the zoom takes, in seconds. Short: this is a flick gesture, and an
-/// animation you have to wait out turns a shortcut back into a menu.
-pub const ZOOM: f32 = 0.14;
+/// How long the zoom takes, in seconds. This is a flick gesture, so the
+/// animation exists only to show *where* the field came from: any longer and
+/// it stops being a shortcut and becomes a menu you have to sit through.
+pub const ZOOM: f32 = 0.08;
 
 /// The overview's state: whether it is showing, how far the zoom has got, and
 /// which session the user is pointing at.
@@ -496,6 +603,39 @@ pub struct Overview {
 }
 
 const PHASE_MAX: u16 = 1000;
+
+/// Fetched tails of other sessions, for the preview behind the field.
+///
+/// Kept as its own type rather than a bare map so the "asked but not yet
+/// answered" state is explicit: without it, hovering a slow session would
+/// re-request its tail on every frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Peeks {
+    fetched: std::collections::HashMap<String, crate::transcript::Transcript>,
+    requested: std::collections::BTreeSet<String>,
+}
+
+impl Peeks {
+    /// Record a fetched tail.
+    pub fn insert(&mut self, session_id: &str, transcript: crate::transcript::Transcript) {
+        self.requested.remove(session_id);
+        self.fetched.insert(session_id.to_string(), transcript);
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<&crate::transcript::Transcript> {
+        self.fetched.get(session_id)
+    }
+
+    /// Whether this session still needs fetching. Marks it requested, so a
+    /// caller polling every frame asks exactly once.
+    pub fn should_request(&mut self, session_id: &str) -> bool {
+        if self.fetched.contains_key(session_id) || self.requested.contains(session_id) {
+            return false;
+        }
+        self.requested.insert(session_id.to_string());
+        true
+    }
+}
 
 impl Overview {
     /// Open the overview, starting the zoom from wherever it currently is (so
@@ -516,6 +656,18 @@ impl Overview {
     /// session you picked.
     pub fn close(&mut self) {
         self.open = false;
+    }
+
+    /// Take the field off screen *now*, with no zoom out.
+    ///
+    /// The escape hatch for the instant-open gesture: Alt opens the field on
+    /// the keydown, so a chord like Alt+B has to erase it in the same frame
+    /// the letter arrives. Zooming out here would leave the blobs washing
+    /// over the composer for a tenth of a second after the user has already
+    /// moved on, which reads as lag rather than as an animation.
+    pub fn abort(&mut self) {
+        self.open = false;
+        self.phase = 0;
     }
 
     /// Whether the field should be drawn at all.

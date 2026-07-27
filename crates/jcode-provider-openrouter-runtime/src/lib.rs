@@ -713,6 +713,11 @@ fn global_endpoint_refresh() -> &'static Mutex<EndpointRefreshTracker> {
 struct ProfileCatalogRefreshTracker {
     in_flight: HashSet<String>,
     last_attempt_unix: HashMap<String, u64>,
+    /// Consecutive failed refresh attempts per profile. Used to back off so a
+    /// permanently unreachable profile (no credentials, dead endpoint, local
+    /// Ollama that is not running) does not re-attempt every
+    /// `MODEL_CATALOG_REFRESH_RETRY_SECS` for the lifetime of the process.
+    consecutive_failures: HashMap<String, u32>,
 }
 
 static GLOBAL_PROFILE_CATALOG_REFRESH: OnceLock<Mutex<ProfileCatalogRefreshTracker>> =
@@ -743,7 +748,14 @@ fn begin_profile_catalog_refresh(profile_id: &str) -> bool {
         return false;
     }
     if let Some(last) = state.last_attempt_unix.get(profile_id)
-        && now.saturating_sub(*last) < MODEL_CATALOG_REFRESH_RETRY_SECS
+        && now.saturating_sub(*last)
+            < profile_catalog_retry_delay_secs(
+                state
+                    .consecutive_failures
+                    .get(profile_id)
+                    .copied()
+                    .unwrap_or(0),
+            )
     {
         return false;
     }
@@ -755,6 +767,31 @@ fn begin_profile_catalog_refresh(profile_id: &str) -> bool {
 fn finish_profile_catalog_refresh(profile_id: &str) {
     if let Ok(mut state) = global_profile_catalog_refresh().lock() {
         state.in_flight.remove(profile_id);
+    }
+}
+
+/// Exponential backoff for repeatedly failing catalog refreshes: 60s, 2m, 4m,
+/// ... capped at one hour. A single success resets the profile to the base
+/// retry interval.
+fn profile_catalog_retry_delay_secs(consecutive_failures: u32) -> u64 {
+    const MAX_RETRY_SECS: u64 = 60 * 60;
+    MODEL_CATALOG_REFRESH_RETRY_SECS
+        .saturating_mul(1u64 << consecutive_failures.min(8))
+        .min(MAX_RETRY_SECS)
+}
+
+fn finish_profile_catalog_refresh_with_outcome(profile_id: &str, succeeded: bool) {
+    if let Ok(mut state) = global_profile_catalog_refresh().lock() {
+        state.in_flight.remove(profile_id);
+        if succeeded {
+            state.consecutive_failures.remove(profile_id);
+        } else {
+            let entry = state
+                .consecutive_failures
+                .entry(profile_id.to_string())
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
     }
 }
 
@@ -800,15 +837,16 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             .unwrap_or_default();
     handle.spawn(async move {
         let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
-        match fetch_models_from_api(
+        let result = fetch_models_from_api(
             jcode_provider_core::shared_http_client(),
             api_base,
             auth,
             models_cache,
             Some(profile_id.clone()),
         )
-        .await
-        {
+        .await;
+        let succeeded = result.is_ok();
+        match result {
             Ok(models) => {
                 let updated = models_fingerprint(&models) != previous_fingerprint;
                 if updated {
@@ -833,7 +871,7 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
                 context, display_name, error
             )),
         }
-        finish_profile_catalog_refresh(&profile_id);
+        finish_profile_catalog_refresh_with_outcome(&profile_id, succeeded);
     });
 
     true
@@ -907,15 +945,16 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
             .unwrap_or_default();
     handle.spawn(async move {
         let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
-        match fetch_models_from_api(
+        let result = fetch_models_from_api(
             jcode_provider_core::shared_http_client(),
             api_base,
             auth,
             models_cache,
             Some(namespace.to_string()),
         )
-        .await
-        {
+        .await;
+        let succeeded = result.is_ok();
+        match result {
             Ok(models) => {
                 let updated = models_fingerprint(&models) != previous_fingerprint;
                 if updated {
@@ -938,7 +977,7 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
                 context, error
             )),
         }
-        finish_profile_catalog_refresh(namespace);
+        finish_profile_catalog_refresh_with_outcome(namespace, succeeded);
     });
 
     true
@@ -2744,3 +2783,30 @@ mod tests;
 #[cfg(test)]
 #[path = "openrouter_catalog_merge_tests.rs"]
 mod openrouter_catalog_merge_tests;
+
+#[cfg(test)]
+mod profile_catalog_backoff_tests {
+    use super::{MODEL_CATALOG_REFRESH_RETRY_SECS, profile_catalog_retry_delay_secs};
+
+    #[test]
+    fn healthy_profile_uses_base_retry_interval() {
+        assert_eq!(
+            profile_catalog_retry_delay_secs(0),
+            MODEL_CATALOG_REFRESH_RETRY_SECS
+        );
+    }
+
+    #[test]
+    fn repeated_failures_back_off_exponentially_and_cap() {
+        assert_eq!(
+            profile_catalog_retry_delay_secs(1),
+            MODEL_CATALOG_REFRESH_RETRY_SECS * 2
+        );
+        assert_eq!(
+            profile_catalog_retry_delay_secs(3),
+            MODEL_CATALOG_REFRESH_RETRY_SECS * 8
+        );
+        // Capped at one hour no matter how many failures accumulate.
+        assert_eq!(profile_catalog_retry_delay_secs(20), 60 * 60);
+    }
+}
