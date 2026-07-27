@@ -171,6 +171,16 @@ pub fn get_current_session() -> Option<String> {
     crate::get_current_session()
 }
 
+/// Whether a panic in this process should relabel the on-disk session as crashed.
+///
+/// Only an `Active` session can legitimately make that transition. A dying
+/// client (closed terminal window, dropped SSH) must not relabel a session that
+/// the shared server still owns, nor write its stale snapshot over the server's
+/// newer one. See #599; `mark_current_session_crashed` already had this guard.
+fn should_record_panic_as_crash(status: &session::SessionStatus) -> bool {
+    matches!(status, session::SessionStatus::Active)
+}
+
 pub fn install_panic_hook() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -183,7 +193,9 @@ pub fn install_panic_hook() {
                 telemetry::record_crash(&provider, &model, telemetry::SessionEndReason::Panic);
             }
 
-            if let Ok(mut session) = session::Session::load(&session_id) {
+            if let Ok(mut session) = session::Session::load(&session_id)
+                && should_record_panic_as_crash(&session.status)
+            {
                 session.mark_crashed(Some(format!("Panic: {}", info)));
                 let _ = session.save();
             }
@@ -409,7 +421,12 @@ fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
         if state.keyboard_enhanced {
             tui::disable_keyboard_enhancement();
         }
-        ratatui::restore();
+        // A dead terminal makes ratatui::restore()'s internal eprintln! panic
+        // with EIO, which the panic hook then records as a session crash
+        // (#599). Route the failure to the log file instead.
+        if let Err(error) = ratatui::try_restore() {
+            crate::logging::warn(&format!("failed to restore terminal: {error}"));
+        }
     }
 }
 
@@ -732,5 +749,52 @@ mod tests {
         let error = write_session_resume_hint(ClosedWriter, "session_closed_pipe")
             .expect_err("closed stderr should be reported as an I/O error");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+}
+
+#[cfg(test)]
+mod panic_crash_labeling_tests {
+    //! Regression coverage for #599.
+    //!
+    //! Closing a terminal (or dropping SSH) makes `ratatui::restore()`'s
+    //! internal `eprintln!` panic with EIO. The panic hook then relabeled the
+    //! session as `Crashed` and saved the dying client's stale snapshot over the
+    //! server's newer one. Only an `Active` session may be relabeled.
+    use super::*;
+
+    #[test]
+    fn active_session_is_still_labeled_crashed_on_panic() {
+        assert!(should_record_panic_as_crash(
+            &session::SessionStatus::Active
+        ));
+    }
+
+    #[test]
+    fn already_crashed_session_is_not_relabeled() {
+        assert!(!should_record_panic_as_crash(
+            &session::SessionStatus::Crashed {
+                message: Some("earlier crash".to_string())
+            }
+        ));
+    }
+
+    #[test]
+    fn completed_session_is_not_relabeled_by_a_dying_client() {
+        // The exact #599 shape: the session lives on in the shared server and is
+        // no longer Active locally, so a dead-terminal panic must leave it alone.
+        for status in [
+            session::SessionStatus::Closed,
+            session::SessionStatus::Reloaded,
+            session::SessionStatus::Compacted,
+            session::SessionStatus::RateLimited,
+            session::SessionStatus::Error {
+                message: "unrelated".to_string(),
+            },
+        ] {
+            assert!(
+                !should_record_panic_as_crash(&status),
+                "non-active status {status:?} must not be relabeled as crashed"
+            );
+        }
     }
 }
