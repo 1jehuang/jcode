@@ -8,6 +8,18 @@ remote `bash` tool execution, ~10ms WebSocket upgrade.
 
 ## Setup on the host (the machine that runs the session)
 
+From inside jcode, `/remote` does all of this:
+
+```
+/remote on        # enable the gateway
+                  # then restart the server: jcode server reload
+/remote pair      # pairing code + QR
+/remote           # status, dial address, paired devices
+/remote revoke <device>
+```
+
+The equivalent by hand:
+
 1. Enable the gateway in `~/.jcode/config.toml` (Windows: `%USERPROFILE%\.jcode\config.toml`):
 
    ```toml
