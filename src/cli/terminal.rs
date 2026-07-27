@@ -421,12 +421,7 @@ fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
         if state.keyboard_enhanced {
             tui::disable_keyboard_enhancement();
         }
-        // A dead terminal makes ratatui::restore()'s internal eprintln! panic
-        // with EIO, which the panic hook then records as a session crash
-        // (#599). Route the failure to the log file instead.
-        if let Err(error) = ratatui::try_restore() {
-            crate::logging::warn(&format!("failed to restore terminal: {error}"));
-        }
+        jcode_tui_style::restore_terminal_quietly();
     }
 }
 

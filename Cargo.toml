@@ -161,6 +161,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 open = "5"               # Open URLs in browser
+jcode-tui-style = { path = "crates/jcode-tui-style" }
 jcode-tui-session-picker = { path = "crates/jcode-tui-session-picker", features = ["serde"] }
 
 # Streaming

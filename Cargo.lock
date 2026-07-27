@@ -3581,6 +3581,7 @@ dependencies = [
  "jcode-selfdev-types",
  "jcode-tui",
  "jcode-tui-session-picker",
+ "jcode-tui-style",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -4660,6 +4661,7 @@ dependencies = [
 name = "jcode-tui-style"
 version = "0.1.0"
 dependencies = [
+ "jcode-logging",
  "ratatui",
 ]
 
