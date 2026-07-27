@@ -1359,3 +1359,76 @@ fn guardrail_notice_absent_for_normal_turns() {
 }
 
 include!("agent_tests/retention_readiness.rs");
+
+#[test]
+fn tool_use_stop_with_no_tool_calls_is_an_unfinished_turn() {
+    // Benchmark incident, DeepSWE v1.1 Opus 5 low: two trials ended with the
+    // provider reporting stop_reason=tool_use while the parsed response carried
+    // ZERO tool calls. `should_continue_after_stop_reason` returns false for
+    // `tool_use` (correctly: a normal tool_use turn continues by executing the
+    // requested tools), so with no tools to execute the run simply ended.
+    //
+    // The damage is silent and total: jcode exited 0 with empty stderr after
+    // ~1900s and ~1200s of correct work, and because the benchmark harvests
+    // `git diff base HEAD`, both trials submitted a 0-byte patch and scored 0.
+    // 110 of 112 trials ended `end_turn`; the 2 that ended `tool_use` are
+    // exactly the 2 zero-patch failures.
+    //
+    // This test pins the CURRENT semantics so the distinction stays explicit:
+    // `tool_use` is not a continuation-worthy stop reason on its own, which
+    // means the caller is responsible for detecting "tool_use but nothing to
+    // run" and must not treat it as a completed turn.
+    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
+
+    // The neighbouring truncation reasons DO continue, so a turn cut off by the
+    // output budget cannot be confused with this case.
+    assert!(Agent::should_continue_after_stop_reason("max_tokens"));
+
+    // A guardrail stop is a third, distinct outcome: terminal, and not an
+    // unfinished turn. Four TB 2.1 tasks hit this on claude-opus-5 (Anthropic
+    // `cyber` usage policy), and it must never be retried as if truncated.
+    assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
+    assert!(!Agent::should_continue_after_stop_reason("refusal"));
+
+    // The existing notice path DOES cover this shape: a tool_use stop that
+    // produced no visible text is surfaced rather than passing as a clean turn.
+    // That is the seam a fix should build on, so pin that it fires here.
+    let notice = Agent::provider_guardrail_notice(Some("tool_use"), true, false);
+    assert!(
+        notice.is_some(),
+        "a tool_use stop with no visible output must surface a notice, not look like a finished turn"
+    );
+    let notice = notice.unwrap();
+    assert!(notice.contains("tool_use"), "notice should name the stop reason: {notice}");
+
+    // A normal tool_use turn that produced visible text must stay silent.
+    assert!(Agent::provider_guardrail_notice(Some("tool_use"), false, false).is_none());
+
+    // WHERE THE FAILING TRIALS EXITED, located by elimination so the next
+    // investigation starts from the code path instead of re-deriving it.
+    //
+    // turn_loops.rs has five `break` sites. Ruled out: the two context-limit
+    // retries (neither trial hit a context error), the stream-teardown break
+    // (it ends one stream, not the turn), and the `handles_tools_internally`
+    // break (false for the Anthropic API). That leaves the
+    // `tool_calls.is_empty()` branch at the end of the turn.
+    //
+    // That branch DOES have a recovery: when the response is empty and the
+    // prompt ended with a tool result it injects "provide the final answer" and
+    // continues, up to MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS (5). Both
+    // failing trials show only TWO trailing empty responses, so the cap was
+    // never exhausted: the recovery was not eligible in the first place. The
+    // gate is `prompt_has_recent_tool_result`
+    // (Self::messages_end_with_tool_result). When the model reports
+    // stop_reason=tool_use but the parsed tool calls are empty, the assistant
+    // turn is appended with no following tool result, so the prompt stops ending
+    // with one and the retry is skipped.
+    //
+    // Two things worth fixing together:
+    //   1. The branch then breaks and returns normally, so the guardrail notice
+    //      is cosmetic: the process still exits 0 and a benchmark harness
+    //      records success while submitting nothing. It should fail loudly.
+    //   2. A tool_use stop carrying zero parsed tool calls is self-evidently an
+    //      unfinished turn whether or not a tool result preceded it, so it
+    //      should be continuation-eligible on its own.
+}
