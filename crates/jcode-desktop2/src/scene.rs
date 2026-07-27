@@ -401,7 +401,7 @@ fn draw_transcript(
         .len()
         .checked_sub(1)
         .filter(|_| model.stream.is_revealing())
-        .filter(|index| laid[*index].role == Role::Assistant);
+        .filter(|index| laid[*index].role != Role::User);
 
     for placed in &view.visible {
         let message_top = frame.body_top + placed.top;
@@ -425,6 +425,24 @@ fn draw_transcript(
         }
         let text_left = frame.left + USER_PAD_X;
         let text_top = message_top + if is_user { USER_PAD_Y } else { 0.0 };
+
+        // A reasoning message carries a rule down its whole left edge: one
+        // mark for the thought, rather than a label repeated per paragraph.
+        // It is the quote convention, which is exactly what a thought is here.
+        if placed.message.role == Role::Reasoning {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.rule,
+                None,
+                &Rect::new(
+                    text_left,
+                    message_top,
+                    text_left + frame.hairline() * 2.0,
+                    message_top + placed.message.height,
+                ),
+            );
+        }
 
         // Glyphs in this message, and how many earlier blocks have consumed,
         // so the reveal sweeps across block boundaries as one motion.

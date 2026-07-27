@@ -115,7 +115,7 @@ impl App {
     pub(crate) fn copy_to(&mut self, target: clipboard::Target, text: &str) {
         if let Err(error) = self.clipboard.set_to(target, text) {
             self.model
-                .set_notice(&format!("clipboard unavailable: {error}"));
+                .set_notice(format!("clipboard unavailable: {error}"));
         }
     }
 

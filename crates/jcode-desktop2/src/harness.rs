@@ -32,6 +32,10 @@ pub enum HarnessUpdate {
         model: Option<String>,
     },
     Text(String),
+    /// Streamed reasoning. Kept a separate variant from `Text` so the UI can
+    /// place it in its own subordinate block instead of splicing a thought
+    /// into the middle of the answer.
+    Reasoning(String),
     /// The agent's current phase (a tool intent, or "thinking"), for the
     /// activity line. Streamed so the UI is never silent mid-turn.
     Activity(String),
@@ -281,8 +285,9 @@ fn run(
             // Reasoning is not rendered as transcript text yet, but its
             // arrival is proof the model is working, which is the thing the
             // silent-until-done UI was missing.
-            ApiEvent::ReasoningDelta { .. } => {
+            ApiEvent::ReasoningDelta { text, .. } => {
                 send(HarnessUpdate::Activity("thinking".into()));
+                send(HarnessUpdate::Reasoning(text));
             }
             ApiEvent::ToolStart { call_id, name, .. } => {
                 tool_input.remove(&call_id);

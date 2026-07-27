@@ -25,6 +25,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
+    ("reasoning", reasoning),
+    ("reasoning_streaming", reasoning_streaming),
     ("working", working),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
@@ -389,6 +391,51 @@ fn notice() -> Model {
     Model {
         editor: editor_with("undo me", None),
         notice: Some("nothing to undo".into()),
+        ..attached_empty()
+    }
+}
+
+/// A finished turn that thought before it answered. The point of the node is
+/// the contrast: the thought is muted, indented behind a rule, and set smaller,
+/// so the answer below it is unmistakably the reply.
+fn reasoning() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("why is the reveal a fraction, not a count?"));
+    transcript.push(Message::reasoning(
+        "The cursor counts markdown *source* characters, but the renderer \
+         draws laid-out glyphs. Every `**` and backtick makes those two \
+         numbers differ, so a count would run ahead of the visible edge.",
+    ));
+    transcript.push(Message::assistant(
+        "Because the reveal cursor and the drawn glyphs are counted in \
+         different units, and only a fraction is well defined across both.",
+    ));
+    Model {
+        transcript,
+        ..attached_empty()
+    }
+}
+
+/// The same turn mid-flight: reasoning is arriving and being swept in by the
+/// same reveal as the answer, with the activity line still running.
+fn reasoning_streaming() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("why is the reveal a fraction, not a count?"));
+    transcript.push(Message::reasoning(
+        "The cursor counts markdown source characters, but the renderer draws \
+         laid-out glyphs, so the two disagree by every marker in the reply and",
+    ));
+    Model {
+        transcript,
+        busy: true,
+        stream: crate::stream::Stream::pinned(0.7),
+        activity: crate::activity::Activity::pinned(
+            3,
+            std::time::Duration::from_secs(5),
+            Some("thinking"),
+        ),
         ..attached_empty()
     }
 }

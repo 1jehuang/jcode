@@ -219,6 +219,12 @@ fn run_e2e(message: &str) -> Result<()> {
                 print!("{text}");
                 model.transcript.append_assistant(&text);
             }
+            harness::HarnessUpdate::Reasoning(text) => {
+                // Printed to stderr so the e2e log keeps stdout as the answer
+                // alone, while still proving reasoning reached the client.
+                eprint!("{text}");
+                model.transcript.append_reasoning(&text);
+            }
             harness::HarnessUpdate::TurnDone if sent => {
                 println!("\n[e2e] turn done");
                 let out = std::env::temp_dir().join("jcode-desktop2-e2e.png");
