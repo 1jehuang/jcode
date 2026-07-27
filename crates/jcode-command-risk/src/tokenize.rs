@@ -9,6 +9,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub text: String,
+    /// True when this segment's stdin comes from a pipe, so its operands are
+    /// partly supplied at runtime by the previous command.
+    pub receives_pipe: bool,
     /// True for `>` / `>|` redirect destinations, which are truncated on open.
     pub is_truncating_redirect_target: bool,
     /// True for control operators like `&&`, which are never path targets.
@@ -19,6 +22,7 @@ impl Token {
     fn word(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            receives_pipe: false,
             is_truncating_redirect_target: false,
             is_operator: false,
         }
@@ -61,13 +65,19 @@ pub fn split_segments(command: &str) -> Vec<Vec<Token>> {
     let mut segments = Vec::new();
     let mut current = Vec::new();
 
+    let mut next_receives_pipe = false;
     for token in tokens {
         if token.is_operator && SEGMENT_SEPARATORS.contains(&token.text.as_str()) {
             if !current.is_empty() {
                 segments.push(std::mem::take(&mut current));
             }
+            // The command after `|` consumes the previous one's output as
+            // operands, which this parser cannot see (#604 review).
+            next_receives_pipe = token.text == "|";
             continue;
         }
+        let mut token = token;
+        token.receives_pipe = next_receives_pipe;
         current.push(token);
     }
     if !current.is_empty() {

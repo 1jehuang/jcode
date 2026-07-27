@@ -268,3 +268,141 @@ fn no_separator_launders_a_catastrophic_command() {
         "laundered through a separator: {escaped:#?}"
     );
 }
+
+/// Bypasses found by automated review of the original PR. Each of these was
+/// classified `Safe` before the fix, including `sudo rm -rf ~`.
+#[test]
+fn wrapper_commands_do_not_hide_the_real_program() {
+    let ctx = ctx();
+    let mut escaped = Vec::new();
+    for wrapper in [
+        "sudo",
+        "doas",
+        "env",
+        "nice -n 10",
+        "ionice -c 3",
+        "time",
+        "timeout 5",
+        "nohup",
+        "setsid",
+        "stdbuf -o0",
+        "command",
+        "exec",
+        "sudo -u root",
+        "env FOO=bar",
+        "watch",
+    ] {
+        for tail in ["rm -rf ~", "rm -rf $HOME", "rm -rf /"] {
+            let command = format!("{wrapper} {tail}");
+            if assess(&command, &ctx).level != RiskLevel::Catastrophic {
+                escaped.push(command);
+            }
+        }
+    }
+    assert!(escaped.is_empty(), "wrapper bypass: {escaped:#?}");
+}
+
+#[test]
+fn nested_wrappers_are_unwrapped_all_the_way_down() {
+    let ctx = ctx();
+    assert_eq!(
+        level("sudo env nice -n 5 rm -rf ~"),
+        RiskLevel::Catastrophic
+    );
+    assert_eq!(level("timeout 5 sudo rm -rf /"), RiskLevel::Catastrophic);
+}
+
+#[test]
+fn a_wrapper_hiding_an_unparseable_payload_escalates() {
+    // We could not see what sudo was about to run, so we must not assume safety.
+    let ctx = ctx();
+    assert!(assess("sudo", &ctx).level >= RiskLevel::Confirm);
+}
+
+#[test]
+fn inline_shell_scripts_are_assessed_not_skipped() {
+    // `sh -c "..."` is the classic way around a static parser. It cannot be
+    // fully solved, but the plain literal case must not be a free pass.
+    let ctx = ctx();
+    for command in [
+        r#"sh -c "rm -rf ~""#,
+        r#"bash -c 'rm -rf $HOME'"#,
+        r#"sudo sh -c "rm -rf /""#,
+    ] {
+        assert_eq!(
+            assess(command, &ctx).level,
+            RiskLevel::Catastrophic,
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn piped_deletes_cannot_launder_their_targets() {
+    // `find ~ -type f | xargs rm -rf` deletes home contents, but neither
+    // segment shows it: xargs takes its operands from stdin.
+    let ctx = ctx();
+    for command in [
+        "find ~ -type f | xargs rm -rf",
+        "find / -name '*.conf' | xargs rm",
+        "cat paths.txt | xargs rm -rf",
+    ] {
+        assert!(
+            !assess(command, &ctx).level.runs_immediately(),
+            "{command:?} must not run unchallenged"
+        );
+    }
+}
+
+#[test]
+fn files_inside_system_directories_are_protected_too() {
+    // Exact-root matching left /etc/passwd merely "Confirm", and apply_patch
+    // consults only the catastrophic tier, so it would have deleted it.
+    let ctx = ctx();
+    for path in [
+        "rm -f /etc/passwd",
+        "rm -rf /usr/bin/env",
+        "rm /boot/vmlinuz",
+        "shred /etc/shadow",
+    ] {
+        assert_eq!(level(path), RiskLevel::Catastrophic, "{path:?}");
+    }
+}
+
+#[test]
+fn user_directories_under_home_root_stay_workable() {
+    // /home and /Users must not become recursive, or every project path under
+    // them would be blocked.
+    let ctx = ctx();
+    assert!(level("rm -rf /home/u/proj/target").runs_immediately());
+    assert_eq!(level("rm -rf /home"), RiskLevel::Catastrophic);
+}
+
+/// The wrapper unwrapping must not make everyday wrapped commands noisy.
+#[test]
+fn ordinary_wrapped_commands_still_run_immediately() {
+    let ctx = ctx();
+    let mut noisy = Vec::new();
+    for command in [
+        "sudo apt update",
+        "env RUST_LOG=debug cargo test",
+        "timeout 30 cargo build",
+        "nice -n 10 make",
+        "time ls -la",
+        "sudo systemctl status jcode",
+        "xargs echo",
+        "find . -name '*.rs' | xargs grep TODO",
+        "sh -c 'echo hello'",
+        "bash -c 'cargo build'",
+        "sudo rm -rf /home/u/proj/target",
+    ] {
+        let level = assess(command, &ctx).level;
+        if !level.runs_immediately() {
+            noisy.push(format!("{command} -> {level:?}"));
+        }
+    }
+    assert!(
+        noisy.is_empty(),
+        "gate became noisy on normal work: {noisy:#?}"
+    );
+}

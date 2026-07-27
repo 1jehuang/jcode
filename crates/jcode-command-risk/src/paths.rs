@@ -51,6 +51,13 @@ const PROTECTED_SYSTEM_PATHS: &[&str] = &[
     "/home",
 ];
 
+/// System paths where the *contents* are as critical as the directory itself,
+/// so deleting a single file inside them is also unacceptable.
+const SYSTEM_PATHS_PROTECTED_RECURSIVELY: &[&str] = &[
+    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/sbin", "/sys", "/usr",
+    "/var/lib", "/System", "/Library",
+];
+
 /// The set of paths this policy protects, exposed for testing and docs.
 pub struct ProtectedPaths;
 
@@ -63,6 +70,9 @@ impl ProtectedPaths {
     }
     pub fn system_paths() -> &'static [&'static str] {
         PROTECTED_SYSTEM_PATHS
+    }
+    pub fn recursive_system_paths() -> &'static [&'static str] {
+        SYSTEM_PATHS_PROTECTED_RECURSIVELY
     }
 }
 
@@ -125,7 +135,17 @@ fn normalize(path: &Path) -> PathBuf {
 pub fn is_catastrophic_target(path: &Path, ctx: &RiskContext) -> bool {
     let path = normalize(path);
 
+    // Exact system roots, plus anything inside the ones whose contents are as
+    // unrecoverable as the directory itself (`/etc/passwd`). `/home` and
+    // `/Users` are deliberately not recursive: a user's own project lives
+    // under them, and the home directory itself is handled below.
     if PROTECTED_SYSTEM_PATHS.iter().any(|p| path == Path::new(p)) {
+        return true;
+    }
+    if SYSTEM_PATHS_PROTECTED_RECURSIVELY
+        .iter()
+        .any(|p| path.starts_with(p))
+    {
         return true;
     }
 
