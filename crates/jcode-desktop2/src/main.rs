@@ -419,10 +419,12 @@ impl App {
                 }
                 harness::HarnessUpdate::Tool { call_id, label } => {
                     // Progress belongs in the transcript, not only in the
-                    // composer's activity line: each call is one muted line
-                    // that refines in place as its streamed intent arrives.
+                    // composer's activity line: the call running right now is
+                    // one card at the tail that refines in place as its
+                    // streamed intent arrives, and the next call takes it
+                    // over rather than adding a row.
                     self.model.busy = true;
-                    self.model.transcript.upsert_tool(&call_id, &label);
+                    self.model.transcript.set_live_tool(&call_id, &label);
                     self.model.stream.extend_to(
                         self.model.transcript.streaming_len(),
                         std::time::Instant::now(),
@@ -431,6 +433,10 @@ impl App {
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
                     self.model.activity.finish();
+                    // The card shows the call in flight; the turn ending means
+                    // there is none, and a card left behind would claim work
+                    // is still happening.
+                    self.model.transcript.clear_live_tool();
                 }
                 harness::HarnessUpdate::Peek {
                     session_id,
@@ -1113,6 +1119,36 @@ impl App {
         crate::viewport::Viewport::new(laid, region, state.scroll).max_scroll()
     }
 
+    /// Report the conversation's measured height to the stream, so growth at
+    /// the tail becomes a glide rather than a jump. Runs against the warm
+    /// layout cache, so a steady-state frame pays a lookup, not a relayout.
+    fn observe_stream_growth(&mut self) {
+        let frame = self.frame;
+        let style = crate::scene::transcript_body_style(&self.model);
+        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+        let App {
+            painter,
+            model: state,
+            ..
+        } = self;
+        let paint::Painter {
+            text,
+            transcript: cache,
+        } = painter;
+        let laid = cache.lay_out(
+            text,
+            &state.transcript,
+            width,
+            &state.theme,
+            style,
+            frame.scale,
+        );
+        let content = crate::viewport::Viewport::new(laid, 0.0, 0.0).content_height;
+        // Only a view following the tail is glided: a user who scrolled back
+        // is holding a position, and moving it would be the app fighting them.
+        state.stream.observe_content(content, state.scroll == 0.0);
+    }
+
     /// Apply one resolved action. Returns false when the app should exit, so
     /// quitting stays an explicit outcome rather than a side effect.
     fn apply(&mut self, action: keymap::Action, typed: Option<&str>) -> bool {
@@ -1275,6 +1311,9 @@ impl App {
                 if self.model.selection.take().is_some() {
                 } else if self.model.busy {
                     self.model.busy = false;
+                    // The card shows a call in flight; the user just said
+                    // there is none.
+                    self.model.transcript.clear_live_tool();
                     self.model.set_notice("interrupting...");
                 } else if !self.model.editor.is_empty() {
                     self.model.editor.clear();
@@ -1287,6 +1326,7 @@ impl App {
             Action::InterruptOrQuit => {
                 if self.model.busy {
                     self.model.busy = false;
+                    self.model.transcript.clear_live_tool();
                     self.model.set_notice("interrupting...");
                 } else if !self.model.editor.is_empty() {
                     self.model.editor.clear();
@@ -1490,6 +1530,16 @@ impl ApplicationHandler for App {
                     // remove.
                     self.frame =
                         Self::frame_for_model_with(size, scale, &self.model, &mut self.painter);
+                }
+                // Feed the conversation's measured height to the stream's
+                // glide, so a reply growing at the tail slides the page up
+                // instead of jumping it a line at a time. The cache is warm
+                // (the frame was just measured through it), so this is a
+                // lookup rather than a relayout.
+                self.observe_stream_growth();
+                if let Some(state) = self.state.as_mut() {
+                    let scale = state.scale_factor();
+                    let size = state.size();
                     build_scene(&mut scene, &mut self.painter, &self.model, size, scale);
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");

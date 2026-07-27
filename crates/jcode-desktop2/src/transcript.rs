@@ -136,24 +136,38 @@ impl Transcript {
         }
     }
 
-    /// Record a tool call's current label, keyed by its call id.
+    /// Show the current tool call as the single live tool card.
     ///
-    /// A call announces itself by name the moment it opens, then its streamed
-    /// arguments usually carry an `intent` ("check the build"), which is the
-    /// better line. Updating in place is what turns those two events into one
-    /// transcript line instead of a name followed by a duplicate.
-    pub fn upsert_tool(&mut self, call_id: &str, label: &str) {
+    /// The transcript holds at most one tool message: the call running right
+    /// now. A call announces itself by name the moment it opens, its streamed
+    /// arguments usually carry a better line (the `intent`), and the next
+    /// call takes the card over entirely, so a turn with fifty calls reads as
+    /// one live line of "what is being done" instead of fifty rows of
+    /// history. The reply itself is what records the turn's work.
+    pub fn set_live_tool(&mut self, call_id: &str, label: &str) {
         let label = label.trim();
         if label.is_empty() {
             return;
         }
-        let existing = self.messages.iter_mut().rev().find(|message| {
-            message.role == Role::Tool && message.call_id.as_deref() == Some(call_id)
-        });
-        match existing {
-            Some(message) => message.source = label.to_string(),
-            None => self.messages.push(Message::tool(call_id, label)),
+        // Refine the card in place when it is already at the tail, whichever
+        // call it belongs to now: the card is a slot, not a log entry.
+        if let Some(last) = self.messages.last_mut()
+            && last.role == Role::Tool
+        {
+            last.call_id = Some(call_id.to_string());
+            last.source = label.to_string();
+            return;
         }
+        // Text arrived since the last call, so the old card is mid-transcript:
+        // drop it and re-open the card at the tail, where the user is reading.
+        self.clear_live_tool();
+        self.messages.push(Message::tool(call_id, label));
+    }
+
+    /// Remove the live tool card. Called when the turn ends: a card left
+    /// behind would claim work is still happening after it stopped.
+    pub fn clear_live_tool(&mut self) {
+        self.messages.retain(|message| message.role != Role::Tool);
     }
 
     /// Plain-text rendering, for tests and for copying the conversation.
@@ -202,13 +216,15 @@ pub struct LaidMessage {
 
 impl LaidMessage {
     /// Vertical inset from the top of the message to its first block. A user
-    /// message is drawn in a padded card; an assistant reply is not. Shared by
-    /// drawing and hit-testing so a click cannot land a padding's worth away
-    /// from the glyph it aimed at.
+    /// message is drawn in a padded card, and the live tool card pads the
+    /// same way; an assistant reply is not. Shared by drawing and hit-testing
+    /// so a click cannot land a padding's worth away from the glyph it aimed
+    /// at.
     pub fn top_padding(&self) -> f64 {
         match self.role {
             Role::User => USER_PAD_Y,
-            Role::Assistant | Role::Reasoning | Role::Tool => 0.0,
+            Role::Tool => TOOL_PAD_Y,
+            Role::Assistant | Role::Reasoning => 0.0,
         }
     }
 }
@@ -246,6 +262,12 @@ pub const QUOTE_INSET: f64 = 12.0;
 /// measure as a quote, because it is the same idea: text attributed to
 /// somewhere other than the main voice.
 pub const REASONING_INSET: f64 = 12.0;
+/// Indent of the tool card's text, leaving room for the activity spinner
+/// that shows the call running. Wider than the reasoning rule because the
+/// spinner is a drawn object, not a hairline.
+pub const TOOL_INSET: f64 = 24.0;
+/// Vertical padding inside the live tool card.
+pub const TOOL_PAD_Y: f64 = 6.0;
 /// Reasoning is set smaller than body copy, as a multiple of it. Enough to
 /// read as an aside at a glance without becoming unreadable.
 pub const REASONING_SCALE: f32 = 0.92;
@@ -290,8 +312,9 @@ pub fn lay_out_message(
     let document: Document = parse_markdown(&message.source);
     // Reasoning is the same document machinery in a subordinate voice: muted,
     // slightly smaller, and indented behind a rule the scene draws.
-    // A tool line is the same subordinate voice: it reports what the agent
-    // did, not what it said, so it must never be mistaken for the reply.
+    // The tool card is that voice again, indented further to leave room for
+    // the spinner: it reports what the agent is doing, not what it said, so
+    // it must never be mistaken for the reply.
     let (base, role_inset) = match message.role {
         Role::Reasoning | Role::Tool => (
             ParagraphStyle {
@@ -300,7 +323,10 @@ pub fn lay_out_message(
                 color: theme.muted,
                 ..base
             },
-            REASONING_INSET,
+            match message.role {
+                Role::Tool => TOOL_INSET,
+                _ => REASONING_INSET,
+            },
         ),
         _ => (base, 0.0),
     };
@@ -347,9 +373,13 @@ pub fn lay_out_message(
     }
 
     let mut height = (top - BLOCK_GAP).max(0.0);
-    if message.role == Role::User {
-        height += USER_PAD_Y * 2.0;
-    }
+    height += match message.role {
+        // The user card and the tool card both reserve their padding, so the
+        // tint can never crop the text it wraps.
+        Role::User => USER_PAD_Y * 2.0,
+        Role::Tool => TOOL_PAD_Y * 2.0,
+        Role::Assistant | Role::Reasoning => 0.0,
+    };
     LaidMessage {
         role: message.role,
         blocks,
@@ -633,54 +663,77 @@ mod tests {
         assert_eq!(transcript.messages()[1].source, "**bold**");
     }
 
-    /// A tool call is one transcript line however many events it produced:
+    /// A tool call is one transcript card however many events it produced:
     /// the name that opened it and the streamed intent that refined it must
     /// land on the same message, or every call would render twice.
     #[test]
     fn a_tool_call_refines_one_line_in_place() {
         let mut transcript = Transcript::default();
-        transcript.upsert_tool("call_1", "bash");
-        transcript.upsert_tool("call_1", "check the build");
+        transcript.set_live_tool("call_1", "bash");
+        transcript.set_live_tool("call_1", "check the build");
         assert_eq!(transcript.messages().len(), 1);
         assert_eq!(transcript.messages()[0].role, Role::Tool);
         assert_eq!(transcript.messages()[0].source, "check the build");
     }
 
-    /// Distinct calls are distinct lines, in the order they happened, and text
-    /// arriving between them still appends rather than merging into a call.
+    /// The card is a slot, not a log: the next call takes it over, and text
+    /// arriving between calls moves the card back to the tail rather than
+    /// leaving a stale line mid-transcript. At most one tool message exists.
     #[test]
-    fn distinct_tool_calls_are_distinct_lines() {
+    fn the_live_tool_card_is_singular() {
         let mut transcript = Transcript::default();
-        transcript.upsert_tool("call_1", "read the config");
+        transcript.set_live_tool("call_1", "read the config");
         transcript.append_assistant("Found it. ");
-        transcript.upsert_tool("call_2", "run the tests");
+        transcript.set_live_tool("call_2", "run the tests");
         let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
-        assert_eq!(roles, vec![Role::Tool, Role::Assistant, Role::Tool]);
-        // Refining the *first* call later must not touch the second.
-        transcript.upsert_tool("call_1", "read the config file");
-        assert_eq!(transcript.messages()[0].source, "read the config file");
-        assert_eq!(transcript.messages()[2].source, "run the tests");
+        assert_eq!(roles, vec![Role::Assistant, Role::Tool]);
+        assert_eq!(transcript.messages()[1].source, "run the tests");
+        // Back-to-back calls reuse the card in place.
+        transcript.set_live_tool("call_3", "check the diff");
+        let tools = transcript
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        assert_eq!(tools, 1, "a second call added a card instead of taking it");
+        assert_eq!(transcript.messages()[1].source, "check the diff");
     }
 
-    /// A blank label is noise, not a line: an empty intent must not blank an
+    /// The turn ending removes the card: a card left behind would claim work
+    /// is still happening after it stopped.
+    #[test]
+    fn the_tool_card_clears_when_the_turn_ends() {
+        let mut transcript = Transcript::default();
+        transcript.push(Message::user("go"));
+        transcript.set_live_tool("call_1", "running tests");
+        transcript.append_assistant("done");
+        transcript.clear_live_tool();
+        assert!(
+            transcript.messages().iter().all(|m| m.role != Role::Tool),
+            "a finished turn left its tool card behind"
+        );
+        assert_eq!(transcript.messages().len(), 2);
+    }
+
+    /// A blank label is noise, not a card: an empty intent must not blank an
     /// existing label or create an empty message.
     #[test]
     fn a_blank_tool_label_changes_nothing() {
         let mut transcript = Transcript::default();
-        transcript.upsert_tool("call_1", "   ");
+        transcript.set_live_tool("call_1", "   ");
         assert!(transcript.messages().is_empty());
-        transcript.upsert_tool("call_1", "list the crate");
-        transcript.upsert_tool("call_1", "");
+        transcript.set_live_tool("call_1", "list the crate");
+        transcript.set_live_tool("call_1", "");
         assert_eq!(transcript.messages()[0].source, "list the crate");
     }
 
-    /// A tool line is streamed like reasoning: it counts toward the reveal, so
+    /// The card is streamed like reasoning: it counts toward the reveal, so
     /// it sweeps in rather than popping.
     #[test]
     fn a_trailing_tool_line_is_part_of_the_stream() {
         let mut transcript = Transcript::default();
         transcript.push(Message::user("go"));
-        transcript.upsert_tool("call_1", "running tests");
+        transcript.set_live_tool("call_1", "running tests");
         assert_eq!(transcript.streaming_len(), "running tests".chars().count());
     }
 

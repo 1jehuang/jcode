@@ -789,7 +789,7 @@ fn draw_transcript(
     frame: &layout::Frame,
     scale: f64,
 ) {
-    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_PAD_Y, USER_RADIUS};
+    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_RADIUS};
     use jcode_render_core::BlockKind;
 
     let theme = &model.theme;
@@ -839,7 +839,7 @@ fn draw_transcript(
             );
         }
         let text_left = frame.left + USER_PAD_X;
-        let text_top = message_top + if is_user { USER_PAD_Y } else { 0.0 };
+        let text_top = message_top + placed.message.top_padding();
 
         // A reasoning message carries a rule down its whole left edge: one
         // mark for the thought, rather than a label repeated per paragraph.
@@ -859,18 +859,41 @@ fn draw_transcript(
             );
         }
 
-        // A tool line gets a single dot where the rule would start: the app's
-        // halftone mark, one per call, so a run of tool calls reads as a list
-        // of actions rather than as one long quoted thought.
+        // The live tool card: one card for the call running right now, on
+        // the composer's wash with the app's halftone spinner beside its
+        // label. There is at most one of these in the transcript, so a busy
+        // turn reads as a single line of "what is being done" rather than a
+        // growing log of finished calls.
         if placed.message.role == Role::Tool {
-            let line = frame.body_line_height() * f64::from(crate::transcript::REASONING_SCALE);
             scene.fill(
                 vello::peniko::Fill::NonZero,
                 Affine::scale(scale),
-                theme.muted,
+                theme.wash,
                 None,
-                &Circle::new((text_left + 2.0, message_top + line / 2.0), 2.0),
+                &RoundedRect::new(
+                    frame.left,
+                    message_top,
+                    frame.right,
+                    message_top + placed.message.height,
+                    USER_RADIUS,
+                ),
             );
+            // The spinner only turns while the turn runs: a card drawn in a
+            // still capture (or after an interrupt raced the clear) must not
+            // claim live work.
+            if model.busy {
+                draw_spinner(
+                    scene,
+                    &model.activity,
+                    (
+                        text_left + SPINNER_SIZE / 2.0,
+                        message_top + placed.message.height / 2.0,
+                    ),
+                    theme.muted,
+                    scale,
+                    std::time::Instant::now(),
+                );
+            }
         }
 
         // Glyphs in this message, and how many earlier blocks have consumed,
@@ -955,7 +978,9 @@ fn draw_transcript(
                     // A user message and a code block sit on a wash, so they
                     // need the stronger band: the paper-tuned one is nearly
                     // invisible against the card the user's own message is in.
-                    let on_wash = is_user || matches!(block.kind, BlockKind::CodeBlock { .. });
+                    let on_wash = is_user
+                        || placed.message.role == Role::Tool
+                        || matches!(block.kind, BlockKind::CodeBlock { .. });
                     let band_color = if on_wash {
                         theme.selection_on_wash
                     } else {
