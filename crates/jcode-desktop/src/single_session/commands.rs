@@ -57,6 +57,9 @@ impl SingleSessionApp {
             "/clear" => {
                 self.messages.clear();
                 self.streaming_response.clear();
+                // Same gap as the TUI (issue #605): a cleared session's side
+                // panel pages are orphaned, and nothing else resets them.
+                self.side_panel = DesktopSidePanelState::default();
                 self.error = None;
                 self.is_processing = false;
                 self.draft.clear();

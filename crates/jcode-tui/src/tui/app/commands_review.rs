@@ -267,6 +267,18 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
     session.provider_session_id = None;
 }
 
+/// Drop every side panel page belonging to the discarded session (#605).
+///
+/// The server only emits `SidePanelState` when a page is written, so nothing
+/// else ever tells the client to drop the old session's pages. Shared by both
+/// `/clear` implementations so they cannot drift apart again.
+pub(crate) fn clear_side_panel_for_new_session(app: &mut App) {
+    app.apply_side_panel_snapshot(crate::side_panel::SidePanelSnapshot::default());
+    app.last_side_panel_focus_id = None;
+    app.diff_pane_scroll = 0;
+    app.diff_pane_scroll_x = 0;
+}
+
 pub(super) fn reset_current_session(app: &mut App) {
     app.session.mark_closed();
     let _ = app.session.save();
@@ -300,9 +312,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     session.autojudge_enabled = Some(app.autojudge_enabled);
     session.ensure_initial_session_context_message();
     app.session = session;
-    app.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot::default());
-    app.last_side_panel_focus_id = None;
-    app.diff_pane_scroll_x = 0;
+    clear_side_panel_for_new_session(app);
     app.provider_session_id = None;
 }
 
@@ -1087,3 +1097,7 @@ pub(super) enum RefactorCommand {
     Status,
     Stop,
 }
+
+#[cfg(test)]
+#[path = "tests/issue_605_clear_side_panel.rs"]
+mod issue_605_clear_side_panel_tests;
