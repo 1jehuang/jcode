@@ -36,6 +36,15 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("notice", notice),
     ("error", error),
     ("long_paragraph", long_paragraph),
+    // Heavy nodes. Every node above is a small, pretty screen, which is what a
+    // capture wants and exactly the wrong thing to profile: a sweep over them
+    // would have reported the whole app as fast while a real session lagged.
+    // These sit at the slow end of the space on purpose, so `--profile-states`
+    // measures the frames that actually hurt.
+    ("heavy_long_session", heavy_long_session),
+    ("heavy_code_wall", heavy_code_wall),
+    ("heavy_wide_table", heavy_wide_table),
+    ("heavy_math", heavy_math),
 ];
 
 pub fn by_name(name: &str) -> Option<Model> {
@@ -485,6 +494,78 @@ fn long_paragraph() -> Model {
             "the client opens the socket and sends a hello frame carrying its supported version range. "
                 .repeat(24),
         )]),
+        ..attached_empty()
+    }
+}
+
+/// A realistic long session: the shape that made the window feel laggy, and
+/// the shape no other node covers. Sixty turns is an afternoon of work, not a
+/// pathological input.
+fn heavy_long_session() -> Model {
+    let turns = (0..60)
+        .map(|n| {
+            (
+                format!("question {n} about the transport layer"),
+                format!(
+                    "answer {n}. {}",
+                    "the client opens the socket and sends a hello frame carrying its \
+                     supported version range. "
+                        .repeat(3)
+                ),
+            )
+        })
+        .collect();
+    Model {
+        transcript: conversation(turns),
+        ..attached_empty()
+    }
+}
+
+/// A reply that is mostly code. Code blocks carry their own wash, inset, and
+/// padding, so they cost more per line than prose and are worth measuring
+/// separately.
+fn heavy_code_wall() -> Model {
+    let code = (0..120)
+        .map(|n| format!("    let value_{n} = compute(input[{n}], &config, depth + {n});"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Model {
+        transcript: conversation(vec![(
+            "show me the whole function".into(),
+            format!("Here it is:\n\n```rust\nfn main() {{\n{code}\n}}\n```\n"),
+        )]),
+        ..attached_empty()
+    }
+}
+
+/// A wide table. Column widths are measured per cell by the desktop's own
+/// table adapter, so this exercises a path prose never touches.
+fn heavy_wide_table() -> Model {
+    let header = "| frame | direction | payload | notes | since |";
+    let rule = "|---|---|---|---|---|";
+    let rows = (0..40)
+        .map(|n| format!("| frame_{n} | client | {{\"id\": {n}}} | row {n} notes | v0.{n} |"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Model {
+        transcript: conversation(vec![(
+            "list every frame".into(),
+            format!("{header}\n{rule}\n{rows}\n"),
+        )]),
+        ..attached_empty()
+    }
+}
+
+/// Math-heavy output. LaTeX goes through render-core's math translation before
+/// it is ever laid out, so a reply full of it is a different cost profile
+/// again.
+fn heavy_math() -> Model {
+    let body = (0..30)
+        .map(|n| format!("The bound $x_{{{n}}}^2 + y_{{{n}}}^2 \\leq z_{{{n}}}$ holds.\n\n$$\\frac{{a_{{{n}}}}}{{b_{{{n}}}}} = \\sum_{{i=0}}^{{{n}}} c_i$$"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Model {
+        transcript: conversation(vec![("derive the bounds".into(), body)]),
         ..attached_empty()
     }
 }

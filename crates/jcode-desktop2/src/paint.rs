@@ -124,9 +124,15 @@ impl TranscriptCache {
     }
 
     /// Reused and re-laid message counts from the last call. Exposed so the
-    /// tests can assert the cache actually caches: a cache whose hit rate is
-    /// never checked silently degrades into no cache at all.
-    #[cfg(test)]
+    /// tests and the state-space profiler can assert the cache actually
+    /// caches: a cache whose hit rate is never checked silently degrades into
+    /// no cache at all.
+    ///
+    /// This is the *deterministic* half of the perf signal. Wall-clock frame
+    /// cost varies with the machine and the scheduler, so a timing gate has to
+    /// leave slack and can only catch a large regression. "How many messages
+    /// did this frame lay out" is exact, reproducible, and catches the same
+    /// regression the moment it appears.
     pub fn stats(&self) -> (usize, usize) {
         (self.hits, self.misses)
     }
