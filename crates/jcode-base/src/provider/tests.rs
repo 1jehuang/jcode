@@ -1122,7 +1122,7 @@ fn profile_catalog_cache_needs_refresh_for_missing_cache() {
             .copied()
             .expect("at least one OpenAI-compatible profile is defined");
         assert!(
-            super::profile_catalog_cache_needs_refresh(profile),
+            super::catalog_scheduler::profile_catalog_cache_needs_refresh(profile),
             "a missing catalog cache must be reported as needing a refresh"
         );
     });
