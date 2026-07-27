@@ -24,6 +24,13 @@ jcode-desktop2 --profile-states            # ranked table
 jcode-desktop2 --profile-states 2000       # with a custom warm budget, in us
 ```
 
+The command exits non-zero only for problems that are real regardless of the
+machine: any state redoing layout on an unchanged frame, or a state past the
+40ms failure threshold. The 4ms warm budget in the table is *advisory*. It is
+wall clock, so an unoptimised build or a machine busy compiling something else
+will flag healthy states, and a tool that cries wolf gets ignored. When rows
+say SLOW but relayout is `0/n`, read the relayout column and move on.
+
 The measurement lives in `crates/jcode-desktop2/src/profile.rs`, and runs as a
 gate in `scripts/check_guardrails.sh` and in CI.
 
