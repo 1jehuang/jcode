@@ -1381,3 +1381,101 @@ fn guardrail_notice_absent_for_normal_turns() {
 }
 
 include!("agent_tests/retention_readiness.rs");
+
+/// Provider that reproduces the DeepSWE Opus 5 incident: the first response
+/// ends with `stop_reason: "tool_use"` while carrying no tool-use block at all,
+/// which is what happens when an unrecognized content block is dropped from the
+/// stream. The second response is a normal completion, so a correct agent
+/// recovers and this provider's queue is exhausted.
+#[derive(Clone, Default)]
+struct StrandedToolUseProvider {
+    calls: Arc<std::sync::Mutex<usize>>,
+}
+
+#[async_trait]
+impl Provider for StrandedToolUseProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = {
+            let mut guard = self.calls.lock().unwrap();
+            *guard += 1;
+            *guard
+        };
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            if call == 1 {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta("working on it".to_string())))
+                    .await;
+                // No ToolUseStart: the tool block was lost, yet the provider
+                // still reports that it stopped in order to call a tool.
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("tool_use".to_string()),
+                    }))
+                    .await;
+            } else {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta("all done".to_string())))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("end_turn".to_string()),
+                    }))
+                    .await;
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "stranded-tool-use"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// End-to-end guard for the incident. Before the fix the agent took the
+/// "no tool calls" branch and ended the turn on the very first response, so a
+/// benchmark trial stopped mid-task and its uncommitted work was never
+/// captured. The agent must instead ask the model to continue, which shows up
+/// as a second provider call and a final turn that ends normally.
+#[tokio::test]
+async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let stranded = StrandedToolUseProvider::default();
+    let calls = stranded.calls.clone();
+    let provider: Arc<dyn Provider> = Arc::new(stranded);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("do the task", Vec::new(), None, tx)
+        .await
+        .expect("turn should complete");
+
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TextDelta { text: delta } = event {
+            text.push_str(&delta);
+        }
+    }
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        2,
+        "a tool_use stop with no tool call must trigger exactly one continuation request"
+    );
+    assert!(
+        text.contains("all done"),
+        "the recovered turn must deliver the model's real completion, got {text:?}"
+    );
+}
