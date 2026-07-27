@@ -43,8 +43,6 @@ const FIT_MARGIN: f64 = 0.03;
 /// narrow enough that "right" never picks something above you.
 const CONE: f64 = std::f64::consts::FRAC_PI_3;
 
-/// A direction for keyboard navigation across the field.
-
 /// The region the field is laid out in: the page inside its margins.
 ///
 /// One definition shared by the renderer and by pointer hit-testing, for the
@@ -52,14 +50,15 @@ const CONE: f64 = std::f64::consts::FRAC_PI_3;
 /// would land on a different blob than the one under the cursor.
 pub fn area(frame: &crate::layout::Frame) -> (f64, f64, f64, f64) {
     let inset = (frame.width * 0.04).clamp(16.0, 56.0);
-    (
-        inset,
-        frame.body_top,
-        frame.width - inset,
-        frame.height - inset,
-    )
+    // The overview replaces the page rather than sitting in the transcript's
+    // slot, so it gets the window from the top margin down to the hint row.
+    // Anchoring the top at `body_top` left the field crowded into the lower
+    // two thirds with a band of blank paper above it.
+    let bottom = frame.height - crate::layout::FOOTNOTE_HEIGHT * 2.5;
+    (inset, inset, frame.width - inset, bottom.max(inset + 1.0))
 }
 
+/// A direction for keyboard navigation across the field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     Left,
@@ -333,7 +332,10 @@ pub fn layout(
         // is where it looks like it is, which is what the label hangs off.
         let count = order.len() as f64;
         let centroid = order.iter().fold((0.0, 0.0), |acc, index| {
-            (acc.0 + placed[*index].0 / count, acc.1 + placed[*index].1 / count)
+            (
+                acc.0 + placed[*index].0 / count,
+                acc.1 + placed[*index].1 / count,
+            )
         });
         let mut extent: f64 = 0.0;
         for index in &order {
@@ -368,7 +370,10 @@ pub fn layout(
     // sizes (the entire point of the blobs) survive.
     let (x0, y0, x1, y1) = area;
     let margin = ((x1 - x0).min(y1 - y0) * FIT_MARGIN).max(8.0);
-    let (fit_w, fit_h) = ((x1 - x0 - margin * 2.0).max(1.0), (y1 - y0 - margin * 2.0).max(1.0));
+    let (fit_w, fit_h) = (
+        (x1 - x0 - margin * 2.0).max(1.0),
+        (y1 - y0 - margin * 2.0).max(1.0),
+    );
     let mut bounds = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for (index, position) in placed.iter().enumerate() {
         bounds.0 = bounds.0.min(position.0 - radii[index]);
@@ -376,14 +381,14 @@ pub fn layout(
         bounds.2 = bounds.2.max(position.0 + radii[index]);
         bounds.3 = bounds.3.max(position.1 + radii[index]);
     }
-    let span = ((bounds.2 - bounds.0).max(1.0), (bounds.3 - bounds.1).max(1.0));
+    let span = (
+        (bounds.2 - bounds.0).max(1.0),
+        (bounds.3 - bounds.1).max(1.0),
+    );
     // Never scale *up*: a single session blown up to fill a 4K window would
     // read as an error page rather than as one small conversation.
     let scale = (fit_w / span.0).min(fit_h / span.1).min(1.0);
-    let field_center = (
-        (bounds.0 + bounds.2) / 2.0,
-        (bounds.1 + bounds.3) / 2.0,
-    );
+    let field_center = ((bounds.0 + bounds.2) / 2.0, (bounds.1 + bounds.3) / 2.0);
     let area_center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
     let to_screen = |position: (f64, f64)| {
         (
@@ -666,7 +671,13 @@ mod tests {
     fn every_blob_fits_inside_the_area() {
         let field = layout(
             &(0..24)
-                .map(|n| entry(&format!("s{n}"), &format!("/home/j/p{}", n % 5), n as f64 * 30.0))
+                .map(|n| {
+                    entry(
+                        &format!("s{n}"),
+                        &format!("/home/j/p{}", n % 5),
+                        n as f64 * 30.0,
+                    )
+                })
                 .collect::<Vec<_>>(),
             None,
             None,
@@ -674,9 +685,15 @@ mod tests {
         );
         for blob in &field.blobs {
             assert!(blob.center.0 - blob.radius >= AREA.0 - 1.0, "{blob:?} left");
-            assert!(blob.center.0 + blob.radius <= AREA.2 + 1.0, "{blob:?} right");
+            assert!(
+                blob.center.0 + blob.radius <= AREA.2 + 1.0,
+                "{blob:?} right"
+            );
             assert!(blob.center.1 - blob.radius >= AREA.1 - 1.0, "{blob:?} top");
-            assert!(blob.center.1 + blob.radius <= AREA.3 + 1.0, "{blob:?} bottom");
+            assert!(
+                blob.center.1 + blob.radius <= AREA.3 + 1.0,
+                "{blob:?} bottom"
+            );
         }
     }
 
@@ -708,7 +725,8 @@ mod tests {
                 .unwrap()
                 .center
         };
-        let distance = |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+        let distance =
+            |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
         for id in ["a1", "a2", "a3"] {
             assert!(
                 distance(blob(id), center("jcode")) < distance(blob(id), center("site")),
@@ -821,10 +839,15 @@ mod tests {
         let field = field();
         let blob = field.blobs[0].clone();
         assert_eq!(
-            field.hit(blob.center.0, blob.center.1).map(|b| &b.session_id),
+            field
+                .hit(blob.center.0, blob.center.1)
+                .map(|b| &b.session_id),
             Some(&blob.session_id)
         );
-        let outside = (blob.center.0 + blob.radius * 0.95, blob.center.1 + blob.radius * 0.95);
+        let outside = (
+            blob.center.0 + blob.radius * 0.95,
+            blob.center.1 + blob.radius * 0.95,
+        );
         assert_ne!(
             field.hit(outside.0, outside.1).map(|b| &b.session_id),
             Some(&blob.session_id),
@@ -838,7 +861,10 @@ mod tests {
     #[test]
     fn the_label_is_the_session_name_not_its_hash() {
         assert_eq!(short_id("session_clover_1785130341680_5a8db08"), "clover");
-        assert_eq!(short_id("session_mushroom_1785129393446_e7007f8"), "mushroom");
+        assert_eq!(
+            short_id("session_mushroom_1785129393446_e7007f8"),
+            "mushroom"
+        );
         // No generated name: still has to produce something, and something
         // that distinguishes one session from the next.
         assert_ne!(short_id("9f0b21d4aa"), short_id("1c93aa4bb0"));
@@ -871,7 +897,10 @@ mod tests {
         assert!(!overview.is_animating());
         assert!((overview.phase() - 1.0).abs() < 1e-9);
         overview.close();
-        assert!(overview.is_visible(), "the field vanished before the zoom out");
+        assert!(
+            overview.is_visible(),
+            "the field vanished before the zoom out"
+        );
         for _ in 0..200 {
             overview.advance(0.016);
         }

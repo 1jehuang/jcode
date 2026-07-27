@@ -450,9 +450,7 @@ impl App {
         if self.model.overview.is_open() {
             return;
         }
-        self.model
-            .overview
-            .open(self.model.session_id.as_deref());
+        self.model.overview.open(self.model.session_id.as_deref());
         self.request_redraw();
     }
 
@@ -509,14 +507,36 @@ impl App {
         }
     }
 
+    /// Alt went down or came up.
+    ///
+    /// Held alone past [`OVERVIEW_HOLD`] this opens the session overview, and
+    /// releasing it commits to the highlighted session. Tracked from the
+    /// modifier event rather than from a key event because a bare modifier
+    /// never produces one of its own.
+    ///
+    /// A named method rather than an inline arm so the tests drive the same
+    /// code the window does: a test that reimplemented this gesture would keep
+    /// passing after the real handler stopped opening anything.
+    fn on_alt_changed(&mut self, down: bool, now: std::time::Instant) {
+        if down {
+            if self.alt_held_since.is_none() && !self.model.overview.is_open() {
+                self.alt_held_since = Some(now);
+                self.request_redraw();
+            }
+            return;
+        }
+        self.alt_held_since = None;
+        // Releasing Alt flies into whichever blob is highlighted.
+        self.close_overview(true);
+    }
+
     /// Advance the overview one frame: ripen a pending Alt hold into an open
     /// field, then step the zoom.
     ///
     /// Done on the frame rather than on a timer thread so the zoom is driven
     /// by the same clock as everything else on screen, and so a window that is
     /// not drawing is not silently animating either.
-    fn tick_overview(&mut self) {
-        let now = std::time::Instant::now();
+    fn tick_overview(&mut self, now: std::time::Instant) {
         if let Some(since) = self.alt_held_since
             && now.duration_since(since) >= OVERVIEW_HOLD
         {
@@ -1293,19 +1313,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                // Alt held alone opens the session overview, and releasing it
-                // commits. Tracked here rather than in the key handler because
-                // a bare modifier never produces a key event of its own.
-                if self.modifiers.alt_key() {
-                    if self.alt_held_since.is_none() && !self.model.overview.is_open() {
-                        self.alt_held_since = Some(std::time::Instant::now());
-                        self.request_redraw();
-                    }
-                } else {
-                    self.alt_held_since = None;
-                    // Releasing Alt flies into whichever blob is highlighted.
-                    self.close_overview(true);
-                }
+                self.on_alt_changed(self.modifiers.alt_key(), std::time::Instant::now());
             }
             WindowEvent::Focused(focused) => {
                 self.model.focused = focused;
@@ -1331,7 +1339,8 @@ impl ApplicationHandler for App {
                 // cannot see. Shift+Tab steps backwards, the Alt+Tab habit.
                 if self.model.overview.is_open() {
                     let action = if self.modifiers.shift_key()
-                        && logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
+                        && logical_key
+                            == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
                     {
                         Some(keymap::Action::OverviewPrev)
                     } else {
@@ -1361,7 +1370,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
-                self.tick_overview();
+                self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
                 self.model.stream.advance(std::time::Instant::now());
                 let mut scene = Scene::new();

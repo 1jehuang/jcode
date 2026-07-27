@@ -410,7 +410,11 @@ fn session_strip_second_group() -> Model {
 /// the two clusters have to read as two places.
 fn overview() -> Model {
     Model {
-        overview: crate::overview::Overview::pinned(true, 1.0, Some("session_mushroom_1785129393446_e7007f8")),
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_mushroom_1785129393446_e7007f8"),
+        ),
         ..session_strip()
     }
 }
@@ -419,7 +423,11 @@ fn overview() -> Model {
 /// looks right only when settled would still feel like a panel appearing.
 fn overview_opening() -> Model {
     Model {
-        overview: crate::overview::Overview::pinned(true, 0.45, Some("session_mushroom_1785129393446_e7007f8")),
+        overview: crate::overview::Overview::pinned(
+            true,
+            0.45,
+            Some("session_mushroom_1785129393446_e7007f8"),
+        ),
         ..session_strip()
     }
 }
@@ -429,7 +437,11 @@ fn overview_opening() -> Model {
 /// are drawn differently.
 fn overview_other_session() -> Model {
     Model {
-        overview: crate::overview::Overview::pinned(true, 1.0, Some("session_harbor_1785128881021_9f0b21d")),
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_harbor_1785128881021_9f0b21d"),
+        ),
         ..session_strip()
     }
 }
@@ -449,7 +461,11 @@ fn overview_single_session() -> Model {
     Model {
         session_id: Some("session_willow_1785130555000_7d3e9f1".into()),
         strip,
-        overview: crate::overview::Overview::pinned(true, 1.0, Some("session_willow_1785130555000_7d3e9f1")),
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_willow_1785130555000_7d3e9f1"),
+        ),
         ..attached_empty()
     }
 }
@@ -460,10 +476,14 @@ fn overview_many_sessions() -> Model {
     /// Short names in the daemon's own style, so the captured labels are the
     /// length the real ones will be.
     const NAMES: &[&str] = &[
-        "clover", "mushroom", "pebble", "harbor", "ember", "willow", "quartz",
-        "lantern", "meadow",
+        "clover", "mushroom", "pebble", "harbor", "ember", "willow", "quartz", "lantern", "meadow",
     ];
-    let id = |n: usize| format!("session_{}_17851290000{n:02}_a1b2c3d4", NAMES[n % NAMES.len()]);
+    let id = |n: usize| {
+        format!(
+            "session_{}_17851290000{n:02}_a1b2c3d4",
+            NAMES[n % NAMES.len()]
+        )
+    };
     let entries: Vec<crate::strip::Entry> = (0..18)
         .map(|n| crate::strip::Entry {
             session_id: id(n),
