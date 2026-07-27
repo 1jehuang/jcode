@@ -300,9 +300,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     session.autojudge_enabled = Some(app.autojudge_enabled);
     session.ensure_initial_session_context_message();
     app.session = session;
-    app.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot::default());
-    app.last_side_panel_focus_id = None;
-    app.diff_pane_scroll_x = 0;
+    app.clear_side_panel_for_new_session();
     app.provider_session_id = None;
 }
 
