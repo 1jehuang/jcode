@@ -17,10 +17,10 @@ fn stalled_process_emits_watchdog_stall_event() {
     }
 
     jcode_logging::init();
-    jcode_logging::watchdog::beat("probe.phase");
+    let _work = jcode_logging::watchdog::begin_work("probe.phase");
     jcode_logging::watchdog::set_detail("probe detail");
 
-    // Simulate the hang: no further beats for longer than the stall threshold.
+    // Simulate the hang: work is in flight (guard alive) but no beats follow.
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut found = false;
     while Instant::now() < deadline {
