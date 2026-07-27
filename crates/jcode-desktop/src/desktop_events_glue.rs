@@ -199,6 +199,8 @@ pub(crate) fn desktop_session_event_type_name(
         session_launch::DesktopSessionEvent::SessionRenamed { .. } => "session_renamed",
         session_launch::DesktopSessionEvent::TextDelta(_) => "text_delta",
         session_launch::DesktopSessionEvent::TextReplace(_) => "text_replace",
+        session_launch::DesktopSessionEvent::ReasoningDelta(_) => "reasoning_delta",
+        session_launch::DesktopSessionEvent::ReasoningDone { .. } => "reasoning_done",
         session_launch::DesktopSessionEvent::ToolStarted { .. } => "tool_started",
         session_launch::DesktopSessionEvent::ToolExecuting { .. } => "tool_executing",
         session_launch::DesktopSessionEvent::ToolInput { .. } => "tool_input",

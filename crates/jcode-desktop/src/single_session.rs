@@ -290,6 +290,7 @@ pub(crate) struct SingleSessionApp {
     pub(crate) live_session_id: Option<String>,
     pub(crate) messages: Vec<SingleSessionMessage>,
     pub(crate) streaming_response: String,
+    pub(crate) reasoning: SingleSessionReasoningState,
     pub(crate) status: Option<String>,
     status_kind: Option<SingleSessionStatus>,
     pub(crate) error: Option<String>,
@@ -456,6 +457,42 @@ struct SingleSessionTokenUsage {
     output: u64,
     cache_read_input: Option<u64>,
     cache_creation_input: Option<u64>,
+}
+
+/// Live reasoning ("thinking") state for the current turn.
+///
+/// The server streams `reasoning_delta` before any answer text. Without this
+/// the desktop transcript stays empty until the final response lands, which
+/// reads as a hang. We keep a rolling buffer, render its tail dim, and collapse
+/// it to a `thought for Ns` trace once the model moves on.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SingleSessionReasoningState {
+    /// Raw reasoning text streamed so far for the current step.
+    pub(crate) live: String,
+    /// Deltas seen since the last `ReasoningDone`, used to know a step is open.
+    pub(crate) streaming: bool,
+}
+
+impl SingleSessionReasoningState {
+    pub(crate) fn clear(&mut self) {
+        self.live.clear();
+        self.streaming = false;
+    }
+
+    /// Last few non-empty reasoning lines, which is what the transcript shows.
+    pub(crate) fn visible_tail(&self) -> Vec<&str> {
+        const MAX_VISIBLE_REASONING_LINES: usize = 3;
+        let mut tail = self
+            .live
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if tail.len() > MAX_VISIBLE_REASONING_LINES {
+            tail.drain(..tail.len() - MAX_VISIBLE_REASONING_LINES);
+        }
+        tail
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -651,6 +688,7 @@ pub(crate) enum SingleSessionStatus {
     LoadingModels,
     LoadingRecentSessions,
     Receiving,
+    Thinking,
     Connected,
     SendingInteractiveInput,
     Cancelling,
@@ -679,6 +717,7 @@ impl SingleSessionStatus {
             Self::LoadingModels => "loading models".to_string(),
             Self::LoadingRecentSessions => "loading recent sessions".to_string(),
             Self::Receiving => "receiving".to_string(),
+            Self::Thinking => "thinking".to_string(),
             Self::Connected => "connected".to_string(),
             Self::SendingInteractiveInput => "sending interactive input".to_string(),
             Self::Cancelling => "cancelling".to_string(),
@@ -711,6 +750,7 @@ impl SingleSessionStatus {
             Self::LoadingModels
             | Self::LoadingRecentSessions
             | Self::Receiving
+            | Self::Thinking
             | Self::Connected
             | Self::SendingInteractiveInput
             | Self::Cancelling
@@ -1099,6 +1139,7 @@ impl SingleSessionApp {
             live_session_id: None,
             messages,
             streaming_response: String::new(),
+            reasoning: SingleSessionReasoningState::default(),
             status: None,
             status_kind: None,
             error: None,
@@ -1224,6 +1265,7 @@ impl SingleSessionApp {
         self.detail_scroll = 0;
         self.messages.clear();
         self.streaming_response.clear();
+        self.reasoning.clear();
         self.status = None;
         self.status_kind = None;
         self.error = None;
@@ -1264,6 +1306,7 @@ impl SingleSessionApp {
             .map(SingleSessionMessage::from_session_transcript)
             .collect();
         self.streaming_response.clear();
+        self.reasoning.clear();
         self.tool.active_message_index = None;
         self.tool.input_buffer.clear();
         self.welcome.timeline = false;
@@ -1281,6 +1324,7 @@ impl SingleSessionApp {
         self.live_session_id = None;
         self.messages.clear();
         self.streaming_response.clear();
+        self.reasoning.clear();
         self.status = None;
         self.status_kind = None;
         self.error = None;
@@ -1332,6 +1376,7 @@ impl SingleSessionApp {
     pub(crate) fn should_show_session_title_header(&self) -> bool {
         self.messages.is_empty()
             && self.streaming_response.is_empty()
+            && self.reasoning.live.trim().is_empty()
             && self.error.is_none()
             && !self.model_picker.open
             && !self.session_switcher.open
@@ -1430,7 +1475,10 @@ impl SingleSessionApp {
     /// streamed token. Once text flows, the streaming tail cursor takes over
     /// as the "alive" cue at the end of the revealed text.
     pub(crate) fn streaming_activity_pill_visible(&self) -> bool {
-        self.has_activity_indicator() && self.streaming_response.is_empty()
+        self.has_activity_indicator()
+            && self.streaming_response.is_empty()
+            // Live reasoning is itself the "alive" cue; the pill would be noise.
+            && self.reasoning.live.trim().is_empty()
     }
 
     fn set_status(&mut self, status: SingleSessionStatus) {
@@ -1507,7 +1555,10 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn has_welcome_timeline_transcript(&self) -> bool {
-        !self.messages.is_empty() || !self.streaming_response.is_empty() || self.error.is_some()
+        !self.messages.is_empty()
+            || !self.streaming_response.is_empty()
+            || !self.reasoning.live.trim().is_empty()
+            || self.error.is_some()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1516,6 +1567,7 @@ impl SingleSessionApp {
             && self.live_session_id.is_none()
             && self.messages.is_empty()
             && self.streaming_response.is_empty()
+            && self.reasoning.live.trim().is_empty()
             && self.status.is_none()
             && self.error.is_none()
             && self.pending_images.is_empty()

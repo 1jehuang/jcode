@@ -247,6 +247,15 @@ pub enum DesktopSessionEvent {
     },
     TextDelta(String),
     TextReplace(String),
+    /// Streaming reasoning/thinking delta. Rendered live so the user sees work
+    /// in progress instead of a silent gap before the final response.
+    ReasoningDelta(String),
+    /// Reasoning finished for the current step, with wall-clock duration when
+    /// known. Stored in milliseconds so the event stays `Eq`/hashable like the
+    /// rest of the desktop event stream.
+    ReasoningDone {
+        duration_ms: Option<u64>,
+    },
     ToolStarted {
         id: Option<String>,
         name: String,
@@ -1189,6 +1198,8 @@ fn desktop_session_event_kind(event: &DesktopSessionEvent) -> &'static str {
         DesktopSessionEvent::SessionRenamed { .. } => "session_renamed",
         DesktopSessionEvent::TextDelta(_) => "text_delta",
         DesktopSessionEvent::TextReplace(_) => "text_replace",
+        DesktopSessionEvent::ReasoningDelta(_) => "reasoning_delta",
+        DesktopSessionEvent::ReasoningDone { .. } => "reasoning_done",
         DesktopSessionEvent::ToolStarted { .. } => "tool_started",
         DesktopSessionEvent::ToolExecuting { .. } => "tool_executing",
         DesktopSessionEvent::ToolInput { .. } => "tool_input",

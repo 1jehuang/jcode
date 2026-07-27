@@ -76,6 +76,18 @@ pub(crate) fn run_headless_chat_smoke(message: String) -> Result<()> {
                     serde_json::json!({"event": "text_delta", "chars": text.chars().count()})
                 );
             }
+            session_launch::DesktopSessionEvent::ReasoningDelta(text) => {
+                println!(
+                    "{}",
+                    serde_json::json!({"event": "reasoning_delta", "chars": text.chars().count()})
+                );
+            }
+            session_launch::DesktopSessionEvent::ReasoningDone { duration_ms } => {
+                println!(
+                    "{}",
+                    serde_json::json!({"event": "reasoning_done", "duration_ms": duration_ms})
+                );
+            }
             session_launch::DesktopSessionEvent::TextReplace(text) => {
                 response = text;
                 println!(

@@ -57,6 +57,7 @@ impl SingleSessionApp {
             "/clear" => {
                 self.messages.clear();
                 self.streaming_response.clear();
+                self.reasoning.clear();
                 self.error = None;
                 self.is_processing = false;
                 self.draft.clear();

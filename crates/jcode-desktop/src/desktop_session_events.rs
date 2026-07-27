@@ -139,6 +139,7 @@ fn desktop_session_event_can_wait_for_frame_tick(
     matches!(
         event,
         session_launch::DesktopSessionEvent::TextDelta(_)
+            | session_launch::DesktopSessionEvent::ReasoningDelta(_)
             | session_launch::DesktopSessionEvent::ToolInput { .. }
             | session_launch::DesktopSessionEvent::ToolExecuting { .. }
             | session_launch::DesktopSessionEvent::Status(_)
@@ -152,7 +153,9 @@ fn desktop_session_event_payload_bytes(event: &session_launch::DesktopSessionEve
         session_launch::DesktopSessionEvent::Status(status) => status.payload_bytes(),
         session_launch::DesktopSessionEvent::TextDelta(text)
         | session_launch::DesktopSessionEvent::TextReplace(text)
+        | session_launch::DesktopSessionEvent::ReasoningDelta(text)
         | session_launch::DesktopSessionEvent::Error(text) => text.len(),
+        session_launch::DesktopSessionEvent::ReasoningDone { .. } => 8,
         session_launch::DesktopSessionEvent::ToolInput { id, delta } => {
             id.as_deref().unwrap_or_default().len() + delta.len()
         }
@@ -242,6 +245,15 @@ pub(crate) fn coalesce_desktop_session_events(
                     existing.push_str(&delta);
                 } else {
                     coalesced.push(session_launch::DesktopSessionEvent::TextDelta(delta));
+                }
+            }
+            session_launch::DesktopSessionEvent::ReasoningDelta(delta) if !delta.is_empty() => {
+                if let Some(session_launch::DesktopSessionEvent::ReasoningDelta(existing)) =
+                    coalesced.last_mut()
+                {
+                    existing.push_str(&delta);
+                } else {
+                    coalesced.push(session_launch::DesktopSessionEvent::ReasoningDelta(delta));
                 }
             }
             session_launch::DesktopSessionEvent::ToolInput { id, delta } if !delta.is_empty() => {

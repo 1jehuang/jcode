@@ -29,6 +29,17 @@ pub(super) fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSe
             .get("text")
             .and_then(Value::as_str)
             .map(|text| DesktopSessionEvent::TextReplace(text.to_string())),
+        "reasoning_delta" => value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| DesktopSessionEvent::ReasoningDelta(text.to_string())),
+        "reasoning_done" => Some(DesktopSessionEvent::ReasoningDone {
+            duration_ms: value
+                .get("duration_secs")
+                .and_then(Value::as_f64)
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .map(|seconds| (seconds * 1000.0).round() as u64),
+        }),
         "connection_phase" => value
             .get("phase")
             .and_then(Value::as_str)
