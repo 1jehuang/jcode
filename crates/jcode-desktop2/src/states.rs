@@ -25,6 +25,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
+    ("working", working),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
     ("scrolled_back", scrolled_back),
@@ -81,6 +82,7 @@ fn connecting() -> Model {
         // which would make most caret nodes indistinguishable.
         focused: true,
         busy: false,
+        activity: crate::activity::Activity::default(),
         scroll: 0.0,
         selection: None,
         notice: None,
@@ -142,6 +144,7 @@ fn attached_empty() -> Model {
         // which would make most caret nodes indistinguishable.
         focused: true,
         busy: false,
+        activity: crate::activity::Activity::default(),
         scroll: 0.0,
         selection: None,
         notice: None,
@@ -389,6 +392,28 @@ fn streaming() -> Model {
                 .into(),
         )]),
         busy: true,
+        // Pinned so the spinner cell and the elapsed time are the same in
+        // every capture; a live clock here would make the node unreviewable.
+        activity: crate::activity::Activity::pinned(
+            2,
+            std::time::Duration::from_secs(8),
+            Some("reading crates/jcode-desktop2/src/scene.rs"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// A turn that has produced no text yet: the state the old design showed as a
+/// blank screen. The activity line is the whole of the feedback here, so it is
+/// worth a node of its own.
+fn working() -> Model {
+    Model {
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            5,
+            std::time::Duration::from_secs(42),
+            Some("running the desktop2 test suite"),
+        ),
         ..attached_empty()
     }
 }

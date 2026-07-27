@@ -181,6 +181,10 @@ fn run_e2e(message: &str) -> Result<()> {
             }
             harness::HarnessUpdate::TurnDone => {}
             // The e2e path drives one session, so the list is irrelevant here.
+            harness::HarnessUpdate::Activity(label) => {
+                println!("[e2e] activity: {label}");
+                model.activity.set_label(label, std::time::Instant::now());
+            }
             harness::HarnessUpdate::Sessions(_) => {}
         }
     }

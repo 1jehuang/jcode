@@ -225,8 +225,7 @@ mod tests {
             // And it must be the stronger of the two, or it would be doing
             // less work than the band it replaces.
             assert!(
-                (band - luma(theme.wash)).abs()
-                    > (luma(theme.selection) - luma(theme.wash)).abs(),
+                (band - luma(theme.wash)).abs() > (luma(theme.selection) - luma(theme.wash)).abs(),
                 "the washed band is weaker than the paper band in {:?}",
                 theme.mode
             );

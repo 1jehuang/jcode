@@ -4,6 +4,7 @@
 //! Vello vector rendering, Parley text layout, and a live harness API
 //! connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
+mod activity;
 mod capture;
 mod caret;
 mod cli;
@@ -132,6 +133,9 @@ pub struct Model {
     pub editor: editor::Editor,
     pub caret: caret::Caret,
     pub busy: bool,
+    /// What the agent is doing right now, and the spinner that proves the app
+    /// is still alive mid-turn.
+    pub activity: activity::Activity,
     /// Whether the window has keyboard focus. The field border and the caret
     /// both key off this: an unfocused input that still shows a blinking caret
     /// lies about where typing will go.
@@ -198,6 +202,7 @@ impl Default for Model {
             editor: editor::Editor::default(),
             caret: caret::Caret::default(),
             busy: false,
+            activity: activity::Activity::default(),
             focused: true,
             scroll: 0.0,
             selection: None,
@@ -271,6 +276,16 @@ impl Model {
         if let Some(notice) = &self.notice {
             return Some(notice.clone());
         }
+        // The activity line normally lives in the empty composer. When the user
+        // has already typed the next message the ghost line is gone, so it
+        // moves down here rather than disappearing: "is it working?" must be
+        // answerable in every state, not just the idle-composer one.
+        if self.busy
+            && !self.editor.is_empty()
+            && let Some(line) = self.activity.line(std::time::Instant::now())
+        {
+            return Some(line);
+        }
         if self.scroll > 0.0 {
             return Some("scrolled back".to_string());
         }
@@ -295,8 +310,15 @@ impl App {
                     self.model.model = Some(ModelId { provider, model });
                 }
                 harness::HarnessUpdate::Text(text) => self.model.transcript.append_assistant(&text),
+                harness::HarnessUpdate::Activity(label) => {
+                    self.model.busy = true;
+                    self.model
+                        .activity
+                        .set_label(label, std::time::Instant::now());
+                }
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
+                    self.model.activity.finish();
                 }
                 harness::HarnessUpdate::Sessions(entries) => {
                     // Rebuild around the session we are actually attached to,
@@ -324,6 +346,7 @@ impl App {
         }
         self.model.transcript = transcript::Transcript::default();
         self.model.busy = false;
+        self.model.activity.finish();
         self.model.scroll = 0.0;
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
@@ -348,6 +371,7 @@ impl App {
             .transcript
             .push(transcript::Message::user(content.clone()));
         self.model.busy = true;
+        self.model.activity.start(std::time::Instant::now());
         // Submitting jumps back to the live tail; otherwise the reply streams
         // in off-screen.
         self.model.scroll = 0.0;
@@ -655,13 +679,14 @@ impl App {
     /// When the loop must next wake to repaint, or `None` when nothing on
     /// screen is animating.
     ///
-    /// Two things want frames: the blinking caret, and the donut while it is on
-    /// screen. Both go through this one function so they cannot fight over
-    /// `ControlFlow`, and the earlier deadline wins.
+    /// Three things want frames: the blinking caret, the donut while it is on
+    /// screen, and the activity spinner while a turn runs. All go through this
+    /// one function so they cannot fight over `ControlFlow`, and the earliest
+    /// deadline wins.
     ///
     /// `None` matters as much as `Some`: an idle window must sleep rather than
-    /// spin, so the states that animate nothing (no window focus, a turn in
-    /// flight, a pinned caret with no donut) return `None` here.
+    /// spin, so the states that animate nothing (no window focus, a pinned
+    /// caret with no donut and no turn in flight) return `None` here.
     pub fn animation_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
         if !self.model.focused {
             return None;
@@ -670,10 +695,10 @@ impl App {
             .then(|| self.model.caret.next_toggle_at(now))
             .flatten();
         let donut = self.donut_animating().then(|| now + DONUT_FRAME);
-        match (caret, donut) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (only, None) | (None, only) => only,
-        }
+        // A running turn animates the activity spinner; this is what keeps the
+        // window from looking frozen while the agent works.
+        let spinner = self.model.activity.next_frame_at(now);
+        [caret, donut, spinner].into_iter().flatten().min()
     }
 
     /// Height of the transcript region in logical units.
