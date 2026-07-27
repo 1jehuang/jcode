@@ -657,7 +657,8 @@ fn draw_scrollbar(
         return;
     }
     let content = view.content_height.max(1.0);
-    let thumb = (region_height / content * region_height).max(SCROLLBAR_MIN_THUMB.min(region_height));
+    let thumb =
+        (region_height / content * region_height).max(SCROLLBAR_MIN_THUMB.min(region_height));
     // scroll counts pixels *up from the tail*, so 0 puts the thumb at the
     // bottom, which is where the newest message is.
     let travel = (region_height - thumb).max(0.0);
