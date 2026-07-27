@@ -245,3 +245,86 @@ fn test_parse_update_without_explicit_at() {
         _ => panic!("Expected UpdateFile"),
     }
 }
+
+// Issue #604: apply_patch can delete by absolute path, so it is a second route
+// to the same damage the bash gate blocks. `ToolContext::resolve_path` passes
+// absolute paths through unchanged, so nothing else bounds it.
+
+#[tokio::test]
+async fn apply_patch_refuses_to_delete_a_protected_path() {
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = temp.path().to_path_buf();
+    let previous = std::env::var("HOME").ok();
+    // SAFETY: single-threaded test setup; restored below.
+    unsafe { std::env::set_var("HOME", &home) };
+
+    // A credential file inside the protected ~/.ssh directory.
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).expect("ssh dir");
+    let key = ssh.join("id_ed25519");
+    std::fs::write(&key, "PRIVATE KEY").expect("key");
+
+    let patch = format!(
+        "*** Begin Patch\n*** Delete File: {}\n*** End Patch",
+        key.display()
+    );
+    let result = ApplyPatchTool
+        .execute(
+            serde_json::json!({ "patch_text": patch }),
+            ToolContext {
+                session_id: "patch-gate".to_string(),
+                message_id: "m".to_string(),
+                tool_call_id: "c".to_string(),
+                working_dir: Some(std::path::PathBuf::from("/tmp")),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await;
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("HOME", value) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    let output = result.expect("the tool should report, not error out");
+    assert!(
+        format!("{output:?}").contains("refused"),
+        "expected a refusal in the output: {output:?}"
+    );
+    assert!(
+        key.exists(),
+        "apply_patch must not delete a protected credential file"
+    );
+}
+
+#[tokio::test]
+async fn apply_patch_still_deletes_ordinary_files() {
+    // The guard must not break the tool's normal job.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let target = temp.path().join("obsolete.rs");
+    std::fs::write(&target, "fn old() {}\n").expect("file");
+
+    let patch = format!(
+        "*** Begin Patch\n*** Delete File: {}\n*** End Patch",
+        target.display()
+    );
+    ApplyPatchTool
+        .execute(
+            serde_json::json!({ "patch_text": patch }),
+            ToolContext {
+                session_id: "patch-ok".to_string(),
+                message_id: "m".to_string(),
+                tool_call_id: "c".to_string(),
+                working_dir: Some(temp.path().to_path_buf()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect("ordinary delete should succeed");
+
+    assert!(!target.exists(), "an ordinary file should still be deleted");
+}
