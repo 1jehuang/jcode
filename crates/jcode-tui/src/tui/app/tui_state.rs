@@ -1625,7 +1625,11 @@ impl crate::tui::TuiState for App {
     }
 
     fn auth_status(&self) -> crate::auth::AuthStatus {
-        crate::auth::AuthStatus::check_fast()
+        // Render path: never pay a cold credential probe on the frame thread.
+        // A TTL lapse serves the previous snapshot and refreshes in the
+        // background; the auth generation bump repaints the header when the
+        // refreshed snapshot differs.
+        crate::auth::AuthStatus::check_fast_nonblocking()
     }
 
     fn active_dual_credential(

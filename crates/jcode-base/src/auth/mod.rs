@@ -88,6 +88,12 @@ pub fn bump_auth_status_generation_for_tests() {
     AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Guards the background refresh spawned by
+/// [`AuthStatus::check_fast_nonblocking`] so an expired snapshot triggers one
+/// probe thread, not one per frame.
+static AUTH_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Per-process cache for command existence lookups.
 /// CLI tools don't get installed/uninstalled while jcode is running, so caching
 /// indefinitely per process is correct and avoids repeated PATH scans.
@@ -290,6 +296,72 @@ impl AuthStatus {
         let status = Self::check_uncached_fast();
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = Some((status.clone(), Instant::now(), home_key));
+        }
+
+        status
+    }
+
+    /// Non-blocking auth snapshot for per-frame render paths (the TUI header).
+    ///
+    /// [`Self::check_fast`] blocks on a cold probe (~20-30ms of credential-file
+    /// reads on this hardware), and the TUI's prepared-header cache re-probes
+    /// every TTL lapse - directly on the render thread, where it showed up as a
+    /// periodic 40-55ms frame while typing. This variant never runs a probe on
+    /// the caller's thread once a snapshot exists: it serves the freshest
+    /// cached snapshot (even if expired) and refreshes the cache on a detached
+    /// background thread, bumping the auth generation when the refreshed
+    /// snapshot actually differs so signature-keyed caches repaint.
+    ///
+    /// The only blocking case is the very first call in a process with no
+    /// cached snapshot at all, which matches the old behavior for frame one.
+    /// Tests always take the blocking path: background refreshes racing
+    /// per-test `JCODE_HOME` swaps would poison the shared cache.
+    pub fn check_fast_nonblocking() -> Self {
+        if running_in_test_harness() {
+            return Self::check_fast();
+        }
+
+        let home_key = auth_cache_home_key();
+        if let Ok(cache) = AUTH_STATUS_CACHE.read()
+            && let Some((ref status, ref when, ref cached_home)) = *cache
+            && when.elapsed().as_secs() < AUTH_STATUS_CACHE_TTL_SECS
+            && *cached_home == home_key
+        {
+            return status.clone();
+        }
+
+        let stale = AUTH_STATUS_FAST_CACHE
+            .read()
+            .ok()
+            .and_then(|cache| cache.clone())
+            .filter(|(_, _, cached_home)| *cached_home == home_key);
+
+        let Some((status, when, _)) = stale else {
+            // First probe of the process: nothing to serve yet.
+            return Self::check_fast();
+        };
+
+        if when.elapsed().as_secs() >= AUTH_STATUS_FAST_CACHE_TTL_SECS
+            && !AUTH_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            let previous = status.clone();
+            std::thread::Builder::new()
+                .name("auth-refresh".into())
+                .spawn(move || {
+                    let refreshed = Self::check_uncached_fast();
+                    let changed = format!("{previous:?}") != format!("{refreshed:?}");
+                    if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
+                        *cache = Some((refreshed, Instant::now(), auth_cache_home_key()));
+                    }
+                    AUTH_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+                    if changed {
+                        AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                })
+                .map(drop)
+                .unwrap_or_else(|_| {
+                    AUTH_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release)
+                });
         }
 
         status
