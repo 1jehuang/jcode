@@ -121,12 +121,16 @@ pub const WARM_BUDGET_US: u64 = 4_000;
 
 /// Budget the *automated gate* enforces, as opposed to the advisory one above.
 ///
-/// Deliberately far looser. A wall-clock number measured on a loaded CI box
-/// while other tests share the cores is worth several times its idle value, so
-/// a tight timing gate is a flaky gate, and a flaky gate gets muted, which
-/// leaves no gate at all. This one only catches an order-of-magnitude
-/// blow-up. The precise, machine-independent check is
-/// [`wasteful`]: it counts work rather than time, so it needs no slack.
+/// Deliberately far looser, for two compounding reasons. A wall-clock number
+/// measured while the rest of the suite shares the cores is worth several
+/// times its idle value, and CI runners are slower and more variable than a
+/// developer machine. A tight timing gate would therefore be a flaky gate, and
+/// a flaky gate gets muted, which leaves no gate at all.
+///
+/// So this one only catches an order-of-magnitude blow-up, and the real work
+/// is done by [`wasteful`], which counts layout work rather than time and
+/// needs no slack at all: it fires identically on the fastest laptop and the
+/// slowest shared runner.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const GATE_BUDGET_US: u64 = 40_000;
 
