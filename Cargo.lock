@@ -3640,6 +3640,7 @@ dependencies = [
  "jcode-base",
  "jcode-build-meta",
  "jcode-build-support",
+ "jcode-command-risk",
  "jcode-core",
  "jcode-import-core",
  "jcode-message-types",
@@ -3800,6 +3801,13 @@ dependencies = [
  "jcode-storage",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "jcode-command-risk"
+version = "0.1.0"
+dependencies = [
  "tempfile",
 ]
 

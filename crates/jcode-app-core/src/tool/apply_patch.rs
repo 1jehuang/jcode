@@ -110,6 +110,21 @@ impl Tool for ApplyPatchTool {
                 }
                 PatchHunk::DeleteFile { path } => {
                     let resolved = ctx.resolve_path(Path::new(path));
+                    // `resolve_path` passes absolute paths through unchanged, so
+                    // a patch can name any file on disk. The bash gate does not
+                    // cover this path, so apply the same absolute deny here
+                    // (#604). Only the catastrophic tier: ordinary file deletes
+                    // are this tool's normal job.
+                    let risk_ctx =
+                        jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
+                    if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+                        results.push(format!(
+                            "✗ {}: refused, this path is protected and must never \
+                             be deleted by an agent",
+                            path
+                        ));
+                        continue;
+                    }
                     let old_contents = tokio::fs::read_to_string(&resolved)
                         .await
                         .unwrap_or_default();

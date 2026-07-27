@@ -86,6 +86,7 @@ jcode-build-meta = { path = "../jcode-build-meta" }
 # Re-exported via `pub use jcode_base::*` in lib.rs. default-features=false so
 # this crate controls jcode-base's optional features (see [features] below).
 jcode-base = { path = "../jcode-base", default-features = false }
+jcode-command-risk = { path = "../jcode-command-risk" }
 jcode-core = { path = "../jcode-core" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-overnight-core = { path = "../jcode-overnight-core" }
