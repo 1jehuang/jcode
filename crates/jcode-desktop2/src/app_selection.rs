@@ -8,6 +8,42 @@
 use crate::{App, DOUBLE_CLICK, clipboard, select};
 
 impl App {
+    /// Scroll the transcript when a selection drag reaches its edge.
+    ///
+    /// Without this a selection is capped at one screenful: the pointer stops
+    /// at the edge of the window, so text above the region can be highlighted
+    /// only by releasing, scrolling, and shift-clicking. Every other text
+    /// surface scrolls under the drag instead, which is what makes selecting a
+    /// long reply possible at all.
+    ///
+    /// Returns whether the view moved, so the caller can re-hit-test against
+    /// the new scroll position rather than the stale one.
+    pub(crate) fn autoscroll_for_drag(&mut self, y: f64) -> bool {
+        /// How close to the edge the pointer must come, in logical units.
+        const MARGIN: f64 = 24.0;
+        /// How far one frame of autoscroll moves, in logical units. A fixed
+        /// step rather than a rate: the drag only scrolls while the pointer is
+        /// moving, so this is the granularity of the gesture, not a speed.
+        const STEP: f64 = 18.0;
+
+        let top = self.frame.body_top;
+        let bottom = self.frame.body_bottom;
+        let max = self.max_scroll();
+        if y < top + MARGIN {
+            // Scrolling up reveals older text, which is what dragging toward
+            // the top of the window is asking for.
+            let before = self.model.scroll;
+            self.model.scroll_up(STEP, max);
+            self.model.scroll != before
+        } else if y > bottom - MARGIN {
+            let before = self.model.scroll;
+            self.model.scroll_down(STEP);
+            self.model.scroll != before
+        } else {
+            false
+        }
+    }
+
     /// Whether a logical point is inside the transcript region.
     pub(crate) fn in_transcript(&self, x: f64, y: f64) -> bool {
         !self.model.transcript.is_empty()
