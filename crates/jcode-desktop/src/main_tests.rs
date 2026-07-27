@@ -233,6 +233,62 @@ fn desktop_session_events_convert_to_worker_wire_events() {
 }
 
 #[test]
+fn worker_wire_round_trip_preserves_live_progress_events() {
+    // Worker-hosted sessions render from the wire enum, so anything that falls
+    // through to RawJson is invisible in the UI. Reasoning, tool-arg streaming,
+    // and the prepare/execute distinction all have to survive the round trip.
+    let events = vec![
+        session_launch::DesktopSessionEvent::ReasoningDelta("weighing options".to_string()),
+        session_launch::DesktopSessionEvent::ReasoningDone {
+            duration_ms: Some(1500),
+        },
+        session_launch::DesktopSessionEvent::ToolStarted {
+            id: Some("tool-a".to_string()),
+            name: "bash".to_string(),
+        },
+        session_launch::DesktopSessionEvent::ToolInput {
+            id: Some("tool-a".to_string()),
+            delta: "{\"intent\": \"run tests\"".to_string(),
+        },
+        session_launch::DesktopSessionEvent::ToolExecuting {
+            id: Some("tool-a".to_string()),
+            name: "bash".to_string(),
+        },
+    ];
+
+    for event in events {
+        let wire = desktop_session_event_to_wire(&event);
+        assert!(
+            !matches!(wire, DesktopSessionEventWire::RawJson { .. }),
+            "{event:?} must have a typed wire form, otherwise the worker path drops it"
+        );
+        assert_eq!(
+            desktop_wire_session_event_to_runtime_event(wire),
+            Some(event.clone()),
+            "{event:?} should round trip through the worker wire unchanged"
+        );
+    }
+}
+
+#[test]
+fn worker_hosted_reasoning_reaches_the_transcript() {
+    let mut app = SingleSessionApp::new(None);
+    let wire = desktop_session_event_to_wire(&session_launch::DesktopSessionEvent::ReasoningDelta(
+        "inspecting the bridge".to_string(),
+    ));
+    let event = desktop_wire_session_event_to_runtime_event(wire)
+        .expect("reasoning must survive the worker wire");
+    app.apply_session_event(event);
+
+    let body = app.body_lines();
+    assert!(
+        body.iter()
+            .any(|line| line.contains("inspecting the bridge")),
+        "worker-hosted sessions should show thinking live too, got {body:?}"
+    );
+}
+
+#[test]
 fn desktop_app_worker_relaunch_replaces_existing_process_role() {
     let relaunch = DesktopRelaunch {
         binary: PathBuf::from("/tmp/jcode-desktop"),
