@@ -1,5 +1,6 @@
 use crate::storage;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use jcode_task_types::{
@@ -48,6 +49,133 @@ pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated todo co
 /// A completed todo is considered spike-finished when its final recorded
 /// confidence increase is at least this large.
 pub const TODO_CONFIDENCE_SPIKE: u8 = 15;
+
+/// Below this score on the very first plan write, the agent is admitting it
+/// does not yet know what it is being asked to do. That is worth one immediate
+/// nudge, because a whole turn spent on the wrong task cannot be recovered at
+/// turn end. Every other write-time check is deferred to the turn-end digest.
+pub const SEVERE_INTENT_MISUNDERSTANDING: u8 = 60;
+
+/// Which deferred quality check a recorded observation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateObservationKind {
+    IntentUnderstanding,
+    HillClimbability,
+}
+
+/// A point during the turn that would previously have interrupted the model
+/// with a quality-gate continuation.
+///
+/// Recording instead of interrupting is the whole point: assessments like
+/// intent understanding start low and rise as the agent explores the codebase,
+/// so a check that fires the moment a score is low mostly punishes agents that
+/// are already in the process of fixing it. These observations are replayed
+/// once at turn end and filtered against the final scores, so only the points
+/// that never resolved are surfaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateObservation {
+    pub kind: GateObservationKind,
+    /// Todo group for goal-scoped observations; `None` for plan-level ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The score observed when this point was flagged.
+    pub score: Option<u8>,
+}
+
+/// Header for the turn-end digest of unresolved quality-check points.
+///
+/// Deliberately framed as "double-check these" rather than as a refusal: by
+/// turn end the work is done, so the useful action is verification, not
+/// replanning. Names categories without disclosing scores or thresholds.
+pub const TODO_GATE_DIGEST_PREFIX: &str = "[automated todo quality review - not a user message] Before you treat this turn as finished, double-check the weak points it surfaced. Do not reply conversationally or wait for the user.";
+
+fn observation_is_resolved(
+    observation: &GateObservation,
+    plan: &TodoPlan,
+    goals: &[TodoGoal],
+) -> bool {
+    match observation.kind {
+        GateObservationKind::IntentUnderstanding => plan
+            .understands_user_intent
+            .is_some_and(|score| score >= LOW_INTENT_UNDERSTANDING),
+        GateObservationKind::HillClimbability => goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
+            .and_then(|goal| goal.hill_climbability)
+            .is_some_and(|score| score >= LOW_HILL_CLIMBABILITY),
+    }
+}
+
+/// Build the turn-end reminder from this turn's recorded observations.
+///
+/// Observations whose score has since cleared its threshold are dropped, which
+/// is the mechanism that makes deferral cheaper than gating: an agent whose
+/// understanding rose from 70 to 97 while reading the codebase is never told
+/// anything. Repeats of the same point collapse into one line with a count, so
+/// a long iterative turn cannot generate a wall of duplicates. Returns `None`
+/// when nothing is left to say.
+pub fn build_gate_digest(
+    observations: &[GateObservation],
+    plan: &TodoPlan,
+    goals: &[TodoGoal],
+) -> Option<String> {
+    let mut unresolved: Vec<(GateObservationKind, Option<String>, usize)> = Vec::new();
+    for observation in observations {
+        if observation_is_resolved(observation, plan, goals) {
+            continue;
+        }
+        match unresolved
+            .iter_mut()
+            .find(|(kind, group, _)| *kind == observation.kind && *group == observation.group)
+        {
+            Some((_, _, count)) => *count += 1,
+            None => unresolved.push((observation.kind, observation.group.clone(), 1)),
+        }
+    }
+    if unresolved.is_empty() {
+        return None;
+    }
+
+    let resolved_count =
+        observations.len() - unresolved.iter().map(|(_, _, count)| *count).sum::<usize>();
+    let mut message = String::from(TODO_GATE_DIGEST_PREFIX);
+    for (kind, group, count) in &unresolved {
+        let detail = match kind {
+            GateObservationKind::IntentUnderstanding => {
+                "your understanding of what the user actually wants never became solid. Re-read the request, confirm the work you did matches it, and state any interpretation you had to guess at.".to_string()
+            }
+            GateObservationKind::HillClimbability => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the goal{} never had a feedback loop you could measure progress against. Confirm the result is actually better, with concrete evidence rather than inspection.",
+                    label
+                )
+            }
+        };
+        let repeats = if *count > 1 {
+            format!(" (flagged {} times this turn)", count)
+        } else {
+            String::new()
+        };
+        message.push_str(&format!("\n- {}{}", detail, repeats));
+    }
+    if resolved_count > 0 {
+        message.push_str(&format!(
+            "\n{} other point{} resolved on their own as the work progressed; no action needed there.",
+            resolved_count,
+            if resolved_count == 1 { "" } else { "s" }
+        ));
+    }
+    message.push_str(
+        "\nAddress the points above, then update the todo tool with the assessments that reflect what you verified.",
+    );
+    Some(message)
+}
+
 const LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX: &str = "All todos are done. Todo confidence summary:";
 /// Pre-gate-rewrite texts (before the "[automated todo completion gate" prefix)
 /// still exist in persisted transcripts; keep detecting them so reload/resume
@@ -156,6 +284,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
+        || trimmed.starts_with(TODO_GATE_DIGEST_PREFIX)
 }
 
 pub fn load_todos(session_id: &str) -> Result<Vec<TodoItem>> {
@@ -270,9 +399,256 @@ fn plan_path(session_id: &str) -> Result<PathBuf> {
     Ok(base.join("todos").join(format!("{}-plan.json", session_id)))
 }
 
+/// Deferred quality-check observations for the current turn.
+///
+/// Kept in its own file for the same reason goals and plan are: each format
+/// stays independently readable. This one is turn-scoped rather than durable,
+/// cleared once the digest has been delivered.
+pub fn load_gate_observations(session_id: &str) -> Result<Vec<GateObservation>> {
+    let path = gate_observations_path(session_id)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    storage::read_json(&path).or_else(|_| Ok(Vec::new()))
+}
+
+pub fn save_gate_observations(session_id: &str, observations: &[GateObservation]) -> Result<()> {
+    let path = gate_observations_path(session_id)?;
+    storage::write_json_fast(&path, observations)
+}
+
+/// Append this write's observations, capped so a very long iterative turn
+/// cannot grow the file without bound. The digest collapses repeats anyway, so
+/// dropping the oldest entries past the cap costs no information the reminder
+/// would have used.
+pub fn append_gate_observations(session_id: &str, new: &[GateObservation]) -> Result<()> {
+    if new.is_empty() {
+        return Ok(());
+    }
+    let mut observations = load_gate_observations(session_id).unwrap_or_default();
+    observations.extend(new.iter().cloned());
+    if observations.len() > MAX_GATE_OBSERVATIONS {
+        let excess = observations.len() - MAX_GATE_OBSERVATIONS;
+        observations.drain(0..excess);
+    }
+    save_gate_observations(session_id, &observations)
+}
+
+pub fn clear_gate_observations(session_id: &str) -> Result<()> {
+    let path = gate_observations_path(session_id)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+/// Upper bound on retained observations per turn.
+const MAX_GATE_OBSERVATIONS: usize = 256;
+
+fn gate_observations_path(session_id: &str) -> Result<PathBuf> {
+    let base = storage::jcode_dir()?;
+    Ok(base
+        .join("todos")
+        .join(format!("{}-gate-observations.json", session_id)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn intent_observation(score: Option<u8>) -> GateObservation {
+        GateObservation {
+            kind: GateObservationKind::IntentUnderstanding,
+            group: None,
+            score,
+        }
+    }
+
+    fn hill_observation(group: Option<&str>, score: Option<u8>) -> GateObservation {
+        GateObservation {
+            kind: GateObservationKind::HillClimbability,
+            group: group.map(str::to_string),
+            score,
+        }
+    }
+
+    /// The point of deferring: understanding of a request starts low and rises
+    /// as the agent explores, so a flag raised early must vanish once the score
+    /// has cleared by turn end. This is the case that used to generate a nudge
+    /// on every single write.
+    #[test]
+    fn digest_drops_points_that_resolved_during_the_turn() {
+        let observations = vec![
+            intent_observation(Some(70)),
+            intent_observation(Some(80)),
+            intent_observation(Some(92)),
+        ];
+        let resolved = TodoPlan {
+            understands_user_intent: Some(QUALITY_GATE_THRESHOLD),
+            understands_user_intent_history: vec![70, 80, 92, QUALITY_GATE_THRESHOLD],
+            ..Default::default()
+        };
+        assert_eq!(build_gate_digest(&observations, &resolved, &[]), None);
+    }
+
+    #[test]
+    fn digest_reports_a_point_that_never_resolved() {
+        let observations = vec![intent_observation(Some(70))];
+        let unresolved = TodoPlan {
+            understands_user_intent: Some(70),
+            understands_user_intent_history: vec![70],
+            ..Default::default()
+        };
+        let digest = build_gate_digest(&observations, &unresolved, &[])
+            .expect("an unresolved point should be surfaced");
+        assert!(digest.starts_with(TODO_GATE_DIGEST_PREFIX));
+        assert!(digest.contains("what the user actually wants"));
+        // Framed as verification, since by turn end the work is already done.
+        assert!(digest.contains("double-check"));
+        // Private calibration stays private.
+        assert!(!digest.contains("70"));
+        assert!(!digest.contains(&QUALITY_GATE_THRESHOLD.to_string()));
+        assert!(!digest.to_ascii_lowercase().contains("threshold"));
+    }
+
+    /// A long iterative turn flags the same point on every write. The digest
+    /// must collapse those into one line, not a wall of duplicates.
+    #[test]
+    fn digest_collapses_repeats_and_counts_them() {
+        let observations: Vec<GateObservation> = (0..9)
+            .map(|_| hill_observation(Some("utf16 transcode"), Some(84)))
+            .collect();
+        let goals = vec![TodoGoal {
+            group: Some("utf16 transcode".to_string()),
+            hill_climbability: Some(84),
+            ..Default::default()
+        }];
+        let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
+            .expect("an unresolved goal should be surfaced");
+        assert_eq!(
+            digest.matches("\n- ").count(),
+            1,
+            "nine identical flags should collapse to one line: {digest}"
+        );
+        assert!(digest.contains("flagged 9 times"));
+        assert!(digest.contains("utf16 transcode"));
+    }
+
+    #[test]
+    fn digest_separates_goals_and_notes_resolved_points() {
+        let observations = vec![
+            hill_observation(Some("measured"), Some(50)),
+            hill_observation(Some("unmeasured"), Some(50)),
+            hill_observation(Some("unmeasured"), Some(55)),
+        ];
+        let goals = vec![
+            TodoGoal {
+                group: Some("measured".to_string()),
+                hill_climbability: Some(QUALITY_GATE_THRESHOLD),
+                ..Default::default()
+            },
+            TodoGoal {
+                group: Some("unmeasured".to_string()),
+                hill_climbability: Some(55),
+                ..Default::default()
+            },
+        ];
+        let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
+            .expect("the unmeasured goal should be surfaced");
+        assert_eq!(digest.matches("\n- ").count(), 1);
+        assert!(digest.contains("unmeasured"));
+        assert!(!digest.contains("\"measured\""));
+        assert!(digest.contains("1 other point resolved on their own"));
+    }
+
+    /// An ungrouped goal has no label to name, so the line must still read
+    /// cleanly rather than rendering an empty quoted string.
+    #[test]
+    fn digest_handles_the_ungrouped_goal() {
+        let digest = build_gate_digest(
+            &[hill_observation(None, Some(10))],
+            &TodoPlan::default(),
+            &[TodoGoal {
+                hill_climbability: Some(10),
+                ..Default::default()
+            }],
+        )
+        .expect("ungrouped goal should be surfaced");
+        assert!(!digest.contains("\"\""));
+        assert!(digest.contains("the goal never had a feedback loop"));
+    }
+
+    #[test]
+    fn digest_is_empty_without_observations() {
+        assert_eq!(build_gate_digest(&[], &TodoPlan::default(), &[]), None);
+    }
+
+    /// The digest is persisted as a user-role message so the model treats it as
+    /// a continuation, so reload must not re-render it as a user prompt.
+    #[test]
+    fn digest_is_recognized_as_a_synthetic_message() {
+        let digest = build_gate_digest(&[intent_observation(Some(70))], &TodoPlan::default(), &[])
+            .expect("digest");
+        assert!(is_auto_poke_message(&digest));
+    }
+
+    #[test]
+    fn gate_observations_round_trip_and_clear() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let session = "gate-observation-round-trip";
+        assert!(
+            load_gate_observations(session)
+                .expect("load empty")
+                .is_empty()
+        );
+        append_gate_observations(session, &[intent_observation(Some(70))]).expect("append");
+        append_gate_observations(session, &[hill_observation(Some("perf"), Some(80))])
+            .expect("append");
+        let stored = load_gate_observations(session).expect("load");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].kind, GateObservationKind::IntentUnderstanding);
+        assert_eq!(stored[1].group.as_deref(), Some("perf"));
+
+        clear_gate_observations(session).expect("clear");
+        assert!(load_gate_observations(session).expect("reload").is_empty());
+        // Clearing an absent log is not an error, since the digest path clears
+        // unconditionally.
+        clear_gate_observations(session).expect("clear again");
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    /// A very long turn must not grow the log without bound. Repeats collapse in
+    /// the digest anyway, so dropping the oldest costs nothing it would report.
+    #[test]
+    fn gate_observation_log_is_capped() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let session = "gate-observation-cap";
+        let batch: Vec<GateObservation> = (0..MAX_GATE_OBSERVATIONS + 50)
+            .map(|_| intent_observation(Some(70)))
+            .collect();
+        append_gate_observations(session, &batch).expect("append");
+        assert_eq!(
+            load_gate_observations(session).expect("load").len(),
+            MAX_GATE_OBSERVATIONS
+        );
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
 
     #[test]
     fn built_auto_poke_messages_are_detected() {
@@ -539,6 +915,7 @@ mod tests {
         let plan = TodoPlan {
             user_intention: Some("Keep resumed work easy to identify".to_string()),
             understands_user_intent: Some(97),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -561,6 +938,7 @@ mod tests {
         let plan = TodoPlan {
             user_intention: Some("Preserve why the user requested the work".to_string()),
             understands_user_intent: Some(97),
+            ..Default::default()
         };
         save_plan("user-intention-round-trip", &plan).expect("save plan");
         let stored =

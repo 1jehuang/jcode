@@ -2264,6 +2264,14 @@ fn process_sse_event(
                             name: mapped_name,
                         });
                     }
+                    ApiContentBlockStart::Unknown => {
+                        // Newer/unsupported block type. Parsing succeeded, so
+                        // the rest of the stream stays intact; there is simply
+                        // nothing for this build to surface.
+                        jcode_base::logging::warn(
+                            "Anthropic stream sent an unrecognized content_block_start type; ignoring the block",
+                        );
+                    }
                 }
             }
         }

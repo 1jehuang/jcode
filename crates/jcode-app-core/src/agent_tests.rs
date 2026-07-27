@@ -1310,6 +1310,28 @@ fn output_budget_truncation_requests_a_continuation() {
 }
 
 #[test]
+fn stranded_tool_use_stop_is_detected() {
+    // Second half of the Opus 5 DeepSWE incident: the provider reported
+    // stop_reason="tool_use" while the parsed tool-call list was empty, so the
+    // turn loop had nothing to execute and broke out mid-task, discarding every
+    // uncommitted edit. `tool_use` is a normal completion reason, so
+    // `should_continue_after_stop_reason` must keep rejecting it; the stranded
+    // case is only recoverable when it is paired with zero tool calls, which is
+    // exactly what this predicate is for.
+    assert!(Agent::is_stranded_tool_use_stop(Some("tool_use")));
+    assert!(Agent::is_stranded_tool_use_stop(Some("TOOL_USE")));
+    assert!(Agent::is_stranded_tool_use_stop(Some(" tool_use ")));
+
+    assert!(!Agent::is_stranded_tool_use_stop(Some("end_turn")));
+    assert!(!Agent::is_stranded_tool_use_stop(Some("max_tokens")));
+    assert!(!Agent::is_stranded_tool_use_stop(Some("")));
+    assert!(!Agent::is_stranded_tool_use_stop(None));
+    // Must stay disjoint from the truncation path so a turn never takes both
+    // continuation branches for one stop reason.
+    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
+}
+
+#[test]
 fn guardrail_stop_reason_detection() {
     assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
     assert!(Agent::is_guardrail_stop_reason(Some("REFUSAL")));
@@ -1360,78 +1382,100 @@ fn guardrail_notice_absent_for_normal_turns() {
 
 include!("agent_tests/retention_readiness.rs");
 
-#[test]
-fn tool_use_stop_with_no_tool_calls_is_an_unfinished_turn() {
-    // Benchmark incident, DeepSWE v1.1 Opus 5 low: two trials ended with the
-    // provider reporting stop_reason=tool_use while the parsed response carried
-    // ZERO tool calls. `should_continue_after_stop_reason` returns false for
-    // `tool_use` (correctly: a normal tool_use turn continues by executing the
-    // requested tools), so with no tools to execute the run simply ended.
-    //
-    // The damage is silent and total: jcode exited 0 with empty stderr after
-    // ~1900s and ~1200s of correct work, and because the benchmark harvests
-    // `git diff base HEAD`, both trials submitted a 0-byte patch and scored 0.
-    // 110 of 112 trials ended `end_turn`; the 2 that ended `tool_use` are
-    // exactly the 2 zero-patch failures.
-    //
-    // This test pins the CURRENT semantics so the distinction stays explicit:
-    // `tool_use` is not a continuation-worthy stop reason on its own, which
-    // means the caller is responsible for detecting "tool_use but nothing to
-    // run" and must not treat it as a completed turn.
-    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
+/// Provider that reproduces the DeepSWE Opus 5 incident: the first response
+/// ends with `stop_reason: "tool_use"` while carrying no tool-use block at all,
+/// which is what happens when an unrecognized content block is dropped from the
+/// stream. The second response is a normal completion, so a correct agent
+/// recovers and this provider's queue is exhausted.
+#[derive(Clone, Default)]
+struct StrandedToolUseProvider {
+    calls: Arc<std::sync::Mutex<usize>>,
+}
 
-    // The neighbouring truncation reasons DO continue, so a turn cut off by the
-    // output budget cannot be confused with this case.
-    assert!(Agent::should_continue_after_stop_reason("max_tokens"));
+#[async_trait]
+impl Provider for StrandedToolUseProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = {
+            let mut guard = self.calls.lock().unwrap();
+            *guard += 1;
+            *guard
+        };
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            if call == 1 {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta("working on it".to_string())))
+                    .await;
+                // No ToolUseStart: the tool block was lost, yet the provider
+                // still reports that it stopped in order to call a tool.
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("tool_use".to_string()),
+                    }))
+                    .await;
+            } else {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta("all done".to_string())))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("end_turn".to_string()),
+                    }))
+                    .await;
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
 
-    // A guardrail stop is a third, distinct outcome: terminal, and not an
-    // unfinished turn. Four TB 2.1 tasks hit this on claude-opus-5 (Anthropic
-    // `cyber` usage policy), and it must never be retried as if truncated.
-    assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
-    assert!(!Agent::should_continue_after_stop_reason("refusal"));
+    fn name(&self) -> &str {
+        "stranded-tool-use"
+    }
 
-    // The existing notice path DOES cover this shape: a tool_use stop that
-    // produced no visible text is surfaced rather than passing as a clean turn.
-    // That is the seam a fix should build on, so pin that it fires here.
-    let notice = Agent::provider_guardrail_notice(Some("tool_use"), true, false);
-    assert!(
-        notice.is_some(),
-        "a tool_use stop with no visible output must surface a notice, not look like a finished turn"
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// End-to-end guard for the incident. Before the fix the agent took the
+/// "no tool calls" branch and ended the turn on the very first response, so a
+/// benchmark trial stopped mid-task and its uncommitted work was never
+/// captured. The agent must instead ask the model to continue, which shows up
+/// as a second provider call and a final turn that ends normally.
+#[tokio::test]
+async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let stranded = StrandedToolUseProvider::default();
+    let calls = stranded.calls.clone();
+    let provider: Arc<dyn Provider> = Arc::new(stranded);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("do the task", Vec::new(), None, tx)
+        .await
+        .expect("turn should complete");
+
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TextDelta { text: delta } = event {
+            text.push_str(&delta);
+        }
+    }
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        2,
+        "a tool_use stop with no tool call must trigger exactly one continuation request"
     );
-    let notice = notice.unwrap();
     assert!(
-        notice.contains("tool_use"),
-        "notice should name the stop reason: {notice}"
+        text.contains("all done"),
+        "the recovered turn must deliver the model's real completion, got {text:?}"
     );
-
-    // A normal tool_use turn that produced visible text must stay silent.
-    assert!(Agent::provider_guardrail_notice(Some("tool_use"), false, false).is_none());
-
-    // WHERE THE FAILING TRIALS EXITED, located by elimination so the next
-    // investigation starts from the code path instead of re-deriving it.
-    //
-    // turn_loops.rs has five `break` sites. Ruled out: the two context-limit
-    // retries (neither trial hit a context error), the stream-teardown break
-    // (it ends one stream, not the turn), and the `handles_tools_internally`
-    // break (false for the Anthropic API). That leaves the
-    // `tool_calls.is_empty()` branch at the end of the turn.
-    //
-    // That branch DOES have a recovery: when the response is empty and the
-    // prompt ended with a tool result it injects "provide the final answer" and
-    // continues, up to MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS (5). Both
-    // failing trials show only TWO trailing empty responses, so the cap was
-    // never exhausted: the recovery was not eligible in the first place. The
-    // gate is `prompt_has_recent_tool_result`
-    // (Self::messages_end_with_tool_result). When the model reports
-    // stop_reason=tool_use but the parsed tool calls are empty, the assistant
-    // turn is appended with no following tool result, so the prompt stops ending
-    // with one and the retry is skipped.
-    //
-    // Two things worth fixing together:
-    //   1. The branch then breaks and returns normally, so the guardrail notice
-    //      is cosmetic: the process still exits 0 and a benchmark harness
-    //      records success while submitting nothing. It should fail loudly.
-    //   2. A tool_use stop carrying zero parsed tool calls is self-evidently an
-    //      unfinished turn whether or not a tool result preceded it, so it
-    //      should be continuation-eligible on its own.
 }

@@ -177,6 +177,7 @@ impl BridgeState {
                         } else {
                             "idle".into()
                         },
+                        transcript_bytes: Self::transcript_bytes(session_id),
                     })
                     .collect();
                 vec![Outbound::Reply(ServerFrame::reply(
@@ -233,6 +234,7 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
+                                transcript_bytes: Self::transcript_bytes(&session_id),
                                 session_id,
                                 working_dir: None,
                                 title: None,
@@ -411,6 +413,22 @@ impl BridgeState {
         let text = std::fs::read_to_string(path).ok()?;
         let value: Value = serde_json::from_str(&text).ok()?;
         value["working_dir"].as_str().map(str::to_string)
+    }
+
+    /// Size of a session's stored record, in bytes.
+    ///
+    /// A stat rather than a parse: this runs for every session on every list
+    /// request, and deserializing a dozen multi-megabyte transcripts to count
+    /// their characters would make the cheap call expensive. The file is
+    /// almost entirely message content, so its size tracks the conversation
+    /// closely enough for a client to size or sort by.
+    fn transcript_bytes(session_id: &str) -> Option<u64> {
+        let home = std::env::var_os("HOME")?;
+        let path = std::path::Path::new(&home)
+            .join(".jcode")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        std::fs::metadata(path).ok().map(|meta| meta.len())
     }
 
     /// Record the session set the daemon reported, plus any working

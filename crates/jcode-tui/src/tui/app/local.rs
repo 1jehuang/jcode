@@ -61,6 +61,9 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
+    // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
+    // the last phase that made progress.
+    crate::logging::watchdog::beat("tui.idle_tick");
     // The decorative animation must still request redraws here: the run loops
     // decide *how* to paint (cheap animation-only repaint vs full frame) at the
     // draw site. Excluding it here instead would mean animation ticks request
@@ -133,6 +136,7 @@ pub(super) fn handle_terminal_event(
     terminal: &mut DefaultTerminal,
     event: Option<std::result::Result<Event, std::io::Error>>,
 ) -> Result<bool> {
+    crate::logging::watchdog::beat("tui.terminal_event");
     let mut needs_redraw = apply_terminal_event(app, terminal, event)?;
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {

@@ -73,6 +73,21 @@ pub enum Action {
     SessionRight,
     SessionUp,
     SessionDown,
+
+    /// Overview field navigation, while the overview is held open. Spatial
+    /// rather than list motion: the field is 2D, so these move to whichever
+    /// blob actually lies that way.
+    OverviewLeft,
+    OverviewRight,
+    OverviewUp,
+    OverviewDown,
+    /// Cycle the field in reading order, for Alt+Tab muscle memory.
+    OverviewNext,
+    OverviewPrev,
+    /// Attach to the highlighted session and close the field.
+    OverviewCommit,
+    /// Close the field without switching.
+    OverviewCancel,
 }
 
 impl Action {
@@ -381,6 +396,42 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
     ("ctrl+j / ctrl+[ / ctrl+]", "no prompt-jump anchors yet"),
     ("super+5", "onboarding simulator is a TUI dev aid"),
 ];
+
+/// Resolve a key press while the overview is held open.
+///
+/// A separate table rather than more arms in [`resolve`]: the overview owns
+/// the whole keyboard while it is up, so the same arrow that moves the text
+/// cursor in the composer moves across the field here. Keeping the two
+/// resolvers apart is what makes that impossible to get wrong, and lets the
+/// overview's bindings be tested without a window.
+///
+/// `None` means the key does nothing while the field is up. Unbound keys are
+/// swallowed rather than typed: text arriving in a composer you cannot see
+/// would be worse than a dead key.
+pub fn resolve_overview(key: &Key) -> Option<Action> {
+    match key {
+        Key::Named(named) => match named {
+            NamedKey::ArrowLeft => Some(Action::OverviewLeft),
+            NamedKey::ArrowRight => Some(Action::OverviewRight),
+            NamedKey::ArrowUp => Some(Action::OverviewUp),
+            NamedKey::ArrowDown => Some(Action::OverviewDown),
+            NamedKey::Tab => Some(Action::OverviewNext),
+            NamedKey::Enter | NamedKey::Space => Some(Action::OverviewCommit),
+            NamedKey::Escape => Some(Action::OverviewCancel),
+            _ => None,
+        },
+        Key::Character(text) => match text.chars().next()?.to_ascii_lowercase() {
+            // vim motion, because the field is a spatial surface and the
+            // author's hands are already on the home row.
+            'h' => Some(Action::OverviewLeft),
+            'l' => Some(Action::OverviewRight),
+            'k' => Some(Action::OverviewUp),
+            'j' => Some(Action::OverviewDown),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 /// Resolve a key press to an action. `None` means the key is not bound and
 /// should fall through to text insertion.

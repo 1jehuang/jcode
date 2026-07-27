@@ -171,11 +171,35 @@ impl TextSystem {
     /// Draw an already-built layout at `origin` (logical units). Pairs with
     /// [`Self::layout_paragraph`] so geometry and glyphs share one layout.
     pub fn draw_layout(scene: &mut Scene, layout: &Layout<Brush>, origin: (f64, f64), scale: f64) {
+        Self::draw_layout_revealed(scene, layout, origin, scale, f64::INFINITY);
+    }
+
+    /// Draw a layout with only its first `revealed` glyphs on screen, the
+    /// leading edge fading and drifting in (see [`crate::stream`]).
+    ///
+    /// `revealed` is a *fractional glyph ordinal* within this layout, and
+    /// `f64::INFINITY` means "all of it", which is the path every non-streaming
+    /// caller takes and which costs exactly what the plain draw used to: the
+    /// ramp is only entered for the handful of glyphs at the tip.
+    pub fn draw_layout_revealed(
+        scene: &mut Scene,
+        layout: &Layout<Brush>,
+        origin: (f64, f64),
+        scale: f64,
+        revealed: f64,
+    ) {
         let origin = (origin.0 * scale, origin.1 * scale);
+        // Glyphs are counted across the whole layout, not per run, so the
+        // reveal sweeps continuously through a styled paragraph instead of
+        // restarting at every bold span.
+        let mut ordinal = 0.0;
         for line in layout.lines() {
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
-                    draw_glyph_run(scene, &glyph_run, origin);
+                    if revealed.is_finite() && ordinal >= revealed {
+                        return;
+                    }
+                    ordinal = draw_glyph_run(scene, &glyph_run, origin, scale, revealed, ordinal);
                 }
             }
         }
@@ -203,29 +227,95 @@ impl TextSystem {
     }
 }
 
-fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f64, f64)) {
+/// Draw one glyph run, starting at glyph ordinal `ordinal`, and return the
+/// ordinal after it.
+///
+/// Glyphs at the leading edge differ in alpha and vertical offset, and a Vello
+/// glyph batch carries one brush and one transform, so the run is emitted as
+/// batches of glyphs sharing a quantised ramp step. Settled text is a single
+/// batch, which is why a long reply does not become thousands of draw calls.
+fn draw_glyph_run(
+    scene: &mut Scene,
+    glyph_run: &GlyphRun<'_, Brush>,
+    origin: (f64, f64),
+    scale: f64,
+    revealed: f64,
+    ordinal: f64,
+) -> f64 {
     let run = glyph_run.run();
     let style = glyph_run.style();
     let mut x = glyph_run.offset();
     let y = glyph_run.baseline();
-    scene
-        .draw_glyphs(run.font())
-        .font_size(run.font_size())
-        .transform(Affine::translate((origin.0, origin.1)))
-        .normalized_coords(run.normalized_coords())
-        .brush(&style.brush)
-        .draw(
-            Fill::NonZero,
-            glyph_run.glyphs().map(|glyph| {
-                let glyph_x = x + glyph.x;
-                x += glyph.advance;
-                vello::Glyph {
-                    id: glyph.id,
-                    x: glyph_x,
-                    y: y - glyph.y,
-                }
-            }),
-        );
+    let mut ordinal = ordinal;
+    // Batches of glyphs that share a ramp step, flushed when the step changes.
+    let mut batch: Vec<vello::Glyph> = Vec::new();
+    let mut batch_step: Option<u8> = None;
+
+    let flush = |scene: &mut Scene, batch: &mut Vec<vello::Glyph>, step: Option<u8>| {
+        let Some(step) = step else { return };
+        if batch.is_empty() {
+            return;
+        }
+        let alpha = f32::from(step) / f32::from(RAMP_STEPS);
+        let brush = fade_brush(&style.brush, alpha);
+        let rise = crate::stream::glyph_rise(alpha) * scale;
+        scene
+            .draw_glyphs(run.font())
+            .font_size(run.font_size())
+            .transform(Affine::translate((origin.0, origin.1 - rise)))
+            .normalized_coords(run.normalized_coords())
+            .brush(&brush)
+            .draw(Fill::NonZero, batch.drain(..));
+    };
+
+    for glyph in glyph_run.glyphs() {
+        let glyph_x = x + glyph.x;
+        x += glyph.advance;
+        let Some(alpha) = crate::stream::glyph_alpha(ordinal, revealed) else {
+            break;
+        };
+        ordinal += 1.0;
+        // Quantise so settled text collapses into one batch and the ramp is
+        // still smooth: the eye cannot resolve 1/24 of an alpha step.
+        let step = (alpha * f32::from(RAMP_STEPS)).round().clamp(0.0, 255.0) as u8;
+        if batch_step != Some(step) {
+            flush(scene, &mut batch, batch_step);
+            batch_step = Some(step);
+        }
+        batch.push(vello::Glyph {
+            id: glyph.id,
+            x: glyph_x,
+            y: y - glyph.y,
+        });
+    }
+    flush(scene, &mut batch, batch_step);
+    ordinal
+}
+
+/// Total glyphs in a layout. The reveal needs this to turn "how far through
+/// this message are we" into "how many glyphs of this block are on screen",
+/// and a layout does not expose a glyph count directly.
+pub fn glyph_count(layout: &Layout<Brush>) -> usize {
+    layout
+        .lines()
+        .flat_map(|line| line.items())
+        .map(|item| match item {
+            PositionedLayoutItem::GlyphRun(run) => run.glyphs().count(),
+            PositionedLayoutItem::InlineBox(_) => 0,
+        })
+        .sum()
+}
+
+/// Quantisation steps of the fade ramp.
+const RAMP_STEPS: u8 = 24;
+
+/// A brush at `alpha` times its own opacity. Only solid brushes are used by
+/// this app's text, and a gradient tip would be a different feature.
+fn fade_brush(brush: &Brush, alpha: f32) -> Brush {
+    match brush {
+        Brush::Solid(color) => Brush::Solid(color.multiply_alpha(alpha)),
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]

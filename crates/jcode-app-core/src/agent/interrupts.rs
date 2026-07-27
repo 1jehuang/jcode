@@ -406,6 +406,9 @@ impl Agent {
         if self.maybe_continue_incomplete_response(stop_reason, incomplete_continuations)? {
             return Ok(NoToolCallOutcome::ContinueWithoutEvent);
         }
+        if self.maybe_continue_stranded_tool_use(stop_reason, incomplete_continuations)? {
+            return Ok(NoToolCallOutcome::ContinueWithoutEvent);
+        }
         logging::info("Turn complete - no tool calls");
         let injected = self.inject_soft_interrupts();
         if !injected.is_empty() {

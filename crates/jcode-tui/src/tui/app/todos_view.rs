@@ -675,6 +675,7 @@ mod tests {
         crate::todo::TodoPlan {
             user_intention: Some("make navigation feel immediate".to_string()),
             understands_user_intent: Some(96),
+            ..Default::default()
         }
     }
 
@@ -783,6 +784,7 @@ mod tests {
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
                 end_to_end_ownership: Some(85),
+                ..Default::default()
             }],
         );
 

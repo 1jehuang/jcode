@@ -25,6 +25,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
+    ("reasoning", reasoning),
+    ("reasoning_streaming", reasoning_streaming),
     ("working", working),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
@@ -34,6 +36,11 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("code_block", code_block),
     ("session_strip", session_strip),
     ("session_strip_second_group", session_strip_second_group),
+    ("overview", overview),
+    ("overview_opening", overview_opening),
+    ("overview_other_session", overview_other_session),
+    ("overview_single_session", overview_single_session),
+    ("overview_many_sessions", overview_many_sessions),
     ("notice", notice),
     ("error", error),
     ("long_paragraph", long_paragraph),
@@ -94,6 +101,12 @@ fn connecting() -> Model {
         // Detached: nothing has told us the model yet, so the caption is absent.
         model: None,
         strip: crate::strip::Strip::default(),
+        // Captures are still frames, so nothing is mid-reveal: a default
+        // stream draws every glyph.
+        stream: crate::stream::Stream::default(),
+        // Closed: the overview is a held gesture, so every ordinary node
+        // renders with it away.
+        overview: crate::overview::Overview::default(),
         // Detached: no session, so no directory to name.
         working_dir: None,
     }
@@ -157,6 +170,10 @@ fn attached_empty() -> Model {
         hint: 0,
         model: Some(fixed_model()),
         strip: crate::strip::Strip::default(),
+        // Captures are still frames, so nothing is mid-reveal: a default
+        // stream draws every glyph.
+        stream: crate::stream::Stream::default(),
+        overview: crate::overview::Overview::default(),
         // Fixed path, so captures do not depend on where the repo is checked
         // out or on whose `$HOME` the capture ran under.
         working_dir: Some("/home/j/jcode".into()),
@@ -325,30 +342,38 @@ fn scrolled_back() -> Model {
 fn demo_strip(focused: &str) -> crate::strip::Strip {
     crate::strip::Strip::build(
         vec![
+            // Weights differ by an order of magnitude, because that is what
+            // the overview's blobs are for: a capture where every session is
+            // the same size would prove nothing about the sizing.
             crate::strip::Entry {
-                session_id: "s_jcode_1".into(),
+                session_id: "session_clover_1785130341680_5a8db08".into(),
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
+                weight: 480_000.0,
             },
             crate::strip::Entry {
-                session_id: "s_jcode_2".into(),
+                session_id: "session_mushroom_1785129393446_e7007f8".into(),
                 working_dir: Some("/home/j/jcode".into()),
                 busy: true,
+                weight: 90_000.0,
             },
             crate::strip::Entry {
-                session_id: "s_jcode_3".into(),
+                session_id: "session_pebble_1785130002233_1c93aa4".into(),
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
+                weight: 6_000.0,
             },
             crate::strip::Entry {
-                session_id: "s_site_1".into(),
+                session_id: "session_harbor_1785128881021_9f0b21d".into(),
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
+                weight: 210_000.0,
             },
             crate::strip::Entry {
-                session_id: "s_site_2".into(),
+                session_id: "session_ember_1785131110907_44de7c2".into(),
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
+                weight: 1_200.0,
             },
         ],
         Some(focused),
@@ -363,8 +388,8 @@ fn session_strip() -> Model {
                 crate::transcript::Message::assistant("A coding agent, written in Rust."),
             ][..],
         ),
-        session_id: Some("s_jcode_2".into()),
-        strip: demo_strip("s_jcode_2"),
+        session_id: Some("session_mushroom_1785129393446_e7007f8".into()),
+        strip: demo_strip("session_mushroom_1785129393446_e7007f8"),
         ..attached_empty()
     }
 }
@@ -373,8 +398,110 @@ fn session_strip() -> Model {
 /// another directory rather than only recolouring within one.
 fn session_strip_second_group() -> Model {
     Model {
-        session_id: Some("s_site_1".into()),
-        strip: demo_strip("s_site_1"),
+        session_id: Some("session_harbor_1785128881021_9f0b21d".into()),
+        strip: demo_strip("session_harbor_1785128881021_9f0b21d"),
+        ..attached_empty()
+    }
+}
+
+/// The overview at rest, from a session in the middle of a busy checkout.
+/// The node the whole feature is judged on: five sessions of very different
+/// sizes across two projects, so the blobs have to be legibly different and
+/// the two clusters have to read as two places.
+fn overview() -> Model {
+    Model {
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_mushroom_1785129393446_e7007f8"),
+        ),
+        ..session_strip()
+    }
+}
+
+/// Mid-zoom. Captured because the transition is the feature: a field that
+/// looks right only when settled would still feel like a panel appearing.
+fn overview_opening() -> Model {
+    Model {
+        overview: crate::overview::Overview::pinned(
+            true,
+            0.45,
+            Some("session_mushroom_1785129393446_e7007f8"),
+        ),
+        ..session_strip()
+    }
+}
+
+/// Highlight moved off the session we are attached to: the state every switch
+/// passes through, and the one that proves "where I am" and "where I am going"
+/// are drawn differently.
+fn overview_other_session() -> Model {
+    Model {
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_harbor_1785128881021_9f0b21d"),
+        ),
+        ..session_strip()
+    }
+}
+
+/// One session. The field must still look deliberate rather than like a bug,
+/// which is the case a layout that only ever fits a crowd tends to get wrong.
+fn overview_single_session() -> Model {
+    let strip = crate::strip::Strip::build(
+        vec![crate::strip::Entry {
+            session_id: "session_willow_1785130555000_7d3e9f1".into(),
+            working_dir: Some("/home/j/jcode".into()),
+            busy: false,
+            weight: 40_000.0,
+        }],
+        Some("session_willow_1785130555000_7d3e9f1"),
+    );
+    Model {
+        session_id: Some("session_willow_1785130555000_7d3e9f1".into()),
+        strip,
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_willow_1785130555000_7d3e9f1"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// A crowded field: four projects, eighteen sessions. The stress case for
+/// packing, for fitting the page, and for whether the labels survive at all.
+fn overview_many_sessions() -> Model {
+    /// Short names in the daemon's own style, so the captured labels are the
+    /// length the real ones will be.
+    const NAMES: &[&str] = &[
+        "clover", "mushroom", "pebble", "harbor", "ember", "willow", "quartz", "lantern", "meadow",
+    ];
+    let id = |n: usize| {
+        format!(
+            "session_{}_17851290000{n:02}_a1b2c3d4",
+            NAMES[n % NAMES.len()]
+        )
+    };
+    let entries: Vec<crate::strip::Entry> = (0..18)
+        .map(|n| crate::strip::Entry {
+            session_id: id(n),
+            working_dir: Some(format!("/home/j/proj{}", n % 4)),
+            busy: n % 5 == 0,
+            // A spread of sizes rather than a ramp, so the field is not a
+            // suspiciously tidy gradient.
+            weight: ((n * 7919) % 400) as f64 * 900.0 + 500.0,
+        })
+        .collect();
+    let strip = crate::strip::Strip::build(entries, Some(&id(3)));
+    Model {
+        session_id: Some(id(3)),
+        strip,
+        // Highlight parked away from the attached session: the crowded field
+        // is exactly where "where I am" and "where I am going" have to stay
+        // distinguishable.
+        overview: crate::overview::Overview::pinned(true, 1.0, Some(&id(7))),
         ..attached_empty()
     }
 }
@@ -383,6 +510,51 @@ fn notice() -> Model {
     Model {
         editor: editor_with("undo me", None),
         notice: Some("nothing to undo".into()),
+        ..attached_empty()
+    }
+}
+
+/// A finished turn that thought before it answered. The point of the node is
+/// the contrast: the thought is muted, indented behind a rule, and set smaller,
+/// so the answer below it is unmistakably the reply.
+fn reasoning() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("why is the reveal a fraction, not a count?"));
+    transcript.push(Message::reasoning(
+        "The cursor counts markdown *source* characters, but the renderer \
+         draws laid-out glyphs. Every `**` and backtick makes those two \
+         numbers differ, so a count would run ahead of the visible edge.",
+    ));
+    transcript.push(Message::assistant(
+        "Because the reveal cursor and the drawn glyphs are counted in \
+         different units, and only a fraction is well defined across both.",
+    ));
+    Model {
+        transcript,
+        ..attached_empty()
+    }
+}
+
+/// The same turn mid-flight: reasoning is arriving and being swept in by the
+/// same reveal as the answer, with the activity line still running.
+fn reasoning_streaming() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("why is the reveal a fraction, not a count?"));
+    transcript.push(Message::reasoning(
+        "The cursor counts markdown source characters, but the renderer draws \
+         laid-out glyphs, so the two disagree by every marker in the reply and",
+    ));
+    Model {
+        transcript,
+        busy: true,
+        stream: crate::stream::Stream::pinned(0.7),
+        activity: crate::activity::Activity::pinned(
+            3,
+            std::time::Duration::from_secs(5),
+            Some("thinking"),
+        ),
         ..attached_empty()
     }
 }
