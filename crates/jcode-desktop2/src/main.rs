@@ -641,6 +641,9 @@ impl App {
         }
         self.update_cursor_icon();
         if self.selecting {
+            // Dragging at the edge scrolls the conversation under the pointer,
+            // so a selection is not capped at one screenful.
+            let scrolled = self.autoscroll_for_drag(self.pointer.1);
             // Clamp into the region so dragging past the top or bottom keeps
             // extending to the nearest text instead of dropping the gesture.
             let (x, y) = self.pointer;
@@ -655,6 +658,8 @@ impl App {
                     self.click_streak.interrupt();
                 }
                 selection.focus = position;
+                self.request_redraw();
+            } else if scrolled {
                 self.request_redraw();
             }
             return;
