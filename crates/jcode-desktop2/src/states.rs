@@ -22,6 +22,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("selection", selection),
     ("multiline", multiline),
     ("wrapped_long_line", wrapped_long_line),
+    ("unbreakable_paste", unbreakable_paste),
+    ("overlong_paste", overlong_paste),
     ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
@@ -39,6 +41,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("overview", overview),
     ("overview_opening", overview_opening),
     ("overview_other_session", overview_other_session),
+    ("overview_preview", overview_preview),
     ("overview_single_session", overview_single_session),
     ("overview_many_sessions", overview_many_sessions),
     ("notice", notice),
@@ -107,6 +110,12 @@ fn connecting() -> Model {
         // Closed: the overview is a held gesture, so every ordinary node
         // renders with it away.
         overview: crate::overview::Overview::default(),
+        // Captures pin their previews, so a node never depends on what
+        // happens to be on disk.
+        peeks: crate::overview::Peeks::default(),
+        // Captures are still frames, so the scroll is settled rather than
+        // mid-glide.
+        smooth: crate::scroll::Smooth::default(),
         // Detached: no session, so no directory to name.
         working_dir: None,
     }
@@ -174,6 +183,12 @@ fn attached_empty() -> Model {
         // stream draws every glyph.
         stream: crate::stream::Stream::default(),
         overview: crate::overview::Overview::default(),
+        // Captures pin their previews, so a node never depends on what
+        // happens to be on disk.
+        peeks: crate::overview::Peeks::default(),
+        // Captures are still frames, so the scroll is settled rather than
+        // mid-glide.
+        smooth: crate::scroll::Smooth::default(),
         // Fixed path, so captures do not depend on where the repo is checked
         // out or on whose `$HOME` the capture ran under.
         working_dir: Some("/home/j/jcode".into()),
@@ -308,6 +323,32 @@ fn wrapped_long_line() -> Model {
     }
 }
 
+/// A pasted URL longer than the well: one "word" with no break opportunity,
+/// which used to run straight off the right edge of the composer.
+fn unbreakable_paste() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str(
+        "https://example.com/some/extremely/long/path/segment/that/never/offers/a/break/opportunity?query=parameter&another=value",
+    );
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// A paste taller than the well: the composer caps at
+/// [`crate::layout::COMPOSER_MAX_LINES`], so the layout is scrolled under the
+/// field and the rows outside it must be clipped away rather than painted over
+/// the transcript and the footnote.
+fn overlong_paste() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str(&"the quick brown fox jumps over the lazy dog ".repeat(20));
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
 /// A selection spanning a line break.
 fn multiline_selection() -> Model {
     let mut editor = crate::editor::Editor::default();
@@ -333,6 +374,8 @@ fn scrolled_back() -> Model {
                 .collect(),
         ),
         scroll: 200.0,
+        // Scrolled back is exactly when the bar is up, so the capture shows it.
+        smooth: crate::scroll::Smooth::lit(),
         ..attached_empty()
     }
 }
@@ -503,6 +546,43 @@ fn overview_many_sessions() -> Model {
         // distinguishable.
         overview: crate::overview::Overview::pinned(true, 1.0, Some(&id(7))),
         ..attached_empty()
+    }
+}
+
+/// Hovering another session, with its conversation fetched: the state the
+/// preview exists for. Captured because it is the only one that shows the
+/// three layers at once (your own transcript, the hovered session's tail over
+/// it, and the field over both), which is where they can be seen to fight.
+fn overview_preview() -> Model {
+    let mut peeks = crate::overview::Peeks::default();
+    let mut tail = crate::transcript::Transcript::default();
+    tail.push(crate::transcript::Message::user(
+        "why is the halftone screen in logical units?",
+    ));
+    tail.push(crate::transcript::Message::assistant(
+        "So the dot density is identical on 1x and HiDPI, exactly like the \
+         website's CSS-pixel lattice.",
+    ));
+    tail.push(crate::transcript::Message::user("and the gamma?"));
+    tail.push(crate::transcript::Message::assistant(
+        "Applied to luminance before sizing a dot, so the midtones do not \
+         crush.",
+    ));
+    peeks.insert("session_harbor_1785128881021_9f0b21d", tail);
+    Model {
+        // A conversation of our own underneath, so the capture shows the
+        // preview against real content rather than against blank paper.
+        transcript: conversation(vec![(
+            "what is in this repo".into(),
+            "A coding agent, written in Rust.".into(),
+        )]),
+        peeks,
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_harbor_1785128881021_9f0b21d"),
+        ),
+        ..session_strip()
     }
 }
 

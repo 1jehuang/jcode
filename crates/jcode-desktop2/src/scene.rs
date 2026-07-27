@@ -302,9 +302,98 @@ const BLOB_HALO: f64 = 7.0;
 const BUSY_PULSE: f64 = 0.06;
 /// Period of that breath, in seconds.
 const BUSY_PERIOD: f32 = 1.6;
+/// How far the page is veiled behind the field, at full zoom. Short of opaque
+/// on purpose: the transcript underneath is context, not clutter, and seeing
+/// it is what keeps the overview a layer rather than a separate screen.
+const VEIL_OPACITY: f64 = 0.82;
+/// Type size, leading, and ink for the hovered session's preview. Small and
+/// faint: it is the page *behind* the decision, not the decision.
+const PREVIEW_SIZE: f32 = 11.0;
+const PREVIEW_LEADING: f64 = 1.7;
+const PREVIEW_OPACITY: f64 = 0.72;
+/// Fraction of the window height the preview may occupy, measured from the
+/// top. Bounded so it can never reach the cluster names and the hint at the
+/// foot, whichever session is hovered.
+const PREVIEW_BAND: f64 = 0.3;
 /// Smallest blob that carries a busy spinner. Below this the spinner would be
 /// larger than the session it belongs to.
 const MIN_SPINNER_RADIUS: f64 = 22.0;
+
+/// Draw the highlighted session's conversation behind the field.
+///
+/// The blobs say how big each session is and what it is called, which is
+/// enough to *navigate* and not enough to *choose*: "clover" and "pebble" are
+/// only names until you can see what is in them. Hovering a blob puts that
+/// session's last exchanges on the page underneath, so picking is recognition
+/// rather than recall.
+///
+/// Set faint and behind the veil on purpose: this is context for a decision
+/// being made in the foreground, and a preview that competed with the blobs
+/// would make the field unreadable at exactly the moment it is being used.
+fn draw_preview(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+    phase: f64,
+) {
+    let Some(focus) = model.overview.focus() else {
+        return;
+    };
+    // The session we are attached to is already on the page underneath, so
+    // previewing it would draw the same conversation twice.
+    if model.session_id.as_deref() == Some(focus) {
+        return;
+    }
+    let Some(transcript) = model.peeks.get(focus) else {
+        return;
+    };
+
+    // Top-down from the head of the page, oldest of the tail first, so the
+    // preview reads in conversation order. It lives at the top because that is
+    // where the field is emptiest (the packing centres on the current session)
+    // and because the foot already carries the cluster names and the hint.
+    let mut y = frame.body_top;
+    let width = frame.column() as f32;
+    let ceiling = frame.height * PREVIEW_BAND;
+    for message in transcript.messages() {
+        if y >= ceiling {
+            break;
+        }
+        let source = message.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        // One line per message: the preview is a shape to recognise, not a
+        // transcript to read, and a wrapped paragraph would push the older
+        // exchanges (the ones that identify the session) off the page.
+        let budget = (frame.column() / (f64::from(PREVIEW_SIZE) * 0.6)) as usize;
+        let line = elide(&source.replace('\n', " "), budget.max(16));
+        text.draw_paragraph_scaled(
+            scene,
+            &line,
+            (frame.left, y),
+            width,
+            ParagraphStyle {
+                font_size: PREVIEW_SIZE,
+                // A user's line is set darker than a reply, the only structure
+                // the preview keeps: it is what makes the alternation legible
+                // as a conversation rather than as a paragraph of noise.
+                color: if message.role == crate::transcript::Role::User {
+                    model.theme.muted
+                } else {
+                    model.theme.faint
+                }
+                .with_alpha((PREVIEW_OPACITY * phase) as f32),
+                line_height: PREVIEW_LEADING as f32,
+                ..Default::default()
+            },
+            scale,
+        );
+        y += f64::from(PREVIEW_SIZE) * PREVIEW_LEADING;
+    }
+}
 
 /// Draw the session overview: every live session as a blob in a 2D field.
 ///
@@ -336,20 +425,25 @@ fn draw_overview(
         return;
     }
 
-    // Cover the page. The conversation underneath must go, not merely dim: a
-    // translucent wash left the transcript and the composer legible *through*
-    // the blobs, which read as two screens fighting rather than as one that
-    // zoomed out. The cover reaches full opacity early in the zoom, so the
-    // handover happens while the field is still flying out and there is never
-    // a frame of double vision.
-    let cover = (phase * 2.5).min(1.0) as f32;
+    // Veil the page rather than replace it. The conversation stays visible
+    // underneath, so the field reads as a layer over the work you were doing
+    // instead of as a different screen you have been taken to: you never lose
+    // your place, and the switch is a glance rather than a context change.
+    //
+    // Just opaque enough that the blobs and their labels win the foreground,
+    // and no more. A full cover made the gesture feel like navigating away.
+    let veil = (VEIL_OPACITY * phase) as f32;
     scene.fill(
         vello::peniko::Fill::NonZero,
         Affine::scale(scale),
-        theme.background.with_alpha(cover),
+        theme.background.with_alpha(veil),
         None,
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
+
+    // The hovered session's own conversation, on the page the veil just
+    // cleared: drawn before the blobs so it is unambiguously behind them.
+    draw_preview(scene, text, model, frame, scale, phase);
 
     // Everything flies out from the blob you came from, so the session on
     // screen stays under the eye through the whole transition.
@@ -378,7 +472,11 @@ fn draw_overview(
         // is the one case where the field lies about what it contains.
         let (_, _, _, area_bottom) = crate::overview::area(frame);
         let top = (center.1 + cluster.radius * phase + CLUSTER_LABEL_GAP)
-            .min(area_bottom - f64::from(CLUSTER_LABEL_SIZE));
+            .min(area_bottom - f64::from(CLUSTER_LABEL_SIZE))
+            // Never into the preview's band at the head of the page: the two
+            // are both faint small type, so overlapping them makes each
+            // unreadable rather than merely crowded.
+            .max(frame.height * PREVIEW_BAND);
         text.draw_paragraph_scaled(
             scene,
             &cluster.label,
@@ -604,6 +702,78 @@ pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
     }
 }
 
+/// Width of the scrollbar's thumb, in logical pixels. A hairline-ish sliver:
+/// this is a position readout, not a drag handle competing with the text.
+const SCROLLBAR_WIDTH: f64 = 3.0;
+/// Gap between the text column's right edge and the bar.
+const SCROLLBAR_GAP: f64 = 6.0;
+/// Shortest the thumb may be drawn. Proportional sizing alone makes a very
+/// long conversation's thumb a dot, which stops reading as a position.
+const SCROLLBAR_MIN_THUMB: f64 = 24.0;
+
+/// Draw the transcript scrollbar: a thumb whose length is the visible
+/// fraction of the conversation and whose position is where you are in it.
+///
+/// It is only drawn while [`crate::scroll::Smooth`] says it is lit, so it
+/// appears when you scroll and fades out afterwards rather than sitting on the
+/// page permanently. Drawn outside the transcript's clip so it can hug the
+/// region's edge, and skipped entirely when everything already fits.
+fn draw_scrollbar(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    cache: &mut crate::paint::TranscriptCache,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    let alpha = model.smooth.alpha() as f32;
+    if alpha <= 0.0 {
+        return;
+    }
+    let region_height = (frame.body_bottom - frame.body_top).max(0.0);
+    if region_height <= 0.0 {
+        return;
+    }
+    let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+    let laid = cache.lay_out(
+        text,
+        &model.transcript,
+        width,
+        &model.theme,
+        transcript_body_style(model),
+        scale,
+    );
+    let view = crate::viewport::Viewport::new(laid, region_height, model.view_scroll());
+    let max = view.max_scroll();
+    // Nothing to scroll: a full-height thumb would just be a border.
+    if max <= 0.5 {
+        return;
+    }
+    let content = view.content_height.max(1.0);
+    let thumb =
+        (region_height / content * region_height).max(SCROLLBAR_MIN_THUMB.min(region_height));
+    // scroll counts pixels *up from the tail*, so 0 puts the thumb at the
+    // bottom, which is where the newest message is.
+    let travel = (region_height - thumb).max(0.0);
+    let from_tail = (model.view_scroll().clamp(0.0, max)) / max;
+    let top = frame.body_top + travel * (1.0 - from_tail);
+    let left = frame.right + SCROLLBAR_GAP;
+    let color = model.theme.rule.multiply_alpha(alpha);
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        color,
+        None,
+        &RoundedRect::new(
+            left,
+            top,
+            left + SCROLLBAR_WIDTH,
+            top + thumb,
+            SCROLLBAR_WIDTH / 2.0,
+        ),
+    );
+}
+
 /// Draw the conversation.
 ///
 /// Roles are distinguished structurally rather than by a marker glyph: your
@@ -638,8 +808,7 @@ fn draw_transcript(
     // The glide holds the view slightly above the tail while the conversation
     // grows, so a new line slides in instead of snapping the page up by a line
     // height. It decays to zero, so this cannot drift the scroll position.
-    let view =
-        crate::viewport::Viewport::new(laid, region_height, model.scroll + model.stream.glide());
+    let view = crate::viewport::Viewport::new(laid, region_height, model.view_scroll());
 
     // Only the trailing assistant message is being revealed; everything above
     // it has been read and must be drawn whole.
@@ -936,6 +1105,7 @@ pub fn build_scene(
         scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &region);
         draw_transcript(scene, text, transcript_cache, model, &frame, scale);
         scene.pop_layer();
+        draw_scrollbar(scene, text, transcript_cache, model, &frame, scale);
     }
 
     // Prompt line inside the well: a real input box. The caret is drawn at
@@ -1037,12 +1207,26 @@ pub fn build_scene(
         } else {
             // Draw the whole layout in one pass: Parley already wrapped it to
             // the well, so per-row drawing would only reintroduce drift.
+            // Clipped to the text band, not the whole well: the layout is
+            // scrolled under the field once it outgrows it, and clipping to
+            // the well would let the row above bleed a sliced half-glyph into
+            // the top padding. The band is a whole number of rows, so the
+            // window always shows whole lines.
+            let band = Rect::new(
+                frame.left,
+                prompt_y,
+                frame.right,
+                (prompt_y + frame.composer_lines() as f64 * layout::COMPOSER_LINE_HEIGHT)
+                    .min(clip_bottom),
+            );
+            scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &band);
             crate::text::TextSystem::draw_layout(
                 scene,
                 input.layout(),
                 (prompt_x, origin_y),
                 scale,
             );
+            scene.pop_layer();
         }
 
         // An unfocused window must not show a blinking caret: it would claim

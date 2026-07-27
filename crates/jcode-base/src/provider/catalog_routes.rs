@@ -716,18 +716,11 @@ fn append_openrouter_routes(
     // the `openrouter` cache namespace so `/model` can switch back to it
     // without relabeling OpenRouter models as the active direct profile.
     if !supports_openrouter_provider_features && standard_openrouter_profile_configured() {
-        // The shared OpenRouter/OpenAI-compatible slot is occupied by a
-        // direct profile (e.g. NVIDIA NIM), so standard OpenRouter is never
-        // the active provider and its `openrouter` namespace catalog is
-        // never refreshed by the normal active-provider path. Schedule a
-        // background refresh whenever that cache is missing or stale so
-        // models like `openrouter/owl-alpha` appear in `/model` on the next
-        // picker render, and keep self-healing after upgrades (issue #292).
-        // The scheduler is internally rate-limited and a no-op when the
-        // cache is already fresh.
-        openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
-            "inactive standard OpenRouter route hydration",
-        );
+        // The shared OpenRouter/OpenAI-compatible slot is occupied by a direct
+        // profile (e.g. NVIDIA NIM), so standard OpenRouter is never the active
+        // provider and its `openrouter` namespace catalog is never refreshed by
+        // the normal active-provider path. The background catalog scheduler
+        // keeps that namespace fresh (issue #292); rendering only reads it.
         routes.extend(configured_standard_openrouter_profile_routes());
     }
 }

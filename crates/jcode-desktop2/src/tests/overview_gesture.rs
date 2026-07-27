@@ -8,7 +8,7 @@
 
 use crate::keymap::Action;
 use crate::strip::{Entry, Strip};
-use crate::{App, OVERVIEW_HOLD, keymap};
+use crate::{ALT_TAP, App, keymap};
 use std::time::{Duration, Instant};
 use winit::keyboard::{Key, NamedKey, SmolStr};
 
@@ -53,14 +53,13 @@ fn app() -> App {
     app
 }
 
-/// Hold Alt long enough for the field to open, and return the clock it opened
+/// Press Alt, which opens the field at once, and return the clock it opened
 /// at so a test can keep advancing from there.
 fn hold_alt(app: &mut App) -> Instant {
     let start = Instant::now();
     app.on_alt_changed(true, start);
-    let ripe = start + OVERVIEW_HOLD;
-    app.tick_overview(ripe);
-    ripe
+    app.tick_overview(start);
+    start
 }
 
 /// Run the zoom to completion, so `phase` is settled.
@@ -87,19 +86,33 @@ fn holding_alt_opens_the_overview() {
     assert!((app.model.overview.phase() - 1.0).abs() < 1e-9);
 }
 
-/// A tap must not flash the field: Alt is the first half of a dozen editing
-/// chords, and an overview that blinks on the way to Alt+B would make the
-/// composer feel haunted.
+/// The field is up on the keydown: the gesture may not make the user wait out
+/// a threshold before the app admits it heard them.
 #[test]
-fn a_brief_tap_of_alt_opens_nothing() {
+fn alt_opens_the_field_on_the_keydown() {
     let mut app = app();
     let start = Instant::now();
     app.on_alt_changed(true, start);
-    app.tick_overview(start + OVERVIEW_HOLD / 3);
-    assert!(!app.model.overview.is_visible(), "a tap opened the field");
-    app.on_alt_changed(false, start + OVERVIEW_HOLD / 2);
-    app.tick_overview(start + OVERVIEW_HOLD);
-    assert!(!app.model.overview.is_visible());
+    assert!(
+        app.model.overview.is_open(),
+        "alt did not open the field immediately"
+    );
+}
+
+/// A bare tap leaves everything as it was, and takes the field off screen at
+/// once rather than zooming it out: the user was reaching for a chord.
+#[test]
+fn a_brief_tap_of_alt_changes_nothing() {
+    let mut app = app();
+    let start = Instant::now();
+    app.on_alt_changed(true, start);
+    app.on_alt_changed(false, start + ALT_TAP / 2);
+    assert!(!app.model.overview.is_visible(), "a tap left the field up");
+    assert_eq!(
+        app.model.session_id.as_deref(),
+        Some("session_mushroom_2_b"),
+        "a tap switched session"
+    );
 }
 
 /// Alt+B must still be word-motion. The gesture may not cost the user a
@@ -110,13 +123,14 @@ fn an_alt_chord_cancels_the_pending_overview() {
     app.apply(Action::Insert, Some("hello world"));
     let start = Instant::now();
     app.on_alt_changed(true, start);
-    // The key handler clears the pending hold the moment Alt becomes a chord.
+    // The key handler aborts the field the moment Alt becomes a chord.
     app.alt_held_since = None;
+    app.model.overview.abort();
     app.apply(Action::MoveWordLeft, None);
-    app.tick_overview(start + OVERVIEW_HOLD * 2);
+    app.tick_overview(start + ALT_TAP * 2);
     assert!(
         !app.model.overview.is_visible(),
-        "an editing chord opened the overview"
+        "an editing chord left the overview up"
     );
 }
 

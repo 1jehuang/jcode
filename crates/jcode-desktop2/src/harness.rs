@@ -42,6 +42,11 @@ pub enum HarnessUpdate {
     TurnDone,
     /// The daemon's current session list, for the session strip.
     Sessions(Vec<crate::strip::Entry>),
+    /// The tail of another session's conversation, for the overview's preview.
+    Peek {
+        session_id: String,
+        transcript: crate::transcript::Transcript,
+    },
 }
 
 /// A command from the UI thread to the connection worker.
@@ -54,6 +59,8 @@ pub enum Command {
     Send(String),
     /// Attach to another session; the worker retargets subsequent sends.
     Attach(String),
+    /// Fetch the tail of another session without attaching to it.
+    Peek(String),
 }
 
 /// The API socket both this app and the bridge agree on. Shared with the
@@ -220,6 +227,13 @@ fn run(
                         }
                         ApiRequest::AttachSession { session_id: target }
                     }
+                    // A peek must not retarget anything: it is a read of
+                    // another session, and the one we are attached to has to
+                    // stay the one a message would land in.
+                    Command::Peek(target) => ApiRequest::PeekSession {
+                        session_id: target,
+                        limit: None,
+                    },
                 };
                 let frame = ClientFrame::new(writer_ids.fetch_add(1, Ordering::Relaxed), request);
                 if write_frame(&mut writer_stream, &frame).is_err() {
@@ -344,6 +358,31 @@ fn run(
             ApiEvent::ModelInfo {
                 provider, model, ..
             } => send(HarnessUpdate::Model { provider, model }),
+            // A peek's reply. History for the *attached* session arrives on
+            // this event too, but the desktop asks for that only to learn the
+            // session set, so treating every one as a peek is correct: the
+            // preview cache is keyed by id and the attached session's own
+            // transcript is built from the stream, not from here.
+            ApiEvent::History {
+                session_id,
+                messages,
+            } => {
+                let mut transcript = crate::transcript::Transcript::default();
+                for message in messages {
+                    let text = message.content.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    transcript.push(match message.role.as_str() {
+                        "user" => crate::transcript::Message::user(text),
+                        _ => crate::transcript::Message::assistant(text),
+                    });
+                }
+                send(HarnessUpdate::Peek {
+                    session_id,
+                    transcript,
+                });
+            }
             ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
             ApiEvent::Error { message, .. } => {
                 send(HarnessUpdate::Status(format!("error: {message}")));

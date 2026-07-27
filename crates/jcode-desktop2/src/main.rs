@@ -24,6 +24,7 @@ mod place;
 mod profile;
 mod render;
 mod scene;
+mod scroll;
 mod select;
 mod states;
 mod stream;
@@ -69,8 +70,9 @@ struct App {
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
     /// When Alt went down with nothing else pressed since, or `None` when Alt
-    /// is up or has already been used as part of a chord. Holding it past
-    /// [`OVERVIEW_HOLD`] opens the session overview.
+    /// is up or has already been used as part of a chord. The field opens on
+    /// the keydown; this is what lets a tap shorter than [`ALT_TAP`] take it
+    /// straight back off screen.
     alt_held_since: Option<std::time::Instant>,
     clipboard: clipboard::Clipboard,
     /// Pointer position in logical units, tracked for click and drag.
@@ -137,13 +139,16 @@ const DONUT_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Maximum gap between two clicks that still counts as a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// How long Alt must be held, alone, before the session overview opens.
+/// How quickly Alt must go back up for the press to count as a tap rather
+/// than a gesture.
 ///
-/// A threshold rather than an instant trigger: Alt is the first half of a
-/// dozen editing chords (Alt+B, Alt+F, Alt+Backspace), and a field that
-/// flashed up on the way to every one of them would make the composer feel
-/// haunted. Short enough that a deliberate hold still feels immediate.
-const OVERVIEW_HOLD: std::time::Duration = std::time::Duration::from_millis(180);
+/// The field opens the instant Alt goes down, because a hold threshold made
+/// the most-used shortcut in the app feel like it was thinking. Alt is still
+/// the first half of a dozen editing chords, so the two escapes are: any key
+/// pressed with Alt aborts the field in the same frame, and letting Alt back
+/// up this fast dismisses without switching session. Neither costs the user
+/// anything they had, and a deliberate hold shows the field immediately.
+const ALT_TAP: std::time::Duration = std::time::Duration::from_millis(180);
 
 /// Frame interval while the overview zooms (~60fps).
 const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
@@ -192,12 +197,18 @@ pub struct Model {
     /// The streaming reveal: how much of the arriving reply is on screen, and
     /// the glide that keeps a growing transcript from jumping.
     pub stream: stream::Stream,
+    /// Scroll smoothing and the scrollbar's fade. The logical position stays
+    /// in `scroll`; this is only how the view catches up to it.
+    pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
     /// The session overview: the blob field held Alt zooms out into. Part of
     /// the model so a frame stays a pure function of it and every phase of
     /// the zoom is capturable.
     pub overview: overview::Overview,
+    /// Fetched tails of the other sessions, so the field can show *which*
+    /// conversation each blob is rather than only its name.
+    pub peeks: overview::Peeks,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
@@ -250,8 +261,10 @@ impl Default for Model {
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
             stream: stream::Stream::default(),
+            smooth: scroll::Smooth::default(),
             strip: strip::Strip::default(),
             overview: overview::Overview::default(),
+            peeks: overview::Peeks::default(),
             working_dir: None,
             model: None,
         }
@@ -278,12 +291,29 @@ impl Model {
     /// Scroll up by `amount` logical pixels, clamped to `max` so the view
     /// cannot run past the top of the conversation into blank space.
     fn scroll_up(&mut self, amount: f64, max: f64) {
+        let before = self.scroll;
         self.scroll = (self.scroll + amount).clamp(0.0, max.max(0.0));
+        self.smooth
+            .nudge(self.scroll - before, std::time::Instant::now());
     }
 
     /// Scroll down by `amount` logical pixels; reaching 0 re-follows the tail.
     fn scroll_down(&mut self, amount: f64) {
+        let before = self.scroll;
         self.scroll = (self.scroll - amount).max(0.0);
+        self.smooth
+            .nudge(self.scroll - before, std::time::Instant::now());
+    }
+
+    /// The scroll offset the frame is actually drawn at.
+    ///
+    /// The logical `scroll` is where the user asked to be; the glide holds the
+    /// view above the tail while a reply grows, and the smoothing lag lets a
+    /// wheel notch ease in. Everything that has to agree with the pixels on
+    /// screen (the renderer, hit-testing, selection) reads this one function,
+    /// so a click during an ease lands on the glyph under the pointer.
+    pub fn view_scroll(&self) -> f64 {
+        self.scroll + self.stream.glide() - self.smooth.lag()
     }
 
     fn set_notice(&mut self, notice: impl Into<String>) {
@@ -385,6 +415,15 @@ impl App {
                     self.model.busy = false;
                     self.model.activity.finish();
                 }
+                harness::HarnessUpdate::Peek {
+                    session_id,
+                    transcript,
+                } => {
+                    // The attached session's own transcript comes from the
+                    // stream, so a peek reply for it is only ever cache: it
+                    // must not overwrite the live page.
+                    self.model.peeks.insert(&session_id, transcript);
+                }
                 harness::HarnessUpdate::Sessions(entries) => {
                     // Rebuild around the session we are actually attached to,
                     // so a refresh never silently moves the highlight off the
@@ -414,6 +453,9 @@ impl App {
         self.model.busy = false;
         self.model.activity.finish();
         self.model.scroll = 0.0;
+        // Attaching is a jump, not a scroll: easing here would sweep through
+        // the previous session's layout.
+        self.model.smooth.settle();
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
         // The new session's directory arrives with its `Attached` event; until
@@ -451,7 +493,33 @@ impl App {
             return;
         }
         self.model.overview.open(self.model.session_id.as_deref());
+        self.request_peek();
         self.request_redraw();
+    }
+
+    /// Fetch the highlighted session's conversation tail, if we do not have
+    /// it yet, so hovering a blob shows *which* conversation it is.
+    ///
+    /// Only the highlighted one: prefetching the whole field would send a
+    /// burst of reads on every open for previews the user will mostly never
+    /// look at. Cached once fetched, so moving back and forth across the field
+    /// is instant after the first visit.
+    fn request_peek(&mut self) {
+        let Some(target) = self
+            .model
+            .overview
+            .focus()
+            .or(self.model.session_id.as_deref())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if !self.model.peeks.should_request(&target) {
+            return;
+        }
+        if let Some((_, outgoing)) = self.harness.as_ref() {
+            let _ = outgoing.send(harness::Command::Peek(target));
+        }
     }
 
     /// Close the field, attaching to the highlighted session when `commit`.
@@ -486,6 +554,7 @@ impl App {
         if let Some(target) = field.neighbor(&from, dir) {
             let id = target.session_id.clone();
             self.model.overview.set_focus(&id);
+            self.request_peek();
             self.request_redraw();
         }
     }
@@ -503,16 +572,17 @@ impl App {
         if let Some(target) = field.next_in_order(&from, step) {
             let id = target.to_string();
             self.model.overview.set_focus(&id);
+            self.request_peek();
             self.request_redraw();
         }
     }
 
     /// Alt went down or came up.
     ///
-    /// Held alone past [`OVERVIEW_HOLD`] this opens the session overview, and
-    /// releasing it commits to the highlighted session. Tracked from the
-    /// modifier event rather than from a key event because a bare modifier
-    /// never produces one of its own.
+    /// Pressing it opens the session overview at once, and releasing it
+    /// commits to the highlighted session unless the press was a tap shorter
+    /// than [`ALT_TAP`]. Tracked from the modifier event rather than from a
+    /// key event because a bare modifier never produces one of its own.
     ///
     /// A named method rather than an inline arm so the tests drive the same
     /// code the window does: a test that reimplemented this gesture would keep
@@ -521,28 +591,32 @@ impl App {
         if down {
             if self.alt_held_since.is_none() && !self.model.overview.is_open() {
                 self.alt_held_since = Some(now);
-                self.request_redraw();
+                self.open_overview();
             }
             return;
         }
+        let tap = self
+            .alt_held_since
+            .is_some_and(|since| now.duration_since(since) < ALT_TAP);
         self.alt_held_since = None;
+        if tap && self.model.overview.focus() == self.model.session_id.as_deref() {
+            // A bare tap on Alt, with the highlight never moved: the user was
+            // reaching for a chord they did not finish, not switching session.
+            // Take the field straight off screen rather than zooming it out.
+            self.model.overview.abort();
+            self.request_redraw();
+            return;
+        }
         // Releasing Alt flies into whichever blob is highlighted.
         self.close_overview(true);
     }
 
-    /// Advance the overview one frame: ripen a pending Alt hold into an open
-    /// field, then step the zoom.
+    /// Advance the overview's zoom one frame.
     ///
     /// Done on the frame rather than on a timer thread so the zoom is driven
     /// by the same clock as everything else on screen, and so a window that is
     /// not drawing is not silently animating either.
     fn tick_overview(&mut self, now: std::time::Instant) {
-        if let Some(since) = self.alt_held_since
-            && now.duration_since(since) >= OVERVIEW_HOLD
-        {
-            self.alt_held_since = None;
-            self.open_overview();
-        }
         // Its own clock, not the donut's: the donut stops advancing the
         // moment there is a transcript, and a zoom driven by a stopped clock
         // would freeze halfway in exactly the sessions worth switching to.
@@ -840,6 +914,7 @@ impl App {
                 let id = blob.session_id.clone();
                 if self.model.overview.focus() != Some(id.as_str()) {
                     self.model.overview.set_focus(&id);
+                    self.request_peek();
                     self.request_redraw();
                 }
             }
@@ -955,14 +1030,8 @@ impl App {
             .overview
             .is_animating()
             .then(|| now + OVERVIEW_FRAME);
-        // A pending Alt hold has to wake the loop when it ripens, or the field
-        // would only appear on the next unrelated event.
-        let hold = self
-            .alt_held_since
-            .filter(|_| !self.model.overview.is_open())
-            .map(|since| since + OVERVIEW_HOLD);
         if !self.model.focused {
-            return [overview, hold].into_iter().flatten().min();
+            return overview;
         }
         let caret = (!self.model.busy)
             .then(|| self.model.caret.next_toggle_at(now))
@@ -975,7 +1044,10 @@ impl App {
         // keep running while the window is busy, and they stop themselves the
         // moment the text has caught up.
         let stream = self.model.stream.next_frame_at(now);
-        [caret, donut, spinner, stream, overview, hold]
+        // Scroll smoothing and the scrollbar fade both need frames, and both
+        // stop themselves once the view has landed and the bar is gone.
+        let smooth = self.model.smooth.next_frame_at(now);
+        [caret, donut, spinner, stream, smooth, overview]
             .into_iter()
             .flatten()
             .min()
@@ -1163,7 +1235,13 @@ impl App {
                 let max = self.max_scroll();
                 self.model.scroll_up(max, max);
             }
-            Action::ScrollBottom => self.model.scroll = 0.0,
+            Action::ScrollBottom => {
+                let travelled = -self.model.scroll;
+                self.model.scroll = 0.0;
+                self.model
+                    .smooth
+                    .nudge(travelled, std::time::Instant::now());
+            }
 
             // Escape never quits: it cancels, then clears, then re-follows the
             // tail, matching the TUI.
@@ -1353,9 +1431,12 @@ impl ApplicationHandler for App {
                     return;
                 }
                 // Alt is the first half of a dozen editing chords, so any key
-                // pressed with it cancels the pending overview: the user is
-                // typing, not gesturing.
+                // pressed with it takes the field straight back off screen:
+                // the user is typing, not gesturing.
                 self.alt_held_since = None;
+                if self.model.overview.is_visible() {
+                    self.model.overview.abort();
+                }
                 let action =
                     keymap::resolve(&logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
                 let typed = text.as_ref().map(|t| t.as_str());
@@ -1373,6 +1454,7 @@ impl ApplicationHandler for App {
                 self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
                 self.model.stream.advance(std::time::Instant::now());
+                self.model.smooth.advance(std::time::Instant::now());
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();

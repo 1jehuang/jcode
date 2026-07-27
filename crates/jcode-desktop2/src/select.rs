@@ -411,7 +411,7 @@ pub fn position_at_in_frame(
     y: f64,
 ) -> Option<Position> {
     let region = (frame.body_bottom - frame.body_top).max(1.0);
-    let scroll = model.scroll;
+    let scroll = model.view_scroll();
     let laid = laid_for(painter, model, frame);
     let view = Viewport::new(laid, region, scroll);
     position_at(
@@ -432,7 +432,7 @@ pub fn selection_at_in_frame(
     granularity: Granularity,
 ) -> Option<Selection> {
     let region = (frame.body_bottom - frame.body_top).max(1.0);
-    let scroll = model.scroll;
+    let scroll = model.view_scroll();
     let laid = laid_for(painter, model, frame);
     let view = Viewport::new(laid, region, scroll);
     selection_at(

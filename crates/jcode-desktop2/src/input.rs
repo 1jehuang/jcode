@@ -364,4 +364,54 @@ mod tests {
         let l = laid_out(text, 400.0, 1.75);
         assert_eq!(l.offset_at_point(10_000.0, 5.0), text.len());
     }
+
+    /// A word longer than the well has no break opportunity, so with CSS's
+    /// default overflow-wrap Parley let it run straight off the right edge:
+    /// a pasted URL or path rendered as one endless line. Every layout must
+    /// stay inside the width it was wrapped to.
+    #[test]
+    fn an_unbreakable_word_wraps_instead_of_overflowing() {
+        let width = 200.0;
+        for text in [
+            "x".repeat(400),
+            "https://example.com/a/very/long/path/that/never/breaks?q=1&r=2".to_string(),
+            format!("short {} tail", "y".repeat(300)),
+        ] {
+            for &scale in &[1.0, 1.75] {
+                let l = laid_out(&text, width, scale);
+                assert!(
+                    f64::from(l.layout.width()) / scale <= width + 1.0,
+                    "layout {:.2} overflowed the {width} well",
+                    f64::from(l.layout.width()) / scale
+                );
+                assert!(l.line_count() > 1, "the long word never wrapped");
+                let caret = l.caret_rect(text.len(), 1.5);
+                assert!(caret.x1 <= width + 1.0, "caret escaped the well");
+            }
+        }
+    }
+
+    /// Scrolling must always keep the caret's row inside the visible window,
+    /// however long the text is: this is what stops typing running out of
+    /// sight at the bottom of the well.
+    #[test]
+    fn scrolling_keeps_the_caret_row_visible() {
+        let text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima";
+        let l = laid_out(text, 120.0, 1.75);
+        let lines = l.lines();
+        assert!(lines.len() > 3, "test text did not wrap enough");
+        for visible in 1..=lines.len() + 2 {
+            for offset in [0, text.len() / 2, text.len()] {
+                let off = l.scroll_offset(offset, visible);
+                let caret = l.caret_rect(offset, 1.5);
+                let top = caret.y0 - off;
+                let bottom = caret.y1 - off;
+                let window = visible.max(1) as f64 * crate::layout::COMPOSER_LINE_HEIGHT;
+                assert!(
+                    top >= -0.5 && bottom <= window + 0.5,
+                    "caret row [{top:.2},{bottom:.2}] outside a {visible}-line window"
+                );
+            }
+        }
+    }
 }
