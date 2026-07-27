@@ -7,7 +7,8 @@
 // panel reset through `clear_side_panel_for_new_session`, so cover that shared
 // seam plus the caller that regressed.
 
-#[cfg(test)]
+use crate::tui::app::tests::create_test_app;
+
 fn side_panel_snapshot_with_one_page() -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
         focused_page_id: Some("page-from-old-session".to_string()),
@@ -32,7 +33,7 @@ fn clear_side_panel_for_new_session_drops_pages_and_focus() {
         "precondition: the panel should hold the old session's page"
     );
 
-    app.clear_side_panel_for_new_session();
+    crate::tui::app::commands_review::clear_side_panel_for_new_session(&mut app);
 
     assert!(
         !app.side_panel.has_pages(),
