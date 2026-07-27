@@ -882,6 +882,7 @@ impl SingleSessionApp {
         self.detail_scroll = 0;
         self.messages.clear();
         self.streaming_response.clear();
+        self.reasoning.clear();
         self.error = None;
         self.stdin_response = None;
         self.body_scroll_lines = 0.0;

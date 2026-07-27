@@ -1707,24 +1707,7 @@ async fn parse_and_inject_key(
 }
 
 fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
-    let handled = super::commands::handle_help_command(app, trimmed)
-        || super::commands::handle_keys_command(app, trimmed)
-        || super::commands::handle_session_command(app, trimmed)
-        || super::commands::handle_test_command(app, trimmed)
-        || super::commands::handle_disabled_mission_command(app, trimmed)
-        || super::commands::handle_goals_command(app, trimmed)
-        || super::commands::handle_config_command(app, trimmed)
-        || super::commands::handle_log_command(app, trimmed)
-        || super::commands::handle_diff_command(app, trimmed)
-        || super::commands::handle_debug_command(app, trimmed)
-        || super::commands::handle_model_command(app, trimmed)
-        || super::commands::handle_usage_command(app, trimmed)
-        || super::commands::handle_feedback_command(app, trimmed)
-        || super::commands::handle_telemetry_command(app, trimmed)
-        || super::support::handle_support_command(app, trimmed)
-        || super::state_ui::handle_info_command(app, trimmed)
-        || super::auth::handle_auth_command(app, trimmed)
-        || super::commands::handle_dev_command(app, trimmed);
+    let handled = super::commands_dispatch::dispatch_local_command(app, trimmed);
 
     if handled {
         if trimmed.starts_with('/') {

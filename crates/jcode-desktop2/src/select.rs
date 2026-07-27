@@ -183,22 +183,157 @@ fn ceil_boundary(text: &str, index: usize) -> usize {
 /// point in the margin between two messages resolves to the nearest one, so a
 /// drag that strays into a gap keeps extending rather than sticking.
 pub fn position_at(view: &Viewport<'_>, x: f64, y: f64, scale: f64) -> Option<Position> {
+    let hit = block_at(view, x, y, scale)?;
+    let offset = Cursor::from_point(&hit.block.layout, hit.x, hit.y)
+        .index()
+        .min(hit.block.source.len());
+    Some(Position {
+        message: hit.message,
+        block: hit.block_index,
+        offset,
+    })
+}
+
+/// How much text one gesture grabs. Click places a caret, double click takes
+/// the word, triple click takes the line: the granularity ladder every text
+/// surface has, and the reason a user does not have to drag precisely to quote
+/// a single word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Granularity {
+    Character,
+    Word,
+    Line,
+}
+
+impl Granularity {
+    /// The granularity for the nth consecutive click at one spot.
+    ///
+    /// Cycles past three so a fourth click starts over rather than sticking on
+    /// whole lines, which is what a user leaning on the button expects.
+    pub fn for_click(count: usize) -> Self {
+        match count % 3 {
+            2 => Self::Word,
+            0 => Self::Line,
+            _ => Self::Character,
+        }
+    }
+}
+
+/// Consecutive clicks at one spot, which is what decides whether a press is a
+/// caret, a word, or a line.
+///
+/// Its own type rather than a tuple in the app, because "is this the same
+/// click again" has three real rules (soon enough, close enough, and not
+/// interrupted by a drag) and each one is a bug when it is missing: no time
+/// limit and two unrelated clicks grab a word, no distance limit and a click
+/// across the window continues the streak, no drag reset and releasing a drag
+/// then clicking silently selects a word.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClickStreak {
+    last: Option<(std::time::Instant, (f64, f64))>,
+    count: usize,
+}
+
+/// How far the pointer may move between clicks and still count as the same
+/// spot, in logical units. Zero would make a double click impossible on a
+/// trackpad, where the finger always drifts a little.
+const CLICK_SLOP: f64 = 3.0;
+
+impl ClickStreak {
+    /// Record a press and report the granularity it selects with.
+    pub fn press(&mut self, x: f64, y: f64, window: std::time::Duration) -> Granularity {
+        self.press_at(std::time::Instant::now(), x, y, window)
+    }
+
+    /// As [`Self::press`], with an explicit clock so the rules are testable
+    /// without sleeping.
+    pub fn press_at(
+        &mut self,
+        now: std::time::Instant,
+        x: f64,
+        y: f64,
+        window: std::time::Duration,
+    ) -> Granularity {
+        let continues = self.last.is_some_and(|(at, (last_x, last_y))| {
+            now.duration_since(at) < window
+                && (last_x - x).abs() <= CLICK_SLOP
+                && (last_y - y).abs() <= CLICK_SLOP
+        });
+        self.count = if continues { self.count + 1 } else { 1 };
+        self.last = Some((now, (x, y)));
+        Granularity::for_click(self.count)
+    }
+
+    /// End the streak. A drag is a gesture in its own right, so pressing again
+    /// after one is a fresh click rather than the second half of a double.
+    pub fn interrupt(&mut self) {
+        self.last = None;
+        self.count = 0;
+    }
+}
+
+/// The selection a click of `granularity` makes at a point, or `None` when
+/// there is nothing laid out there.
+///
+/// Word and line ranges come from Parley's own [`ParleySelection`] helpers, so
+/// they agree with the cluster and line breaking the text was actually shaped
+/// with rather than a hand-rolled scan for spaces, which is wrong for
+/// punctuation, CJK, and anything that wraps.
+pub fn selection_at(
+    view: &Viewport<'_>,
+    x: f64,
+    y: f64,
+    scale: f64,
+    granularity: Granularity,
+) -> Option<Selection> {
+    let hit = block_at(view, x, y, scale)?;
+    let range = match granularity {
+        Granularity::Character => {
+            let offset = Cursor::from_point(&hit.block.layout, hit.x, hit.y)
+                .index()
+                .min(hit.block.source.len());
+            offset..offset
+        }
+        Granularity::Word => {
+            ParleySelection::word_from_point(&hit.block.layout, hit.x, hit.y).text_range()
+        }
+        Granularity::Line => {
+            ParleySelection::line_from_point(&hit.block.layout, hit.x, hit.y).text_range()
+        }
+    };
+    let len = hit.block.source.len();
+    let at = |offset: usize| Position {
+        message: hit.message,
+        block: hit.block_index,
+        offset: offset.min(len),
+    };
+    Some(Selection::new(at(range.start), at(range.end)))
+}
+
+/// A resolved pointer hit: which block, and where in its layout, in the
+/// physical units Parley's own hit-testing wants.
+struct Hit<'a> {
+    message: usize,
+    block_index: usize,
+    block: &'a LaidBlock,
+    x: f32,
+    y: f32,
+}
+
+/// Resolve a transcript point to a block and a point within its layout.
+/// Shared by every gesture, so a click, a drag, and a double click can never
+/// disagree about which glyph the pointer is over.
+fn block_at<'a>(view: &'a Viewport<'_>, x: f64, y: f64, scale: f64) -> Option<Hit<'a>> {
     let placed = nearest_message(view, y)?;
     let local_y = y - placed.top - placed.message.top_padding();
     let block_index = nearest_block(&placed.message.blocks, local_y)?;
     let block = &placed.message.blocks[block_index];
-    let layout_y = local_y - block.top;
-    let offset = Cursor::from_point(
-        &block.layout,
-        ((x - block.inset) * scale) as f32,
-        (layout_y * scale) as f32,
-    )
-    .index()
-    .min(block.source.len());
-    Some(Position {
+    Some(Hit {
         message: placed.index,
-        block: block_index,
-        offset,
+        block_index,
+        block,
+        x: ((x - block.inset) * scale) as f32,
+        y: ((local_y - block.top) * scale) as f32,
     })
 }
 
@@ -284,6 +419,28 @@ pub fn position_at_in_frame(
         x - (frame.left + crate::transcript::USER_PAD_X),
         y - frame.body_top,
         frame.scale,
+    )
+}
+
+/// The selection a click of `granularity` makes at a window point.
+pub fn selection_at_in_frame(
+    painter: &mut crate::paint::Painter,
+    model: &crate::Model,
+    frame: crate::layout::Frame,
+    x: f64,
+    y: f64,
+    granularity: Granularity,
+) -> Option<Selection> {
+    let region = (frame.body_bottom - frame.body_top).max(1.0);
+    let scroll = model.scroll;
+    let laid = laid_for(painter, model, frame);
+    let view = Viewport::new(laid, region, scroll);
+    selection_at(
+        &view,
+        x - (frame.left + crate::transcript::USER_PAD_X),
+        y - frame.body_top,
+        frame.scale,
+        granularity,
     )
 }
 
@@ -455,5 +612,90 @@ mod tests {
     fn an_empty_range_draws_no_band() {
         let laid = lay(&[Message::assistant("text")]);
         assert!(block_bands(&laid[0].blocks[0], (3, 3), SCALE).is_empty());
+    }
+    /// The click ladder: caret, word, line, then back to a caret so someone
+    /// leaning on the button is not stuck selecting whole lines.
+    #[test]
+    fn the_click_ladder_cycles_caret_word_line() {
+        let expected = [
+            Granularity::Character,
+            Granularity::Word,
+            Granularity::Line,
+            Granularity::Character,
+            Granularity::Word,
+            Granularity::Line,
+        ];
+        for (index, want) in expected.iter().enumerate() {
+            assert_eq!(
+                Granularity::for_click(index + 1),
+                *want,
+                "click {}",
+                index + 1
+            );
+        }
+    }
+
+    /// Each of these rules is a bug when it is missing, so each is asserted
+    /// separately rather than through one happy-path double click.
+    #[test]
+    fn a_streak_continues_only_when_it_is_soon_enough_and_close_enough() {
+        let window = std::time::Duration::from_millis(400);
+        let start = std::time::Instant::now();
+
+        // Same spot, straight away: a double click.
+        let mut streak = ClickStreak::default();
+        assert_eq!(
+            streak.press_at(start, 10.0, 10.0, window),
+            Granularity::Character
+        );
+        assert_eq!(
+            streak.press_at(start, 10.0, 10.0, window),
+            Granularity::Word,
+            "a second click at the same spot was not a double click"
+        );
+
+        // Too slow: a fresh click.
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        assert_eq!(
+            streak.press_at(start + window * 2, 10.0, 10.0, window),
+            Granularity::Character,
+            "a slow second click was treated as a double click"
+        );
+
+        // Too far: a fresh click.
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        assert_eq!(
+            streak.press_at(start, 400.0, 10.0, window),
+            Granularity::Character,
+            "clicks at two different spots were treated as a double click"
+        );
+
+        // Interrupted by a drag: a fresh click.
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        streak.interrupt();
+        assert_eq!(
+            streak.press_at(start, 10.0, 10.0, window),
+            Granularity::Character,
+            "a click after a drag continued the streak"
+        );
+    }
+
+    /// A trackpad finger always drifts, so a tiny move must not break a double
+    /// click. Without this, double click is unreliable on exactly the input
+    /// device most users have.
+    #[test]
+    fn a_small_drift_between_clicks_still_counts_as_a_double() {
+        let window = std::time::Duration::from_millis(400);
+        let start = std::time::Instant::now();
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        assert_eq!(
+            streak.press_at(start, 10.0 + CLICK_SLOP / 2.0, 10.0, window),
+            Granularity::Word,
+            "a trackpad's drift broke the double click"
+        );
     }
 }

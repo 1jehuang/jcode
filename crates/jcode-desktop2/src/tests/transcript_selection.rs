@@ -438,3 +438,274 @@ fn middle_click_with_an_empty_primary_selection_is_a_no_op() {
     app.paste_primary_selection();
     assert!(app.model.editor.is_empty());
 }
+
+// --- click granularity ---
+//
+// Click places a caret, double click takes the word, triple click takes the
+// line. The transcript had only the first of those, which meant quoting a
+// single word required a precise drag across it.
+
+/// Press `count` times in a row at one spot, the way a real double or triple
+/// click arrives: separate presses, close together, at the same place.
+fn multi_click(app: &mut App, point: (f64, f64), count: usize) {
+    for _ in 0..count {
+        app.pointer = point;
+        app.on_pointer_pressed();
+        release(app);
+    }
+}
+
+#[test]
+fn double_clicking_the_transcript_selects_a_word() {
+    let mut app = app_with_transcript();
+    // Land inside "answer" in "the answer is forty two".
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 2);
+    assert_eq!(
+        app.selected_transcript_text().as_deref(),
+        Some("answer"),
+        "a double click did not take the word under the pointer"
+    );
+}
+
+#[test]
+fn triple_clicking_the_transcript_selects_the_line() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 3);
+    assert_eq!(
+        app.selected_transcript_text().as_deref(),
+        Some("the answer is forty two"),
+        "a triple click did not take the whole line"
+    );
+}
+
+/// A word or line grab completes on press, so it must publish immediately
+/// rather than waiting for a drag that never comes.
+#[test]
+fn a_double_click_in_the_transcript_auto_copies() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 2);
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("answer")
+    );
+}
+
+/// Two clicks far apart in time are two clicks, not a double: otherwise
+/// clicking to place a caret, pausing, and clicking again would grab a word.
+#[test]
+fn two_slow_clicks_are_not_a_double_click() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 1);
+    // A press outside the double-click window is a fresh click, driven
+    // through the streak's own clock so the test does not have to sleep.
+    let later = std::time::Instant::now() + crate::DOUBLE_CLICK * 2;
+    let granularity = app
+        .click_streak
+        .press_at(later, point.0, point.1, crate::DOUBLE_CLICK);
+    assert_eq!(
+        granularity,
+        crate::select::Granularity::Character,
+        "a slow second click was treated as a double click"
+    );
+    assert!(
+        app.selected_transcript_text().is_none(),
+        "two slow clicks selected a word"
+    );
+}
+
+/// And two clicks in different places are two clicks, however fast: a double
+/// click is one spot pressed twice, not any two presses.
+#[test]
+fn two_clicks_in_different_places_are_not_a_double_click() {
+    let mut app = app_with_transcript();
+    let first = point_for(&mut app, at(1, 0, 0));
+    multi_click(&mut app, first, 1);
+    let elsewhere = point_for(&mut app, at(1, 0, 18));
+    multi_click(&mut app, elsewhere, 1);
+    assert!(
+        app.selected_transcript_text().is_none(),
+        "clicks at two different spots were treated as a double click"
+    );
+}
+
+/// A fourth click starts the ladder over rather than sticking on whole lines,
+/// which is what someone leaning on the button expects.
+#[test]
+fn a_fourth_click_returns_to_a_caret() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 4);
+    assert!(
+        app.model
+            .selection
+            .is_none_or(|selection| selection.is_empty()),
+        "a fourth click did not return to placing a caret"
+    );
+}
+
+/// A drag ends the streak: releasing after a drag and pressing again is a
+/// fresh click, not the second half of a double click.
+#[test]
+fn a_drag_then_a_click_is_not_a_double_click() {
+    let mut app = app_with_transcript();
+    let from = point_for(&mut app, at(1, 0, 0));
+    let to = point_for(&mut app, at(1, 0, 10));
+    drag_and_release(&mut app, from, to);
+    multi_click(&mut app, from, 1);
+    assert!(
+        app.selected_transcript_text().is_none(),
+        "a click after a drag grabbed a word"
+    );
+}
+
+// --- selection under scrolling and streaming ---
+//
+// A selection is (message, block, offset), not screen coordinates. That is
+// what should make it survive anything that moves the text around, and it is
+// worth asserting rather than assuming: the alternative design, caching
+// rectangles, silently highlights the wrong words after a scroll.
+
+/// A conversation long enough to scroll.
+fn app_with_long_transcript() -> App {
+    let mut app = App::default();
+    app.model.session_id = Some("session_test".into());
+    for n in 0..12 {
+        app.model
+            .transcript
+            .push(Message::user(format!("question number {n}")));
+        app.model.transcript.push(Message::assistant(format!(
+            "answer number {n}, with enough prose to take up a line or two of the region"
+        )));
+    }
+    app.frame = App::frame_for_model((1100, 720), 1.0, &app.model);
+    app
+}
+
+#[test]
+fn a_selection_survives_scrolling() {
+    let mut app = app_with_long_transcript();
+    // Select inside the last reply, which is on screen at the tail.
+    let last = app.model.transcript.messages().len() - 1;
+    let from = point_for(&mut app, at(last, 0, 0));
+    let to = point_for(&mut app, at(last, 0, 6));
+    drag_and_release(&mut app, from, to);
+    let before = app
+        .selected_transcript_text()
+        .expect("nothing selected to begin with");
+
+    let max = app.max_scroll();
+    assert!(max > 0.0, "the test conversation does not scroll");
+    app.model.scroll_up(max, max);
+
+    assert_eq!(
+        app.selected_transcript_text().as_deref(),
+        Some(before.as_str()),
+        "scrolling changed which characters were selected"
+    );
+}
+
+/// Streaming appends to the tail message, so a selection made earlier in the
+/// conversation must not slide onto different words as the reply grows.
+#[test]
+fn a_selection_survives_a_streaming_reply() {
+    let mut app = app_with_transcript();
+    let from = point_for(&mut app, at(0, 0, 0));
+    let to = point_for(&mut app, at(0, 0, 4));
+    drag_and_release(&mut app, from, to);
+    let before = app.selected_transcript_text().expect("nothing selected");
+
+    for _ in 0..5 {
+        app.model.transcript.append_assistant(" and more text");
+    }
+
+    assert_eq!(
+        app.selected_transcript_text().as_deref(),
+        Some(before.as_str()),
+        "a streaming reply moved an earlier selection"
+    );
+}
+
+// --- autoscroll while dragging ---
+//
+// Without this a selection is capped at one screenful: the pointer runs out of
+// window, so text above the region can only be reached by releasing,
+// scrolling, and shift-clicking.
+
+#[test]
+fn dragging_to_the_top_edge_scrolls_the_conversation() {
+    let mut app = app_with_long_transcript();
+    let last = app.model.transcript.messages().len() - 1;
+    let start = point_for(&mut app, at(last, 0, 0));
+    app.pointer = start;
+    app.on_pointer_pressed();
+
+    let before = app.model.scroll;
+    for _ in 0..5 {
+        app.pointer = (start.0, app.frame.body_top + 1.0);
+        app.on_pointer_moved();
+    }
+    assert!(
+        app.model.scroll > before,
+        "dragging to the top edge did not scroll ({before} -> {})",
+        app.model.scroll
+    );
+}
+
+/// And the selection grows as it scrolls, rather than the view moving out from
+/// under a selection that stays the same size.
+#[test]
+fn autoscrolling_extends_the_selection_over_the_revealed_text() {
+    let mut app = app_with_long_transcript();
+    let last = app.model.transcript.messages().len() - 1;
+    let start = point_for(&mut app, at(last, 0, 4));
+    app.pointer = start;
+    app.on_pointer_pressed();
+    app.pointer = (start.0, app.frame.body_top + 1.0);
+    app.on_pointer_moved();
+    let short = app.selected_transcript_text().unwrap_or_default().len();
+
+    for _ in 0..8 {
+        app.pointer = (start.0, app.frame.body_top + 1.0);
+        app.on_pointer_moved();
+    }
+    let long = app.selected_transcript_text().unwrap_or_default().len();
+    assert!(
+        long > short,
+        "autoscrolling did not extend the selection ({short} -> {long} bytes)"
+    );
+}
+
+/// Autoscroll must stop at the ends rather than running forever, and must not
+/// fire in the middle of the region where the user is just dragging normally.
+#[test]
+fn autoscroll_is_bounded_and_does_not_fire_mid_region() {
+    let mut app = app_with_long_transcript();
+    let middle = (
+        app.frame.left + 40.0,
+        (app.frame.body_top + app.frame.body_bottom) / 2.0,
+    );
+    let before = app.model.scroll;
+    app.pointer = middle;
+    app.on_pointer_pressed();
+    app.on_pointer_moved();
+    assert_eq!(
+        app.model.scroll, before,
+        "a drag in the middle of the region scrolled the view"
+    );
+
+    // Drive it hard into the top: it must stop at the head, not run away.
+    for _ in 0..200 {
+        app.pointer = (middle.0, app.frame.body_top + 1.0);
+        app.on_pointer_moved();
+    }
+    let max = app.max_scroll();
+    assert!(
+        app.model.scroll <= max + 0.5,
+        "autoscroll ran past the head: {} > {max}",
+        app.model.scroll
+    );
+}

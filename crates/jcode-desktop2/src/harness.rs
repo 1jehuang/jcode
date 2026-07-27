@@ -23,6 +23,8 @@ pub enum HarnessUpdate {
     Status(String),
     Attached {
         session_id: String,
+        /// The session's working directory, as the daemon reports it.
+        working_dir: Option<String>,
     },
     /// The provider and model serving the session.
     Model {
@@ -272,6 +274,7 @@ fn run(
                 })?;
                 send(HarnessUpdate::Attached {
                     session_id: session.session_id,
+                    working_dir: session.working_dir,
                 });
             }
             ApiEvent::TextDelta { text, .. } => send(HarnessUpdate::Text(text)),
