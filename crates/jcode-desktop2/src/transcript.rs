@@ -34,6 +34,10 @@ use vello::peniko::{Brush, Color};
 pub enum Role {
     User,
     Assistant,
+    /// The model's reasoning. Shown, because a long silent think is
+    /// indistinguishable from a stall, but visibly subordinate to the answer:
+    /// muted ink behind a rule, never mistaken for the reply itself.
+    Reasoning,
 }
 
 /// One turn of the conversation.
@@ -56,6 +60,13 @@ impl Message {
     pub fn assistant(source: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
+            source: source.into(),
+        }
+    }
+
+    pub fn reasoning(source: impl Into<String>) -> Self {
+        Self {
+            role: Role::Reasoning,
             source: source.into(),
         }
     }
@@ -94,6 +105,17 @@ impl Transcript {
         }
     }
 
+    /// Append streamed reasoning, continuing the current thought. Reasoning
+    /// arrives in the same delta-sized chunks as the reply, so it coalesces
+    /// the same way; a new assistant message ends the thought, which is what
+    /// makes "thought, then answered" read in order.
+    pub fn append_reasoning(&mut self, text: &str) {
+        match self.messages.last_mut() {
+            Some(last) if last.role == Role::Reasoning => last.source.push_str(text),
+            _ => self.messages.push(Message::reasoning(text)),
+        }
+    }
+
     /// Plain-text rendering, for tests and for copying the conversation.
     pub fn plain_text(&self) -> String {
         self.messages
@@ -108,7 +130,7 @@ impl Transcript {
     /// because nothing is arriving.
     pub fn streaming_len(&self) -> usize {
         match self.messages.last() {
-            Some(last) if last.role == Role::Assistant => last.source.chars().count(),
+            Some(last) if last.role != Role::User => last.source.chars().count(),
             _ => 0,
         }
     }
@@ -146,7 +168,7 @@ impl LaidMessage {
     pub fn top_padding(&self) -> f64 {
         match self.role {
             Role::User => USER_PAD_Y,
-            Role::Assistant => 0.0,
+            Role::Assistant | Role::Reasoning => 0.0,
         }
     }
 }
@@ -180,6 +202,13 @@ pub const CODE_PAD_X: f64 = 10.0;
 pub const CODE_PAD_Y: f64 = 6.0;
 /// Indent applied to quoted text, leaving room for the quote rule.
 pub const QUOTE_INSET: f64 = 12.0;
+/// Indent applied to a reasoning message, leaving room for its rule. Same
+/// measure as a quote, because it is the same idea: text attributed to
+/// somewhere other than the main voice.
+pub const REASONING_INSET: f64 = 12.0;
+/// Reasoning is set smaller than body copy, as a multiple of it. Enough to
+/// read as an aside at a glance without becoming unreadable.
+pub const REASONING_SCALE: f32 = 0.92;
 
 /// Resolve a render-core [`StyleRole`] to a concrete theme colour. This is the
 /// whole of the desktop's "theme adapter": the neutral document says *what* a
@@ -219,11 +248,29 @@ pub fn lay_out_message(
     // Markdown and math both come from render-core, so the desktop and the TUI
     // agree on what a document *is*; only the drawing differs.
     let document: Document = parse_markdown(&message.source);
+    // Reasoning is the same document machinery in a subordinate voice: muted,
+    // slightly smaller, and indented behind a rule the scene draws.
+    let (base, role_inset) = match message.role {
+        Role::Reasoning => (
+            ParagraphStyle {
+                font_size: base.font_size * REASONING_SCALE,
+                line_height: base.line_height,
+                color: theme.muted,
+                ..base
+            },
+            REASONING_INSET,
+        ),
+        _ => (base, 0.0),
+    };
+    let tint = match message.role {
+        Role::Reasoning => Some(theme.muted),
+        _ => None,
+    };
     let mut blocks = Vec::new();
     let mut top = 0.0;
 
     for block in &document.blocks {
-        let inset = block_inset(&block.kind);
+        let inset = block_inset(&block.kind) + role_inset;
         let style = block_style(&block.kind, base, theme);
         let lines = block_lines(block);
         if lines.is_empty() {
@@ -239,7 +286,7 @@ pub fn lay_out_message(
             &spans,
             (width - inset * 2.0).max(1.0),
             style,
-            theme,
+            Palette { theme, tint },
             scale,
         );
         let mut height = f64::from(layout.height()) / scale;
@@ -443,13 +490,32 @@ pub fn flatten(lines: &[StyledLine]) -> (String, Vec<SpanStyle>) {
 /// This is the reason emphasis, code, links, and math can look different from
 /// body copy without the transcript having to draw them as separate
 /// paragraphs, which would break wrapping across a style boundary.
+/// How a block's spans get their ink: the theme they resolve against, and an
+/// optional override. Bundled rather than passed as two arguments because they
+/// are one decision, and a caller that had the theme but forgot the tint would
+/// silently draw reasoning in body colour.
+#[derive(Clone, Copy)]
+pub struct Palette<'a> {
+    pub theme: &'a Theme,
+    /// Overrides every span's role colour when set. Reasoning uses this so a
+    /// `**bold**` word inside a thought stays in the aside's muted ink instead
+    /// of jumping to full-strength body colour.
+    pub tint: Option<Color>,
+}
+
+impl Palette<'_> {
+    fn color(&self, role: StyleRole) -> Color {
+        self.tint.unwrap_or_else(|| role_color(role, self.theme))
+    }
+}
+
 pub fn layout_rich(
     text: &mut TextSystem,
     source: &str,
     spans: &[SpanStyle],
     width: f64,
     style: ParagraphStyle,
-    theme: &Theme,
+    palette: Palette<'_>,
     scale: f64,
 ) -> Layout<Brush> {
     text.layout_rich(source, width as f32, style, scale, &mut |builder| {
@@ -457,8 +523,9 @@ pub fn layout_rich(
             if span.range.is_empty() {
                 continue;
             }
+            let color = palette.color(span.role);
             builder.push(
-                StyleProperty::Brush(Brush::Solid(role_color(span.role, theme))),
+                StyleProperty::Brush(Brush::Solid(color)),
                 span.range.clone(),
             );
             if span.bold {
@@ -522,6 +589,77 @@ mod tests {
         transcript.append_assistant("ld**");
         assert_eq!(transcript.messages().len(), 2);
         assert_eq!(transcript.messages()[1].source, "**bold**");
+    }
+
+    /// Reasoning coalesces like a reply, and the answer that follows it starts
+    /// a new message: without this, "thought, then answered" would render as
+    /// one undifferentiated block.
+    #[test]
+    fn reasoning_accumulates_then_yields_to_the_answer() {
+        let mut transcript = Transcript::default();
+        transcript.append_reasoning("first ");
+        transcript.append_reasoning("thought");
+        transcript.append_assistant("the answer");
+        let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::Reasoning, Role::Assistant]);
+        assert_eq!(transcript.messages()[0].source, "first thought");
+    }
+
+    /// Reasoning must read as subordinate: muted ink, smaller type, and an
+    /// indent for the rule the scene draws beside it. Equal treatment would
+    /// make a thought indistinguishable from the reply.
+    #[test]
+    fn reasoning_is_set_apart_from_the_reply() {
+        let mut text = TextSystem::default();
+        let theme = theme();
+        let lay = |text: &mut TextSystem, message: &Message| {
+            lay_out_message(text, message, 600.0, &theme, base(), 1.75)
+        };
+        let thought = lay(&mut text, &Message::reasoning("a thought"));
+        let reply = lay(&mut text, &Message::assistant("a thought"));
+        assert!(
+            thought.blocks[0].inset > reply.blocks[0].inset,
+            "reasoning was not indented away from the reply"
+        );
+        assert!(
+            thought.height < reply.height
+                || thought.blocks[0].layout.width() < reply.blocks[0].layout.width(),
+            "reasoning was set at the same size as the reply"
+        );
+    }
+
+    /// Emphasis inside a thought must stay muted. Without the tint, a bold
+    /// word in reasoning would be drawn in full-strength body ink and read as
+    /// louder than the answer beneath it.
+    #[test]
+    fn emphasis_inside_reasoning_stays_muted() {
+        let mut text = TextSystem::default();
+        let theme = theme();
+        let laid = lay_out_message(
+            &mut text,
+            &Message::reasoning("**loud** and quiet"),
+            600.0,
+            &theme,
+            base(),
+            1.75,
+        );
+        let brushes: Vec<_> = laid.blocks[0]
+            .layout
+            .lines()
+            .flat_map(|line| line.items().collect::<Vec<_>>())
+            .filter_map(|item| match item {
+                parley::PositionedLayoutItem::GlyphRun(run) => Some(run.style().brush.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!brushes.is_empty(), "no glyph runs to check");
+        for brush in brushes {
+            assert_eq!(
+                brush,
+                Brush::Solid(theme.muted),
+                "a span in reasoning escaped the muted tint"
+            );
+        }
     }
 
     /// The marker is gone: role is carried in the model, so nothing needs to

@@ -339,6 +339,16 @@ impl App {
                         std::time::Instant::now(),
                     );
                 }
+                harness::HarnessUpdate::Reasoning(text) => {
+                    self.model.transcript.append_reasoning(&text);
+                    // Reasoning is revealed by the same sweep as the reply, so
+                    // a thought does not appear as an instant wall of text
+                    // while the answer below it types itself out.
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
                 harness::HarnessUpdate::Activity(label) => {
                     self.model.busy = true;
                     self.model
