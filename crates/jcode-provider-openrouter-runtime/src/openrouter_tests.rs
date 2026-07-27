@@ -2977,3 +2977,4 @@ model_catalog = false
 
     jcode_base::config::invalidate_config_cache();
 }
+include!("openrouter_stream_options_tests.rs");
