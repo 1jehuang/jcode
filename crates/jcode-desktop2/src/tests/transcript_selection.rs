@@ -438,3 +438,120 @@ fn middle_click_with_an_empty_primary_selection_is_a_no_op() {
     app.paste_primary_selection();
     assert!(app.model.editor.is_empty());
 }
+
+// --- click granularity ---
+//
+// Click places a caret, double click takes the word, triple click takes the
+// line. The transcript had only the first of those, which meant quoting a
+// single word required a precise drag across it.
+
+/// Press `count` times in a row at one spot, the way a real double or triple
+/// click arrives: separate presses, close together, at the same place.
+fn multi_click(app: &mut App, point: (f64, f64), count: usize) {
+    for _ in 0..count {
+        app.pointer = point;
+        app.on_pointer_pressed();
+        release(app);
+    }
+}
+
+#[test]
+fn double_clicking_the_transcript_selects_a_word() {
+    let mut app = app_with_transcript();
+    // Land inside "answer" in "the answer is forty two".
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 2);
+    assert_eq!(
+        app.selected_transcript_text().as_deref(),
+        Some("answer"),
+        "a double click did not take the word under the pointer"
+    );
+}
+
+#[test]
+fn triple_clicking_the_transcript_selects_the_line() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 3);
+    assert_eq!(
+        app.selected_transcript_text().as_deref(),
+        Some("the answer is forty two"),
+        "a triple click did not take the whole line"
+    );
+}
+
+/// A word or line grab completes on press, so it must publish immediately
+/// rather than waiting for a drag that never comes.
+#[test]
+fn a_double_click_in_the_transcript_auto_copies() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 2);
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("answer")
+    );
+}
+
+/// Two clicks far apart in time are two clicks, not a double: otherwise
+/// clicking to place a caret, pausing, and clicking again would grab a word.
+#[test]
+fn two_slow_clicks_are_not_a_double_click() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 1);
+    // Age the streak past the double-click window.
+    app.click_streak = app
+        .click_streak
+        .map(|(at, spot, count)| (at - crate::DOUBLE_CLICK * 2, spot, count));
+    multi_click(&mut app, point, 1);
+    assert!(
+        app.selected_transcript_text().is_none(),
+        "two slow clicks selected a word"
+    );
+}
+
+/// And two clicks in different places are two clicks, however fast: a double
+/// click is one spot pressed twice, not any two presses.
+#[test]
+fn two_clicks_in_different_places_are_not_a_double_click() {
+    let mut app = app_with_transcript();
+    let first = point_for(&mut app, at(1, 0, 0));
+    multi_click(&mut app, first, 1);
+    let elsewhere = point_for(&mut app, at(1, 0, 18));
+    multi_click(&mut app, elsewhere, 1);
+    assert!(
+        app.selected_transcript_text().is_none(),
+        "clicks at two different spots were treated as a double click"
+    );
+}
+
+/// A fourth click starts the ladder over rather than sticking on whole lines,
+/// which is what someone leaning on the button expects.
+#[test]
+fn a_fourth_click_returns_to_a_caret() {
+    let mut app = app_with_transcript();
+    let point = point_for(&mut app, at(1, 0, 6));
+    multi_click(&mut app, point, 4);
+    assert!(
+        app.model
+            .selection
+            .is_none_or(|selection| selection.is_empty()),
+        "a fourth click did not return to placing a caret"
+    );
+}
+
+/// A drag ends the streak: releasing after a drag and pressing again is a
+/// fresh click, not the second half of a double click.
+#[test]
+fn a_drag_then_a_click_is_not_a_double_click() {
+    let mut app = app_with_transcript();
+    let from = point_for(&mut app, at(1, 0, 0));
+    let to = point_for(&mut app, at(1, 0, 10));
+    drag_and_release(&mut app, from, to);
+    multi_click(&mut app, from, 1);
+    assert!(
+        app.selected_transcript_text().is_none(),
+        "a click after a drag grabbed a word"
+    );
+}

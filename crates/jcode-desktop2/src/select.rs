@@ -183,22 +183,104 @@ fn ceil_boundary(text: &str, index: usize) -> usize {
 /// point in the margin between two messages resolves to the nearest one, so a
 /// drag that strays into a gap keeps extending rather than sticking.
 pub fn position_at(view: &Viewport<'_>, x: f64, y: f64, scale: f64) -> Option<Position> {
+    let hit = block_at(view, x, y, scale)?;
+    let offset = Cursor::from_point(&hit.block.layout, hit.x, hit.y)
+        .index()
+        .min(hit.block.source.len());
+    Some(Position {
+        message: hit.message,
+        block: hit.block_index,
+        offset,
+    })
+}
+
+/// How much text one gesture grabs. Click places a caret, double click takes
+/// the word, triple click takes the line: the granularity ladder every text
+/// surface has, and the reason a user does not have to drag precisely to quote
+/// a single word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Granularity {
+    Character,
+    Word,
+    Line,
+}
+
+impl Granularity {
+    /// The granularity for the nth consecutive click at one spot.
+    ///
+    /// Cycles past three so a fourth click starts over rather than sticking on
+    /// whole lines, which is what a user leaning on the button expects.
+    pub fn for_click(count: usize) -> Self {
+        match count % 3 {
+            2 => Self::Word,
+            0 => Self::Line,
+            _ => Self::Character,
+        }
+    }
+}
+
+/// The selection a click of `granularity` makes at a point, or `None` when
+/// there is nothing laid out there.
+///
+/// Word and line ranges come from Parley's own [`ParleySelection`] helpers, so
+/// they agree with the cluster and line breaking the text was actually shaped
+/// with rather than a hand-rolled scan for spaces, which is wrong for
+/// punctuation, CJK, and anything that wraps.
+pub fn selection_at(
+    view: &Viewport<'_>,
+    x: f64,
+    y: f64,
+    scale: f64,
+    granularity: Granularity,
+) -> Option<Selection> {
+    let hit = block_at(view, x, y, scale)?;
+    let range = match granularity {
+        Granularity::Character => {
+            let offset = Cursor::from_point(&hit.block.layout, hit.x, hit.y)
+                .index()
+                .min(hit.block.source.len());
+            offset..offset
+        }
+        Granularity::Word => {
+            ParleySelection::word_from_point(&hit.block.layout, hit.x, hit.y).text_range()
+        }
+        Granularity::Line => {
+            ParleySelection::line_from_point(&hit.block.layout, hit.x, hit.y).text_range()
+        }
+    };
+    let len = hit.block.source.len();
+    let at = |offset: usize| Position {
+        message: hit.message,
+        block: hit.block_index,
+        offset: offset.min(len),
+    };
+    Some(Selection::new(at(range.start), at(range.end)))
+}
+
+/// A resolved pointer hit: which block, and where in its layout, in the
+/// physical units Parley's own hit-testing wants.
+struct Hit<'a> {
+    message: usize,
+    block_index: usize,
+    block: &'a LaidBlock,
+    x: f32,
+    y: f32,
+}
+
+/// Resolve a transcript point to a block and a point within its layout.
+/// Shared by every gesture, so a click, a drag, and a double click can never
+/// disagree about which glyph the pointer is over.
+fn block_at<'a>(view: &'a Viewport<'_>, x: f64, y: f64, scale: f64) -> Option<Hit<'a>> {
     let placed = nearest_message(view, y)?;
     let local_y = y - placed.top - placed.message.top_padding();
     let block_index = nearest_block(&placed.message.blocks, local_y)?;
     let block = &placed.message.blocks[block_index];
-    let layout_y = local_y - block.top;
-    let offset = Cursor::from_point(
-        &block.layout,
-        ((x - block.inset) * scale) as f32,
-        (layout_y * scale) as f32,
-    )
-    .index()
-    .min(block.source.len());
-    Some(Position {
+    Some(Hit {
         message: placed.index,
-        block: block_index,
-        offset,
+        block_index,
+        block,
+        x: ((x - block.inset) * scale) as f32,
+        y: ((local_y - block.top) * scale) as f32,
     })
 }
 
@@ -284,6 +366,28 @@ pub fn position_at_in_frame(
         x - (frame.left + crate::transcript::USER_PAD_X),
         y - frame.body_top,
         frame.scale,
+    )
+}
+
+/// The selection a click of `granularity` makes at a window point.
+pub fn selection_at_in_frame(
+    painter: &mut crate::paint::Painter,
+    model: &crate::Model,
+    frame: crate::layout::Frame,
+    x: f64,
+    y: f64,
+    granularity: Granularity,
+) -> Option<Selection> {
+    let region = (frame.body_bottom - frame.body_top).max(1.0);
+    let scroll = model.scroll;
+    let laid = laid_for(painter, model, frame);
+    let view = Viewport::new(laid, region, scroll);
+    selection_at(
+        &view,
+        x - (frame.left + crate::transcript::USER_PAD_X),
+        y - frame.body_top,
+        frame.scale,
+        granularity,
     )
 }
 

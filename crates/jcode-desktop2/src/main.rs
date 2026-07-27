@@ -18,6 +18,7 @@ mod keymap;
 mod layout;
 mod meta;
 mod paint;
+mod place;
 mod profile;
 mod render;
 mod scene;
@@ -75,6 +76,11 @@ struct App {
     selecting: bool,
     /// Last click time and offset, for double-click word selection.
     last_click: Option<(std::time::Instant, usize)>,
+    /// Consecutive clicks at one spot in the transcript: when the last one
+    /// landed, where, and how many there have been. Counted rather than
+    /// treated as a boolean because the transcript has three granularities
+    /// (caret, word, line), not two.
+    click_streak: Option<(std::time::Instant, (f64, f64), usize)>,
     /// Current mouse pointer shape, tracked so it is only set when it changes.
     cursor_icon: winit::window::CursorIcon,
     /// Window size and position, persisted so the app reopens as it was left.
@@ -103,6 +109,7 @@ impl Default for App {
             dragging: false,
             selecting: false,
             last_click: None,
+            click_streak: None,
             cursor_icon: winit::window::CursorIcon::Default,
             geometry: window_state::Geometry::default(),
             geometry_saved: None,
@@ -163,6 +170,10 @@ pub struct Model {
     pub hint: usize,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
+    /// Working directory of the attached session, as the daemon reports it.
+    /// `None` until attach, because a guess here is worse than silence: it is
+    /// the fact that decides whether an answer applies to your project.
+    pub working_dir: Option<String>,
     /// Provider and model serving this session, once the harness reports it.
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
@@ -211,6 +222,7 @@ impl Default for Model {
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
             strip: strip::Strip::default(),
+            working_dir: None,
             model: None,
         }
     }
@@ -301,10 +313,15 @@ impl App {
         while let Ok(update) = updates.try_recv() {
             match update {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
-                harness::HarnessUpdate::Attached { session_id } => {
+                harness::HarnessUpdate::Attached {
+                    session_id,
+                    working_dir,
+                } => {
                     self.model.status = format!("attached: {session_id}");
                     self.model.strip.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
+                    self.model.working_dir = working_dir;
+                    self.retitle();
                 }
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
@@ -350,6 +367,11 @@ impl App {
         self.model.scroll = 0.0;
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
+        // The new session's directory arrives with its `Attached` event; until
+        // then show the strip's entry rather than the previous session's path,
+        // which would name the wrong project.
+        self.model.working_dir = self.model.strip.focused_working_dir().map(str::to_string);
+        self.retitle();
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Attach(target));
         }
@@ -417,9 +439,11 @@ impl App {
             probe.scale,
         )
         .line_count();
-        // The strip only earns its row when there is somewhere to go: with
-        // one session it would be a widget that says "1 of 1".
-        let strip = model.strip.len() > 1;
+        // The top chrome row is reserved when it has something to say: more
+        // than one session to move between (the strip proper), or a working
+        // directory to name. With neither it would be a widget saying "1 of 1"
+        // about nowhere, so nothing is reserved and the page is unchanged.
+        let strip = model.strip.len() > 1 || model.working_dir.is_some();
         // Measure the conversation so the composer can sit just under the
         // last reply while it is short, instead of floating at the middle of
         // the page with a gap above it. Content height is a function of the
@@ -479,17 +503,7 @@ impl App {
             // In the transcript: start a text selection there. The
             // conversation is the part of the window worth quoting from, so a
             // drag over it has to select rather than do nothing.
-            if self.in_transcript(x, y)
-                && let Some(position) = self.transcript_position_at(x, y)
-            {
-                // Shift+click extends the existing selection, as anywhere else.
-                let anchor = match self.model.selection {
-                    Some(existing) if self.modifiers.shift_key() => existing.anchor,
-                    _ => position,
-                };
-                self.model.selection = Some(select::Selection::new(anchor, position));
-                self.selecting = true;
-                self.request_redraw();
+            if self.in_transcript(x, y) && self.press_in_transcript(x, y) {
                 return;
             }
             // Outside the well: the donut is the only other interactive thing,
@@ -569,6 +583,69 @@ impl App {
     /// The transcript position under a logical point.
     fn transcript_position_at(&mut self, x: f64, y: f64) -> Option<select::Position> {
         select::position_at_in_frame(&mut self.painter, &self.model, self.frame, x, y)
+    }
+
+    /// Handle a press inside the transcript. Returns whether it was consumed,
+    /// so the caller can fall through to the donut when there is no text here.
+    ///
+    /// Click places a caret, double click takes the word, triple click takes
+    /// the line: the same ladder every other text surface has, and the reason
+    /// quoting one word does not require a precise drag.
+    fn press_in_transcript(&mut self, x: f64, y: f64) -> bool {
+        let count = self.count_click(x, y);
+        let granularity = select::Granularity::for_click(count);
+        let Some(hit) = select::selection_at_in_frame(
+            &mut self.painter,
+            &self.model,
+            self.frame,
+            x,
+            y,
+            granularity,
+        ) else {
+            return false;
+        };
+        self.model.selection = Some(match self.model.selection {
+            // Shift+click extends the existing selection, as anywhere else.
+            Some(existing)
+                if self.modifiers.shift_key() && granularity == select::Granularity::Character =>
+            {
+                select::Selection::new(existing.anchor, hit.focus)
+            }
+            _ => hit,
+        });
+        // A caret drag continues on move; a word or line grab is already
+        // complete, so it publishes now rather than waiting for a release.
+        if granularity == select::Granularity::Character {
+            self.selecting = true;
+        } else {
+            self.publish_primary_selection();
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// How many consecutive clicks have landed at this spot, counting this
+    /// one. Resets when the pointer moves or the user pauses, so a slow second
+    /// click somewhere else is a fresh click rather than a double.
+    fn count_click(&mut self, x: f64, y: f64) -> usize {
+        /// How far the pointer may move between clicks and still count as the
+        /// same spot, in logical units. Zero would make a double click
+        /// impossible on a trackpad, where the finger always drifts a little.
+        const SLOP: f64 = 3.0;
+
+        let now = std::time::Instant::now();
+        let count = match self.click_streak {
+            Some((at, (last_x, last_y), count))
+                if now.duration_since(at) < DOUBLE_CLICK
+                    && (last_x - x).abs() <= SLOP
+                    && (last_y - y).abs() <= SLOP =>
+            {
+                count + 1
+            }
+            _ => 1,
+        };
+        self.click_streak = Some((now, (x, y), count));
+        count
     }
 
     /// The selected transcript text, if any.
@@ -697,6 +774,12 @@ impl App {
             if let Some(position) = self.transcript_position_at(x, y)
                 && let Some(selection) = self.model.selection.as_mut()
             {
+                // A drag is a gesture in its own right, so it ends the click
+                // streak: pressing again afterwards is a fresh click, not the
+                // second half of a double click that would grab a word.
+                if selection.focus != position {
+                    self.click_streak = None;
+                }
                 selection.focus = position;
                 self.request_redraw();
             }
@@ -745,6 +828,14 @@ impl App {
         let (time, offset) = (self.model.spin.time, self.model.spin.offset);
         if let Some(field) = self.model.donut.as_mut() {
             field.render(time, offset);
+        }
+    }
+
+    /// Put the session's directory in the window title, so the compositor's
+    /// window list distinguishes two jcode windows on different checkouts.
+    fn retitle(&self) {
+        if let Some(state) = self.state.as_ref() {
+            state.set_title(&place::window_title(self.model.working_dir.as_deref()));
         }
     }
 
@@ -998,7 +1089,7 @@ impl ApplicationHandler for App {
         // Reopen where the user left off.
         let geometry = window_state::Geometry::load();
         let mut attributes = Window::default_attributes()
-            .with_title("jcode desktop2")
+            .with_title(place::window_title(self.model.working_dir.as_deref()))
             .with_inner_size(winit::dpi::LogicalSize::new(
                 geometry.width,
                 geometry.height,
