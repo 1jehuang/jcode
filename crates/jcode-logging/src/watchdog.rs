@@ -38,12 +38,46 @@ static LAST_BEAT_MS: AtomicU64 = AtomicU64::new(0);
 static BEAT_COUNT: AtomicU64 = AtomicU64::new(0);
 static PHASE: AtomicUsize = AtomicUsize::new(0);
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+/// Number of in-flight units of work. A process that is simply waiting for
+/// user input is idle, not stalled, so stall reporting is gated on this.
+static BUSY: AtomicUsize = AtomicUsize::new(0);
 /// Free-form detail about the current operation (e.g. the running tool). Kept
 /// separate from the interned phase because it is dynamic and low-frequency.
 static DETAIL: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
 
 fn detail_slot() -> &'static std::sync::Mutex<String> {
     DETAIL.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
+
+/// RAII guard marking a unit of work in flight. While any guard is alive the
+/// process is expected to make progress, so missing beats mean a real hang
+/// rather than an idle wait for input.
+#[must_use = "the guard must stay alive for the duration of the work"]
+pub struct WorkGuard(());
+
+impl WorkGuard {
+    fn new(phase: &'static str) -> Self {
+        BUSY.fetch_add(1, Ordering::SeqCst);
+        beat(phase);
+        Self(())
+    }
+}
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        BUSY.fetch_sub(1, Ordering::SeqCst);
+        beat("idle");
+    }
+}
+
+/// Mark the start of a unit of work that is expected to make steady progress.
+pub fn begin_work(phase: &'static str) -> WorkGuard {
+    WorkGuard::new(phase)
+}
+
+/// Whether any work is currently in flight.
+pub fn is_busy() -> bool {
+    BUSY.load(Ordering::SeqCst) > 0
 }
 
 /// Describe the operation currently in flight. Shown in stall dumps so a hang
@@ -226,6 +260,16 @@ fn monitor_loop(stall: Duration, heartbeat: Duration) {
         let since_beat = Duration::from_millis(now_ms().saturating_sub(last_beat_ms));
         let resources = resource_snapshot();
 
+        // An idle client waiting for input is not stalled; only work that
+        // claimed to be in flight can hang.
+        if !is_busy() {
+            if stall_reported_at.take().is_some() {
+                next_stall_report = stall;
+            }
+            emit_heartbeat_if_due(&mut last_heartbeat, heartbeat, resources);
+            continue;
+        }
+
         if since_beat >= next_stall_report {
             let states = thread_states();
             super::event_warn(
@@ -262,25 +306,37 @@ fn monitor_loop(stall: Duration, heartbeat: Duration) {
             next_stall_report = stall;
         }
 
-        if !heartbeat.is_zero() && last_heartbeat.elapsed() >= heartbeat {
-            last_heartbeat = Instant::now();
-            super::event_info(
-                "watchdog.alive",
-                [
-                    ("phase", current_phase().to_string()),
-                    ("detail", current_detail()),
-                    (
-                        "uptime_secs",
-                        process_start().elapsed().as_secs().to_string(),
-                    ),
-                    ("beats", BEAT_COUNT.load(Ordering::Relaxed).to_string()),
-                    ("rss_mb", resources.rss_mb.to_string()),
-                    ("threads", resources.threads.to_string()),
-                    ("open_fds", resources.open_fds.to_string()),
-                ],
-            );
-        }
+        emit_heartbeat_if_due(&mut last_heartbeat, heartbeat, resources);
     }
+}
+
+/// The heartbeat runs whether or not work is in flight: a log that stops
+/// growing entirely is itself the signal that the process died or froze hard.
+fn emit_heartbeat_if_due(
+    last_heartbeat: &mut Instant,
+    heartbeat: Duration,
+    resources: ResourceSnapshot,
+) {
+    if heartbeat.is_zero() || last_heartbeat.elapsed() < heartbeat {
+        return;
+    }
+    *last_heartbeat = Instant::now();
+    super::event_info(
+        "watchdog.alive",
+        [
+            ("phase", current_phase().to_string()),
+            ("detail", current_detail()),
+            ("busy", is_busy().to_string()),
+            (
+                "uptime_secs",
+                process_start().elapsed().as_secs().to_string(),
+            ),
+            ("beats", BEAT_COUNT.load(Ordering::Relaxed).to_string()),
+            ("rss_mb", resources.rss_mb.to_string()),
+            ("threads", resources.threads.to_string()),
+            ("open_fds", resources.open_fds.to_string()),
+        ],
+    );
 }
 
 #[cfg(test)]
@@ -295,6 +351,18 @@ mod tests {
         assert!(BEAT_COUNT.load(Ordering::Relaxed) > before);
         beat("test-phase-2");
         assert_eq!(current_phase(), "test-phase-2");
+    }
+
+    #[test]
+    fn work_guard_tracks_busy_state() {
+        assert!(!is_busy(), "no work should be in flight at test start");
+        {
+            let _guard = begin_work("test-work");
+            assert!(is_busy());
+            assert_eq!(current_phase(), "test-work");
+        }
+        assert!(!is_busy(), "guard drop must clear busy state");
+        assert_eq!(current_phase(), "idle");
     }
 
     #[test]
