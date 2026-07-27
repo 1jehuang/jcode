@@ -640,16 +640,17 @@ fn reasoning_streaming() -> Model {
     }
 }
 
-/// A turn in flight showing its work: each tool call is a muted line in the
-/// transcript, so progress is visible where the user is already reading, not
-/// only in the composer's activity line.
+/// A turn in flight showing its work: the call running right now is one card
+/// at the tail of the transcript, so progress is visible where the user is
+/// already reading, not only in the composer's activity line. Earlier calls
+/// do not accumulate: the card is a slot the current call occupies.
 fn tool_progress() -> Model {
     use crate::transcript::{Message, Transcript};
     let mut transcript = Transcript::default();
     transcript.push(Message::user("tighten the scrollbar's fade timing"));
-    transcript.upsert_tool("call_1", "read the scroll smoothing module");
-    transcript.upsert_tool("call_2", "find every use of the fade alpha");
-    transcript.upsert_tool("call_3", "run the desktop2 scroll tests");
+    transcript.set_live_tool("call_1", "read the scroll smoothing module");
+    transcript.set_live_tool("call_2", "find every use of the fade alpha");
+    transcript.set_live_tool("call_3", "run the desktop2 scroll tests");
     Model {
         transcript,
         busy: true,

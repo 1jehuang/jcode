@@ -247,7 +247,7 @@ fn run_e2e(message: &str) -> Result<()> {
             }
             harness::HarnessUpdate::Tool { call_id, label } => {
                 println!("[e2e] tool: {label}");
-                model.transcript.upsert_tool(&call_id, &label);
+                model.transcript.set_live_tool(&call_id, &label);
             }
             harness::HarnessUpdate::Sessions(_) => {}
         }
