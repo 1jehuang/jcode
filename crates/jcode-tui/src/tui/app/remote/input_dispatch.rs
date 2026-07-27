@@ -356,7 +356,7 @@ fn submit_transcript_input(app: &mut App) {
         SendAction::Queue => queue_transcript_input(app),
         SendAction::Interleave => {
             let prepared = input::take_prepared_input(app);
-            input::stage_local_interleave(app, prepared.expanded);
+            input::stage_local_interleave(app, prepared.expanded, prepared.images);
         }
     }
 }
@@ -403,7 +403,8 @@ async fn submit_remote_transcript_input(
         SendAction::Queue => queue_transcript_input(app),
         SendAction::Interleave => {
             let prepared = input::take_prepared_input(app);
-            app.send_interleave_now(prepared.expanded, remote).await;
+            app.send_interleave_now(prepared.expanded, prepared.images, remote)
+                .await;
         }
     }
 
@@ -519,6 +520,11 @@ pub(in crate::tui::app) async fn apply_remote_transcript_event(
 pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input: &str) -> bool {
     if !app.is_remote {
         return false;
+    }
+    if app.is_processing && !app.queue_mode {
+        let images = std::mem::take(&mut app.pending_images);
+        input::stage_local_interleave(app, input.to_string(), images);
+        return true;
     }
     app.queued_messages.push(input.to_string());
     app.pending_images.clear();

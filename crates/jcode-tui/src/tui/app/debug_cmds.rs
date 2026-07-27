@@ -173,7 +173,7 @@ impl App {
                 }
                 SendAction::Interleave => {
                     let prepared = input::take_prepared_input(self);
-                    input::stage_local_interleave(self, prepared.expanded);
+                    input::stage_local_interleave(self, prepared.expanded, prepared.images);
                     self.debug_trace
                         .record("message", format!("interleave:{}", msg));
                     format!("OK: interleave message '{}' (injecting now)", msg)

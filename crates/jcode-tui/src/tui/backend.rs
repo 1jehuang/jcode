@@ -421,6 +421,7 @@ impl RemoteConnection {
                 id,
                 content,
                 urgent,
+                ..
             } => Some(format!(
                 "{} urgent={} content_bytes={} content_chars={}",
                 base("soft_interrupt", *id),
@@ -873,11 +874,17 @@ impl RemoteConnection {
 
     /// Queue a soft interrupt message to be injected at the next safe point
     /// This doesn't cancel anything - the message is naturally incorporated
-    pub async fn soft_interrupt(&mut self, content: String, urgent: bool) -> Result<u64> {
+    pub async fn soft_interrupt(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::SoftInterrupt {
             id,
             content,
+            images,
             urgent,
         };
         self.next_request_id += 1;

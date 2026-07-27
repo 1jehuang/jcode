@@ -107,6 +107,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         .map_err(|_| anyhow!("old queue lock"))?
         .push(jcode_agent_runtime::SoftInterruptMessage {
             content: "stale queued message".to_string(),
+            images: Vec::new(),
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
         });
