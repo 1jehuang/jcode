@@ -3557,26 +3557,7 @@ impl App {
         }
 
         let trimmed = input.trim();
-        let handled = commands::handle_cancel_command(self, trimmed)
-            || commands::handle_help_command(self, trimmed)
-            || commands::handle_keys_command(self, trimmed)
-            || commands::handle_ssh_command(self, trimmed)
-            || commands::handle_session_command(self, trimmed)
-            || commands::handle_dictation_command(self, trimmed)
-            || commands::handle_config_command(self, trimmed)
-            || commands::handle_log_command(self, trimmed)
-            || commands::handle_diff_command(self, trimmed)
-            || commands::handle_model_status_command(self, trimmed)
-            || super::debug::handle_debug_command(self, trimmed)
-            || super::model_context::handle_model_command(self, trimmed)
-            || super::commands::handle_usage_command(self, trimmed)
-            || super::productivity::handle_productivity_command(self, trimmed)
-            || super::commands::handle_feedback_command(self, trimmed)
-            || super::commands::handle_telemetry_command(self, trimmed)
-            || super::support::handle_support_command(self, trimmed)
-            || super::state_ui::handle_info_command(self, trimmed)
-            || super::auth::handle_auth_command(self, trimmed)
-            || super::tui_lifecycle_runtime::handle_dev_command(self, trimmed);
+        let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
             if trimmed.starts_with('/') {
                 crate::telemetry::record_command_family(trimmed);
