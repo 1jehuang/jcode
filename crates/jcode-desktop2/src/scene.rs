@@ -38,6 +38,54 @@ const CIRCLE_TOLERANCE: f64 = 0.05;
 /// appended to one `BezPath` and filled in a single draw, which is the same
 /// trick the website uses with one canvas path: per-dot fills would mean
 /// thousands of separate Vello draw commands per frame.
+/// Diameter of the activity spinner's ring, in logical pixels. Sized to a
+/// caption line so it reads as part of the text row rather than as a graphic
+/// bolted next to it.
+pub(crate) const SPINNER_SIZE: f64 = 13.0;
+/// Gap between the spinner and the phase text.
+pub(crate) const SPINNER_GAP: f64 = 8.0;
+
+/// The activity spinner: a ring of halftone dots with a bright head that walks
+/// around it. Same visual language as the hero donut, so "the agent is working"
+/// looks like part of the app rather than a stock throbber.
+fn draw_spinner(
+    scene: &mut Scene,
+    activity: &crate::activity::Activity,
+    center: (f64, f64),
+    ink: Color,
+    scale: f64,
+    now: std::time::Instant,
+) {
+    let lead = activity.frame(now);
+    let count = crate::activity::SPINNER_DOTS;
+    let radius = SPINNER_SIZE / 2.0;
+    for index in 0..count {
+        // Distance behind the head, so the ring reads as a comet trail and the
+        // direction of motion is unambiguous even in a still frame.
+        let behind = (count + lead - index) % count;
+        let fade = 1.0 - (behind as f32 / count as f32);
+        let angle =
+            std::f64::consts::TAU * index as f64 / count as f64 - std::f64::consts::FRAC_PI_2;
+        let dot = Circle::new(
+            (
+                center.0 + radius * angle.cos(),
+                center.1 + radius * angle.sin(),
+            ),
+            // The head is a full dot and the tail shrinks, so the motion is
+            // carried by size as well as by alpha: alpha alone disappears on a
+            // faint caption colour.
+            (1.0 + 1.4 * f64::from(fade)) * 0.62,
+        );
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            Affine::scale(scale),
+            ink.with_alpha(0.25 + 0.75 * fade),
+            None,
+            &dot,
+        );
+    }
+}
+
 fn draw_donut(scene: &mut Scene, field: &donut::Donut, box_: Rect, ink: Color, scale: f64) {
     let side = box_.width().min(box_.height());
     if side < layout::DONUT_MIN_SIDE {
@@ -373,8 +421,7 @@ fn draw_transcript(
                     // A user message and a code block sit on a wash, so they
                     // need the stronger band: the paper-tuned one is nearly
                     // invisible against the card the user's own message is in.
-                    let on_wash =
-                        is_user || matches!(block.kind, BlockKind::CodeBlock { .. });
+                    let on_wash = is_user || matches!(block.kind, BlockKind::CodeBlock { .. });
                     let band_color = if on_wash {
                         theme.selection_on_wash
                     } else {
@@ -575,16 +622,43 @@ pub fn build_scene(
         // could actually type teaches what the thing is for. While busy it says
         // so instead, because "nothing is happening" and "working" must never
         // look the same.
+        // The busy line is the activity line when a turn is running: a
+        // spinner, the current phase, and elapsed time, so a long turn shows
+        // progress instead of a frozen label.
+        let busy_line = model
+            .busy
+            .then(|| model.activity.line(std::time::Instant::now()))
+            .flatten()
+            .unwrap_or_else(|| "working... esc to interrupt".to_string());
         if model.editor.is_empty() {
+            // While busy the line is indented past the spinner, which is drawn
+            // in the space this makes.
+            let (line_x, line_width) = if model.busy {
+                let inset = SPINNER_SIZE + SPINNER_GAP;
+                draw_spinner(
+                    scene,
+                    &model.activity,
+                    (
+                        prompt_x + SPINNER_SIZE / 2.0,
+                        prompt_y + f64::from(prompt_style.font_size) * 0.55,
+                    ),
+                    theme.faint,
+                    scale,
+                    std::time::Instant::now(),
+                );
+                (prompt_x + inset, prompt_width - inset as f32)
+            } else {
+                (prompt_x, prompt_width)
+            };
             text.draw_paragraph_scaled(
                 scene,
                 if model.busy {
-                    "working... esc to interrupt"
+                    busy_line.as_str()
                 } else {
                     crate::hints::hint(model.hint)
                 },
-                (prompt_x, prompt_y),
-                prompt_width,
+                (line_x, prompt_y),
+                line_width,
                 ParagraphStyle {
                     color: theme.faint,
                     ..prompt_style
@@ -604,7 +678,9 @@ pub fn build_scene(
 
         // An unfocused window must not show a blinking caret: it would claim
         // keystrokes land here when they do not.
-        if model.focused && model.caret.visible() {
+        // No caret while a turn runs: it would sit on top of the activity
+        // line, and typing is not what the field is showing right now.
+        if model.focused && model.caret.visible() && !(model.busy && model.editor.is_empty()) {
             let bar = input.caret_rect(model.editor.cursor(), layout::CARET_WIDTH);
             let top = (origin_y + bar.y0).max(clip_top);
             let bottom = (origin_y + bar.y1).min(clip_bottom);

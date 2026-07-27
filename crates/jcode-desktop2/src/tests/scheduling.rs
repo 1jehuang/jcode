@@ -71,8 +71,9 @@ fn an_unfocused_window_sleeps() {
     );
 }
 
-/// While a turn is streaming the composer shows "working...", so there is no
-/// caret to blink and no reason to wake for one.
+/// While a turn is streaming the composer shows the activity line, so there is
+/// no caret to blink and no reason to wake for one. A busy turn with no running
+/// activity (the state right after attaching) must still sleep.
 #[test]
 fn a_busy_turn_does_not_schedule_caret_wakes() {
     let mut app = focused_app();
@@ -81,6 +82,43 @@ fn a_busy_turn_does_not_schedule_caret_wakes() {
         app.animation_deadline(Instant::now()),
         None,
         "a busy turn scheduled a caret wake for a caret it does not draw"
+    );
+}
+
+/// A running turn must animate: the whole point of the spinner is that the
+/// window does not look frozen while the agent works, which needs frames.
+#[test]
+fn a_running_turn_schedules_spinner_frames() {
+    let mut app = focused_app();
+    app.model.donut = None;
+    app.model.busy = true;
+    let now = Instant::now();
+    app.model.activity.start(now);
+    let deadline = app
+        .animation_deadline(now)
+        .expect("a running turn scheduled no frames, so the spinner would freeze");
+    assert!(
+        deadline <= now + Duration::from_millis(200),
+        "the spinner's next frame is too far out to read as motion"
+    );
+}
+
+/// The spinner stops asking for frames the moment the turn ends, so a finished
+/// session goes back to sleep.
+#[test]
+fn a_finished_turn_stops_the_spinner_wakes() {
+    let mut app = focused_app();
+    app.model.donut = None;
+    app.model.busy = true;
+    let now = Instant::now();
+    app.model.activity.start(now);
+    app.model.activity.finish();
+    app.model.busy = false;
+    app.model.caret = Caret::pinned(true);
+    assert_eq!(
+        app.animation_deadline(now),
+        None,
+        "the app kept waking after the turn ended"
     );
 }
 

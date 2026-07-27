@@ -30,6 +30,9 @@ pub enum HarnessUpdate {
         model: Option<String>,
     },
     Text(String),
+    /// The agent's current phase (a tool intent, or "thinking"), for the
+    /// activity line. Streamed so the UI is never silent mid-turn.
+    Activity(String),
     TurnDone,
     /// The daemon's current session list, for the session strip.
     Sessions(Vec<crate::strip::Entry>),
@@ -51,6 +54,26 @@ pub enum Command {
 /// bridge via `jcode-harness-api` so the two can never disagree.
 pub fn api_socket_path() -> PathBuf {
     jcode_harness_api::api_socket_path()
+}
+
+/// Working directory for sessions this app creates.
+///
+/// Desktop2 is developed on itself, so a session opened from the app should
+/// land in the desktop2 crate: the daemon derives self-dev mode and the
+/// desktop2 product focus from this directory, and a session rooted anywhere
+/// else gets an agent that assumes it is working on the TUI. Overridable so a
+/// desktop2 build can be pointed at another project.
+fn default_working_dir() -> Option<String> {
+    if let Some(raw) = std::env::var_os("JCODE_DESKTOP2_WORKING_DIR") {
+        let path = PathBuf::from(raw);
+        if path.is_dir() {
+            return Some(path.display().to_string());
+        }
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .is_dir()
+        .then(|| manifest_dir.display().to_string())
 }
 
 /// How long to wait for a freshly spawned runtime to publish its socket.
@@ -156,7 +179,9 @@ fn run(
     let mut client = HarnessClient::new(reader, stream.try_clone()?);
     client.hello(concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")))?;
     send(HarnessUpdate::Status("connected, attaching...".into()));
-    client.send(ApiRequest::CreateSession { working_dir: None })?;
+    client.send(ApiRequest::CreateSession {
+        working_dir: default_working_dir(),
+    })?;
 
     // Writer thread: forwards user messages immediately even while the read
     // loop below is blocked on the stream. Frame ids start high so they never
@@ -219,6 +244,11 @@ fn run(
         }
     });
 
+    // Streamed tool arguments, keyed by call id, so a tool's `intent` can be
+    // shown while it is still arriving. Cleared as each call finishes: a turn
+    // with hundreds of calls must not accumulate their arguments forever.
+    let mut tool_input: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     loop {
         let frame = client.recv()?;
         match frame.event {
@@ -229,14 +259,47 @@ fn run(
                 // The daemon reports the full session set only alongside
                 // history, so ask for it once on attach; without this the
                 // strip would only ever see the session we are attached to.
-                let _ = client.send(ApiRequest::GetHistory {
+                // A write failure here means the connection is gone, which is
+                // the read loop's error to report, so surface it rather than
+                // continuing to poll a dead socket.
+                client.send(ApiRequest::GetHistory {
                     session_id: session.session_id.clone(),
-                });
+                })?;
                 send(HarnessUpdate::Attached {
                     session_id: session.session_id,
                 });
             }
             ApiEvent::TextDelta { text, .. } => send(HarnessUpdate::Text(text)),
+            // Reasoning is not rendered as transcript text yet, but its
+            // arrival is proof the model is working, which is the thing the
+            // silent-until-done UI was missing.
+            ApiEvent::ReasoningDelta { .. } => {
+                send(HarnessUpdate::Activity("thinking".into()));
+            }
+            ApiEvent::ToolStart { call_id, name, .. } => {
+                tool_input.remove(&call_id);
+                send(HarnessUpdate::Activity(name));
+            }
+            ApiEvent::ToolInputDelta { call_id, delta, .. } => {
+                let buffer = tool_input.entry(call_id.clone()).or_default();
+                buffer.push_str(&delta);
+                if let Some(intent) = crate::activity::intent_from_partial_json(buffer) {
+                    send(HarnessUpdate::Activity(intent));
+                }
+            }
+            ApiEvent::ToolExec { call_id, name, .. } => {
+                // Prefer the intent the model wrote over the bare tool name:
+                // "check the build" says more than "bash".
+                let label = tool_input
+                    .get(&call_id)
+                    .and_then(|input| crate::activity::intent_from_partial_json(input))
+                    .unwrap_or(name);
+                send(HarnessUpdate::Activity(label));
+            }
+            ApiEvent::ToolDone { call_id, .. } => {
+                tool_input.remove(&call_id);
+                send(HarnessUpdate::Activity("thinking".into()));
+            }
             ApiEvent::Sessions { sessions } => {
                 send(HarnessUpdate::Sessions(
                     sessions
