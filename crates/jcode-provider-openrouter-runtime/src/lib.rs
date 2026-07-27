@@ -35,9 +35,9 @@ pub use jcode_provider_openrouter::{
 };
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
-    ProviderPin, current_unix_secs, known_providers, load_disk_cache_entry,
-    load_endpoints_disk_cache, parse_model_spec, save_disk_cache_with_source,
-    save_disk_cache_with_source_for_namespace, save_endpoints_disk_cache,
+    ProviderPin, current_unix_secs, known_providers, load_endpoints_disk_cache, parse_model_spec,
+    save_disk_cache_with_source, save_disk_cache_with_source_for_namespace,
+    save_endpoints_disk_cache,
 };
 use reqwest::Client;
 use reqwest::header::HeaderName;
@@ -1823,12 +1823,6 @@ impl OpenRouterProvider {
         source_api_base == self.api_base
     }
 
-    pub(crate) fn load_usable_model_disk_cache_entry(
-        &self,
-    ) -> Option<jcode_provider_openrouter::DiskCache> {
-        load_disk_cache_entry().filter(|entry| self.model_disk_cache_source_matches(entry))
-    }
-
     fn begin_background_model_catalog_refresh(&self) -> bool {
         let Some(now) = current_unix_secs() else {
             return false;
@@ -2027,9 +2021,9 @@ impl OpenRouterProvider {
         let models_cache = Arc::clone(&self.models_cache);
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
-
+        let ns = self.foreground_cache_namespace();
         handle.spawn(async move {
-            match fetch_models_from_api(client, api_base, auth, models_cache, None).await {
+            match fetch_models_from_api(client, api_base, auth, models_cache, ns).await {
                 Ok(models) => {
                     let updated = models_fingerprint(&models) != previous_fingerprint;
                     if updated {
@@ -2508,7 +2502,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            None,
+            self.foreground_cache_namespace(),
         )
         .await
     }
@@ -2520,7 +2514,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            None,
+            self.foreground_cache_namespace(),
         )
         .await
     }

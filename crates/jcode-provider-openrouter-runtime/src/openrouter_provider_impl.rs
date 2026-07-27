@@ -772,6 +772,46 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// The disk-cache namespace this provider's *foreground* catalog reads and
+    /// writes should use.
+    ///
+    /// Every `new_named_openai_compatible()` constructor sets the process-global
+    /// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
+    /// profiles in one process the last one constructed wins and all profiles
+    /// collide on a single `<last-profile>_models.json`. The background refresh
+    /// path already passes an explicit namespace; the foreground paths did not.
+    /// See issue #607.
+    ///
+    /// Standard/direct OpenRouter and built-in profiles keep the existing
+    /// env-var-driven `cache_path()` semantics.
+    pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
+        self.is_user_named_profile()
+            .then(|| self.profile_id.clone())
+            .flatten()
+    }
+
+    /// The disk cache entry usable for this provider, i.e. its own namespace
+    /// (#607) and a `source_api_base` that matches this endpoint.
+    pub(crate) fn load_usable_model_disk_cache_entry(
+        &self,
+    ) -> Option<jcode_provider_openrouter::DiskCache> {
+        self.load_disk_cache_entry_for_this_profile()
+            .filter(|entry| self.model_disk_cache_source_matches(entry))
+    }
+
+    /// Load this provider's own model disk cache, ignoring the process-global
+    /// namespace env var for user-named profiles (#607).
+    pub(crate) fn load_disk_cache_entry_for_this_profile(
+        &self,
+    ) -> Option<jcode_provider_openrouter::DiskCache> {
+        match self.foreground_cache_namespace() {
+            Some(namespace) => {
+                jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&namespace)
+            }
+            None => jcode_provider_openrouter::load_disk_cache_entry(),
+        }
+    }
+
     /// True when this instance was built from a user-declared
     /// `[providers.<name>]` profile in config.toml rather than a built-in
     /// OpenAI-compatible profile (Cerebras, NVIDIA NIM, ...).
