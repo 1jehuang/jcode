@@ -74,6 +74,11 @@ struct App {
     /// the keydown; this is what lets a tap shorter than [`ALT_TAP`] take it
     /// straight back off screen.
     alt_held_since: Option<std::time::Instant>,
+    /// Whether holding Alt opens the blob-field overview. Off by default: the
+    /// concept is benched in favour of Super+HJKL strip motion, but the code
+    /// and its tests stay live so it can come back as a flag flip rather than
+    /// a revert.
+    alt_overview: bool,
     clipboard: clipboard::Clipboard,
     /// Pointer position in logical units, tracked for click and drag.
     pointer: (f64, f64),
@@ -115,6 +120,7 @@ impl Default for App {
             harness: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             alt_held_since: None,
+            alt_overview: false,
             clipboard: clipboard::Clipboard::default(),
             pointer: (0.0, 0.0),
             dragging: false,
@@ -588,6 +594,12 @@ impl App {
     /// code the window does: a test that reimplemented this gesture would keep
     /// passing after the real handler stopped opening anything.
     fn on_alt_changed(&mut self, down: bool, now: std::time::Instant) {
+        if !self.alt_overview && !self.model.overview.is_visible() {
+            // The gesture is benched: Alt stays a plain chord modifier. The
+            // visibility check keeps release handling sane if the flag is
+            // ever flipped off while the field is up.
+            return;
+        }
         if down {
             if self.alt_held_since.is_none() && !self.model.overview.is_open() {
                 self.alt_held_since = Some(now);

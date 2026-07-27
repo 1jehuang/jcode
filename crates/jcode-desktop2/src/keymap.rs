@@ -363,6 +363,26 @@ pub const PORTED: &[Ported] = &[
     },
     // Session strip, in the spirit of niri's window/workspace motion.
     Ported {
+        chord: "super+h",
+        action: Action::SessionLeft,
+        tui: "no TUI equivalent: niri focus-column-left",
+    },
+    Ported {
+        chord: "super+l",
+        action: Action::SessionRight,
+        tui: "no TUI equivalent: niri focus-column-right",
+    },
+    Ported {
+        chord: "super+k",
+        action: Action::SessionUp,
+        tui: "no TUI equivalent: niri focus-window-up",
+    },
+    Ported {
+        chord: "super+j",
+        action: Action::SessionDown,
+        tui: "no TUI equivalent: niri focus-window-down",
+    },
+    Ported {
         chord: "ctrl+alt+left",
         action: Action::SessionLeft,
         tui: "no TUI equivalent: desktop-only session strip",
@@ -533,6 +553,19 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     _ => None,
                 };
             }
+            // Super+HJKL walks the session strip: niri's focus motion,
+            // verbatim, because that is the muscle memory this app lives
+            // inside. Checked before the cmd block so Super+K means "session
+            // up" here while Ctrl+K keeps its emacs kill-to-end.
+            if sup && !ctrl && !alt && !shift {
+                match ch {
+                    'h' => return Some(Action::SessionLeft),
+                    'l' => return Some(Action::SessionRight),
+                    'k' => return Some(Action::SessionUp),
+                    'j' => return Some(Action::SessionDown),
+                    _ => {}
+                }
+            }
             if cmd {
                 return match ch {
                     'a' => Some(Action::MoveHome),
@@ -692,7 +725,9 @@ mod tests {
     /// arrives depends on the platform and window manager.
     #[test]
     fn cmd_and_ctrl_are_interchangeable_for_editing() {
-        for ch in ['a', 'e', 'u', 'k', 'w', 'x', 'z', 'v'] {
+        // 'k' is deliberately absent: Super+K is session-up (niri motion)
+        // while Ctrl+K keeps its emacs kill-to-end.
+        for ch in ['a', 'e', 'u', 'w', 'x', 'z', 'v'] {
             let key = Key::Character(SmolStr::new(ch.to_string()));
             let with_ctrl = resolve(&key, ModifiersState::CONTROL);
             let with_cmd = resolve(&key, ModifiersState::SUPER);
