@@ -1851,3 +1851,49 @@ fn ping_keepalive_emits_streaming_phase_event() {
         "expected ping to emit a Streaming ConnectionPhase event, got {events:?}"
     );
 }
+
+#[test]
+fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
+    // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus defaults to
+    // `xhigh`, so an explicit `low` must survive normalization, must NOT be
+    // silently promoted, and must land in `output_config.effort` on the request.
+    assert!(AnthropicProvider::model_supports_output_effort(
+        "claude-opus-5"
+    ));
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
+        Some("xhigh"),
+    );
+    assert_eq!(
+        AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
+        Some("low"),
+    );
+    // Downward selection is never clamped upward toward the model default.
+    assert_eq!(
+        AnthropicProvider::actual_effort_for_model("claude-opus-5", "low"),
+        "low",
+    );
+    assert_eq!(
+        AnthropicProvider::store_effort_for_model("claude-opus-5", "low"),
+        "low",
+    );
+
+    let provider = AnthropicProvider::new();
+    *provider
+        .model
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = "claude-opus-5".to_string();
+    provider.set_reasoning_effort("low").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+
+    let (thinking, output_config, _temp) =
+        provider.build_reasoning_request_parts_inner("claude-opus-5", true, false);
+    assert_eq!(
+        output_config
+            .expect("explicit low effort should set output_config")
+            .effort,
+        "low",
+    );
+    // Opus 5 rejects `thinking.type.enabled`; it requires adaptive thinking.
+    assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+}

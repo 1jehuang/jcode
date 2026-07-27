@@ -434,7 +434,75 @@ pub fn register_external_image(path: &Path, width: u32, height: u32) -> u64 {
             },
         );
     }
+    remember_external_image_path(hash, path);
     hash
+}
+
+/// Bound for the external-image path registry. Entries are just a hash and a
+/// path, so this stays far below the memory cost of the render cache itself
+/// while covering every rendered formula in a long transcript.
+const EXTERNAL_IMAGE_PATHS_MAX: usize = 8192;
+
+/// Paths of externally rendered images (LaTeX formulas, `read` of an image
+/// file) keyed by their render-cache hash.
+///
+/// `RENDER_CACHE` is an LRU bounded at `RENDER_CACHE_MAX` entries and it is the
+/// only thing that knows where an external image lives on disk. Inline pasted
+/// images and mermaid diagrams can both be recovered after eviction (staged
+/// payload / `{hash}_inline.*` / `{hash}_w*.png` filenames), but an external
+/// image's cache file is named by content, not by hash, so an evicted entry
+/// used to be unrecoverable: the placeholder rows stayed reserved and the
+/// formula silently disappeared for the rest of the session. This side table
+/// keeps the hash -> path mapping alive so eviction is recoverable.
+type ExternalImagePaths = (HashMap<u64, PathBuf>, VecDeque<u64>);
+
+static EXTERNAL_IMAGE_PATHS: LazyLock<Mutex<ExternalImagePaths>> =
+    LazyLock::new(|| Mutex::new((HashMap::new(), VecDeque::new())));
+
+fn remember_external_image_path(hash: u64, path: &Path) {
+    let Ok(mut registry) = EXTERNAL_IMAGE_PATHS.lock() else {
+        return;
+    };
+    let (paths, order) = &mut *registry;
+    if paths.insert(hash, path.to_path_buf()).is_none() {
+        order.push_back(hash);
+    }
+    while order.len() > EXTERNAL_IMAGE_PATHS_MAX {
+        if let Some(oldest) = order.pop_front() {
+            paths.remove(&oldest);
+        }
+    }
+}
+
+/// Re-register an external image evicted from the render cache, using the
+/// remembered on-disk path. Returns `(hash, width, height)` when the file still
+/// exists and decodes.
+pub fn rediscover_external_image(hash: u64) -> Option<(u64, u32, u32)> {
+    let path = EXTERNAL_IMAGE_PATHS
+        .lock()
+        .ok()
+        .and_then(|registry| registry.0.get(&hash).cloned())?;
+    if !path.exists() {
+        return None;
+    }
+    let image = image::open(&path).ok()?;
+    let (width, height) = image.dimensions();
+    if let Ok(mut source) = SOURCE_CACHE.lock() {
+        source.insert(hash, path.clone(), image);
+    }
+    if let Ok(mut cache) = RENDER_CACHE.lock() {
+        cache.insert(
+            hash,
+            RenderProfile::default(),
+            CachedDiagram {
+                path,
+                width,
+                height,
+            },
+        );
+        return Some((hash, width, height));
+    }
+    None
 }
 
 pub fn register_inline_image(media_type: &str, data_b64: &str) -> Option<(u64, u32, u32)> {
@@ -508,6 +576,70 @@ pub fn get_font_size() -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An external image (LaTeX formula PNG, `read` of an image file) must be
+    /// recoverable after the bounded render cache evicts it. Before this, the
+    /// hash -> path mapping lived only in that LRU, so a math-heavy transcript
+    /// silently lost its rendered formulas: the placeholder rows stayed
+    /// reserved and nothing could ever repaint them.
+    #[test]
+    fn evicted_external_image_is_rediscovered_from_its_remembered_path() {
+        use image::{ImageBuffer, Rgba};
+
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-external-image-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create fixture dir");
+        let path = dir.join("formula.png");
+        ImageBuffer::from_pixel(9, 4, Rgba([120u8, 160, 255, 255]))
+            .save(&path)
+            .expect("write fixture png");
+
+        let hash = register_external_image(&path, 9, 4);
+        assert!(
+            get_cached_png(hash).is_some(),
+            "registration should populate the render cache"
+        );
+
+        // Simulate LRU eviction of the render-cache entry.
+        {
+            let mut cache = RENDER_CACHE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache
+                .entries
+                .retain(|(entry_hash, _), _| *entry_hash != hash);
+            cache.order.retain(|(entry_hash, _)| *entry_hash != hash);
+        }
+        assert!(
+            !inline_image_is_materialized(hash),
+            "eviction should leave the image unmaterialized"
+        );
+
+        assert_eq!(rediscover_external_image(hash), Some((hash, 9, 4)));
+        assert!(
+            inline_image_is_materialized(hash),
+            "rediscovery must restore the render-cache entry"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A deleted cache file must fail cleanly instead of resurrecting a
+    /// dangling entry that would draw nothing.
+    #[test]
+    fn rediscovery_fails_when_the_external_image_file_is_gone() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-missing-external-image-{}-{:?}.png",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        let hash = register_external_image(&path, 5, 5);
+        assert_eq!(rediscover_external_image(hash), None);
+    }
 
     #[test]
     fn infer_protocol_detects_kitty_family() {

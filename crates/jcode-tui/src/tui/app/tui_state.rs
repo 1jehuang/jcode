@@ -751,6 +751,10 @@ impl crate::tui::TuiState for App {
         App::command_suggestions(self)
     }
 
+    fn advance_command_suggestions_epoch(&self) {
+        App::advance_command_suggestions_epoch(self)
+    }
+
     fn command_suggestion_selected(&self) -> usize {
         self.command_suggestion_selected
     }

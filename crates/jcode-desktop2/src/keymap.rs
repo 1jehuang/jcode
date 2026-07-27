@@ -28,6 +28,15 @@ pub enum Action {
     MoveHome,
     MoveEnd,
 
+    /// Shift+motion: extend the selection instead of collapsing it.
+    ExtendLeft,
+    ExtendRight,
+    ExtendWordLeft,
+    ExtendWordRight,
+    ExtendHome,
+    ExtendEnd,
+    SelectAll,
+
     DeleteBack,
     DeleteForward,
     DeleteWordBack,
@@ -55,6 +64,36 @@ pub enum Action {
     Cancel,
     /// Ctrl+C / Ctrl+D: interrupt while busy, quit only when idle and empty.
     InterruptOrQuit,
+
+    /// Session strip navigation, mirroring niri's spatial motion: left/right
+    /// walk the sessions in the current working directory, up/down walk the
+    /// directories. Bound to Ctrl+Shift+arrows because plain and Alt arrows
+    /// are already text motion, and typing must always win over chrome.
+    SessionLeft,
+    SessionRight,
+    SessionUp,
+    SessionDown,
+}
+
+impl Action {
+    /// Whether this action can leave a different selection behind.
+    ///
+    /// Auto-copy keys off this rather than off a diff of the editor state,
+    /// because the point is to publish what the user *selected*: republishing
+    /// on unrelated actions would mean an arrow key quietly overwrites the
+    /// primary selection with the same text over and over.
+    pub fn changes_the_selection(self) -> bool {
+        matches!(
+            self,
+            Self::ExtendLeft
+                | Self::ExtendRight
+                | Self::ExtendWordLeft
+                | Self::ExtendWordRight
+                | Self::ExtendHome
+                | Self::ExtendEnd
+                | Self::SelectAll
+        )
+    }
 }
 
 /// One row of the parity table: the chord, its action, and the TUI binding it
@@ -307,6 +346,27 @@ pub const PORTED: &[Ported] = &[
         action: Action::InterruptOrQuit,
         tui: "Ctrl+D interrupt or quit",
     },
+    // Session strip, in the spirit of niri's window/workspace motion.
+    Ported {
+        chord: "ctrl+alt+left",
+        action: Action::SessionLeft,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
+    Ported {
+        chord: "ctrl+alt+right",
+        action: Action::SessionRight,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
+    Ported {
+        chord: "ctrl+alt+up",
+        action: Action::SessionUp,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
+    Ported {
+        chord: "ctrl+alt+down",
+        action: Action::SessionDown,
+        tui: "no TUI equivalent: desktop-only session strip",
+    },
 ];
 
 /// TUI chords deliberately **not** ported, with the reason. Keeps the scope
@@ -335,6 +395,13 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
 
     match key {
         Key::Named(named) => match named {
+            // Session-strip motion is checked first: the arrow arms below
+            // would otherwise swallow it, and chrome navigation has to be
+            // reachable from any editor state.
+            NamedKey::ArrowLeft if ctrl && alt => Some(Action::SessionLeft),
+            NamedKey::ArrowRight if ctrl && alt => Some(Action::SessionRight),
+            NamedKey::ArrowUp if ctrl && alt => Some(Action::SessionUp),
+            NamedKey::ArrowDown if ctrl && alt => Some(Action::SessionDown),
             NamedKey::Enter => Some(if shift {
                 Action::InsertNewline
             } else {
@@ -357,28 +424,32 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     Some(Action::DeleteForward)
                 }
             }
-            NamedKey::ArrowLeft => Some(if sup {
-                Action::MoveHome
-            } else if ctrl || alt {
-                Action::MoveWordLeft
-            } else {
-                Action::MoveLeft
+            NamedKey::ArrowLeft => Some(match (shift, ctrl || alt, sup) {
+                (true, true, _) => Action::ExtendWordLeft,
+                (true, false, _) => Action::ExtendLeft,
+                (false, _, true) => Action::MoveHome,
+                (false, true, _) => Action::MoveWordLeft,
+                (false, false, false) => Action::MoveLeft,
             }),
-            NamedKey::ArrowRight => Some(if sup {
-                Action::MoveEnd
-            } else if ctrl || alt {
-                Action::MoveWordRight
-            } else {
-                Action::MoveRight
+            NamedKey::ArrowRight => Some(match (shift, ctrl || alt, sup) {
+                (true, true, _) => Action::ExtendWordRight,
+                (true, false, _) => Action::ExtendRight,
+                (false, _, true) => Action::MoveEnd,
+                (false, true, _) => Action::MoveWordRight,
+                (false, false, false) => Action::MoveRight,
             }),
             NamedKey::ArrowUp => Some(Action::HistoryPrev),
             NamedKey::ArrowDown => Some(Action::HistoryNext),
-            NamedKey::Home => Some(if cmd {
+            NamedKey::Home => Some(if shift {
+                Action::ExtendHome
+            } else if cmd {
                 Action::ScrollTop
             } else {
                 Action::MoveHome
             }),
-            NamedKey::End => Some(if cmd {
+            NamedKey::End => Some(if shift {
+                Action::ExtendEnd
+            } else if cmd {
                 Action::ScrollBottom
             } else {
                 Action::MoveEnd
@@ -396,6 +467,9 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     'k' => return Some(Action::ScrollUp),
                     'j' => return Some(Action::ScrollDown),
                     'c' => return Some(Action::Copy),
+                    // Ctrl+A stays "start of line" (emacs, matching the TUI),
+                    // so select-all takes the shifted chord.
+                    'a' => return Some(Action::SelectAll),
                     _ => {}
                 }
             }
@@ -430,45 +504,97 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
     }
 }
 
+/// Parse a chord like `"ctrl+shift+k"` into a key and modifier state. Shared
+/// by the parity-table tests and `--script`, so scripted verification exercises
+/// the same spelling the table documents.
+pub fn parse_chord(chord: &str) -> Option<(Key, ModifiersState)> {
+    let mut mods = ModifiersState::empty();
+    let mut key = None;
+    for part in chord.split('+') {
+        match part {
+            "ctrl" => mods |= ModifiersState::CONTROL,
+            "alt" => mods |= ModifiersState::ALT,
+            "shift" => mods |= ModifiersState::SHIFT,
+            "super" | "cmd" => mods |= ModifiersState::SUPER,
+            name => {
+                key = Some(match name {
+                    "enter" => Key::Named(NamedKey::Enter),
+                    "escape" | "esc" => Key::Named(NamedKey::Escape),
+                    "backspace" => Key::Named(NamedKey::Backspace),
+                    "delete" | "del" => Key::Named(NamedKey::Delete),
+                    "left" => Key::Named(NamedKey::ArrowLeft),
+                    "right" => Key::Named(NamedKey::ArrowRight),
+                    "up" => Key::Named(NamedKey::ArrowUp),
+                    "down" => Key::Named(NamedKey::ArrowDown),
+                    "home" => Key::Named(NamedKey::Home),
+                    "end" => Key::Named(NamedKey::End),
+                    "pageup" => Key::Named(NamedKey::PageUp),
+                    "pagedown" => Key::Named(NamedKey::PageDown),
+                    other if other.chars().count() == 1 => {
+                        Key::Character(winit::keyboard::SmolStr::new(other))
+                    }
+                    _ => return None,
+                });
+            }
+        }
+    }
+    Some((key?, mods))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use winit::keyboard::SmolStr;
 
-    /// Parse a chord like `"ctrl+shift+k"` into a key and modifier state, so
-    /// the parity table is written the way a human describes a shortcut.
     fn parse(chord: &str) -> (Key, ModifiersState) {
-        let mut mods = ModifiersState::empty();
-        let mut key = None;
-        for part in chord.split('+') {
-            match part {
-                "ctrl" => mods |= ModifiersState::CONTROL,
-                "alt" => mods |= ModifiersState::ALT,
-                "shift" => mods |= ModifiersState::SHIFT,
-                "super" => mods |= ModifiersState::SUPER,
-                name => {
-                    key = Some(match name {
-                        "enter" => Key::Named(NamedKey::Enter),
-                        "escape" => Key::Named(NamedKey::Escape),
-                        "backspace" => Key::Named(NamedKey::Backspace),
-                        "delete" => Key::Named(NamedKey::Delete),
-                        "left" => Key::Named(NamedKey::ArrowLeft),
-                        "right" => Key::Named(NamedKey::ArrowRight),
-                        "up" => Key::Named(NamedKey::ArrowUp),
-                        "down" => Key::Named(NamedKey::ArrowDown),
-                        "home" => Key::Named(NamedKey::Home),
-                        "end" => Key::Named(NamedKey::End),
-                        "pageup" => Key::Named(NamedKey::PageUp),
-                        "pagedown" => Key::Named(NamedKey::PageDown),
-                        other => {
-                            assert_eq!(other.chars().count(), 1, "unknown key '{other}'");
-                            Key::Character(SmolStr::new(other))
-                        }
-                    });
-                }
-            }
+        parse_chord(chord).unwrap_or_else(|| panic!("unparsable chord '{chord}'"))
+    }
+
+    #[test]
+    fn unknown_chords_are_rejected_rather_than_guessed() {
+        assert!(parse_chord("ctrl+nope").is_none());
+        assert!(parse_chord("ctrl").is_none(), "a chord needs a key");
+    }
+
+    /// R7: chrome navigation must never cost the user their text motion.
+    /// Bare and Alt arrows stay in the editor; only Ctrl+Shift leaves it.
+    #[test]
+    fn bare_arrows_still_edit_text() {
+        for (chord, action) in [
+            ("left", Action::MoveLeft),
+            ("right", Action::MoveRight),
+            ("up", Action::HistoryPrev),
+            ("down", Action::HistoryNext),
+            ("alt+left", Action::MoveWordLeft),
+            ("alt+right", Action::MoveWordRight),
+            ("shift+left", Action::ExtendLeft),
+            ("shift+right", Action::ExtendRight),
+            ("ctrl+left", Action::MoveWordLeft),
+            ("ctrl+right", Action::MoveWordRight),
+            ("ctrl+shift+left", Action::ExtendWordLeft),
+            ("ctrl+shift+right", Action::ExtendWordRight),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(
+                resolve(&key, mods),
+                Some(action),
+                "'{chord}' was stolen by the session strip"
+            );
         }
-        (key.expect("chord had no key"), mods)
+    }
+
+    /// R7: and the strip chords really do reach the strip.
+    #[test]
+    fn ctrl_alt_arrows_resolve_to_session_actions() {
+        for (chord, action) in [
+            ("ctrl+alt+left", Action::SessionLeft),
+            ("ctrl+alt+right", Action::SessionRight),
+            ("ctrl+alt+up", Action::SessionUp),
+            ("ctrl+alt+down", Action::SessionDown),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(resolve(&key, mods), Some(action), "'{chord}' did not bind");
+        }
     }
 
     /// The parity table is the contract: every documented chord must really
@@ -607,6 +733,64 @@ mod tests {
                 Some(Action::ScrollDown)
             );
         }
+    }
+
+    /// Shift+motion must extend a selection rather than move the caret, and
+    /// the unshifted chord must still move.
+    #[test]
+    fn shift_motion_extends_instead_of_moving() {
+        let cases = [
+            (NamedKey::ArrowLeft, Action::MoveLeft, Action::ExtendLeft),
+            (NamedKey::ArrowRight, Action::MoveRight, Action::ExtendRight),
+            (NamedKey::Home, Action::MoveHome, Action::ExtendHome),
+            (NamedKey::End, Action::MoveEnd, Action::ExtendEnd),
+        ];
+        for (key, plain, extended) in cases {
+            assert_eq!(
+                resolve(&Key::Named(key), ModifiersState::empty()),
+                Some(plain),
+                "{key:?} without shift should move"
+            );
+            assert_eq!(
+                resolve(&Key::Named(key), ModifiersState::SHIFT),
+                Some(extended),
+                "{key:?} with shift should extend the selection"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_arrows_extend_by_word() {
+        assert_eq!(
+            resolve(
+                &Key::Named(NamedKey::ArrowLeft),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            Some(Action::ExtendWordLeft)
+        );
+        assert_eq!(
+            resolve(
+                &Key::Named(NamedKey::ArrowRight),
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            Some(Action::ExtendWordRight)
+        );
+    }
+
+    /// Ctrl+A must remain start-of-line (emacs, as in the TUI); select-all is
+    /// the shifted chord. Getting this backwards would break muscle memory.
+    #[test]
+    fn ctrl_a_stays_start_of_line_and_select_all_is_shifted() {
+        let a = Key::Character(SmolStr::new("a"));
+        assert_eq!(
+            resolve(&a, ModifiersState::CONTROL),
+            Some(Action::MoveHome),
+            "Ctrl+A stopped being start-of-line"
+        );
+        assert_eq!(
+            resolve(&a, ModifiersState::CONTROL | ModifiersState::SHIFT),
+            Some(Action::SelectAll)
+        );
     }
 
     #[test]

@@ -12,3 +12,4 @@ include!("basic/interaction_links.rs");
 include!("basic/body_cache.rs");
 include!("basic/image_regions.rs");
 include!("basic/input_layout.rs");
+include!("basic/idle_animation_partial.rs");

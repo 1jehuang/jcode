@@ -1880,7 +1880,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
         eprintln!("  Bind address:  \x1b[2m{}\x1b[0m", bind_hint);
     }
 
-    if connect_host == "<your-mac-hostname>" {
+    if connect_host == gateway::UNKNOWN_CONNECT_HOST {
         eprintln!(
             "\n  \x1b[33mTip:\x1b[0m set JCODE_GATEWAY_HOST to your reachable Tailscale hostname."
         );
@@ -1902,58 +1902,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_connect_host(bind_addr: &str) -> String {
-    if bind_addr == "0.0.0.0" || bind_addr == "::" {
-        if let Some(host) = std::env::var("JCODE_GATEWAY_HOST")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
-            return host;
-        }
-
-        if let Some(host) = detect_tailscale_dns_name() {
-            return host;
-        }
-
-        return std::env::var("HOSTNAME")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "<your-mac-hostname>".to_string());
-    }
-    bind_addr.to_string()
-}
-
-pub fn parse_tailscale_dns_name(status_json: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(status_json).ok()?;
-    let dns_name = value
-        .get("Self")?
-        .get("DNSName")?
-        .as_str()?
-        .trim()
-        .trim_end_matches('.')
-        .to_string();
-
-    if dns_name.is_empty() {
-        None
-    } else {
-        Some(dns_name)
-    }
-}
-
-pub fn detect_tailscale_dns_name() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    parse_tailscale_dns_name(&output.stdout)
-}
+pub use gateway::{detect_tailscale_dns_name, parse_tailscale_dns_name, resolve_connect_host};
 
 pub async fn run_browser(action: &str) -> Result<()> {
     match action {

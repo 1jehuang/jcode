@@ -343,6 +343,13 @@ pub(crate) fn materialize_visible(id: u64) -> bool {
     if mermaid::rediscover_inline_image(id).is_some() {
         return true;
     }
+    // Externally rendered images (LaTeX formulas, `read` of an image file) live
+    // at a content-named path rather than a `{hash}_inline.*` file, so they need
+    // their own recovery hook. Without it an LRU eviction of the render-cache
+    // entry left the reserved placeholder rows permanently blank.
+    if mermaid::rediscover_external_image(id).is_some() {
+        return true;
+    }
     if mermaid::get_cached_path(id).is_some() {
         return true;
     }

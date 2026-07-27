@@ -36,6 +36,30 @@ pub struct ParagraphStyle {
     /// Extra letterspacing in em (captions/hints use 0.12-0.2em).
     pub letter_spacing_em: f32,
     pub line_height: f32,
+    /// Horizontal alignment within the wrap width. Start for body copy; the
+    /// hero block centres, like the website's landing section.
+    pub align: Align,
+}
+
+/// Horizontal alignment, kept as our own enum so scene code does not depend on
+/// Parley's type directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Align {
+    #[default]
+    Start,
+    Center,
+    /// Trailing edge of the wrap width (right, for LTR text).
+    End,
+}
+
+impl Align {
+    fn to_parley(self) -> Alignment {
+        match self {
+            Self::Start => Alignment::Start,
+            Self::Center => Alignment::Center,
+            Self::End => Alignment::End,
+        }
+    }
 }
 
 impl Default for ParagraphStyle {
@@ -46,6 +70,7 @@ impl Default for ParagraphStyle {
             bold: false,
             letter_spacing_em: 0.0,
             line_height: 1.65,
+            align: Align::Start,
         }
     }
 }
@@ -62,7 +87,7 @@ impl TextSystem {
         if style.bold {
             builder.push_default(StyleProperty::FontWeight(parley::FontWeight::BOLD));
         }
-        if style.letter_spacing_em > 0.0 {
+        if style.letter_spacing_em != 0.0 {
             builder.push_default(StyleProperty::LetterSpacing(
                 style.letter_spacing_em * style.font_size,
             ));
@@ -73,25 +98,9 @@ impl TextSystem {
         builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
     }
 
-    /// Width in logical pixels of `text` on one line, used to place the caret
-    /// at a cursor offset. Measured with the same font and size as the drawn
-    /// text so the caret lands exactly between glyphs.
-    pub fn measure_width(&mut self, text: &str, style: ParagraphStyle, scale: f64) -> f64 {
-        if text.is_empty() {
-            return 0.0;
-        }
-        let scale32 = scale as f32;
-        let mut builder = self
-            .layouts
-            .ranged_builder(&mut self.fonts, text, scale32, true);
-        Self::push_defaults(&mut builder, style);
-        let mut layout: Layout<Brush> = builder.build(text);
-        layout.break_all_lines(None);
-        f64::from(layout.width()) / scale
-    }
-
     /// Measure a paragraph without drawing it. Returns the wrapped height in
-    /// logical pixels, so callers can bottom-align or paginate text.
+    /// logical pixels.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn measure_paragraph(
         &mut self,
         text: &str,
@@ -101,6 +110,75 @@ impl TextSystem {
     ) -> f64 {
         let mut scratch = Scene::new();
         self.draw_paragraph_scaled(&mut scratch, text, (0.0, 0.0), max_width, style, scale)
+    }
+
+    /// Width of a single unwrapped line in logical units. Used where an
+    /// element must sit immediately after some text (the strip's bars after
+    /// their group label), so the gap is the real one rather than a guess.
+    pub fn measure_width(&mut self, text: &str, style: ParagraphStyle, scale: f64) -> f64 {
+        let layout = self.layout_paragraph(text, f32::MAX, style, scale);
+        f64::from(layout.width()) / scale
+    }
+
+    /// Build a wrapped paragraph layout without drawing it, so callers can read
+    /// caret and selection geometry from the very layout that will be drawn.
+    /// `max_width` is in logical units.
+    pub fn layout_paragraph(
+        &mut self,
+        text: &str,
+        max_width: f32,
+        style: ParagraphStyle,
+        scale: f64,
+    ) -> Layout<Brush> {
+        let scale32 = scale as f32;
+        let mut builder = self
+            .layouts
+            .ranged_builder(&mut self.fonts, text, scale32, true);
+        Self::push_defaults(&mut builder, style);
+        let mut layout: Layout<Brush> = builder.build(text);
+        layout.break_all_lines(Some((max_width * scale32).max(1.0)));
+        layout.align(style.align.to_parley(), parley::AlignmentOptions::default());
+        layout
+    }
+
+    /// Build a layout with per-range styling applied on top of the paragraph
+    /// defaults. `apply` receives the builder so callers can push ranged
+    /// properties (colour, weight, italic) for individual spans.
+    ///
+    /// This is what makes rich transcript text possible in a *single* layout:
+    /// wrapping has to see the whole paragraph, so drawing each styled span as
+    /// its own paragraph would break lines at every style boundary.
+    pub fn layout_rich(
+        &mut self,
+        text: &str,
+        max_width: f32,
+        style: ParagraphStyle,
+        scale: f64,
+        apply: &mut dyn FnMut(&mut parley::RangedBuilder<'_, Brush>),
+    ) -> Layout<Brush> {
+        let scale32 = scale as f32;
+        let mut builder = self
+            .layouts
+            .ranged_builder(&mut self.fonts, text, scale32, true);
+        Self::push_defaults(&mut builder, style);
+        apply(&mut builder);
+        let mut layout: Layout<Brush> = builder.build(text);
+        layout.break_all_lines(Some((max_width * scale32).max(1.0)));
+        layout.align(style.align.to_parley(), parley::AlignmentOptions::default());
+        layout
+    }
+
+    /// Draw an already-built layout at `origin` (logical units). Pairs with
+    /// [`Self::layout_paragraph`] so geometry and glyphs share one layout.
+    pub fn draw_layout(scene: &mut Scene, layout: &Layout<Brush>, origin: (f64, f64), scale: f64) {
+        let origin = (origin.0 * scale, origin.1 * scale);
+        for line in layout.lines() {
+            for item in line.items() {
+                if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
+                    draw_glyph_run(scene, &glyph_run, origin);
+                }
+            }
+        }
     }
 
     /// Layout and draw a paragraph at `origin`, wrapped to `max_width`.
@@ -117,22 +195,10 @@ impl TextSystem {
         style: ParagraphStyle,
         scale: f64,
     ) -> f64 {
-        let scale32 = scale as f32;
-        let mut builder = self
-            .layouts
-            .ranged_builder(&mut self.fonts, text, scale32, true);
-        Self::push_defaults(&mut builder, style);
-        let mut layout: Layout<Brush> = builder.build(text);
-        layout.break_all_lines(Some(max_width * scale32));
-        layout.align(Alignment::Start, parley::AlignmentOptions::default());
-        let origin = (origin.0 * scale, origin.1 * scale);
-        for line in layout.lines() {
-            for item in line.items() {
-                if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
-                    draw_glyph_run(scene, &glyph_run, origin);
-                }
-            }
-        }
+        // One layout path for measuring, drawing, and geometry, so the caret
+        // and selection can never disagree with the glyphs.
+        let layout = self.layout_paragraph(text, max_width, style, scale);
+        Self::draw_layout(scene, &layout, origin, scale);
         f64::from(layout.height()) / scale
     }
 }
@@ -160,4 +226,105 @@ fn draw_glyph_run(scene: &mut Scene, glyph_run: &GlyphRun<'_, Brush>, origin: (f
                 }
             }),
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style() -> ParagraphStyle {
+        ParagraphStyle {
+            font_size: 13.5,
+            ..Default::default()
+        }
+    }
+
+    /// A paragraph is laid out in *logical* units, so the same text at the same
+    /// logical width must wrap into the same lines at any scale factor. If this
+    /// drifts, text reflows when a window moves between displays.
+    #[test]
+    fn wrapping_is_scale_independent() {
+        let mut text = TextSystem::default();
+        let sample = "alpha bravo charlie delta echo foxtrot golf hotel india";
+        let base = text.layout_paragraph(sample, 180.0, style(), 1.0).len();
+        assert!(base > 1, "sample did not wrap");
+        for scale in [1.25, 1.5, 1.75, 2.0, 3.0] {
+            let scaled = text.layout_paragraph(sample, 180.0, style(), scale).len();
+            assert_eq!(scaled, base, "line count changed at scale {scale}");
+        }
+    }
+
+    /// Measured height is in logical units too, so bottom-aligning the
+    /// transcript cannot drift on a HiDPI display.
+    #[test]
+    fn measured_height_is_scale_independent() {
+        let mut text = TextSystem::default();
+        let sample = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+        let base = text.measure_paragraph(sample, 180.0, style(), 1.0);
+        assert!(base > 0.0, "measured nothing");
+        for scale in [1.25, 1.75, 2.0, 3.0] {
+            let scaled = text.measure_paragraph(sample, 180.0, style(), scale);
+            assert!(
+                (scaled - base).abs() < base * 0.1,
+                "height drifted at scale {scale}: {base:.1} vs {scaled:.1}"
+            );
+        }
+    }
+
+    /// More text at a fixed width means more height: the property the
+    /// transcript relies on to paginate.
+    #[test]
+    fn height_grows_with_the_number_of_lines() {
+        let mut text = TextSystem::default();
+        let mut previous = 0.0;
+        for count in 1..8 {
+            let body = (0..count)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let height = text.measure_paragraph(&body, 400.0, style(), 1.75);
+            assert!(
+                height > previous,
+                "{count} lines measured {height:.1}, not taller than {previous:.1}"
+            );
+            previous = height;
+        }
+    }
+
+    /// Narrower text wraps into at least as many lines: the wrap width is
+    /// honoured rather than ignored.
+    #[test]
+    fn a_narrower_column_wraps_into_more_lines() {
+        let mut text = TextSystem::default();
+        let sample = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo";
+        let mut previous = 0usize;
+        for width in [600.0, 300.0, 150.0, 80.0] {
+            let lines = text.layout_paragraph(sample, width, style(), 1.75).len();
+            assert!(
+                lines >= previous,
+                "narrowing to {width} produced fewer lines: {lines} vs {previous}"
+            );
+            previous = lines;
+        }
+        assert!(previous > 1, "the narrowest column did not wrap");
+    }
+
+    /// Degenerate widths and text must lay out rather than panic.
+    #[test]
+    fn degenerate_layout_does_not_panic() {
+        let mut text = TextSystem::default();
+        for body in ["", "\n", "a", "ünïcödé", &"x".repeat(400)] {
+            for width in [0.0, 1.0, 40.0, 5000.0] {
+                let _ = text.layout_paragraph(body, width, style(), 1.75);
+                let _ = text.measure_paragraph(body, width, style(), 1.75);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_text_measures_zero_lines_of_content() {
+        let mut text = TextSystem::default();
+        let layout = text.layout_paragraph("", 400.0, style(), 1.75);
+        assert!(layout.len() <= 1, "empty text produced several lines");
+    }
 }

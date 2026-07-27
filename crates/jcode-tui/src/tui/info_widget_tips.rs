@@ -25,9 +25,11 @@ fn all_tips() -> Vec<Tip> {
     if crate::config::config().features.mermaid {
         tips.insert(3, "```mermaid code blocks render as diagrams");
     }
+    // Mac keyboards label this modifier ⌥, not Alt, so rewrite hints there.
+    let alt = jcode_tui_core::keybind::alt_label();
     tips.into_iter()
         .map(|text| Tip {
-            text: text.to_string(),
+            text: text.replace("Alt+", &format!("{alt}+")),
         })
         .collect()
 }

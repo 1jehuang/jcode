@@ -99,4 +99,9 @@ impl RenderState {
     pub fn request_redraw(&self) {
         self.window.request_redraw();
     }
+
+    /// Set the mouse pointer shape.
+    pub fn set_cursor_icon(&self, icon: winit::window::CursorIcon) {
+        self.window.set_cursor(icon);
+    }
 }

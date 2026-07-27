@@ -1672,6 +1672,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    // After `/remote-release`: the parser claims only `/remote` + whitespace/end.
+    if super::commands_remote::handle_remote_command(app, trimmed) {
+        return true;
+    }
+
     if trimmed == "/triage" || trimmed.starts_with("/triage ") {
         let rest = trimmed.strip_prefix("/triage").unwrap_or_default();
         handle_triage_command_local(app, rest);
@@ -3009,9 +3014,9 @@ fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
     if rest.is_empty() || matches!(rest, "show" | "status") {
         let saved = crate::config::Config::load().display.centered;
         app.push_display_message(DisplayMessage::system(format!(
-            "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press Alt+C to toggle it for the current session.",
+            "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press {} to toggle it for the current session.",
             alignment_label(app.centered),
-            alignment_label(saved)
+            alignment_label(saved), jcode_tui_core::keybind::alt_chord("C")
         )));
         return true;
     }

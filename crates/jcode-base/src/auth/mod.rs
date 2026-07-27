@@ -66,6 +66,28 @@ fn auth_cache_home_key() -> Option<std::ffi::OsString> {
 const AUTH_STATUS_CACHE_TTL_SECS: u64 = 30;
 const AUTH_STATUS_FAST_CACHE_TTL_SECS: u64 = 60;
 
+/// Bumped whenever the cached auth status is invalidated.
+///
+/// Lets downstream caches (notably the TUI's prepared-header cache) key on
+/// "have credentials changed" without re-running the expensive probes
+/// themselves, so a credential change repaints immediately instead of waiting
+/// out an unrelated TTL.
+static AUTH_STATUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current auth-status generation; see [`AUTH_STATUS_GENERATION`].
+pub fn auth_status_generation() -> u64 {
+    AUTH_STATUS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bump the auth generation without clearing the cached status.
+///
+/// Tests that only need to observe generation-driven invalidation use this so
+/// they do not evict the process-global auth cache that sibling tests in the
+/// same binary rely on.
+pub fn bump_auth_status_generation_for_tests() {
+    AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Per-process cache for command existence lookups.
 /// CLI tools don't get installed/uninstalled while jcode is running, so caching
 /// indefinitely per process is correct and avoids repeated PATH scans.
@@ -774,6 +796,7 @@ impl AuthStatus {
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = None;
         }
+        AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Invalidate all auth-derived state after credentials actually change.
