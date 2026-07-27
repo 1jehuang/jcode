@@ -285,6 +285,234 @@ fn draw_strip(
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
+/// Size of a blob's session label, and of the cluster's name above it.
+const BLOB_LABEL_SIZE: f32 = 11.0;
+/// Smallest a blob's name may be set before it is dropped entirely: below this
+/// it is illegible, and illegible text is noise rather than a label.
+const BLOB_LABEL_MIN: f32 = 7.0;
+const CLUSTER_LABEL_SIZE: f32 = 13.0;
+/// Gap between the bottom of a cluster's blobs and its name.
+const CLUSTER_LABEL_GAP: f64 = 8.0;
+/// Ring thickness for an unfocused blob, and for the focused one.
+const BLOB_RING: f64 = 1.25;
+const BLOB_RING_FOCUS: f64 = 2.5;
+/// How far past its radius the focused blob's halo reaches.
+const BLOB_HALO: f64 = 7.0;
+/// How much a busy blob's ring breathes, as a fraction of its radius.
+const BUSY_PULSE: f64 = 0.06;
+/// Period of that breath, in seconds.
+const BUSY_PERIOD: f32 = 1.6;
+
+/// Draw the session overview: every live session as a blob in a 2D field.
+///
+/// The field fades and scales in together, from the focused blob's position
+/// outward, so opening reads as the window zooming out of the conversation
+/// you are in rather than as a panel appearing over it. That is the whole
+/// illusion, and it is why the phase drives *geometry* here and not just an
+/// alpha ramp.
+fn draw_overview(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+    now: std::time::Instant,
+) {
+    let phase = model.overview.phase();
+    if phase <= 0.0 {
+        return;
+    }
+    let theme = &model.theme;
+    let field = crate::overview::layout(
+        &model.strip.entries(),
+        model.overview.focus().or(model.session_id.as_deref()),
+        model.session_id.as_deref(),
+        crate::overview::area(frame),
+    );
+    if field.blobs.is_empty() {
+        return;
+    }
+
+    // Cover the page. The conversation underneath must go, not merely dim: a
+    // translucent wash left the transcript and the composer legible *through*
+    // the blobs, which read as two screens fighting rather than as one that
+    // zoomed out. The cover reaches full opacity early in the zoom, so the
+    // handover happens while the field is still flying out and there is never
+    // a frame of double vision.
+    let cover = (phase * 2.5).min(1.0) as f32;
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        theme.background.with_alpha(cover),
+        None,
+        &Rect::new(0.0, 0.0, frame.width, frame.height),
+    );
+
+    // Everything flies out from the blob you came from, so the session on
+    // screen stays under the eye through the whole transition.
+    let origin = field
+        .blobs
+        .iter()
+        .find(|blob| blob.current)
+        .or_else(|| field.focused())
+        .map(|blob| blob.center)
+        .unwrap_or((frame.width / 2.0, frame.height / 2.0));
+    let place = |point: (f64, f64)| {
+        (
+            origin.0 + (point.0 - origin.0) * phase,
+            origin.1 + (point.1 - origin.1) * phase,
+        )
+    };
+
+    // A project's name is anchored to the bottom of its cluster's bounding
+    // circle, clear of every blob in it. Hanging it off the centroid put it
+    // inside the group whenever the blobs were not evenly spread, which is
+    // most of the time and all of the time in a crowded field.
+    for cluster in &field.clusters {
+        let center = place(cluster.center);
+        let top = center.1 + cluster.radius * phase + CLUSTER_LABEL_GAP;
+        text.draw_paragraph_scaled(
+            scene,
+            &cluster.label,
+            (center.0 - 120.0, top),
+            240.0,
+            ParagraphStyle {
+                font_size: CLUSTER_LABEL_SIZE,
+                color: theme.faint.with_alpha(phase as f32),
+                align: text::Align::Center,
+                letter_spacing_em: 0.14,
+                line_height: 1.0,
+                ..Default::default()
+            },
+            scale,
+        );
+    }
+
+    for blob in &field.blobs {
+        let center = place(blob.center);
+        // A busy session breathes, so work happening in a conversation you are
+        // not looking at is visible from across the field.
+        let pulse = if blob.busy {
+            1.0 + BUSY_PULSE * crate::overview::breath(now, BUSY_PERIOD)
+        } else {
+            1.0
+        };
+        let radius = blob.radius * phase * pulse;
+        if radius <= 1.0 {
+            continue;
+        }
+        let circle = Circle::new(center, radius);
+
+        // The focused blob carries a halo, so the highlight survives being
+        // next to a much bigger neighbour: a ring alone reads as "big", while
+        // a halo reads as "chosen".
+        if blob.focused {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.wash.with_alpha(phase as f32),
+                None,
+                &Circle::new(center, radius + BLOB_HALO),
+            );
+        }
+        // Fill: the session you are in is inked, the rest are paper, so "where
+        // am I" is answered before any label is read.
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            Affine::scale(scale),
+            if blob.current {
+                theme.wash.with_alpha(phase as f32)
+            } else {
+                theme.background.with_alpha(phase as f32)
+            },
+            None,
+            &circle,
+        );
+        // Only the highlight gets a heavy ring. A busy session is signalled by
+        // its breathing and by a darker hairline, never by weight: a thick ring
+        // on a busy blob was indistinguishable from the focused one, so a field
+        // with work running in it appeared to have two selections.
+        let ring = if blob.focused {
+            theme.text
+        } else if blob.busy {
+            theme.muted
+        } else {
+            theme.rule
+        };
+        scene.stroke(
+            &vello::kurbo::Stroke::new(if blob.focused {
+                BLOB_RING_FOCUS
+            } else {
+                BLOB_RING
+            }),
+            Affine::scale(scale),
+            ring.with_alpha(phase as f32),
+            None,
+            &circle,
+        );
+
+        // The label goes inside the blob, centred: a caption hung underneath
+        // would collide with the neighbour below it as soon as the field is
+        // dense, which is exactly when the labels matter. It is elided to what
+        // the circle can actually hold, so a long name on a small session is
+        // shortened rather than drawn out over the paper on both sides.
+        // Scale the type to the circle instead of eliding a short name into
+        // ellipses: "m..." on every blob is strictly worse than a small
+        // "mushroom", because the name is the only thing distinguishing one
+        // session from the next. Clamped so it never becomes unreadable, and
+        // a blob too small even for that carries no label at all rather than
+        // a row of dots.
+        let name = crate::overview::short_id(&blob.session_id);
+        // Monospace at this size runs about 0.62em per character.
+        let fitted = (radius * 1.7 / (name.chars().count().max(1) as f64 * 0.62)) as f32;
+        let size = fitted.clamp(BLOB_LABEL_MIN, BLOB_LABEL_SIZE);
+        let label_width = radius * 1.9;
+        if fitted >= BLOB_LABEL_MIN {
+        text.draw_paragraph_scaled(
+            scene,
+            &name,
+            (
+                center.0 - label_width / 2.0,
+                center.1 - f64::from(size) * 0.6,
+            ),
+            label_width as f32,
+            ParagraphStyle {
+                font_size: size,
+                color: if blob.focused { theme.text } else { theme.muted }
+                    .with_alpha(phase as f32),
+                align: text::Align::Center,
+                line_height: 1.1,
+                ..Default::default()
+            },
+            scale,
+        );
+        }
+    }
+
+    // One line of instruction at the very foot of the page, only while the
+    // field is settled: during the zoom it would be text arriving and leaving
+    // in 140ms. Pinned to the bottom margin rather than to the composer's
+    // caption row, which sits in the middle of the field and would put the
+    // hint straight through a blob.
+    if phase > 0.85 {
+        let hint_top = frame.height - layout::FOOTNOTE_HEIGHT * 1.5;
+        text.draw_paragraph_scaled(
+            scene,
+            "arrows or hjkl to move   release alt to switch   esc to stay",
+            (frame.left, hint_top),
+            frame.column() as f32,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: theme.faint,
+                align: text::Align::Center,
+                letter_spacing_em: 0.1,
+                ..Default::default()
+            },
+            scale,
+        );
+    }
+}
+
 /// Draw the working directory on the trailing end of the top chrome row.
 ///
 /// Right-aligned against the strip's bars so the row reads as "these sessions,
@@ -875,6 +1103,19 @@ pub fn build_scene(
                 ..Default::default()
             },
             scale,
+        );
+    }
+
+    // The session overview sits over everything: it is a mode, not a panel,
+    // and drawing it last is what lets it wash the page it replaces.
+    if model.overview.is_visible() {
+        draw_overview(
+            scene,
+            text,
+            model,
+            &frame,
+            scale,
+            std::time::Instant::now(),
         );
     }
 }
