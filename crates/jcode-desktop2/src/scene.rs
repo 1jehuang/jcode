@@ -302,6 +302,9 @@ const BLOB_HALO: f64 = 7.0;
 const BUSY_PULSE: f64 = 0.06;
 /// Period of that breath, in seconds.
 const BUSY_PERIOD: f32 = 1.6;
+/// Smallest blob that carries a busy spinner. Below this the spinner would be
+/// larger than the session it belongs to.
+const MIN_SPINNER_RADIUS: f64 = 22.0;
 
 /// Draw the session overview: every live session as a blob in a 2D field.
 ///
@@ -370,7 +373,12 @@ fn draw_overview(
     // most of the time and all of the time in a crowded field.
     for cluster in &field.clusters {
         let center = place(cluster.center);
-        let top = center.1 + cluster.radius * phase + CLUSTER_LABEL_GAP;
+        // Clamped into the field, so a cluster sitting at the bottom edge
+        // still gets a name: a project whose label silently fell off the page
+        // is the one case where the field lies about what it contains.
+        let (_, _, _, area_bottom) = crate::overview::area(frame);
+        let top = (center.1 + cluster.radius * phase + CLUSTER_LABEL_GAP)
+            .min(area_bottom - f64::from(CLUSTER_LABEL_SIZE));
         text.draw_paragraph_scaled(
             scene,
             &cluster.label,
@@ -428,17 +436,9 @@ fn draw_overview(
             None,
             &circle,
         );
-        // Only the highlight gets a heavy ring. A busy session is signalled by
-        // its breathing and by a darker hairline, never by weight: a thick ring
-        // on a busy blob was indistinguishable from the focused one, so a field
-        // with work running in it appeared to have two selections.
-        let ring = if blob.focused {
-            theme.text
-        } else if blob.busy {
-            theme.muted
-        } else {
-            theme.rule
-        };
+        // Only the highlight gets a heavy ring: a thick ring on a busy blob was
+        // indistinguishable from the focused one, so a field with work running
+        // in it appeared to have two selections.
         scene.stroke(
             &vello::kurbo::Stroke::new(if blob.focused {
                 BLOB_RING_FOCUS
@@ -446,10 +446,24 @@ fn draw_overview(
                 BLOB_RING
             }),
             Affine::scale(scale),
-            ring.with_alpha(phase as f32),
+            if blob.focused { theme.text } else { theme.rule }.with_alpha(phase as f32),
             None,
             &circle,
         );
+        // Work is signalled by a mark rather than by the ring's weight: a
+        // spinner in the blob's shoulder, the same halftone comet the composer
+        // uses, so "this session is working" looks the same everywhere in the
+        // app and cannot be confused with "this session is selected".
+        if blob.busy && radius > MIN_SPINNER_RADIUS {
+            draw_spinner(
+                scene,
+                &model.activity,
+                (center.0 + radius * 0.66, center.1 - radius * 0.66),
+                theme.muted.with_alpha(phase as f32),
+                scale,
+                now,
+            );
+        }
 
         // The label goes inside the blob, centred: a caption hung underneath
         // would collide with the neighbour below it as soon as the field is
@@ -468,24 +482,28 @@ fn draw_overview(
         let size = fitted.clamp(BLOB_LABEL_MIN, BLOB_LABEL_SIZE);
         let label_width = radius * 1.9;
         if fitted >= BLOB_LABEL_MIN {
-        text.draw_paragraph_scaled(
-            scene,
-            &name,
-            (
-                center.0 - label_width / 2.0,
-                center.1 - f64::from(size) * 0.6,
-            ),
-            label_width as f32,
-            ParagraphStyle {
-                font_size: size,
-                color: if blob.focused { theme.text } else { theme.muted }
+            text.draw_paragraph_scaled(
+                scene,
+                &name,
+                (
+                    center.0 - label_width / 2.0,
+                    center.1 - f64::from(size) * 0.6,
+                ),
+                label_width as f32,
+                ParagraphStyle {
+                    font_size: size,
+                    color: if blob.focused {
+                        theme.text
+                    } else {
+                        theme.muted
+                    }
                     .with_alpha(phase as f32),
-                align: text::Align::Center,
-                line_height: 1.1,
-                ..Default::default()
-            },
-            scale,
-        );
+                    align: text::Align::Center,
+                    line_height: 1.1,
+                    ..Default::default()
+                },
+                scale,
+            );
         }
     }
 
@@ -1109,14 +1127,7 @@ pub fn build_scene(
     // The session overview sits over everything: it is a mode, not a panel,
     // and drawing it last is what lets it wash the page it replaces.
     if model.overview.is_visible() {
-        draw_overview(
-            scene,
-            text,
-            model,
-            &frame,
-            scale,
-            std::time::Instant::now(),
-        );
+        draw_overview(scene, text, model, &frame, scale, std::time::Instant::now());
     }
 }
 
