@@ -2498,6 +2498,9 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     record_idle_animation_area(None);
+    // Suggestions are read many times while composing one frame. Bump the
+    // epoch here so the memo is scoped to exactly this frame.
+    app.advance_command_suggestions_epoch();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
