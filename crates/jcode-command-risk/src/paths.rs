@@ -9,14 +9,19 @@
 use super::{RiskContext, RiskFinding, RiskLevel};
 use std::path::{Component, Path, PathBuf};
 
-/// Paths whose recursive destruction is never acceptable, relative to home.
+/// Credential stores. Protected *recursively*: destroying a single private key
+/// inside `~/.ssh` is as damaging as destroying the directory, so containment
+/// matters here and exact-match alone would leave an obvious hole.
+const PROTECTED_CREDENTIAL_SUBPATHS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker"];
+
+/// Directories whose *wholesale* destruction is unacceptable, but whose
+/// individual files are legitimately edited and removed all the time. Matched
+/// exactly, so `~/.config` is protected while `~/.config/app/stale.toml` is not.
 const PROTECTED_HOME_SUBPATHS: &[&str] = &[
-    ".ssh",
-    ".gnupg",
-    ".aws",
     ".config",
     ".jcode",
     ".claude",
+    ".local",
     ".local/share",
     "Documents",
     "Desktop",
@@ -52,6 +57,9 @@ pub struct ProtectedPaths;
 impl ProtectedPaths {
     pub fn home_subpaths() -> &'static [&'static str] {
         PROTECTED_HOME_SUBPATHS
+    }
+    pub fn credential_subpaths() -> &'static [&'static str] {
+        PROTECTED_CREDENTIAL_SUBPATHS
     }
     pub fn system_paths() -> &'static [&'static str] {
         PROTECTED_SYSTEM_PATHS
@@ -130,7 +138,14 @@ pub fn is_catastrophic_target(path: &Path, ctx: &RiskContext) -> bool {
     if path == home {
         return true;
     }
-    // Credential and config stores inside home.
+    // Credential stores, including anything inside them.
+    if PROTECTED_CREDENTIAL_SUBPATHS
+        .iter()
+        .any(|sub| path.starts_with(home.join(sub)))
+    {
+        return true;
+    }
+    // Config and document roots, but not their individual files.
     PROTECTED_HOME_SUBPATHS
         .iter()
         .any(|sub| path == home.join(sub))
