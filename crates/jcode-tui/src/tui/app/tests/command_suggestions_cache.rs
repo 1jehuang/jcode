@@ -128,3 +128,49 @@ fn pending_prompt_transition_invalidates_the_memo() {
         "a pending prompt must suppress the palette down to /cancel"
     );
 }
+
+/// Measures the per-frame cost of the suggestion reads while a slash command is
+/// being typed. Run explicitly:
+///
+///   cargo test -p jcode-tui --lib -- measure_slash_palette_frame_cost \
+///       --nocapture --ignored
+///
+/// A frame reads `command_suggestions()` ~8 times (input box, hint line,
+/// shell-mode routing, key handling, debug capture). This reports the cost of
+/// one frame's worth of reads with the memo active versus the uncached path,
+/// which is the work the memo removes.
+#[test]
+#[ignore = "measurement harness, not a pass/fail assertion"]
+fn measure_slash_palette_frame_cost() {
+    use std::time::Instant;
+
+    const READS_PER_FRAME: usize = 8;
+    let mut app = create_test_app();
+
+    for input in ["/", "/m", "/mod", "/model"] {
+        app.input = input.to_string();
+        app.cursor_pos = app.input.len();
+
+        // Uncached: what every read cost before the memo.
+        let signature = app.command_suggestions_signature();
+        let started = Instant::now();
+        for _ in 0..READS_PER_FRAME {
+            let _ = app.command_suggestions_uncached(&signature);
+        }
+        let uncached_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        // Cached: one build plus seven memo hits, as a real frame does.
+        app.advance_command_suggestions_epoch();
+        let started = Instant::now();
+        for _ in 0..READS_PER_FRAME {
+            let _ = app.command_suggestions();
+        }
+        let cached_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        println!(
+            "input {input:<8} frame cost: uncached={uncached_ms:.4}ms \
+             cached={cached_ms:.4}ms  ({:.1}x)",
+            uncached_ms / cached_ms.max(f64::MIN_POSITIVE),
+        );
+    }
+}
