@@ -48,9 +48,24 @@ fn app() -> App {
         },
     ];
     let mut app = App::default();
+    // The gesture is benched by default; these tests keep the machinery
+    // honest for the day the flag flips back on.
+    app.alt_overview = true;
     app.model.session_id = Some("session_mushroom_2_b".into());
     app.model.strip = Strip::build(entries, Some("session_mushroom_2_b"));
     app
+}
+
+/// The concept is on the bench: a default app must treat Alt as a plain
+/// chord modifier and never open the field.
+#[test]
+fn the_alt_overview_is_disabled_by_default() {
+    let mut app = App::default();
+    app.on_alt_changed(true, Instant::now());
+    assert!(
+        !app.model.overview.is_visible(),
+        "the benched overview opened anyway"
+    );
 }
 
 /// Press Alt, which opens the field at once, and return the clock it opened
