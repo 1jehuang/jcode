@@ -35,9 +35,9 @@ pub use jcode_provider_openrouter::{
 };
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
-    ProviderPin, current_unix_secs, known_providers, load_disk_cache_entry,
-    load_endpoints_disk_cache, parse_model_spec, save_disk_cache_with_source,
-    save_disk_cache_with_source_for_namespace, save_endpoints_disk_cache,
+    ProviderPin, current_unix_secs, known_providers, load_endpoints_disk_cache, parse_model_spec,
+    save_disk_cache_with_source, save_disk_cache_with_source_for_namespace,
+    save_endpoints_disk_cache,
 };
 use reqwest::Client;
 use reqwest::header::HeaderName;
