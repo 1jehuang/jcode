@@ -256,6 +256,21 @@ pub trait TuiState {
     fn status_detail(&self) -> Option<String>;
     fn mcp_servers(&self) -> Vec<(String, usize)>;
     fn available_skills(&self) -> Vec<String>;
+    /// Authoritative active credential (OAuth vs API key) for a dual-auth
+    /// provider, as resolved from the live provider / remote server rather than
+    /// from the `JCODE_RUNTIME_PROVIDER` env var. The header must prefer this
+    /// over its own env-based heuristic: the TUI client process often does not
+    /// inherit `JCODE_RUNTIME_PROVIDER` (it is set inside the agent/server
+    /// process), so the env heuristic silently falls back to "auto prefers
+    /// OAuth" and the header claimed OAuth while the info widget correctly
+    /// reported an API key. Returns `None` when the credential cannot be
+    /// determined, in which case callers fall back to the cached `AuthStatus`.
+    fn active_dual_credential(
+        &self,
+        _provider: jcode_provider_core::ActiveProvider,
+    ) -> Option<crate::auth::ActiveCredential> {
+        None
+    }
 
     // ---- Stream / status ----
     fn streaming_tokens(&self) -> (u64, u64);

@@ -94,6 +94,8 @@ fn connecting() -> Model {
         // Detached: nothing has told us the model yet, so the caption is absent.
         model: None,
         strip: crate::strip::Strip::default(),
+        // Detached: no session, so no directory to name.
+        working_dir: None,
     }
 }
 
@@ -155,6 +157,9 @@ fn attached_empty() -> Model {
         hint: 0,
         model: Some(fixed_model()),
         strip: crate::strip::Strip::default(),
+        // Fixed path, so captures do not depend on where the repo is checked
+        // out or on whose `$HOME` the capture ran under.
+        working_dir: Some("/home/j/jcode".into()),
     }
 }
 

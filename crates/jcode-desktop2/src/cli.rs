@@ -197,7 +197,7 @@ fn run_e2e(message: &str) -> Result<()> {
                 }
                 model.status = status;
             }
-            harness::HarnessUpdate::Attached { session_id } => {
+            harness::HarnessUpdate::Attached { session_id, .. } => {
                 println!("[e2e] attached: {session_id}");
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);

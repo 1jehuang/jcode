@@ -491,3 +491,49 @@ fn partial_json_intent_handles_escapes_and_multibyte_text() {
         Some("say \"héllo\" now".to_string())
     );
 }
+
+#[test]
+fn thinking_display_off_is_surfaced_instead_of_failing_silently() {
+    // The desktop often attaches to an already-running shared server whose
+    // config wins over the spawn-time default, so a silent empty transcript
+    // has to become an explainable one.
+    let mut app = SingleSessionApp::new(None);
+    app.push_thinking_display_notice("off");
+    let body = app.body_lines();
+    assert!(
+        body.iter().any(|line| line.contains("thinking display is off")),
+        "an off mode should explain the empty transcript, got {body:?}"
+    );
+    assert!(
+        body.iter().any(|line| line.contains("reasoning_display")),
+        "the hint should name the setting to change, got {body:?}"
+    );
+
+    for mode in ["current", "full"] {
+        let mut app = SingleSessionApp::new(None);
+        app.push_thinking_display_notice(mode);
+        assert!(
+            app.body_lines()
+                .iter()
+                .all(|line| !line.contains("thinking display is off")),
+            "{mode} mode should not warn"
+        );
+    }
+}
+
+#[test]
+fn thinking_display_notice_is_shown_at_most_once_per_session() {
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(DesktopSessionEvent::SessionStarted {
+        session_id: "session-a".to_string(),
+    });
+    app.apply_session_event(DesktopSessionEvent::SessionStarted {
+        session_id: "session-a".to_string(),
+    });
+    let notices = app
+        .body_lines()
+        .iter()
+        .filter(|line| line.contains("thinking display is off"))
+        .count();
+    assert!(notices <= 1, "reconnects must not repeat the hint");
+}

@@ -1048,6 +1048,36 @@ mod session_strip {
         app
     }
 
+    /// Switching sessions must never leave the previous session's directory on
+    /// screen: the caption and title would then name the wrong project while
+    /// you type into a different one.
+    #[test]
+    fn switching_sessions_renames_the_place() {
+        let mut app = app_with_sessions("s_a1");
+        app.model.working_dir = Some("/home/j/jcode".into());
+        app.apply(Action::SessionDown, None);
+        assert_eq!(app.model.session_id.as_deref(), Some("s_b1"));
+        assert_eq!(app.model.working_dir.as_deref(), Some("/home/j/site"));
+        assert!(
+            crate::place::window_title(app.model.working_dir.as_deref())
+                .starts_with("/home/j/site")
+        );
+    }
+
+    /// R2 revisited: the top row is also earned by having a directory to name,
+    /// so a single-session window still says where it is.
+    #[test]
+    fn a_lone_session_with_a_directory_gets_the_top_row() {
+        let mut app = App::default();
+        app.model.working_dir = Some("/home/j/jcode".into());
+        assert!(
+            App::frame_for_model((1400, 900), 1.0, &app.model)
+                .strip()
+                .is_some(),
+            "a lone attached session had nowhere to show its directory"
+        );
+    }
+
     #[test]
     fn moving_right_switches_the_attached_session() {
         let mut app = app_with_sessions("s_a1");

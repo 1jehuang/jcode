@@ -339,6 +339,7 @@ impl SingleSessionApp {
             DesktopSessionEvent::SessionStarted { session_id } => {
                 self.live_session_id = Some(session_id);
                 self.set_status(SingleSessionStatus::Connected);
+                self.notice_if_thinking_display_is_off();
             }
             DesktopSessionEvent::SessionRenamed {
                 title,
@@ -789,6 +790,35 @@ impl SingleSessionApp {
         self.set_status(SingleSessionStatus::Sending);
         self.error = None;
         self.is_processing = true;
+    }
+
+    /// Warn once per session when thinking display is off.
+    ///
+    /// The desktop asks the server it spawns for `current` mode, but it often
+    /// attaches to an already-running shared server whose config wins. Without
+    /// this the transcript just silently shows nothing until the final
+    /// response, which is the exact failure this feature exists to fix.
+    fn notice_if_thinking_display_is_off(&mut self) {
+        if self.runtime.thinking_display_notice_shown {
+            return;
+        }
+        self.runtime.thinking_display_notice_shown = true;
+        self.push_thinking_display_notice(&crate::desktop_config::desktop_reasoning_display_mode());
+    }
+
+    /// Split from the config lookup so the message itself is testable without
+    /// touching process-global state.
+    pub(crate) fn push_thinking_display_notice(&mut self, mode: &str) {
+        if mode != "off" {
+            return;
+        }
+        self.messages.push(SingleSessionMessage::meta(
+            "thinking display is off, so this session will show nothing until the response \
+             lands. Set display.reasoning_display = \"current\" in ~/.jcode/config.toml \
+             (or run /thinking-display current in the terminal client) to watch work as it \
+             happens."
+                .to_string(),
+        ));
     }
 
     /// Close the live reasoning region, leaving a collapsed trace in the
