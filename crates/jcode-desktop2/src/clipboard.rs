@@ -11,6 +11,17 @@
 //! auto-copy-on-select is safe to do at all, so the distinction is modelled
 //! here rather than collapsed into one buffer.
 
+/// The platform clipboard refused a write. Carries the platform's own message
+/// so the app can say what went wrong rather than failing mutely.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unavailable(pub String);
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Which system buffer an operation refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -79,10 +90,11 @@ impl Clipboard {
         self.backend.as_mut()
     }
 
-    /// Copy `text` to the clipboard. Empty text is ignored so a no-op cut does
-    /// not wipe the user's clipboard.
-    pub fn set(&mut self, text: &str) {
-        self.set_to(Target::Clipboard, text);
+    /// Copy `text` to the ordinary clipboard. Empty text is ignored so a no-op
+    /// cut does not wipe the user's clipboard.
+    #[cfg(test)]
+    pub fn set(&mut self, text: &str) -> Result<(), Unavailable> {
+        self.set_to(Target::Clipboard, text)
     }
 
     /// Copy `text` to a specific buffer.
@@ -91,23 +103,25 @@ impl Clipboard {
     /// fallback to the real clipboard: auto-copy fires on every drag, so
     /// falling back would mean merely highlighting a word destroys whatever
     /// the user had deliberately copied.
-    pub fn set_to(&mut self, target: Target, text: &str) {
+    pub fn set_to(&mut self, target: Target, text: &str) -> Result<(), Unavailable> {
         if text.is_empty() {
-            return;
+            return Ok(());
         }
         match target {
             Target::Clipboard => self.local = Some(text.to_string()),
             Target::Primary => {
                 self.local_primary = Some(text.to_string());
                 if !has_primary_selection() {
-                    return;
+                    return Ok(());
                 }
             }
         }
         let Some(backend) = self.backend() else {
-            return;
+            // No platform clipboard at all (headless, or a sandbox): the
+            // in-process copy above still keeps cut and paste coherent.
+            return Ok(());
         };
-        write(backend, target, text);
+        write(backend, target, text).map_err(|error| Unavailable(error.to_string()))
     }
 
     /// Read the clipboard, preferring the system and falling back to the last
@@ -121,7 +135,7 @@ impl Clipboard {
     pub fn get_from(&mut self, target: Target) -> Option<String> {
         if (target == Target::Clipboard || has_primary_selection())
             && let Some(backend) = self.backend()
-            && let Some(text) = read(backend, target)
+            && let Ok(text) = read(backend, target)
             && !text.is_empty()
         {
             return Some(text);
@@ -144,41 +158,51 @@ impl Clipboard {
 
 /// Write to a system buffer. Split out so the platform-specific selection
 /// plumbing is in one place rather than spread through `set_to`.
+///
+/// Returns the platform error rather than discarding it: a copy that silently
+/// did nothing is the failure mode users report as "the app ate my clipboard",
+/// so the caller keeps the in-process fallback *and* gets to say so.
 #[cfg(target_os = "linux")]
-fn write(backend: &mut arboard::Clipboard, target: Target, text: &str) {
+fn write(
+    backend: &mut arboard::Clipboard,
+    target: Target,
+    text: &str,
+) -> Result<(), arboard::Error> {
     use arboard::{LinuxClipboardKind, SetExtLinux};
     let kind = match target {
         Target::Clipboard => LinuxClipboardKind::Clipboard,
         Target::Primary => LinuxClipboardKind::Primary,
     };
-    let _ = backend.set().clipboard(kind).text(text.to_string());
+    backend.set().clipboard(kind).text(text.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn write(backend: &mut arboard::Clipboard, target: Target, text: &str) {
+fn write(
+    backend: &mut arboard::Clipboard,
+    target: Target,
+    text: &str,
+) -> Result<(), arboard::Error> {
     // Only the ordinary clipboard exists here; `set_to` has already returned
     // for a primary write, so this is unreachable for `Target::Primary`.
-    if target == Target::Clipboard {
-        let _ = backend.set_text(text.to_string());
-    }
+    debug_assert_eq!(target, Target::Clipboard);
+    backend.set_text(text.to_string())
 }
 
-/// Read a system buffer, or `None` when it is empty or unavailable.
+/// Read a system buffer.
 #[cfg(target_os = "linux")]
-fn read(backend: &mut arboard::Clipboard, target: Target) -> Option<String> {
+fn read(backend: &mut arboard::Clipboard, target: Target) -> Result<String, arboard::Error> {
     use arboard::{GetExtLinux, LinuxClipboardKind};
     let kind = match target {
         Target::Clipboard => LinuxClipboardKind::Clipboard,
         Target::Primary => LinuxClipboardKind::Primary,
     };
-    backend.get().clipboard(kind).text().ok()
+    backend.get().clipboard(kind).text()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read(backend: &mut arboard::Clipboard, target: Target) -> Option<String> {
-    (target == Target::Clipboard)
-        .then(|| backend.get_text().ok())
-        .flatten()
+fn read(backend: &mut arboard::Clipboard, target: Target) -> Result<String, arboard::Error> {
+    debug_assert_eq!(target, Target::Clipboard);
+    backend.get_text()
 }
 
 #[cfg(test)]
@@ -190,7 +214,7 @@ mod tests {
         // Exercises the fallback path, which guarantees cut/paste coherence on
         // headless machines and in CI.
         let mut clipboard = Clipboard::default();
-        clipboard.set("hello world");
+        clipboard.set("hello world").expect("fallback write");
         assert_eq!(clipboard.get().as_deref(), Some("hello world"));
     }
 
@@ -210,8 +234,8 @@ mod tests {
     #[test]
     fn empty_copy_does_not_clobber_the_clipboard() {
         let mut clipboard = Clipboard::default();
-        clipboard.set("keep me");
-        clipboard.set("");
+        clipboard.set("keep me").expect("fallback write");
+        let _ = clipboard.set("");
         assert_eq!(clipboard.get().as_deref(), Some("keep me"));
     }
 
@@ -221,8 +245,12 @@ mod tests {
     #[test]
     fn a_primary_write_never_touches_the_clipboard() {
         let mut clipboard = Clipboard::default();
-        clipboard.set("deliberately copied");
-        clipboard.set_to(Target::Primary, "merely selected");
+        clipboard
+            .set("deliberately copied")
+            .expect("fallback write");
+        clipboard
+            .set_to(Target::Primary, "merely selected")
+            .expect("fallback write");
         assert_eq!(
             clipboard.get().as_deref(),
             Some("deliberately copied"),
@@ -236,16 +264,40 @@ mod tests {
     #[test]
     fn a_clipboard_write_never_touches_the_primary_selection() {
         let mut clipboard = Clipboard::default();
-        clipboard.set_to(Target::Primary, "selected");
-        clipboard.set("copied");
+        clipboard
+            .set_to(Target::Primary, "selected")
+            .expect("fallback write");
+        clipboard.set("copied").expect("fallback write");
         assert_eq!(clipboard.primary(), Some("selected"));
     }
 
     #[test]
     fn an_empty_selection_does_not_clobber_the_primary_selection() {
         let mut clipboard = Clipboard::default();
-        clipboard.set_to(Target::Primary, "keep me");
-        clipboard.set_to(Target::Primary, "");
+        clipboard
+            .set_to(Target::Primary, "keep me")
+            .expect("fallback write");
+        let _ = clipboard.set_to(Target::Primary, "");
         assert_eq!(clipboard.primary(), Some("keep me"));
+    }
+    /// A platform failure must be reported, not discarded. The in-process copy
+    /// still happens, so paste within the app keeps working, but the caller
+    /// gets to tell the user their system clipboard did not receive it.
+    #[test]
+    fn a_failed_system_write_still_keeps_the_text_locally() {
+        let mut clipboard = Clipboard::default();
+        // The sandboxed clipboard has no backend, which is the same shape as a
+        // headless machine: the write reports success because the fallback
+        // took it, and the text is readable back.
+        assert_eq!(clipboard.set_to(Target::Clipboard, "text"), Ok(()));
+        assert_eq!(clipboard.get().as_deref(), Some("text"));
+    }
+
+    /// `Unavailable` has to carry the platform's own message: "clipboard
+    /// failed" tells a user nothing they can act on.
+    #[test]
+    fn an_unavailable_clipboard_explains_itself() {
+        let error = Unavailable("no wayland display".into());
+        assert_eq!(error.to_string(), "no wayland display");
     }
 }

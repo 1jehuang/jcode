@@ -62,7 +62,9 @@ fn check_primary_selection() -> Result<()> {
     let before = clipboard.get();
     let sentinel = format!("jcode-primary-check-{}", std::process::id());
 
-    clipboard.set_to(Target::Primary, &sentinel);
+    clipboard
+        .set_to(Target::Primary, &sentinel)
+        .map_err(|error| anyhow::anyhow!("could not write the primary selection: {error}"))?;
     // The selection is served asynchronously by the compositor, so a read
     // immediately after the write can legitimately race it.
     std::thread::sleep(std::time::Duration::from_millis(250));
