@@ -182,7 +182,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
     app.rate_limit_pending_message = None;
     app.rate_limit_reset = None;
     app.push_display_message(DisplayMessage::system(format!(
-        "🛑 Auto-poke stopped because the last request failed with a non-retryable error.{} Fix the request/session, then run /poke again if you want to resume.",
+        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
         if cleared == 0 {
             String::new()
         } else {
@@ -213,19 +213,19 @@ pub(super) fn poke_disabled_message(cleared: usize) -> String {
 }
 
 pub(super) fn poke_enabled_without_incomplete_message() -> String {
-    "Auto-poke enabled. No incomplete todos found right now.".to_string()
+    "Auto-poke enabled. Nothing unfinished right now; we'll poke the agent if it stops with todos left.".to_string()
 }
 
 pub(super) fn poke_queued_display_message() -> String {
     format!(
-        "👉 /poke queued. Re-checking incomplete todos after this turn. {}",
+        "👉 Poke queued. We'll re-check for unfinished todos after this turn. {}",
         POKE_OFF_UI_HINT
     )
 }
 
 pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String {
     format!(
-        "👉 Poking model: {} incomplete todo{}. {}",
+        "👉 {} incomplete todo{}. We poked the agent. {}",
         incomplete_count,
         if incomplete_count == 1 { "" } else { "s" },
         POKE_OFF_UI_HINT,

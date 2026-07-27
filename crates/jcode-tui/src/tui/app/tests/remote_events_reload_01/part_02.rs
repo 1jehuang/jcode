@@ -163,7 +163,7 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         );
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("abrupt confidence increase needs independent validation")
+                .contains("confidence jumped suddenly")
         }));
     });
 }
@@ -206,7 +206,7 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         );
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Todo completion gate: completion confidence needs stronger validation.")
+                .contains("marked its work done without strong enough validation")
         }));
     });
 }

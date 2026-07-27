@@ -322,7 +322,7 @@ fn test_repeated_guardrail_refusals_stop_auto_poke_loop() {
         assert!(
             app.display_messages()
                 .iter()
-                .any(|m| m.role == "system" && m.content.contains("guardrail refused")),
+                .any(|m| m.role == "system" && m.content.contains("refused")),
             "the user should be told why auto-poke stopped"
         );
 

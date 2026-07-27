@@ -45,7 +45,7 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
         assert!(app.queued_messages().is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("/poke queued. Re-checking incomplete todos after this turn")
+                .contains("Poke queued. We'll re-check for unfinished todos after this turn")
         }));
 
         crate::todo::save_todos(
@@ -113,7 +113,7 @@ fn test_remote_ctrl_p_toggles_auto_poke() {
         assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Auto-poke enabled. No incomplete todos found right now.")
+                .contains("Auto-poke enabled. Nothing unfinished right now")
         }));
     });
 }
