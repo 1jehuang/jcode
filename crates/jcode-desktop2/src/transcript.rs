@@ -128,8 +128,25 @@ pub struct LaidMessage {
     pub height: f64,
 }
 
+impl LaidMessage {
+    /// Vertical inset from the top of the message to its first block. A user
+    /// message is drawn in a padded card; an assistant reply is not. Shared by
+    /// drawing and hit-testing so a click cannot land a padding's worth away
+    /// from the glyph it aimed at.
+    pub fn top_padding(&self) -> f64 {
+        match self.role {
+            Role::User => USER_PAD_Y,
+            Role::Assistant => 0.0,
+        }
+    }
+}
+
 pub struct LaidBlock {
     pub layout: Layout<Brush>,
+    /// The block's flattened plain text, the same string the layout was built
+    /// from. Kept so a pointer selection can slice it for the clipboard
+    /// without re-parsing the markdown or reading back from the GPU.
+    pub source: String,
     /// Offset from the top of the message, in logical units.
     pub top: f64,
     pub height: f64,
@@ -221,6 +238,7 @@ pub fn lay_out_message(
         }
         blocks.push(LaidBlock {
             layout,
+            source,
             top,
             height,
             inset,

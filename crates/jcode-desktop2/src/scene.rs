@@ -258,6 +258,7 @@ pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
 fn draw_transcript(
     scene: &mut Scene,
     text: &mut text::TextSystem,
+    cache: &mut crate::paint::TranscriptCache,
     model: &Model,
     frame: &layout::Frame,
     scale: f64,
@@ -270,16 +271,15 @@ fn draw_transcript(
     // A user card is inset by its own padding, so both roles wrap to the same
     // text column and the conversation keeps one measure.
     let width = (frame.column() - USER_PAD_X * 2.0).max(1.0);
-    let view = crate::viewport::Viewport::new(
+    let laid = cache.lay_out(
         text,
         &model.transcript,
         width,
-        region_height,
-        model.scroll,
         theme,
         transcript_body_style(model),
         scale,
     );
+    let view = crate::viewport::Viewport::new(laid, region_height, model.scroll);
 
     for placed in &view.visible {
         let message_top = frame.body_top + placed.top;
@@ -304,7 +304,7 @@ fn draw_transcript(
         let text_left = frame.left + USER_PAD_X;
         let text_top = message_top + if is_user { USER_PAD_Y } else { 0.0 };
 
-        for block in &placed.message.blocks {
+        for (block_index, block) in placed.message.blocks.iter().enumerate() {
             let block_top = text_top + block.top;
             match &block.kind {
                 // A code block gets a wash and an inset, so it reads as a
@@ -363,6 +363,27 @@ fn draw_transcript(
             // The inset the layout wrapped to, so the drawn text cannot sit at
             // a different x than the width it was measured against.
             let inset_x = block.inset;
+            // Selection bands go under the glyphs, so highlighted text stays
+            // legible on the band rather than being painted over by it.
+            if let Some(selection) = model.selection.as_ref()
+                && let Some(range) =
+                    selection.range_in(placed.index, block_index, block.source.len())
+            {
+                for band in crate::select::block_bands(block, range, scale) {
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        Affine::scale(scale),
+                        theme.selection,
+                        None,
+                        &Rect::new(
+                            text_left + inset_x + band.rect.x0,
+                            block_top + inset_y + band.rect.y0,
+                            text_left + inset_x + band.rect.x1,
+                            block_top + inset_y + band.rect.y1,
+                        ),
+                    );
+                }
+            }
             text::TextSystem::draw_layout(
                 scene,
                 &block.layout,
@@ -390,16 +411,20 @@ pub fn composer_text_style(model: &Model) -> ParagraphStyle {
 /// units, so the design reads identically on 1x and HiDPI displays.
 pub fn build_scene(
     scene: &mut Scene,
-    text: &mut text::TextSystem,
+    painter: &mut crate::paint::Painter,
     model: &Model,
     size: (u32, u32),
     scale: f64,
 ) {
+    let frame = crate::App::frame_for_model_with(size, scale, model, painter);
+    let crate::paint::Painter {
+        text,
+        transcript: transcript_cache,
+    } = painter;
     let theme = &model.theme;
     // Size the composer from where the text really wraps, via the same helper
     // the event loop uses, so pointer hit-testing can never see a different
     // frame than the renderer.
-    let frame = crate::App::frame_for_model_with(size, scale, model, text);
     let scale = frame.scale;
     let fill = |scene: &mut Scene, color: Color, shape: &Rect| {
         scene.fill(
@@ -483,7 +508,7 @@ pub fn build_scene(
             frame.body_bottom.max(frame.body_top),
         );
         scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &region);
-        draw_transcript(scene, text, model, &frame, scale);
+        draw_transcript(scene, text, transcript_cache, model, &frame, scale);
         scene.pop_layer();
     }
 

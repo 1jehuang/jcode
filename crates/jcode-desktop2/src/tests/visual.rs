@@ -24,9 +24,9 @@ impl Rendered {
 
     /// Render one model at an explicit surface size and scale factor.
     fn at(model: &Model, width: u32, height: u32, scale: f64) -> Option<Self> {
-        let mut text = TextSystem::default();
+        let mut painter = crate::paint::Painter::default();
         let mut scene = Scene::new();
-        build_scene(&mut scene, &mut text, model, (width, height), scale);
+        build_scene(&mut scene, &mut painter, model, (width, height), scale);
         let pixels = crate::capture::capture_scene_to_rgba(&scene, width, height).ok()?;
         Some(Self {
             pixels,
@@ -759,10 +759,10 @@ fn dump_frames_for_review() {
     };
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).expect("create dump dir");
-    let mut text = TextSystem::default();
+    let mut painter = crate::paint::Painter::default();
     for (name, model) in nodes() {
         let mut scene = Scene::new();
-        build_scene(&mut scene, &mut text, &model, (WIDTH, HEIGHT), SCALE);
+        build_scene(&mut scene, &mut painter, &model, (WIDTH, HEIGHT), SCALE);
         let path = dir.join(format!("{name}.png"));
         crate::capture::capture_scene_to_png(&scene, WIDTH, HEIGHT, &path).expect("write png");
         eprintln!("wrote {}", path.display());
@@ -1311,4 +1311,55 @@ fn rich_content_never_inks_the_composer() {
             "{name}: transcript ink ({darkest:.3} luma) landed inside the composer"
         );
     }
+}
+
+/// A frame over a long conversation must stay cheap enough to feel live.
+///
+/// This is the regression that made the window feel laggy: `build_scene` and
+/// the frame measurement each re-parsed and re-laid *every* message with
+/// Parley, so a caret blink or a wheel tick over a real session cost tens of
+/// milliseconds of CPU before anything was drawn. The cost is asserted
+/// relative to the first frame rather than in absolute milliseconds, so the
+/// test says "steady-state frames must not redo the work" on any machine.
+#[test]
+fn a_steady_state_frame_does_not_relay_the_transcript() {
+    use crate::transcript::Message;
+
+    // No donut: this measures the transcript's cost, not the hero animation.
+    let mut model = Model {
+        donut: None,
+        ..Model::default()
+    };
+    for n in 0..80 {
+        model
+            .transcript
+            .push(Message::user(format!("question {n}")));
+        model.transcript.push(Message::assistant(format!(
+            "answer {n}. {}",
+            "prose that wraps across the measure ".repeat(4)
+        )));
+    }
+    let mut painter = crate::paint::Painter::default();
+    let frame_cost = |painter: &mut crate::paint::Painter| {
+        let start = std::time::Instant::now();
+        let mut scene = Scene::new();
+        build_scene(&mut scene, painter, &model, (WIDTH, HEIGHT), SCALE);
+        start.elapsed()
+    };
+
+    let cold = frame_cost(&mut painter);
+    // Warm up once more so any one-off font loading is out of the way, then
+    // measure the steady state.
+    frame_cost(&mut painter);
+    let warm: std::time::Duration = (0..5)
+        .map(|_| frame_cost(&mut painter))
+        .sum::<std::time::Duration>()
+        / 5;
+
+    eprintln!("cold {cold:?} warm {warm:?}");
+    assert!(
+        warm * 5 < cold,
+        "a steady-state frame costs {warm:?}, barely under the cold frame's {cold:?}: \
+         the transcript is being laid out again every frame"
+    );
 }
