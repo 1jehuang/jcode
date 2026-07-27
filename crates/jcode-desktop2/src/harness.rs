@@ -249,6 +249,11 @@ fn run(
     // with hundreds of calls must not accumulate their arguments forever.
     let mut tool_input: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // The most recent `tool_start`. The server does not populate `call_id` on
+    // `tool_input` deltas, so arguments are attributed to the call that opened
+    // last; tool calls stream one at a time, so this is exact today and would
+    // degrade to a briefly wrong label rather than a panic if that changed.
+    let mut current_call = String::new();
     loop {
         let frame = client.recv()?;
         match frame.event {
@@ -278,10 +283,16 @@ fn run(
             }
             ApiEvent::ToolStart { call_id, name, .. } => {
                 tool_input.remove(&call_id);
+                current_call = call_id;
                 send(HarnessUpdate::Activity(name));
             }
             ApiEvent::ToolInputDelta { call_id, delta, .. } => {
-                let buffer = tool_input.entry(call_id.clone()).or_default();
+                let key = if call_id.is_empty() {
+                    current_call.clone()
+                } else {
+                    call_id
+                };
+                let buffer = tool_input.entry(key).or_default();
                 buffer.push_str(&delta);
                 if let Some(intent) = crate::activity::intent_from_partial_json(buffer) {
                     send(HarnessUpdate::Activity(intent));
@@ -289,12 +300,17 @@ fn run(
             }
             ApiEvent::ToolExec { call_id, name, .. } => {
                 // Prefer the intent the model wrote over the bare tool name:
-                // "check the build" says more than "bash".
-                let label = tool_input
+                // "check the build" says more than "bash". When the arguments
+                // did not carry one, leave the label alone rather than
+                // downgrading a good line back to the tool's name.
+                match tool_input
                     .get(&call_id)
                     .and_then(|input| crate::activity::intent_from_partial_json(input))
-                    .unwrap_or(name);
-                send(HarnessUpdate::Activity(label));
+                {
+                    Some(intent) => send(HarnessUpdate::Activity(intent)),
+                    None if tool_input.contains_key(&call_id) => {}
+                    None => send(HarnessUpdate::Activity(name)),
+                }
             }
             ApiEvent::ToolDone { call_id, .. } => {
                 tool_input.remove(&call_id);
