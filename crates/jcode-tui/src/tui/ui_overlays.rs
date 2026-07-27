@@ -409,6 +409,33 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry("/quit", "Exit jcode"));
 
+    // The sections above are hand-curated for ordering, but they drift as
+    // commands are added. Anything registered and not already shown gets listed
+    // here so no working command is invisible in /help.
+    let shown: std::collections::HashSet<String> = lines
+        .iter()
+        .filter_map(|line| line.spans.get(1).map(|span| span.content.to_string()))
+        .map(|cmd| {
+            cmd.split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    let uncovered: Vec<(&str, &str)> = crate::tui::app::registered_command_entries()
+        .filter(|(name, _)| !shown.contains(*name))
+        .collect();
+    if !uncovered.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(separator());
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  More commands", section_style)));
+        lines.push(Line::from(""));
+        for (name, desc) in uncovered {
+            lines.push(help_entry(name, desc));
+        }
+    }
+
     let skills = app.available_skills();
     if !skills.is_empty() {
         lines.push(Line::from(""));

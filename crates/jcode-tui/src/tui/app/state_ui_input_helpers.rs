@@ -63,12 +63,12 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
     RegisteredCommand::public("/git", "Show git status for the session working directory"),
     RegisteredCommand::public("/hotkeys", "List hotkeys with your personal usage"),
-    RegisteredCommand::hidden("/keys", "Alias for /hotkeys"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public(
         "/commit-push",
         "Make logical commits from current changes, then push",
     ),
+    RegisteredCommand::hidden("/commit-and-push", "Alias for /commit-push"),
     RegisteredCommand::public(
         "/fast-release",
         "Publish Linux immediately from the warm selfdev cache; CI adds other platforms",
@@ -157,6 +157,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/keys",
         "Show keybinding conflicts with your terminal and OS (/keys refresh to rescan)",
     ),
+    RegisteredCommand::hidden("/keybindings", "Alias for /keys"),
     RegisteredCommand::public(
         "/diff",
         "Cycle or set diff display mode (off/inline/full/pinned/file)",
@@ -205,11 +206,23 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Continue every interrupted live session that would auto-resume",
     ),
     RegisteredCommand::remote("/resumeall", "Alias for /continue"),
+    RegisteredCommand::hidden("/resume-all", "Alias for /continue"),
     RegisteredCommand::hidden("/z", "Secret premium-mode command"),
     RegisteredCommand::hidden("/zz", "Secret premium-mode command"),
     RegisteredCommand::hidden("/zzz", "Secret premium-mode command"),
     RegisteredCommand::hidden("/zstatus", "Secret premium-mode status command"),
 ];
+
+/// Every non-hidden slash command with its one-line description, in
+/// registration order. The `/help` overlay uses this to list commands its
+/// hand-written sections have not covered, so a newly registered command can
+/// never be invisible to users.
+pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    REGISTERED_COMMANDS
+        .iter()
+        .filter(|command| !command.hidden)
+        .map(|command| (command.name, command.help))
+}
 
 impl App {
     /// Find word boundary going backward (for Ctrl+W, Alt+B)
@@ -1947,5 +1960,41 @@ mod external_cli_suggestion_tests {
         let candidates = latest_jsonl_suggestion_candidates(temp.path(), "Claude Code", 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].context.as_deref(), Some("new"));
+    }
+
+    /// Every slash command must be registered exactly once. Duplicate entries
+    /// mean two different handlers claim the same name, so which one runs
+    /// depends on dispatch order rather than on the registry the palette and
+    /// `/help` show the user.
+    #[test]
+    fn registered_commands_have_no_duplicate_names() {
+        let mut seen = std::collections::HashSet::new();
+        let duplicates: Vec<&str> = REGISTERED_COMMANDS
+            .iter()
+            .filter(|command| !seen.insert(command.name))
+            .map(|command| command.name)
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "duplicate slash command registrations: {:?}",
+            duplicates
+        );
+    }
+
+    /// Aliases users can actually type must be discoverable through the
+    /// registry, otherwise autocomplete silently omits working commands.
+    #[test]
+    fn known_aliases_are_registered() {
+        let names: std::collections::HashSet<&str> =
+            REGISTERED_COMMANDS.iter().map(|c| c.name).collect();
+        for alias in [
+            "/keybindings",
+            "/commit-and-push",
+            "/resume-all",
+            "/hotkeys",
+            "/keys",
+        ] {
+            assert!(names.contains(alias), "{alias} is not registered");
+        }
     }
 }
