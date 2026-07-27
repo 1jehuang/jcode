@@ -152,6 +152,23 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     let raw_input = prepared.raw_input.clone();
+
+    // Text that merely starts with `/` is not necessarily a command. A terminal
+    // file drop (`/tmp/shot.png`) or a bare path (`/home/me/notes`) is ordinary
+    // user input. Routing those through `App::submit_input` stages a *local*
+    // turn via `pending_turn`, which no remote run loop consumes, so the client
+    // parks in "Sending" forever. Send them as a normal remote turn instead.
+    //
+    // `/?` is the one builtin whose token is not identifier-shaped, so it is
+    // allowed through explicitly.
+    let trimmed = raw_input.trim();
+    let is_command_shaped = trimmed == "/?"
+        || (input::parse_dropped_paths(&raw_input).is_none()
+            && SkillRegistry::parse_invocation(&raw_input).is_some());
+    if !is_command_shaped {
+        return submit_prepared_remote_input(app, remote, prepared).await;
+    }
+
     let Some(invocation) = SkillRegistry::parse_invocation(&raw_input) else {
         app.input = raw_input;
         app.cursor_pos = app.input.len();
@@ -489,4 +506,21 @@ pub(in crate::tui::app) async fn apply_remote_transcript_event(
 
     app.follow_chat_bottom_for_typing();
     Ok(())
+}
+
+/// Stage a submitted turn for the remote tick loop when the app is attached to
+/// a remote session, returning true when it took ownership of the turn.
+///
+/// Only the LOCAL run loop consumes `App::pending_turn`. Any path that reaches
+/// `App::submit_input` while remote (a slash command that turned out not to be
+/// one, an unknown skill fallback, a staged prompt) would otherwise set a flag
+/// nobody dispatches, freezing the client in "Sending" forever. Queueing hands
+/// the turn to `process_remote_followups`, which also echoes the user message.
+pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input: &str) -> bool {
+    if !app.is_remote {
+        return false;
+    }
+    app.queued_messages.push(input.to_string());
+    app.pending_images.clear();
+    true
 }

@@ -72,7 +72,7 @@
     "crates/jcode-tui/src/tui/app/debug_bench.rs": 1281,
     "crates/jcode-tui/src/tui/app/helpers.rs": 1481,
     "crates/jcode-tui/src/tui/app/inline_interactive.rs": 4063,
-    "crates/jcode-tui/src/tui/app/input.rs": 3978,
+    "crates/jcode-tui/src/tui/app/input.rs": 3985,
     "crates/jcode-tui/src/tui/app/model_context.rs": 1956,
     "crates/jcode-tui/src/tui/app/navigation.rs": 1835,
     "crates/jcode-tui/src/tui/app/onboarding_flow_control.rs": 1696,
