@@ -267,3 +267,174 @@ fn an_empty_transcript_has_nothing_to_select() {
     app.on_pointer_moved();
     assert!(app.model.selection.is_none());
 }
+
+// --- auto-copy on select ---
+//
+// Selecting text publishes it to the primary selection, so middle click pastes
+// what was just highlighted. The ordinary clipboard is deliberately untouched:
+// this fires on every drag, and a drag that destroyed an explicit Ctrl+C would
+// be a far worse bug than no auto-copy at all.
+
+use crate::clipboard::Target;
+
+/// The real release handler, so these tests cannot pass while the window's own
+/// path has stopped auto-copying.
+fn release(app: &mut App) {
+    app.on_pointer_released();
+}
+
+fn drag_and_release(app: &mut App, from: (f64, f64), to: (f64, f64)) {
+    app.pointer = from;
+    app.on_pointer_pressed();
+    app.pointer = to;
+    app.on_pointer_moved();
+    release(app);
+}
+
+/// The feature: finishing a transcript drag copies it, with no keystroke.
+#[test]
+fn finishing_a_transcript_drag_auto_copies_it() {
+    let mut app = app_with_transcript();
+    let from = point_for(&mut app, at(1, 0, 0));
+    let to = point_for(&mut app, at(1, 0, 10));
+    drag_and_release(&mut app, from, to);
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("the answer"),
+        "the finished selection was not auto-copied"
+    );
+}
+
+/// The invariant that makes it safe. Auto-copy fires on every drag, so if it
+/// wrote to the ordinary clipboard, highlighting a word would silently destroy
+/// whatever the user had deliberately copied.
+#[test]
+fn auto_copy_never_touches_the_ordinary_clipboard() {
+    let mut app = app_with_transcript();
+    app.clipboard.set("deliberately copied earlier");
+    let from = point_for(&mut app, at(1, 0, 0));
+    let to = point_for(&mut app, at(1, 0, 10));
+    drag_and_release(&mut app, from, to);
+    assert_eq!(
+        app.clipboard.get().as_deref(),
+        Some("deliberately copied earlier"),
+        "auto-copy clobbered the user's clipboard"
+    );
+}
+
+/// A composer drag auto-copies too: the two surfaces must not disagree about
+/// whether selecting text copies it.
+#[test]
+fn a_composer_drag_also_auto_copies() {
+    let mut app = App::default();
+    app.apply(Action::Insert, Some("alpha bravo"));
+    app.frame = App::frame_for_model((1100, 720), 1.0, &app.model);
+    let y = (app.frame.composer_top + app.frame.composer_bottom) / 2.0;
+    let x_at = |app: &mut App, offset: usize| {
+        let frame = app.frame;
+        let source = app.model.editor.text().to_string();
+        let layout = crate::input::InputLayout::new(
+            &mut app.painter.text,
+            &source,
+            frame.composer_text_width(),
+            crate::scene::composer_text_style(&app.model),
+            frame.scale,
+        );
+        frame.composer_text_left() + layout.caret_rect(offset, 1.0).x0
+    };
+    let from = x_at(&mut app, 0);
+    let to = x_at(&mut app, 5);
+    drag_and_release(&mut app, (from, y), (to, y));
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("alpha")
+    );
+}
+
+/// A keyboard selection auto-copies as well, so how you highlighted the text
+/// does not change whether it was copied.
+#[test]
+fn a_keyboard_selection_auto_copies() {
+    let mut app = App::default();
+    app.apply(Action::Insert, Some("alpha bravo"));
+    app.apply(Action::ExtendWordLeft, None);
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("bravo"),
+        "shift+word-left did not auto-copy"
+    );
+}
+
+/// A double click completes on press rather than release, so it needs its own
+/// publish; without it, the most common way to grab one word would not copy.
+#[test]
+fn a_double_click_auto_copies_the_word() {
+    let mut app = App::default();
+    app.apply(Action::Insert, Some("alpha bravo"));
+    app.frame = App::frame_for_model((1100, 720), 1.0, &app.model);
+    let frame = app.frame;
+    let source = app.model.editor.text().to_string();
+    let x = {
+        let layout = crate::input::InputLayout::new(
+            &mut app.painter.text,
+            &source,
+            frame.composer_text_width(),
+            crate::scene::composer_text_style(&app.model),
+            frame.scale,
+        );
+        frame.composer_text_left() + layout.caret_rect(8, 1.0).x0
+    };
+    let y = (frame.composer_top + frame.composer_bottom) / 2.0;
+    app.pointer = (x, y);
+    app.on_pointer_pressed();
+    app.dragging = false;
+    // Second click at the same spot, inside the double-click window.
+    app.on_pointer_pressed();
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("bravo"),
+        "a double click did not auto-copy the word"
+    );
+}
+
+/// A click that selects nothing must leave the previous auto-copy intact,
+/// rather than blanking it: clicking to move the caret is not a copy gesture.
+#[test]
+fn a_click_with_no_selection_does_not_clear_the_auto_copy() {
+    let mut app = app_with_transcript();
+    let from = point_for(&mut app, at(1, 0, 0));
+    let to = point_for(&mut app, at(1, 0, 10));
+    drag_and_release(&mut app, from, to);
+    app.pointer = from;
+    app.on_pointer_pressed();
+    release(&mut app);
+    assert_eq!(
+        app.clipboard.get_from(Target::Primary).as_deref(),
+        Some("the answer"),
+        "a plain click wiped the auto-copied selection"
+    );
+}
+
+/// Middle click pastes the primary selection: the other half of the
+/// convention, and the thing that makes auto-copy useful at all.
+#[test]
+fn middle_click_pastes_the_auto_copied_selection() {
+    let mut app = app_with_transcript();
+    let from = point_for(&mut app, at(1, 0, 0));
+    let to = point_for(&mut app, at(1, 0, 10));
+    drag_and_release(&mut app, from, to);
+    app.paste_primary_selection();
+    assert_eq!(
+        app.model.editor.text(),
+        "the answer",
+        "middle click did not paste the auto-copied selection"
+    );
+}
+
+/// Middle click with nothing selected must not insert anything.
+#[test]
+fn middle_click_with_an_empty_primary_selection_is_a_no_op() {
+    let mut app = app_with_transcript();
+    app.paste_primary_selection();
+    assert!(app.model.editor.is_empty());
+}

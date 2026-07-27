@@ -517,6 +517,9 @@ impl App {
             self.model.editor.place_cursor(start);
             self.model.editor.extend_to(end);
             self.last_click = None;
+            // A double click completes on press, not release, so it publishes
+            // here rather than waiting for a drag that will never come.
+            self.publish_primary_selection();
         } else {
             // Shift+click extends from the existing cursor, like normal fields.
             if self.modifiers.shift_key() {
@@ -571,6 +574,70 @@ impl App {
     /// The selected transcript text, if any.
     fn selected_transcript_text(&mut self) -> Option<String> {
         select::selection_text_in_frame(&mut self.painter, &self.model, self.frame)
+    }
+
+    /// The text currently highlighted on either surface, transcript first
+    /// because it is the one drawn as a band over the conversation.
+    fn any_selected_text(&mut self) -> Option<String> {
+        self.selected_transcript_text()
+            .or_else(|| self.model.editor.selected_text().map(str::to_string))
+    }
+
+    /// Publish the live selection to the primary selection, so middle click
+    /// pastes what was just highlighted.
+    ///
+    /// Deliberately *not* the ordinary clipboard: this fires on every drag, so
+    /// writing there would mean highlighting a word silently destroys whatever
+    /// the user had copied. On platforms without a primary selection this is a
+    /// no-op, which is the honest behaviour rather than a surprising one.
+    fn publish_primary_selection(&mut self) {
+        let Some(text) = self.any_selected_text() else {
+            return;
+        };
+        self.clipboard.set_to(clipboard::Target::Primary, &text);
+    }
+
+    /// Paste the primary selection at the composer's cursor. Middle click is
+    /// the paste half of the select-to-copy convention.
+    fn paste_primary_selection(&mut self) {
+        let Some(text) = self.clipboard.get_from(clipboard::Target::Primary) else {
+            return;
+        };
+        self.model.editor.insert_str(&text);
+        self.model.caret.touch();
+        self.request_redraw();
+    }
+
+    /// The primary button was released: end the gesture, drop an empty
+    /// highlight, and publish a real one.
+    ///
+    /// A named method rather than an inline arm so the tests drive the same
+    /// code the window does. A test that reimplemented this would keep passing
+    /// after the real handler stopped auto-copying.
+    fn on_pointer_released(&mut self) {
+        let was_selecting = self.selecting || self.dragging;
+        self.dragging = false;
+        self.selecting = false;
+        // A click that selected nothing clears the highlight, so a stale band
+        // cannot outlive the gesture that made it.
+        if self
+            .model
+            .selection
+            .is_some_and(|selection| selection.is_empty())
+        {
+            self.model.selection = None;
+            self.request_redraw();
+        }
+        // Finishing a selection auto-copies it to the primary selection, so
+        // middle click pastes what you just highlighted. The ordinary
+        // clipboard is untouched, which is what makes this safe on every drag.
+        if was_selecting {
+            self.publish_primary_selection();
+        }
+        // Releasing hands the donut its momentum; it keeps spinning down on
+        // its own.
+        self.model.spin.release();
+        self.update_cursor_icon();
     }
 
     /// Show a text caret over the composer and the default arrow elsewhere, so
@@ -902,6 +969,11 @@ impl App {
                 }
             }
         }
+        // A keyboard selection auto-copies exactly like a mouse one: the two
+        // ways of highlighting text must not behave differently.
+        if action.changes_the_selection() {
+            self.publish_primary_selection();
+        }
         self.model.caret.touch();
         true
     }
@@ -985,21 +1057,17 @@ impl ApplicationHandler for App {
                 ..
             } => match element_state {
                 ElementState::Pressed => self.on_pointer_pressed(),
-                ElementState::Released => {
-                    self.dragging = false;
-                    self.selecting = false;
-                    // A click that selected nothing clears the highlight, so a
-                    // stale band cannot outlive the gesture that made it.
-                    if self.model.selection.is_some_and(|s| s.is_empty()) {
-                        self.model.selection = None;
-                        self.request_redraw();
-                    }
-                    // Releasing hands the donut its momentum; it keeps
-                    // spinning down on its own.
-                    self.model.spin.release();
-                    self.update_cursor_icon();
-                }
+                ElementState::Released => self.on_pointer_released(),
             },
+            // Middle click pastes the primary selection, the other half of the
+            // same convention: select to copy, middle click to paste.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: winit::event::MouseButton::Middle,
+                ..
+            } => {
+                self.paste_primary_selection();
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Scrolling the transcript with the wheel, in logical pixels
                 // so a trackpad's fine-grained deltas are not quantised to
