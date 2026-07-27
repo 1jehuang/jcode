@@ -206,6 +206,9 @@ pub struct Model {
     /// the model so a frame stays a pure function of it and every phase of
     /// the zoom is capturable.
     pub overview: overview::Overview,
+    /// Fetched tails of the other sessions, so the field can show *which*
+    /// conversation each blob is rather than only its name.
+    pub peeks: overview::Peeks,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
@@ -261,6 +264,7 @@ impl Default for Model {
             smooth: scroll::Smooth::default(),
             strip: strip::Strip::default(),
             overview: overview::Overview::default(),
+            peeks: overview::Peeks::default(),
             working_dir: None,
             model: None,
         }
@@ -411,6 +415,15 @@ impl App {
                     self.model.busy = false;
                     self.model.activity.finish();
                 }
+                harness::HarnessUpdate::Peek {
+                    session_id,
+                    transcript,
+                } => {
+                    // The attached session's own transcript comes from the
+                    // stream, so a peek reply for it is only ever cache: it
+                    // must not overwrite the live page.
+                    self.model.peeks.insert(&session_id, transcript);
+                }
                 harness::HarnessUpdate::Sessions(entries) => {
                     // Rebuild around the session we are actually attached to,
                     // so a refresh never silently moves the highlight off the
@@ -480,7 +493,33 @@ impl App {
             return;
         }
         self.model.overview.open(self.model.session_id.as_deref());
+        self.request_peek();
         self.request_redraw();
+    }
+
+    /// Fetch the highlighted session's conversation tail, if we do not have
+    /// it yet, so hovering a blob shows *which* conversation it is.
+    ///
+    /// Only the highlighted one: prefetching the whole field would send a
+    /// burst of reads on every open for previews the user will mostly never
+    /// look at. Cached once fetched, so moving back and forth across the field
+    /// is instant after the first visit.
+    fn request_peek(&mut self) {
+        let Some(target) = self
+            .model
+            .overview
+            .focus()
+            .or(self.model.session_id.as_deref())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if !self.model.peeks.should_request(&target) {
+            return;
+        }
+        if let Some((_, outgoing)) = self.harness.as_ref() {
+            let _ = outgoing.send(harness::Command::Peek(target));
+        }
     }
 
     /// Close the field, attaching to the highlighted session when `commit`.
@@ -515,6 +554,7 @@ impl App {
         if let Some(target) = field.neighbor(&from, dir) {
             let id = target.session_id.clone();
             self.model.overview.set_focus(&id);
+            self.request_peek();
             self.request_redraw();
         }
     }
@@ -532,6 +572,7 @@ impl App {
         if let Some(target) = field.next_in_order(&from, step) {
             let id = target.to_string();
             self.model.overview.set_focus(&id);
+            self.request_peek();
             self.request_redraw();
         }
     }
@@ -873,6 +914,7 @@ impl App {
                 let id = blob.session_id.clone();
                 if self.model.overview.focus() != Some(id.as_str()) {
                     self.model.overview.set_focus(&id);
+                    self.request_peek();
                     self.request_redraw();
                 }
             }

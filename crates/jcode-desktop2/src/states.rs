@@ -41,6 +41,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("overview", overview),
     ("overview_opening", overview_opening),
     ("overview_other_session", overview_other_session),
+    ("overview_preview", overview_preview),
     ("overview_single_session", overview_single_session),
     ("overview_many_sessions", overview_many_sessions),
     ("notice", notice),
@@ -109,6 +110,9 @@ fn connecting() -> Model {
         // Closed: the overview is a held gesture, so every ordinary node
         // renders with it away.
         overview: crate::overview::Overview::default(),
+        // Captures pin their previews, so a node never depends on what
+        // happens to be on disk.
+        peeks: crate::overview::Peeks::default(),
         // Captures are still frames, so the scroll is settled rather than
         // mid-glide.
         smooth: crate::scroll::Smooth::default(),
@@ -179,6 +183,9 @@ fn attached_empty() -> Model {
         // stream draws every glyph.
         stream: crate::stream::Stream::default(),
         overview: crate::overview::Overview::default(),
+        // Captures pin their previews, so a node never depends on what
+        // happens to be on disk.
+        peeks: crate::overview::Peeks::default(),
         // Captures are still frames, so the scroll is settled rather than
         // mid-glide.
         smooth: crate::scroll::Smooth::default(),
@@ -539,6 +546,43 @@ fn overview_many_sessions() -> Model {
         // distinguishable.
         overview: crate::overview::Overview::pinned(true, 1.0, Some(&id(7))),
         ..attached_empty()
+    }
+}
+
+/// Hovering another session, with its conversation fetched: the state the
+/// preview exists for. Captured because it is the only one that shows the
+/// three layers at once (your own transcript, the hovered session's tail over
+/// it, and the field over both), which is where they can be seen to fight.
+fn overview_preview() -> Model {
+    let mut peeks = crate::overview::Peeks::default();
+    let mut tail = crate::transcript::Transcript::default();
+    tail.push(crate::transcript::Message::user(
+        "why is the halftone screen in logical units?",
+    ));
+    tail.push(crate::transcript::Message::assistant(
+        "So the dot density is identical on 1x and HiDPI, exactly like the \
+         website's CSS-pixel lattice.",
+    ));
+    tail.push(crate::transcript::Message::user("and the gamma?"));
+    tail.push(crate::transcript::Message::assistant(
+        "Applied to luminance before sizing a dot, so the midtones do not \
+         crush.",
+    ));
+    peeks.insert("session_harbor_1785128881021_9f0b21d", tail);
+    Model {
+        // A conversation of our own underneath, so the capture shows the
+        // preview against real content rather than against blank paper.
+        transcript: conversation(vec![(
+            "what is in this repo".into(),
+            "A coding agent, written in Rust.".into(),
+        )]),
+        peeks,
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_harbor_1785128881021_9f0b21d"),
+        ),
+        ..session_strip()
     }
 }
 

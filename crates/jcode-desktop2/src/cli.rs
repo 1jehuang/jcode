@@ -205,6 +205,9 @@ fn run_e2e(message: &str) -> Result<()> {
                 outgoing.send(harness::Command::Send(message.to_string()))?;
                 sent = true;
             }
+            // The e2e probe drives one session, so another session's tail is
+            // nothing it needs to assert on.
+            harness::HarnessUpdate::Peek { .. } => {}
             harness::HarnessUpdate::Model {
                 provider,
                 model: id,

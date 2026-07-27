@@ -52,6 +52,21 @@ pub enum ApiRequest {
     /// Fetch conversation history.
     GetHistory { session_id: String },
 
+    /// Fetch the tail of *any* session's conversation, attached or not.
+    ///
+    /// `GetHistory` can only answer for the session this connection is
+    /// attached to, because it is routed through the daemon's attachment.
+    /// A client showing several sessions at once (a switcher, an overview, a
+    /// dashboard) needs a glance at the others without attaching to each in
+    /// turn, which would disturb the very sessions it is trying to preview.
+    /// Served from the stored record and capped to the last `limit` messages.
+    PeekSession {
+        session_id: String,
+        /// Messages to return from the end. Defaults to a small tail.
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+
     /// Clear conversation history.
     Clear { session_id: String },
 

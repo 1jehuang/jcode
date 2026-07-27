@@ -306,9 +306,94 @@ const BUSY_PERIOD: f32 = 1.6;
 /// on purpose: the transcript underneath is context, not clutter, and seeing
 /// it is what keeps the overview a layer rather than a separate screen.
 const VEIL_OPACITY: f64 = 0.82;
+/// Type size, leading, and ink for the hovered session's preview. Small and
+/// faint: it is the page *behind* the decision, not the decision.
+const PREVIEW_SIZE: f32 = 11.0;
+const PREVIEW_LEADING: f64 = 1.7;
+const PREVIEW_OPACITY: f64 = 0.72;
+/// Fraction of the window height the preview may occupy, measured from the
+/// top. Bounded so it can never reach the cluster names and the hint at the
+/// foot, whichever session is hovered.
+const PREVIEW_BAND: f64 = 0.3;
 /// Smallest blob that carries a busy spinner. Below this the spinner would be
 /// larger than the session it belongs to.
 const MIN_SPINNER_RADIUS: f64 = 22.0;
+
+/// Draw the highlighted session's conversation behind the field.
+///
+/// The blobs say how big each session is and what it is called, which is
+/// enough to *navigate* and not enough to *choose*: "clover" and "pebble" are
+/// only names until you can see what is in them. Hovering a blob puts that
+/// session's last exchanges on the page underneath, so picking is recognition
+/// rather than recall.
+///
+/// Set faint and behind the veil on purpose: this is context for a decision
+/// being made in the foreground, and a preview that competed with the blobs
+/// would make the field unreadable at exactly the moment it is being used.
+fn draw_preview(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+    phase: f64,
+) {
+    let Some(focus) = model.overview.focus() else {
+        return;
+    };
+    // The session we are attached to is already on the page underneath, so
+    // previewing it would draw the same conversation twice.
+    if model.session_id.as_deref() == Some(focus) {
+        return;
+    }
+    let Some(transcript) = model.peeks.get(focus) else {
+        return;
+    };
+
+    // Top-down from the head of the page, oldest of the tail first, so the
+    // preview reads in conversation order. It lives at the top because that is
+    // where the field is emptiest (the packing centres on the current session)
+    // and because the foot already carries the cluster names and the hint.
+    let mut y = frame.body_top;
+    let width = frame.column() as f32;
+    let ceiling = frame.height * PREVIEW_BAND;
+    for message in transcript.messages() {
+        if y >= ceiling {
+            break;
+        }
+        let source = message.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        // One line per message: the preview is a shape to recognise, not a
+        // transcript to read, and a wrapped paragraph would push the older
+        // exchanges (the ones that identify the session) off the page.
+        let budget = (frame.column() / (f64::from(PREVIEW_SIZE) * 0.6)) as usize;
+        let line = elide(&source.replace('\n', " "), budget.max(16));
+        text.draw_paragraph_scaled(
+            scene,
+            &line,
+            (frame.left, y),
+            width,
+            ParagraphStyle {
+                font_size: PREVIEW_SIZE,
+                // A user's line is set darker than a reply, the only structure
+                // the preview keeps: it is what makes the alternation legible
+                // as a conversation rather than as a paragraph of noise.
+                color: if message.role == crate::transcript::Role::User {
+                    model.theme.muted
+                } else {
+                    model.theme.faint
+                }
+                .with_alpha((PREVIEW_OPACITY * phase) as f32),
+                line_height: PREVIEW_LEADING as f32,
+                ..Default::default()
+            },
+            scale,
+        );
+        y += f64::from(PREVIEW_SIZE) * PREVIEW_LEADING;
+    }
+}
 
 /// Draw the session overview: every live session as a blob in a 2D field.
 ///
@@ -356,6 +441,10 @@ fn draw_overview(
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
 
+    // The hovered session's own conversation, on the page the veil just
+    // cleared: drawn before the blobs so it is unambiguously behind them.
+    draw_preview(scene, text, model, frame, scale, phase);
+
     // Everything flies out from the blob you came from, so the session on
     // screen stays under the eye through the whole transition.
     let origin = field
@@ -383,7 +472,11 @@ fn draw_overview(
         // is the one case where the field lies about what it contains.
         let (_, _, _, area_bottom) = crate::overview::area(frame);
         let top = (center.1 + cluster.radius * phase + CLUSTER_LABEL_GAP)
-            .min(area_bottom - f64::from(CLUSTER_LABEL_SIZE));
+            .min(area_bottom - f64::from(CLUSTER_LABEL_SIZE))
+            // Never into the preview's band at the head of the page: the two
+            // are both faint small type, so overlapping them makes each
+            // unreadable rather than merely crowded.
+            .max(frame.height * PREVIEW_BAND);
         text.draw_paragraph_scaled(
             scene,
             &cluster.label,

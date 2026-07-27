@@ -457,11 +457,50 @@ pub fn layout(
         .map(|index| placed[index])
         .unwrap_or(((bounds.0 + bounds.2) / 2.0, (bounds.1 + bounds.3) / 2.0));
     let area_center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-    let to_screen = |position: (f64, f64)| {
+    // Anchoring on the current session can hang the far side of a lopsided
+    // field off the page, and a session drawn off-screen is one the user
+    // cannot reach. So the anchor is a *preference*: honoured while the field
+    // still fits, and slid back inside the margins when it does not.
+    //
+    // Measured from the field's real extent after scaling rather than from a
+    // re-projection of the raw bounds: the radii are scaled too, and counting
+    // them at full size left the correction short by exactly the margin it was
+    // supposed to reclaim.
+    let anchored = |position: (f64, f64)| {
         (
             area_center.0 + (position.0 - anchor.0) * scale,
             area_center.1 + (position.1 - anchor.1) * scale,
         )
+    };
+    let mut extent = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (index, position) in placed.iter().enumerate() {
+        let (cx, cy) = anchored(*position);
+        let r = radii[index] * scale;
+        extent.0 = extent.0.min(cx - r);
+        extent.1 = extent.1.min(cy - r);
+        extent.2 = extent.2.max(cx + r);
+        extent.3 = extent.3.max(cy + r);
+    }
+    /// Slide a span back inside its edges, or centre it when it cannot fit.
+    fn shift(low: f64, high: f64, edge_low: f64, edge_high: f64) -> f64 {
+        if high - low >= edge_high - edge_low {
+            // Too big for the page even after fitting: centre the field so the
+            // overflow is shared, rather than letting one whole end fall off.
+            return (edge_low + edge_high) / 2.0 - (low + high) / 2.0;
+        }
+        if low < edge_low {
+            edge_low - low
+        } else if high > edge_high {
+            edge_high - high
+        } else {
+            0.0
+        }
+    }
+    let dx = shift(extent.0, extent.2, x0 + margin, x1 - margin);
+    let dy = shift(extent.1, extent.3, y0 + margin, y1 - margin);
+    let to_screen = |position: (f64, f64)| {
+        let (cx, cy) = anchored(position);
+        (cx + dx, cy + dy)
     };
 
     let blobs: Vec<Blob> = entries
@@ -542,9 +581,10 @@ pub fn breath(now: std::time::Instant, period: f32) -> f64 {
     f64::from(turn.sin())
 }
 
-/// How long the zoom takes, in seconds. Short: this is a flick gesture, and an
-/// animation you have to wait out turns a shortcut back into a menu.
-pub const ZOOM: f32 = 0.14;
+/// How long the zoom takes, in seconds. This is a flick gesture, so the
+/// animation exists only to show *where* the field came from: any longer and
+/// it stops being a shortcut and becomes a menu you have to sit through.
+pub const ZOOM: f32 = 0.08;
 
 /// The overview's state: whether it is showing, how far the zoom has got, and
 /// which session the user is pointing at.
@@ -563,6 +603,39 @@ pub struct Overview {
 }
 
 const PHASE_MAX: u16 = 1000;
+
+/// Fetched tails of other sessions, for the preview behind the field.
+///
+/// Kept as its own type rather than a bare map so the "asked but not yet
+/// answered" state is explicit: without it, hovering a slow session would
+/// re-request its tail on every frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Peeks {
+    fetched: std::collections::HashMap<String, crate::transcript::Transcript>,
+    requested: std::collections::BTreeSet<String>,
+}
+
+impl Peeks {
+    /// Record a fetched tail.
+    pub fn insert(&mut self, session_id: &str, transcript: crate::transcript::Transcript) {
+        self.requested.remove(session_id);
+        self.fetched.insert(session_id.to_string(), transcript);
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<&crate::transcript::Transcript> {
+        self.fetched.get(session_id)
+    }
+
+    /// Whether this session still needs fetching. Marks it requested, so a
+    /// caller polling every frame asks exactly once.
+    pub fn should_request(&mut self, session_id: &str) -> bool {
+        if self.fetched.contains_key(session_id) || self.requested.contains(session_id) {
+            return false;
+        }
+        self.requested.insert(session_id.to_string());
+        true
+    }
+}
 
 impl Overview {
     /// Open the overview, starting the zoom from wherever it currently is (so
