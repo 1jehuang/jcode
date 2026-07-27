@@ -370,10 +370,20 @@ fn draw_transcript(
                     selection.range_in(placed.index, block_index, block.source.len())
             {
                 for band in crate::select::block_bands(block, range, scale) {
+                    // A user message and a code block sit on a wash, so they
+                    // need the stronger band: the paper-tuned one is nearly
+                    // invisible against the card the user's own message is in.
+                    let on_wash =
+                        is_user || matches!(block.kind, BlockKind::CodeBlock { .. });
+                    let band_color = if on_wash {
+                        theme.selection_on_wash
+                    } else {
+                        theme.selection
+                    };
                     scene.fill(
                         vello::peniko::Fill::NonZero,
                         Affine::scale(scale),
-                        theme.selection,
+                        band_color,
                         None,
                         &Rect::new(
                             text_left + inset_x + band.rect.x0,

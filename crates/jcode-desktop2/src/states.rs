@@ -26,6 +26,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("selection_all", selection_all),
     ("streaming", streaming),
     ("turn_done", turn_done),
+    ("transcript_selection", transcript_selection),
     ("scrolled_back", scrolled_back),
     ("markdown", markdown),
     ("latex", latex),
@@ -394,6 +395,29 @@ fn turn_done() -> Model {
         )]),
         busy: false,
         ..attached_empty()
+    }
+}
+
+/// A transcript selection spanning both turns: the highlight has to band the
+/// tail of the question, all of the gap between, and the head of the reply.
+/// Rendered as a node so the bands can be reviewed and pixel-tested without a
+/// window, which is the only way to see that they line up with the glyphs.
+fn transcript_selection() -> Model {
+    let done = turn_done();
+    Model {
+        selection: Some(crate::select::Selection::new(
+            crate::select::Position {
+                message: 0,
+                block: 0,
+                offset: 8,
+            },
+            crate::select::Position {
+                message: 1,
+                block: 0,
+                offset: 40,
+            },
+        )),
+        ..done
     }
 }
 
