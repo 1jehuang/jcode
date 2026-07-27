@@ -1399,7 +1399,10 @@ fn tool_use_stop_with_no_tool_calls_is_an_unfinished_turn() {
         "a tool_use stop with no visible output must surface a notice, not look like a finished turn"
     );
     let notice = notice.unwrap();
-    assert!(notice.contains("tool_use"), "notice should name the stop reason: {notice}");
+    assert!(
+        notice.contains("tool_use"),
+        "notice should name the stop reason: {notice}"
+    );
 
     // A normal tool_use turn that produced visible text must stay silent.
     assert!(Agent::provider_guardrail_notice(Some("tool_use"), false, false).is_none());

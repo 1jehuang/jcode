@@ -683,7 +683,7 @@ impl Tool for BashTool {
     }
 
     fn parameters_schema(&self) -> Value {
-destructive_gate::bash_parameters_schema()
+        destructive_gate::bash_parameters_schema()
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {

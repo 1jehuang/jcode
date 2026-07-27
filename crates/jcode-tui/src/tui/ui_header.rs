@@ -315,7 +315,10 @@ impl ActiveCredentialOverrides {
 }
 
 /// Configured providers with their full labels, in display order.
-fn auth_full_specs(auth: &AuthStatus, active: ActiveCredentialOverrides) -> Vec<(String, AuthState)> {
+fn auth_full_specs(
+    auth: &AuthStatus,
+    active: ActiveCredentialOverrides,
+) -> Vec<(String, AuthState)> {
     fn provider_label(name: &str, state: AuthState, method: Option<&str>) -> String {
         match (state, method) {
             (AuthState::NotConfigured, _) => name.to_string(),
@@ -1424,7 +1427,10 @@ mod tests {
 
         // Auto mode prefers OAuth; the tag must report only the credential in
         // use (the auth inventory line carries the "both configured" detail).
-        assert_eq!(header_provider_auth_tag("openai", &auth, ActiveCredentialOverrides::default()), "oauth");
+        assert_eq!(
+            header_provider_auth_tag("openai", &auth, ActiveCredentialOverrides::default()),
+            "oauth"
+        );
         if let Some(value) = prev {
             crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
         }
@@ -1486,20 +1492,35 @@ mod tests {
 
         // Explicit API-key selection wins even when OAuth is available.
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
-        assert_eq!(header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()), "api-key");
+        assert_eq!(
+            header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()),
+            "api-key"
+        );
 
         // Explicit OAuth selection.
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
-        assert_eq!(header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()), "oauth");
+        assert_eq!(
+            header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()),
+            "oauth"
+        );
 
         // Auto (unset) prefers OAuth when both credentials are present.
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
-        assert_eq!(header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()), "oauth");
+        assert_eq!(
+            header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()),
+            "oauth"
+        );
 
         // The "claude" display name resolves to the same Anthropic tagging.
-        assert_eq!(header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()), "oauth");
+        assert_eq!(
+            header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()),
+            "oauth"
+        );
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
-        assert_eq!(header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()), "api-key");
+        assert_eq!(
+            header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()),
+            "api-key"
+        );
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
 
         // Auto falls back to the API key when no OAuth credential exists.
@@ -1511,7 +1532,10 @@ mod tests {
             },
             ..AuthStatus::default()
         };
-        assert_eq!(header_provider_auth_tag("anthropic", &api_only, ActiveCredentialOverrides::default()), "api-key");
+        assert_eq!(
+            header_provider_auth_tag("anthropic", &api_only, ActiveCredentialOverrides::default()),
+            "api-key"
+        );
 
         if let Some(value) = prev {
             crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
@@ -1650,7 +1674,8 @@ mod tests {
 
     #[test]
     fn auth_status_lines_list_all_providers_when_nothing_configured() {
-        let lines = build_auth_status_lines(&AuthStatus::default(), ActiveCredentialOverrides::default());
+        let lines =
+            build_auth_status_lines(&AuthStatus::default(), ActiveCredentialOverrides::default());
         assert!(
             !lines.is_empty(),
             "all providers should be listed: {lines:?}"
