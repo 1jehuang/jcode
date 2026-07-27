@@ -131,8 +131,42 @@ impl Frame {
     }
 
     /// Resolve geometry with a session strip reserved at the top.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_strip(size: (u32, u32), scale: f64, lines: usize, strip: bool) -> Self {
-        let mut frame = Self::with_composer_lines(size, scale, lines);
+        Self::resolve(size, scale, lines, strip, 0.0)
+    }
+
+    /// Resolve geometry with a strip and a measured transcript height, so the
+    /// composer can ride down the page as the conversation grows instead of
+    /// staying pinned to the middle with a gap under the first reply.
+    pub fn with_content(
+        size: (u32, u32),
+        scale: f64,
+        lines: usize,
+        strip: bool,
+        content_height: f64,
+    ) -> Self {
+        Self::resolve(size, scale, lines, strip, content_height)
+    }
+
+    fn resolve(
+        size: (u32, u32),
+        scale: f64,
+        lines: usize,
+        strip: bool,
+        content_height: f64,
+    ) -> Self {
+        // The strip's row comes out of the transcript's top margin, so the
+        // content's own floor has to know about it before the composer is
+        // placed. Resolve it on a probe frame first, then rebuild with the
+        // real top so a growing transcript pushes the well down correctly.
+        let strip_offset = if strip { STRIP_HEIGHT + STRIP_GAP } else { 0.0 };
+        let mut frame = Self::with_composer_lines_and_content(
+            size,
+            scale,
+            lines,
+            content_height + strip_offset,
+        );
         // The strip takes its row out of the transcript's top margin, which is
         // dead space anyway, and only when there is something to show. Nothing
         // is reserved otherwise, so a single-session window is byte-identical
@@ -149,6 +183,19 @@ impl Frame {
     /// being clipped, and stops growing at [`COMPOSER_MAX_LINES`] so a long
     /// paste can never push the transcript off the page.
     pub fn with_composer_lines(size: (u32, u32), scale: f64, lines: usize) -> Self {
+        Self::with_composer_lines_and_content(size, scale, lines, 0.0)
+    }
+
+    /// As [`Self::with_composer_lines`], with the measured height of the
+    /// transcript. A conversation taller than the space above the centre line
+    /// pushes the composer down, so the input always sits just under the last
+    /// reply rather than leaving a hole between them.
+    pub fn with_composer_lines_and_content(
+        size: (u32, u32),
+        scale: f64,
+        lines: usize,
+        content_height: f64,
+    ) -> Self {
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
@@ -183,8 +230,17 @@ impl Frame {
         // about that line as the text wraps, clamped so it never crosses the
         // top margin or its own caption row.
         let centred = height * COMPOSER_CENTER - composer_height * 0.5;
+        // ...until the conversation is taller than that. Then the well rides
+        // down with the last reply, the way a chat log fills a page top-down,
+        // and stops at the floor once the transcript fills the window.
+        let content = content_height.max(0.0);
+        let followed = if content > 0.0 {
+            centred.max(body_top + content + SPACE_BEFORE_COMPOSER)
+        } else {
+            centred
+        };
         let ceiling = (slot_bottom - composer_height).max(body_top);
-        let composer_top = centred.clamp(min_top.min(ceiling), ceiling);
+        let composer_top = followed.clamp(min_top.min(ceiling), ceiling);
         let composer_bottom = composer_top + composer_height;
         let footnote_top = composer_bottom + FOOTNOTE_GAP;
         let footnote_bottom = footnote_top + FOOTNOTE_HEIGHT;
@@ -518,6 +574,68 @@ mod tests {
                         frame.width,
                         frame.height
                     );
+                }
+            }
+        }
+    }
+
+    /// The composer follows the conversation down the page: with an empty
+    /// transcript it is centred, and as content accumulates it sits just under
+    /// the last message rather than leaving a hole above itself.
+    #[test]
+    fn the_composer_follows_a_growing_transcript_down_the_page() {
+        let size = (1400u32, 1000u32);
+        let empty = Frame::with_content(size, 1.0, 1, false, 0.0);
+        let mut last = empty.composer_top;
+        for content in [0.0f64, 100.0, 300.0, 500.0, 900.0] {
+            let frame = Frame::with_content(size, 1.0, 1, false, content);
+            assert!(
+                frame.composer_top >= last - 0.001,
+                "composer moved back up as the transcript grew: \
+                 {content} gave {} after {last}",
+                frame.composer_top
+            );
+            last = frame.composer_top;
+        }
+        assert!(
+            last > empty.composer_top,
+            "a tall transcript never pushed the composer below centre"
+        );
+    }
+
+    /// A short transcript must not move the well at all: the centred hero
+    /// layout is the resting state, and only content that would collide with
+    /// the well is allowed to displace it.
+    #[test]
+    fn a_short_transcript_leaves_the_composer_centred() {
+        let size = (1400u32, 1000u32);
+        let empty = Frame::with_content(size, 1.0, 1, false, 0.0);
+        let short = Frame::with_content(size, 1.0, 1, false, 40.0);
+        assert_eq!(empty.composer_top, short.composer_top);
+    }
+
+    /// However tall the conversation, the composer stops at its floor and the
+    /// frame keeps every ordering invariant.
+    #[test]
+    fn a_huge_transcript_never_pushes_the_composer_off_the_page() {
+        for &size in SIZES {
+            for &scale in SCALES {
+                for strip in [false, true] {
+                    for lines in [1usize, 4, COMPOSER_MAX_LINES] {
+                        let frame = Frame::with_content(size, scale, lines, strip, 100_000.0);
+                        assert!(frame.body_top <= frame.body_bottom);
+                        assert!(frame.body_bottom <= frame.composer_top + 0.001);
+                        assert!(frame.composer_bottom <= frame.footnote_top + 0.001);
+                        assert!(
+                            frame.footnote_bottom <= frame.height + 0.001,
+                            "a tall transcript pushed the caption row off-paper at {}x{}",
+                            frame.width,
+                            frame.height
+                        );
+                        if let Some((_, bottom)) = frame.strip() {
+                            assert!(bottom <= frame.body_top + 1e-9);
+                        }
+                    }
                 }
             }
         }

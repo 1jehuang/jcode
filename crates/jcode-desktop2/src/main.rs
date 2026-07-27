@@ -590,7 +590,24 @@ impl App {
         // The strip only earns its row when there is somewhere to go: with
         // one session it would be a widget that says "1 of 1".
         let strip = model.strip.len() > 1;
-        layout::Frame::with_strip(size, scale, lines, strip)
+        // Measure the conversation so the composer can sit just under the
+        // last reply while it is short, instead of floating at the middle of
+        // the page with a gap above it. Content height is a function of the
+        // measure column only, which does not depend on where the well ends
+        // up, so there is no circularity here.
+        let width = (probe.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+        let content = crate::viewport::Viewport::new(
+            text,
+            &model.transcript,
+            width,
+            0.0,
+            0.0,
+            &model.theme,
+            scene::transcript_body_style(model),
+            probe.scale,
+        )
+        .content_height;
+        layout::Frame::with_content(size, scale, lines, strip, content)
     }
 
     /// Byte offset in the composer text under a logical x position, or `None`
