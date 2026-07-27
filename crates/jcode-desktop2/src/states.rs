@@ -29,6 +29,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("streaming", streaming),
     ("reasoning", reasoning),
     ("reasoning_streaming", reasoning_streaming),
+    ("tool_progress", tool_progress),
     ("working", working),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
@@ -634,6 +635,28 @@ fn reasoning_streaming() -> Model {
             3,
             std::time::Duration::from_secs(5),
             Some("thinking"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// A turn in flight showing its work: each tool call is a muted line in the
+/// transcript, so progress is visible where the user is already reading, not
+/// only in the composer's activity line.
+fn tool_progress() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("tighten the scrollbar's fade timing"));
+    transcript.upsert_tool("call_1", "read the scroll smoothing module");
+    transcript.upsert_tool("call_2", "find every use of the fade alpha");
+    transcript.upsert_tool("call_3", "run the desktop2 scroll tests");
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            4,
+            std::time::Duration::from_secs(23),
+            Some("run the desktop2 scroll tests"),
         ),
         ..attached_empty()
     }

@@ -39,6 +39,12 @@ pub enum HarnessUpdate {
     /// The agent's current phase (a tool intent, or "thinking"), for the
     /// activity line. Streamed so the UI is never silent mid-turn.
     Activity(String),
+    /// A tool call's current label, keyed by call id so a streamed `intent`
+    /// refines the same transcript line the call opened with.
+    Tool {
+        call_id: String,
+        label: String,
+    },
     TurnDone,
     /// The daemon's current session list, for the session strip.
     Sessions(Vec<crate::strip::Entry>),
@@ -305,7 +311,14 @@ fn run(
             }
             ApiEvent::ToolStart { call_id, name, .. } => {
                 tool_input.remove(&call_id);
-                current_call = call_id;
+                current_call = call_id.clone();
+                // The call opens under its tool name; the streamed arguments
+                // usually carry a better line (the `intent`), which replaces
+                // this one in place as it arrives.
+                send(HarnessUpdate::Tool {
+                    call_id,
+                    label: name.clone(),
+                });
                 send(HarnessUpdate::Activity(name));
             }
             ApiEvent::ToolInputDelta { call_id, delta, .. } => {
@@ -314,9 +327,13 @@ fn run(
                 } else {
                     call_id
                 };
-                let buffer = tool_input.entry(key).or_default();
+                let buffer = tool_input.entry(key.clone()).or_default();
                 buffer.push_str(&delta);
                 if let Some(intent) = crate::activity::intent_from_partial_json(buffer) {
+                    send(HarnessUpdate::Tool {
+                        call_id: key,
+                        label: intent.clone(),
+                    });
                     send(HarnessUpdate::Activity(intent));
                 }
             }
@@ -329,7 +346,13 @@ fn run(
                     .get(&call_id)
                     .and_then(|input| crate::activity::intent_from_partial_json(input))
                 {
-                    Some(intent) => send(HarnessUpdate::Activity(intent)),
+                    Some(intent) => {
+                        send(HarnessUpdate::Tool {
+                            call_id,
+                            label: intent.clone(),
+                        });
+                        send(HarnessUpdate::Activity(intent));
+                    }
                     None if tool_input.contains_key(&call_id) => {}
                     None => send(HarnessUpdate::Activity(name)),
                 }
