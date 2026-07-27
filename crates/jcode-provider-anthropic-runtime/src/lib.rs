@@ -1765,6 +1765,7 @@ async fn stream_response(
         .await;
 
     let connect_start = std::time::Instant::now();
+    let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
     // Build request with appropriate auth headers
     let url = if is_oauth { API_URL_OAUTH } else { API_URL };
 
@@ -1812,11 +1813,12 @@ async fn stream_response(
             .header("anthropic-beta", beta_header);
     }
 
-    let response = req
-        .json(&request)
-        .send()
-        .await
-        .context("Failed to send request to Anthropic API")?;
+    let response = jcode_provider_core::transport::send_with_initial_response_timeout(
+        req.json(&request),
+        stream_idle_timeout,
+    )
+    .await
+    .context("Failed to send request to Anthropic API")?;
 
     let connect_ms = connect_start.elapsed().as_millis();
     jcode_base::logging::info(&format!(
@@ -1852,20 +1854,18 @@ async fn stream_response(
     // Idle timeout between streamed chunks. Configurable via
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
     // so slow reasoning models don't trip a premature timeout (issue #434).
-    let sse_chunk_timeout = jcode_base::provider::stream_idle_timeout();
-
     loop {
-        let chunk = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
+        let chunk = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
             Ok(Some(chunk_result)) => chunk_result.context("Error reading stream chunk")?,
             Ok(None) => break, // stream ended normally
             Err(_) => {
                 jcode_base::logging::warn(&format!(
                     "Anthropic SSE stream timed out (no data for {}s)",
-                    sse_chunk_timeout.as_secs()
+                    stream_idle_timeout.as_secs()
                 ));
                 anyhow::bail!(
                     "Stream read timeout: no data received for {} seconds",
-                    sse_chunk_timeout.as_secs()
+                    stream_idle_timeout.as_secs()
                 );
             }
         };

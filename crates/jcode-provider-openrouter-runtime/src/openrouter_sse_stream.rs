@@ -167,6 +167,7 @@ async fn stream_response(
         }))
         .await;
     let connect_start = std::time::Instant::now();
+    let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
     let url = format!("{}/chat/completions", api_base);
     let mut req = apply_kimi_coding_agent_headers(
@@ -187,20 +188,21 @@ async fn stream_response(
             .header("X-Title", "jcode");
     }
 
-    let response = req
-        .json(&request)
-        .send()
-        .await
-        .with_context(|| {
-            let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
-            format!(
-                "Failed to send OpenAI-compatible chat request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
-                url,
-                model,
-                auth.label(),
-                hint
-            )
-        })?;
+    let response = jcode_provider_core::transport::send_with_initial_response_timeout(
+        req.json(&request),
+        stream_idle_timeout,
+    )
+    .await
+    .with_context(|| {
+        let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
+        format!(
+            "Failed to send OpenAI-compatible chat request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
+            url,
+            model,
+            auth.label(),
+            hint
+        )
+    })?;
 
     let connect_ms = connect_start.elapsed().as_millis();
     jcode_base::logging::info(&format!(
@@ -241,11 +243,10 @@ async fn stream_response(
     // tokens don't trip a premature timeout (issue #196). Resolved from
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`,
     // defaulting to 180s. Shared with the native provider paths (issue #434).
-    let sse_chunk_timeout = jcode_base::provider::stream_idle_timeout();
-    let idle_timeout_secs = sse_chunk_timeout.as_secs();
+    let idle_timeout_secs = stream_idle_timeout.as_secs();
 
     loop {
-        let event = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
+        let event = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
             Ok(Some(Ok(event))) => event,
             Ok(Some(Err(e))) => anyhow::bail!(
                 "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",
