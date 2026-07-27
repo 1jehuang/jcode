@@ -1438,7 +1438,7 @@ impl App {
             self.consecutive_guardrail_stops, cleared, had_overnight
         ));
         self.push_display_message(DisplayMessage::system(format!(
-            "🛑 Auto-poke stopped: the provider guardrail refused {} turns in a row. Re-poking the same request will keep getting refused. Rephrase or narrow the task, then run /poke again to resume.",
+            "🛑 The provider refused {} turns in a row, so we stopped poking. The same request will keep getting refused. Rephrase or narrow the task, then /poke to resume.",
             self.consecutive_guardrail_stops
         )));
         self.set_status_notice("Poke stopped: provider guardrail");
@@ -1488,7 +1488,7 @@ impl App {
             observations.len()
         ));
         self.push_display_message(DisplayMessage::system(
-            "🔎 Todo quality review: double-checking the weak points from this turn.",
+            "🔎 We asked the agent to double-check this turn's weak points.",
         ));
         self.queued_messages.push(digest);
         self.pending_queued_dispatch = true;
@@ -1539,13 +1539,13 @@ impl App {
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
-                    "🛑 Todo completion gate: completion confidence needs stronger validation."
+                    "🛑 The agent marked its work done without strong enough validation. We asked it to double-check."
                 } else {
                     self.todo_confidence_spike_challenged = true;
                     crate::telemetry::record_todo_gate(
                         crate::telemetry::TodoGateKind::ConfidenceSpike,
                     );
-                    "🛑 Todo completion gate: abrupt confidence increase needs independent validation."
+                    "🛑 The agent's confidence jumped suddenly. We asked it to verify that independently."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
@@ -1568,7 +1568,7 @@ impl App {
                     self.todo_completion_gate_attempts
                 ));
                 self.push_display_message(DisplayMessage::system(
-                    "⚠️ Todo completion gate: validation still failing after repeated nudges. Auto-poke stopped; review the remaining todos manually.",
+                    "⚠️ We nudged the agent several times but its validation still isn't holding up. We stopped poking; review the remaining todos yourself.",
                 ));
                 self.auto_poke_incomplete_todos = false;
                 self.todo_confidence_spike_challenged = false;
@@ -1584,7 +1584,7 @@ impl App {
             self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
             self.push_display_message(DisplayMessage::system(format!(
-                "✅ Todos complete. Completion confidence: {}.",
+                "✅ All todos done. Completion confidence: {}.",
                 confidence_label
             )));
             self.pending_queued_dispatch = false;

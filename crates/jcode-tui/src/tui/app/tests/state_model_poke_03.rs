@@ -2154,7 +2154,7 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_turn);
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("Poking model: 1 incomplete todo")
+            msg.content.contains("1 incomplete todo. We poked the agent")
                 && msg.content.contains("/poke off")
         }));
     });
@@ -2299,7 +2299,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
         assert!(app.queued_messages().is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("/poke queued. Re-checking incomplete todos after this turn")
+                .contains("Poke queued. We'll re-check for unfinished todos after this turn")
         }));
 
         crate::todo::save_todos(
@@ -2454,7 +2454,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             app.display_messages()
                 .iter()
                 .any(|msg| msg.content.contains(
-                    "Todo completion gate: completion confidence needs stronger validation."
+                    "marked its work done without strong enough validation"
                 ))
         );
 
@@ -2490,7 +2490,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         assert!(app.hidden_queued_system_messages.is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Todos complete. Completion confidence: 100%.")
+                .contains("All todos done. Completion confidence: 100%.")
         }));
     });
 }
@@ -2561,7 +2561,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         );
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("abrupt confidence increase needs independent validation")
+                .contains("confidence jumped suddenly")
         }));
 
         app.queued_messages.clear();

@@ -1237,7 +1237,7 @@ fn test_ctrl_p_toggles_auto_poke_locally() {
     assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
     assert!(app.display_messages().iter().any(|msg| {
         msg.content
-            .contains("Auto-poke enabled. No incomplete todos found right now.")
+            .contains("Auto-poke enabled. Nothing unfinished right now")
     }));
 }
 

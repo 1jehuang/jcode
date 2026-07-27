@@ -2692,7 +2692,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with quality-review points outstanding."
+                            "We stopped poking after {max_turns} turn(s); some quality-review points are still open."
                         );
                     }
                     break;
@@ -2700,7 +2700,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 gate_digest_delivered = true;
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: reviewing this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                    "We asked the agent to double-check this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
                 );
                 continue;
             }
@@ -2712,7 +2712,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with completion confidence still needing validation."
+                            "We stopped poking after {max_turns} turn(s); the agent's completion confidence still needs validation."
                         );
                     }
                     break;
@@ -2720,7 +2720,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 confidence_spike_challenged |= confidence_spike_challenge;
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: todos complete; sending confidence summary follow-up. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                    "Todos are done. Asking the agent for a final confidence check. Set JCODE_RUN_AUTO_POKE=0 to disable."
                 );
                 continue;
             }
@@ -2728,7 +2728,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
+                            "We stopped poking after {max_turns} turn(s); {} todo(s) are still unfinished.",
                             count
                         );
                     }
@@ -2736,7 +2736,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 }
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: {} incomplete todo(s). Set JCODE_RUN_AUTO_POKE=0 to disable.",
+                    "{} incomplete todo(s). We poked the agent for you. Set JCODE_RUN_AUTO_POKE=0 to disable.",
                     count
                 );
             }
@@ -2774,7 +2774,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with quality-review points outstanding."
+                            "We stopped poking after {max_turns} turn(s); some quality-review points are still open."
                         );
                     }
                     break;
@@ -2782,7 +2782,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 gate_digest_delivered = true;
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: reviewing this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                    "We asked the agent to double-check this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
                 );
                 continue;
             }
@@ -2794,7 +2794,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         outputs.push(format!(
-                            "Auto-poke stopped after {max_turns} turn(s) with completion confidence still needing validation."
+                            "We stopped poking after {max_turns} turn(s); the agent's completion confidence still needs validation."
                         ));
                     }
                     break;
@@ -2807,7 +2807,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         outputs.push(format!(
-                            "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
+                            "We stopped poking after {max_turns} turn(s); {} todo(s) are still unfinished.",
                             count
                         ));
                     }
@@ -2910,7 +2910,7 @@ async fn run_single_message_command_ndjson(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with quality-review points outstanding."
+                            "We stopped poking after {max_turns} turn(s); some quality-review points are still open."
                         );
                     }
                     break;
@@ -2918,7 +2918,7 @@ async fn run_single_message_command_ndjson(
                 gate_digest_delivered = true;
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: reviewing this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                    "We asked the agent to double-check this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
                 );
                 continue;
             }
