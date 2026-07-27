@@ -1133,14 +1133,66 @@ impl App {
 
     /// Get command suggestions based on current input
     pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        // Read up to eight times per frame; recomputing each time re-ranks
+        // every registered command and skill (and can touch disk for some
+        // prefixes). Memoize on the exact input plus the guard state the
+        // branches below consult, so any transition still recomputes.
+        let signature = self.command_suggestions_signature();
+        let epoch = self.command_suggestions_epoch.get();
+        if let Some(cache) = self.command_suggestions_cache.borrow().as_ref()
+            && cache.epoch == epoch
+            && cache.signature == signature
+            && cache.input == self.input
+        {
+            return cache.suggestions.clone();
+        }
+
+        let suggestions = self.command_suggestions_uncached(&signature);
+        *self.command_suggestions_cache.borrow_mut() = Some(CommandSuggestionsCache {
+            input: self.input.clone(),
+            signature,
+            epoch,
+            suggestions: suggestions.clone(),
+        });
+        suggestions
+    }
+
+    /// Advance the suggestion memo epoch, invalidating it. Called once per
+    /// rendered frame so the memo only ever collapses reads *within* a frame
+    /// and never serves data that predates a state change.
+    pub(crate) fn advance_command_suggestions_epoch(&self) {
+        self.command_suggestions_epoch
+            .set(self.command_suggestions_epoch.get().wrapping_add(1));
+    }
+
+    /// Snapshot the non-input state that `command_suggestions` branches on
+    /// before consulting the input buffer.
+    pub(super) fn command_suggestions_signature(&self) -> CommandSuggestionsSignature {
+        CommandSuggestionsSignature {
+            pending_login: self.pending_login.is_some(),
+            pending_account_input: self.pending_account_input.is_some(),
+            pending_ssh_remote_name: self.pending_ssh_remote_name.is_some(),
+            inline_preview_kind: self
+                .inline_interactive_state
+                .as_ref()
+                .filter(|picker| picker.preview)
+                .map(|picker| picker.kind),
+        }
+    }
+
+    /// Uncached body of [`Self::command_suggestions`].
+    pub(super) fn command_suggestions_uncached(
+        &self,
+        signature: &CommandSuggestionsSignature,
+    ) -> Vec<(String, &'static str)> {
         // While an interactive prompt is waiting for typed input (API key,
         // OAuth callback, account label, SSH target), the composer is an
         // answer box, not a command line. Rendering the full command palette
         // there is misleading (issue #496): the only command those prompts
         // advertise is /cancel, so suggest exactly that and nothing else.
-        if self.pending_login.is_some()
-            || self.pending_account_input.is_some()
-            || self.pending_ssh_remote_name.is_some()
+        if signature.pending_login
+            || signature.pending_account_input
+            || signature.pending_ssh_remote_name
         {
             let input = self.input.trim_start();
             let typed = input.trim_end();
@@ -1154,11 +1206,9 @@ impl App {
         // the picker itself is the suggestion surface. Rendering the textual
         // suggestion list underneath would duplicate it (and its rows are not
         // arrow-navigable anyway, since the preview claims Up/Down first).
-        if let Some(picker) = self.inline_interactive_state.as_ref()
-            && picker.preview
-        {
+        if let Some(kind) = signature.inline_preview_kind {
             let input = self.input.trim_start();
-            let suppress = match picker.kind {
+            let suppress = match kind {
                 crate::tui::PickerKind::Model => {
                     input.starts_with("/model") || input.starts_with("/models")
                 }

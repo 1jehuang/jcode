@@ -654,6 +654,43 @@ struct CommandCandidatesCache {
     candidates: Vec<(String, &'static str)>,
 }
 
+/// Memoized result of [`App::command_suggestions`] for one exact input buffer.
+///
+/// The suggestion list is read up to eight times per rendered frame (input
+/// box, hint line, shell-mode routing, key handling, debug capture). Each
+/// uncached call re-ranks ~120 registered commands plus skills, allocating a
+/// lowercased `String` per candidate, and some prefixes (`/goals show `) hit
+/// the disk. Caching on the exact input plus the small amount of state that
+/// can change the answer collapses that to one computation per distinct
+/// input.
+#[derive(Clone, Debug)]
+struct CommandSuggestionsCache {
+    /// Exact (untrimmed) input buffer the suggestions were computed from.
+    input: String,
+    /// Guard state that changes the answer independently of `input`, so a
+    /// stale entry can never outlive a prompt/picker transition.
+    signature: CommandSuggestionsSignature,
+    /// Frame epoch the entry was built in. The suggestion list also depends on
+    /// mutable session data (rewind target count, model catalogs, skills,
+    /// goals on disk) that is impractical to enumerate in a signature, so the
+    /// memo is deliberately scoped to a single frame: it collapses the ~8
+    /// reads per frame into one computation and never survives into the next.
+    epoch: u64,
+    suggestions: Vec<(String, &'static str)>,
+}
+
+/// Non-input state that [`App::command_suggestions`] branches on before it
+/// ever consults the input buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CommandSuggestionsSignature {
+    pending_login: bool,
+    pending_account_input: bool,
+    pending_ssh_remote_name: bool,
+    /// `Some(kind)` while an inline picker preview is open, which suppresses
+    /// the textual suggestion list for the matching command.
+    inline_preview_kind: Option<crate::tui::PickerKind>,
+}
+
 /// Session-wide token and cache accounting accumulated across all turns.
 ///
 /// Grouped out of [`App`] to keep the cohesive token/cache totals together. The
@@ -803,6 +840,12 @@ pub struct App {
     pending_history_anchor: Option<HistoryScrollAnchor>,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
+    /// Per-input memo for `command_suggestions()`; see
+    /// [`CommandSuggestionsCache`].
+    command_suggestions_cache: RefCell<Option<CommandSuggestionsCache>>,
+    /// Monotonic frame counter bounding the lifetime of
+    /// `command_suggestions_cache` to a single frame.
+    command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming

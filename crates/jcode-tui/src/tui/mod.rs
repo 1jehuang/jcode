@@ -274,6 +274,14 @@ pub trait TuiState {
     }
     fn status(&self) -> ProcessingStatus;
     fn command_suggestions(&self) -> Vec<(String, &'static str)>;
+    /// Invalidate any per-frame memo backing [`Self::command_suggestions`].
+    ///
+    /// Called once at the top of each rendered frame. The suggestion list is
+    /// read many times while composing a single frame; implementations may
+    /// cache within a frame but must not serve that cache across frames, since
+    /// the list also depends on mutable session state. Defaults to a no-op for
+    /// impls that do not cache.
+    fn advance_command_suggestions_epoch(&self) {}
     fn command_suggestion_selected(&self) -> usize {
         0
     }

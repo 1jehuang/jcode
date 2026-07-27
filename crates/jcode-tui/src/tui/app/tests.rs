@@ -46,6 +46,7 @@ include!("tests/issue_496_input_routing.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/spinner_slash_commands.rs");
+include!("tests/command_suggestions_cache.rs");
 
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
