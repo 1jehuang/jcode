@@ -2396,11 +2396,7 @@ impl SessionPicker {
         if keyboard_enhanced {
             super::disable_keyboard_enhancement();
         }
-        // See #599: ratatui::restore() reports failures with eprintln!, which
-        // panics on a dead terminal.
-        if let Err(error) = ratatui::try_restore() {
-            jcode_logging::warn(&format!("failed to restore terminal: {error}"));
-        }
+        jcode_tui_style::restore_terminal_quietly();
         super::mermaid::clear_image_state();
 
         result
