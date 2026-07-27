@@ -1,9 +1,9 @@
 {
-  "total": 3202,
+  "total": 3224,
   "totals_by_pattern": {
-    "dot_ok": 1178,
-    "let_underscore": 1185,
-    "unwrap_or_default": 839
+    "dot_ok": 1184,
+    "let_underscore": 1188,
+    "unwrap_or_default": 852
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -524,7 +524,7 @@
     "crates/jcode-app-core/src/tool/todo.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
-      "unwrap_or_default": 6
+      "unwrap_or_default": 8
     },
     "crates/jcode-app-core/src/tool/webfetch.rs": {
       "dot_ok": 3,
@@ -1004,7 +1004,7 @@
     "crates/jcode-base/src/todo.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 3
     },
     "crates/jcode-base/src/transport/unix.rs": {
       "dot_ok": 0,
@@ -1354,7 +1354,7 @@
     "crates/jcode-desktop2/src/main.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
-      "unwrap_or_default": 0
+      "unwrap_or_default": 2
     },
     "crates/jcode-desktop2/src/meta.rs": {
       "dot_ok": 4,
@@ -1382,7 +1382,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-harness-api-server/src/translate.rs": {
-      "dot_ok": 3,
+      "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
@@ -1410,6 +1410,11 @@
       "dot_ok": 5,
       "let_underscore": 0,
       "unwrap_or_default": 0
+    },
+    "crates/jcode-logging/src/watchdog.rs": {
+      "dot_ok": 5,
+      "let_underscore": 1,
+      "unwrap_or_default": 1
     },
     "crates/jcode-memory-types/src/graph.rs": {
       "dot_ok": 0,
@@ -1993,8 +1998,8 @@
     },
     "crates/jcode-tui/src/tui/app/input.rs": {
       "dot_ok": 8,
-      "let_underscore": 2,
-      "unwrap_or_default": 0
+      "let_underscore": 3,
+      "unwrap_or_default": 3
     },
     "crates/jcode-tui/src/tui/app/local.rs": {
       "dot_ok": 0,
@@ -2363,8 +2368,8 @@
     },
     "src/cli/commands.rs": {
       "dot_ok": 11,
-      "let_underscore": 3,
-      "unwrap_or_default": 6
+      "let_underscore": 4,
+      "unwrap_or_default": 9
     },
     "src/cli/commands/menubar.rs": {
       "dot_ok": 3,
