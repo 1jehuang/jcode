@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent_tests.rs": 1437,
+    "crates/jcode-app-core/src/agent_tests.rs": 1481,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1231,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1393,
@@ -14,10 +14,10 @@
     "crates/jcode-desktop/src/main_tests.rs": 10677,
     "crates/jcode-desktop/src/session_launch/tests.rs": 1207,
     "crates/jcode-desktop/src/single_session_render/tests.rs": 2220,
-    "crates/jcode-desktop2/src/tests/actions.rs": 1220,
-    "crates/jcode-desktop2/src/tests/visual.rs": 1217,
+    "crates/jcode-desktop2/src/tests/actions.rs": 1228,
+    "crates/jcode-desktop2/src/tests/visual.rs": 1280,
     "crates/jcode-plan/src/dag/tests.rs": 1392,
-    "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 1899,
+    "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 1936,
     "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 2980,
     "crates/jcode-tui/src/tui/app/tests.rs": 1745,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1633,
@@ -36,7 +36,7 @@
     "crates/jcode-tui/src/tui/info_widget_tests.rs": 1810,
     "crates/jcode-tui/src/tui/session_picker/loading_tests.rs": 1268,
     "crates/jcode-tui/src/tui/session_picker_tests.rs": 2453,
-    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2892,
+    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2905,
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1285,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1352,
     "tests/e2e/test_support/mod.rs": 1424
