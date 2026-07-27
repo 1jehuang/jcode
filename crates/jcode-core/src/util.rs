@@ -78,6 +78,163 @@ pub fn sse_data_line(line: &str) -> Option<&str> {
         .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
 }
 
+/// Incremental UTF-8 decoder for byte streams whose chunk boundaries are not
+/// guaranteed to fall on character boundaries.
+///
+/// Providers stream SSE over HTTPS, and a multi-byte character (e.g. a 3-byte
+/// CJK codepoint) is routinely split across two TCP chunks. Calling
+/// `str::from_utf8` on each chunk in isolation fails in that case, and callers
+/// that used `if let Ok(text) = ...` silently dropped the entire chunk, losing
+/// text and truncating tool-call arguments. See issue #609.
+///
+/// This decoder carries the incomplete trailing bytes over to the next chunk so
+/// no input is ever discarded. Genuinely invalid sequences are replaced with
+/// U+FFFD rather than dropping surrounding good data.
+#[derive(Debug, Default)]
+pub struct Utf8StreamDecoder {
+    carry: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next chunk, holding back any incomplete trailing character.
+    pub fn decode(&mut self, chunk: &[u8]) -> String {
+        let bytes: &[u8] = if self.carry.is_empty() {
+            chunk
+        } else {
+            self.carry.extend_from_slice(chunk);
+            &self.carry
+        };
+
+        match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                let out = text.to_string();
+                self.carry.clear();
+                out
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                // SAFETY-equivalent: `valid_up_to` is a guaranteed char boundary.
+                let good = std::str::from_utf8(&bytes[..valid_up_to])
+                    .unwrap_or_default()
+                    .to_string();
+                let rest = bytes[valid_up_to..].to_vec();
+                match error.error_len() {
+                    // Truncated but potentially valid: keep it for the next chunk.
+                    None => {
+                        self.carry = rest;
+                        good
+                    }
+                    // Genuinely invalid bytes: emit a replacement char and keep going
+                    // rather than discarding the rest of the chunk.
+                    Some(invalid_len) => {
+                        self.carry.clear();
+                        let mut out = good;
+                        out.push('\u{FFFD}');
+                        out.push_str(&self.decode(&rest[invalid_len..]));
+                        out
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flush anything still held back when the stream ends. A non-empty result
+    /// means the stream ended mid-character, which is upstream truncation.
+    pub fn flush(&mut self) -> String {
+        if self.carry.is_empty() {
+            return String::new();
+        }
+        let carry = std::mem::take(&mut self.carry);
+        String::from_utf8_lossy(&carry).into_owned()
+    }
+
+    pub fn has_pending_bytes(&self) -> bool {
+        !self.carry.is_empty()
+    }
+}
+
+/// Split a payload that contains several concatenated JSON objects.
+///
+/// Some proxies drop the `\n\n` SSE event separator, producing payloads like
+/// `{"id":"a"}{"id":"b"}` or `{"id":"a"}data: {"id":"b"}`. `serde_json` rejects
+/// those wholesale with "trailing characters", which discarded every object in
+/// the blob. Callers should attempt a normal parse first and only fall back to
+/// this on failure, so well-formed payloads keep their existing behavior.
+///
+/// Returns `None` when the payload is not a recoverable concatenation (fewer
+/// than two complete objects), leaving the caller's original error intact.
+/// A trailing incomplete object is reported separately so the caller can carry
+/// it over to the next event instead of losing it.
+pub fn split_concatenated_json(payload: &str) -> Option<SplitJson> {
+    let bytes = payload.as_bytes();
+    let mut objects = Vec::new();
+    let mut depth = 0usize;
+    let mut start: Option<usize> = None;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0
+                    && let Some(s) = start.take()
+                {
+                    objects.push(payload[s..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // An unterminated final object: hand the partial text back to the caller.
+    let trailing_partial = start.map(|s| payload[s..].to_string());
+
+    if objects.len() < 2 && trailing_partial.is_none() {
+        return None;
+    }
+    if objects.is_empty() && trailing_partial.is_some() {
+        return Some(SplitJson {
+            objects,
+            trailing_partial,
+        });
+    }
+    Some(SplitJson {
+        objects,
+        trailing_partial,
+    })
+}
+
+/// Result of [`split_concatenated_json`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitJson {
+    /// Complete, brace-balanced JSON objects, in stream order.
+    pub objects: Vec<String>,
+    /// A trailing object whose braces never closed, if any.
+    pub trailing_partial: Option<String>,
+}
+
 #[cfg(unix)]
 fn read_max_open_files_limits() -> Option<(String, String)> {
     let contents = std::fs::read_to_string("/proc/self/limits").ok()?;
@@ -244,5 +401,130 @@ mod tests {
             approx_tool_output_token_severity(12_000),
             ApproxTokenSeverity::Danger
         );
+    }
+}
+
+#[cfg(test)]
+mod sse_stream_integrity_tests {
+    //! Regression coverage for #609: SSE stream data corruption.
+    use super::*;
+
+    #[test]
+    fn multibyte_char_split_across_chunks_is_not_dropped() {
+        // "读" is 3 bytes; split it after the first byte.
+        let full = "读取文件".as_bytes().to_vec();
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+        out.push_str(&decoder.decode(&full[..1]));
+        assert!(
+            decoder.has_pending_bytes(),
+            "partial char must be held back"
+        );
+        out.push_str(&decoder.decode(&full[1..]));
+        out.push_str(&decoder.flush());
+        assert_eq!(out, "读取文件");
+    }
+
+    #[test]
+    fn every_single_byte_split_point_round_trips() {
+        // State-space sweep: splitting at any byte offset must reproduce the input.
+        let text = "hello 读取 世界 mixed ascii";
+        let bytes = text.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut decoder = Utf8StreamDecoder::new();
+            let mut out = decoder.decode(&bytes[..split]);
+            out.push_str(&decoder.decode(&bytes[split..]));
+            out.push_str(&decoder.flush());
+            assert_eq!(out, text, "failed at split offset {split}");
+        }
+    }
+
+    #[test]
+    fn byte_at_a_time_delivery_round_trips() {
+        let text = "读取文件 with ascii tail";
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut out = String::new();
+        for byte in text.as_bytes() {
+            out.push_str(&decoder.decode(&[*byte]));
+        }
+        out.push_str(&decoder.flush());
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn genuinely_invalid_bytes_do_not_discard_surrounding_text() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let mut bytes = b"good".to_vec();
+        bytes.push(0xFF); // never valid in UTF-8
+        bytes.extend_from_slice(b"tail");
+        let out = decoder.decode(&bytes);
+        assert!(out.starts_with("good"), "leading good text kept: {out:?}");
+        assert!(out.ends_with("tail"), "trailing good text kept: {out:?}");
+        assert!(out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn well_formed_single_object_is_not_treated_as_concatenated() {
+        assert_eq!(split_concatenated_json(r#"{"id":"a"}"#), None);
+    }
+
+    #[test]
+    fn concatenated_objects_are_split() {
+        let split = split_concatenated_json(r#"{"id":"a"}{"id":"b"}"#).expect("split");
+        assert_eq!(split.objects, vec![r#"{"id":"a"}"#, r#"{"id":"b"}"#]);
+        assert_eq!(split.trailing_partial, None);
+    }
+
+    #[test]
+    fn concatenation_with_embedded_data_prefix_is_split() {
+        let split = split_concatenated_json(r#"{"id":"a"}data: {"id":"b"}"#).expect("split");
+        assert_eq!(split.objects, vec![r#"{"id":"a"}"#, r#"{"id":"b"}"#]);
+    }
+
+    #[test]
+    fn braces_inside_strings_do_not_confuse_the_splitter() {
+        let payload = r#"{"content":"a } b { c"}{"id":"second"}"#;
+        let split = split_concatenated_json(payload).expect("split");
+        assert_eq!(
+            split.objects,
+            vec![r#"{"content":"a } b { c"}"#, r#"{"id":"second"}"#]
+        );
+    }
+
+    #[test]
+    fn escaped_quote_inside_string_is_handled() {
+        let payload = r#"{"content":"say \"hi\" }"}{"id":"second"}"#;
+        let split = split_concatenated_json(payload).expect("split");
+        assert_eq!(
+            split.objects,
+            vec![r#"{"content":"say \"hi\" }"}"#, r#"{"id":"second"}"#]
+        );
+    }
+
+    #[test]
+    fn truncated_trailing_object_is_reported_for_carry_over() {
+        let split =
+            split_concatenated_json(r#"{"choices":[{"delta":{"content":"Hello "#).expect("split");
+        assert!(split.objects.is_empty());
+        assert_eq!(
+            split.trailing_partial.as_deref(),
+            Some(r#"{"choices":[{"delta":{"content":"Hello "#)
+        );
+    }
+
+    #[test]
+    fn split_object_rejoins_into_valid_json() {
+        // Event 1 truncated, event 2 carries the remainder.
+        let first = r#"{"choices":[{"delta":{"content":"Hello "#;
+        let second = r#"world"}}]}"#;
+        let split = split_concatenated_json(first).expect("partial");
+        let mut rejoined = split.trailing_partial.expect("partial text");
+        rejoined.push_str(second);
+        assert_eq!(
+            rejoined,
+            r#"{"choices":[{"delta":{"content":"Hello world"}}]}"#
+        );
+        // Brace-balanced after rejoin, so a downstream JSON parse will succeed.
+        assert_eq!(split_concatenated_json(&rejoined), None);
     }
 }

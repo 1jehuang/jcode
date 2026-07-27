@@ -761,6 +761,9 @@ fn handle_openai_image_generation_item(
 pub struct OpenAIResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
+    /// Carries incomplete multi-byte UTF-8 sequences across chunk boundaries
+    /// so split CJK characters are not dropped (#609).
+    utf8: jcode_core::util::Utf8StreamDecoder,
     pending: VecDeque<StreamEvent>,
     saw_text_delta: bool,
     streaming_tool_calls: HashMap<String, StreamingToolCallState>,
@@ -772,6 +775,7 @@ impl OpenAIResponsesStream {
         Self {
             inner: Box::pin(stream),
             buffer: String::new(),
+            utf8: jcode_core::util::Utf8StreamDecoder::new(),
             pending: VecDeque::new(),
             saw_text_delta: false,
             streaming_tool_calls: HashMap::new(),
@@ -851,9 +855,8 @@ impl Stream for OpenAIResponsesStream {
 
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        self.buffer.push_str(text);
-                    }
+                    let text = self.utf8.decode(&bytes);
+                    self.buffer.push_str(&text);
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(anyhow::anyhow!("Stream error: {}", e))));
