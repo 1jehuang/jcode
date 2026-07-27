@@ -3974,13 +3974,13 @@ mod tests {
         assert!(route_supports_reasoning_effort("openai-oauth"));
         assert!(route_supports_reasoning_effort("openai-api-key"));
         assert!(route_supports_reasoning_effort("openrouter"));
-
+        assert!(route_supports_reasoning_effort(
+            "openai-compatible:llamacpp"
+        ));
         assert!(!route_supports_reasoning_effort("copilot"));
         assert!(!route_supports_reasoning_effort("bedrock"));
         assert!(!route_supports_reasoning_effort("https"));
-        assert!(!route_supports_reasoning_effort(
-            "openai-compatible:llamacpp"
-        ));
+        assert!(!route_supports_reasoning_effort("openai-compatible"));
         assert!(!route_supports_reasoning_effort("remote-catalog"));
         assert!(!route_supports_reasoning_effort("current"));
     }

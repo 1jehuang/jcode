@@ -40,8 +40,8 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::OpenAIOAuth
         | Method::OpenAIApiKey
         | Method::OpenRouter => true,
+        Method::OpenAiCompatible { profile_id } => profile_id.is_some(),
         Method::JcodeSubscription
-        | Method::OpenAiCompatible { .. }
         | Method::Copilot
         | Method::Cursor
         | Method::Bedrock
