@@ -9,6 +9,10 @@ pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.123; cc_entrypoint=sdk-cl
 
 const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
+/// Minimal user turn appended when a formatted conversation would otherwise end
+/// on an assistant message, which Anthropic rejects on non-prefill models.
+pub(crate) const CONTINUATION_USER_TURN: &str = "Continue.";
+
 pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
     use std::collections::HashSet;
 
@@ -102,6 +106,28 @@ pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> 
             "[anthropic] Merged {} consecutive same-role messages",
             pre_merge_count - merged.len()
         ));
+    }
+
+    // Anthropic rejects a request whose final message is an assistant turn on
+    // models that do not support assistant prefill ("This model does not support
+    // assistant message prefill. The conversation must end with a user message.").
+    // jcode never intends to prefill, so a trailing assistant turn here is always
+    // an upstream accident: the reload auto-resume path starts a turn with empty
+    // user content and delivers its continuation as a system reminder, leaving the
+    // transcript ending on the interrupted assistant turn. Repair the shape at the
+    // last formatting step. See issue #600.
+    if merged.last().is_some_and(|last| last.role == "assistant") {
+        jcode_logging::warn(
+            "[anthropic] Conversation ended with an assistant message; appending a \
+             continuation user turn to avoid a model prefill rejection (400)",
+        );
+        merged.push(ApiMessage {
+            role: "user".to_string(),
+            content: vec![ApiContentBlock::Text {
+                text: CONTINUATION_USER_TURN.to_string(),
+                cache_control: None,
+            }],
+        });
     }
 
     // Validate: check each assistant message with tool_use has matching tool_result in next user message
@@ -1110,3 +1136,7 @@ mod cache_prefix_invariant_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "trailing_assistant_repair_tests.rs"]
+mod trailing_assistant_repair_tests;
