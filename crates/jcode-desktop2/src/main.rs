@@ -24,6 +24,7 @@ mod place;
 mod profile;
 mod render;
 mod scene;
+mod scroll;
 mod select;
 mod states;
 mod stream;
@@ -196,6 +197,9 @@ pub struct Model {
     /// The streaming reveal: how much of the arriving reply is on screen, and
     /// the glide that keeps a growing transcript from jumping.
     pub stream: stream::Stream,
+    /// Scroll smoothing and the scrollbar's fade. The logical position stays
+    /// in `scroll`; this is only how the view catches up to it.
+    pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
     /// The session overview: the blob field held Alt zooms out into. Part of
@@ -254,6 +258,7 @@ impl Default for Model {
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
             stream: stream::Stream::default(),
+            smooth: scroll::Smooth::default(),
             strip: strip::Strip::default(),
             overview: overview::Overview::default(),
             working_dir: None,
@@ -282,12 +287,29 @@ impl Model {
     /// Scroll up by `amount` logical pixels, clamped to `max` so the view
     /// cannot run past the top of the conversation into blank space.
     fn scroll_up(&mut self, amount: f64, max: f64) {
+        let before = self.scroll;
         self.scroll = (self.scroll + amount).clamp(0.0, max.max(0.0));
+        self.smooth
+            .nudge(self.scroll - before, std::time::Instant::now());
     }
 
     /// Scroll down by `amount` logical pixels; reaching 0 re-follows the tail.
     fn scroll_down(&mut self, amount: f64) {
+        let before = self.scroll;
         self.scroll = (self.scroll - amount).max(0.0);
+        self.smooth
+            .nudge(self.scroll - before, std::time::Instant::now());
+    }
+
+    /// The scroll offset the frame is actually drawn at.
+    ///
+    /// The logical `scroll` is where the user asked to be; the glide holds the
+    /// view above the tail while a reply grows, and the smoothing lag lets a
+    /// wheel notch ease in. Everything that has to agree with the pixels on
+    /// screen (the renderer, hit-testing, selection) reads this one function,
+    /// so a click during an ease lands on the glyph under the pointer.
+    pub fn view_scroll(&self) -> f64 {
+        self.scroll + self.stream.glide() - self.smooth.lag()
     }
 
     fn set_notice(&mut self, notice: impl Into<String>) {
@@ -418,6 +440,9 @@ impl App {
         self.model.busy = false;
         self.model.activity.finish();
         self.model.scroll = 0.0;
+        // Attaching is a jump, not a scroll: easing here would sweep through
+        // the previous session's layout.
+        self.model.smooth.settle();
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
         // The new session's directory arrives with its `Attached` event; until
@@ -977,7 +1002,10 @@ impl App {
         // keep running while the window is busy, and they stop themselves the
         // moment the text has caught up.
         let stream = self.model.stream.next_frame_at(now);
-        [caret, donut, spinner, stream, overview]
+        // Scroll smoothing and the scrollbar fade both need frames, and both
+        // stop themselves once the view has landed and the bar is gone.
+        let smooth = self.model.smooth.next_frame_at(now);
+        [caret, donut, spinner, stream, smooth, overview]
             .into_iter()
             .flatten()
             .min()
@@ -1165,7 +1193,13 @@ impl App {
                 let max = self.max_scroll();
                 self.model.scroll_up(max, max);
             }
-            Action::ScrollBottom => self.model.scroll = 0.0,
+            Action::ScrollBottom => {
+                let travelled = -self.model.scroll;
+                self.model.scroll = 0.0;
+                self.model
+                    .smooth
+                    .nudge(travelled, std::time::Instant::now());
+            }
 
             // Escape never quits: it cancels, then clears, then re-follows the
             // tail, matching the TUI.
@@ -1377,7 +1411,8 @@ impl ApplicationHandler for App {
                 self.drain_harness_updates();
                 self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
-                self.model.stream.advance(std::time::Instant::now());
+        self.model.stream.advance(std::time::Instant::now());
+                self.model.smooth.advance(std::time::Instant::now());
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();

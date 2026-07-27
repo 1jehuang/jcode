@@ -604,6 +604,77 @@ pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
     }
 }
 
+/// Width of the scrollbar's thumb, in logical pixels. A hairline-ish sliver:
+/// this is a position readout, not a drag handle competing with the text.
+const SCROLLBAR_WIDTH: f64 = 3.0;
+/// Gap between the text column's right edge and the bar.
+const SCROLLBAR_GAP: f64 = 6.0;
+/// Shortest the thumb may be drawn. Proportional sizing alone makes a very
+/// long conversation's thumb a dot, which stops reading as a position.
+const SCROLLBAR_MIN_THUMB: f64 = 24.0;
+
+/// Draw the transcript scrollbar: a thumb whose length is the visible
+/// fraction of the conversation and whose position is where you are in it.
+///
+/// It is only drawn while [`crate::scroll::Smooth`] says it is lit, so it
+/// appears when you scroll and fades out afterwards rather than sitting on the
+/// page permanently. Drawn outside the transcript's clip so it can hug the
+/// region's edge, and skipped entirely when everything already fits.
+fn draw_scrollbar(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    cache: &mut crate::paint::TranscriptCache,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    let alpha = model.smooth.alpha() as f32;
+    if alpha <= 0.0 {
+        return;
+    }
+    let region_height = (frame.body_bottom - frame.body_top).max(0.0);
+    if region_height <= 0.0 {
+        return;
+    }
+    let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+    let laid = cache.lay_out(
+        text,
+        &model.transcript,
+        width,
+        &model.theme,
+        transcript_body_style(model),
+        scale,
+    );
+    let view = crate::viewport::Viewport::new(laid, region_height, model.view_scroll());
+    let max = view.max_scroll();
+    // Nothing to scroll: a full-height thumb would just be a border.
+    if max <= 0.5 {
+        return;
+    }
+    let content = view.content_height.max(1.0);
+    let thumb = (region_height / content * region_height).max(SCROLLBAR_MIN_THUMB.min(region_height));
+    // scroll counts pixels *up from the tail*, so 0 puts the thumb at the
+    // bottom, which is where the newest message is.
+    let travel = (region_height - thumb).max(0.0);
+    let from_tail = (model.view_scroll().clamp(0.0, max)) / max;
+    let top = frame.body_top + travel * (1.0 - from_tail);
+    let left = frame.right + SCROLLBAR_GAP;
+    let color = model.theme.rule.multiply_alpha(alpha);
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        color,
+        None,
+        &RoundedRect::new(
+            left,
+            top,
+            left + SCROLLBAR_WIDTH,
+            top + thumb,
+            SCROLLBAR_WIDTH / 2.0,
+        ),
+    );
+}
+
 /// Draw the conversation.
 ///
 /// Roles are distinguished structurally rather than by a marker glyph: your
@@ -638,8 +709,7 @@ fn draw_transcript(
     // The glide holds the view slightly above the tail while the conversation
     // grows, so a new line slides in instead of snapping the page up by a line
     // height. It decays to zero, so this cannot drift the scroll position.
-    let view =
-        crate::viewport::Viewport::new(laid, region_height, model.scroll + model.stream.glide());
+    let view = crate::viewport::Viewport::new(laid, region_height, model.view_scroll());
 
     // Only the trailing assistant message is being revealed; everything above
     // it has been read and must be drawn whole.
@@ -936,6 +1006,7 @@ pub fn build_scene(
         scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &region);
         draw_transcript(scene, text, transcript_cache, model, &frame, scale);
         scene.pop_layer();
+        draw_scrollbar(scene, text, transcript_cache, model, &frame, scale);
     }
 
     // Prompt line inside the well: a real input box. The caret is drawn at
@@ -1037,12 +1108,21 @@ pub fn build_scene(
         } else {
             // Draw the whole layout in one pass: Parley already wrapped it to
             // the well, so per-row drawing would only reintroduce drift.
+            // Clipped to the well: once the text is taller than the well the
+            // layout is scrolled under it, and the rows above and below the
+            // window must not paint over the transcript or the footnote.
+            scene.push_clip_layer(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                &Rect::new(frame.left, clip_top, frame.right, clip_bottom),
+            );
             crate::text::TextSystem::draw_layout(
                 scene,
                 input.layout(),
                 (prompt_x, origin_y),
                 scale,
             );
+            scene.pop_layer();
         }
 
         // An unfocused window must not show a blinking caret: it would claim

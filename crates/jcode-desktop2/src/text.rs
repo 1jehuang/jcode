@@ -96,6 +96,14 @@ impl TextSystem {
             parley::LineHeight::FontSizeRelative(style.line_height),
         ));
         builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
+        // A word longer than the column has no break opportunity, so with the
+        // CSS-default `Normal` it overflows its wrap width instead of wrapping:
+        // a pasted URL, a long path, or a run of keymashed characters would
+        // paint straight out of the composer well and off the page. Break
+        // anywhere, so the wrap width is a real bound on every layout.
+        builder.push_default(StyleProperty::OverflowWrap(
+            parley::style::OverflowWrap::Anywhere,
+        ));
     }
 
     /// Measure a paragraph without drawing it. Returns the wrapped height in
