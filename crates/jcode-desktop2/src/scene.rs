@@ -389,7 +389,19 @@ fn draw_transcript(
         transcript_body_style(model),
         scale,
     );
-    let view = crate::viewport::Viewport::new(laid, region_height, model.scroll);
+    // The glide holds the view slightly above the tail while the conversation
+    // grows, so a new line slides in instead of snapping the page up by a line
+    // height. It decays to zero, so this cannot drift the scroll position.
+    let view =
+        crate::viewport::Viewport::new(laid, region_height, model.scroll + model.stream.glide());
+
+    // Only the trailing assistant message is being revealed; everything above
+    // it has been read and must be drawn whole.
+    let streaming_index = laid
+        .len()
+        .checked_sub(1)
+        .filter(|_| model.stream.is_revealing())
+        .filter(|index| laid[*index].role == Role::Assistant);
 
     for placed in &view.visible {
         let message_top = frame.body_top + placed.top;
@@ -413,6 +425,19 @@ fn draw_transcript(
         }
         let text_left = frame.left + USER_PAD_X;
         let text_top = message_top + if is_user { USER_PAD_Y } else { 0.0 };
+
+        // Glyphs in this message, and how many earlier blocks have consumed,
+        // so the reveal sweeps across block boundaries as one motion.
+        let message_glyphs: usize = match streaming_index {
+            Some(index) if index == placed.index => placed
+                .message
+                .blocks
+                .iter()
+                .map(|block| crate::text::glyph_count(&block.layout))
+                .sum(),
+            _ => 0,
+        };
+        let mut drawn_glyphs = 0usize;
 
         for (block_index, block) in placed.message.blocks.iter().enumerate() {
             let block_top = text_top + block.top;
@@ -503,12 +528,28 @@ fn draw_transcript(
                     );
                 }
             }
-            text::TextSystem::draw_layout(
+            // Reveal is expressed as a fraction of the message and applied to
+            // its glyph count, because the cursor counts markdown *source*
+            // characters while this draws laid-out glyphs; the two differ by
+            // every `**` and backtick in the reply.
+            let revealed = match streaming_index {
+                Some(index) if index == placed.index => {
+                    let shown = message_glyphs as f64 * model.stream.fraction();
+                    (shown - drawn_glyphs as f64).max(0.0)
+                }
+                _ => f64::INFINITY,
+            };
+            if revealed <= 0.0 {
+                break;
+            }
+            text::TextSystem::draw_layout_revealed(
                 scene,
                 &block.layout,
                 (text_left + inset_x, block_top + inset_y),
                 scale,
+                revealed,
             );
+            drawn_glyphs += crate::text::glyph_count(&block.layout);
         }
     }
 }

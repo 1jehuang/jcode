@@ -102,6 +102,16 @@ impl Transcript {
             .collect::<Vec<_>>()
             .join("\n\n")
     }
+
+    /// Characters in the trailing assistant reply, which is the message the
+    /// streaming reveal is animating. Zero when the last turn is the user's,
+    /// because nothing is arriving.
+    pub fn streaming_len(&self) -> usize {
+        match self.messages.last() {
+            Some(last) if last.role == Role::Assistant => last.source.chars().count(),
+            _ => 0,
+        }
+    }
 }
 
 impl From<&[Message]> for Transcript {
