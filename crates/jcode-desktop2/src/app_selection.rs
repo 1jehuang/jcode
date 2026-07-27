@@ -1,0 +1,110 @@
+//! Selection and clipboard behaviour on the `App`.
+//!
+//! Split from `main.rs` so the event loop stays a router. These methods form
+//! one concern (where the pointer is in the conversation, what that selects,
+//! and where the result is published) and they read as a unit; interleaved
+//! with window and harness plumbing they read as neither.
+
+use crate::{App, DOUBLE_CLICK, clipboard, select};
+
+impl App {
+    /// Whether a logical point is inside the transcript region.
+    pub(crate) fn in_transcript(&self, x: f64, y: f64) -> bool {
+        !self.model.transcript.is_empty()
+            && y >= self.frame.body_top
+            && y <= self.frame.body_bottom
+            && x >= self.frame.left
+            && x <= self.frame.right
+    }
+
+    /// The transcript position under a logical point.
+    pub(crate) fn transcript_position_at(&mut self, x: f64, y: f64) -> Option<select::Position> {
+        select::position_at_in_frame(&mut self.painter, &self.model, self.frame, x, y)
+    }
+
+    /// Handle a press inside the transcript. Returns whether it was consumed,
+    /// so the caller can fall through to the donut when there is no text here.
+    ///
+    /// Click places a caret, double click takes the word, triple click takes
+    /// the line: the same ladder every other text surface has, and the reason
+    /// quoting one word does not require a precise drag.
+    pub(crate) fn press_in_transcript(&mut self, x: f64, y: f64) -> bool {
+        let granularity = self.click_streak.press(x, y, DOUBLE_CLICK);
+        let Some(hit) = select::selection_at_in_frame(
+            &mut self.painter,
+            &self.model,
+            self.frame,
+            x,
+            y,
+            granularity,
+        ) else {
+            return false;
+        };
+        self.model.selection = Some(match self.model.selection {
+            // Shift+click extends the existing selection, as anywhere else.
+            Some(existing)
+                if self.modifiers.shift_key() && granularity == select::Granularity::Character =>
+            {
+                select::Selection::new(existing.anchor, hit.focus)
+            }
+            _ => hit,
+        });
+        // A caret drag continues on move; a word or line grab is already
+        // complete, so it publishes now rather than waiting for a release.
+        if granularity == select::Granularity::Character {
+            self.selecting = true;
+        } else {
+            self.publish_primary_selection();
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// The selected transcript text, if any.
+    pub(crate) fn selected_transcript_text(&mut self) -> Option<String> {
+        select::selection_text_in_frame(&mut self.painter, &self.model, self.frame)
+    }
+
+    /// The text currently highlighted on either surface, transcript first
+    /// because it is the one drawn as a band over the conversation.
+    pub(crate) fn any_selected_text(&mut self) -> Option<String> {
+        self.selected_transcript_text()
+            .or_else(|| self.model.editor.selected_text().map(str::to_string))
+    }
+
+    /// Copy to a system buffer, reporting a failure rather than losing it
+    /// silently. A copy that quietly did nothing is the bug users describe as
+    /// "the app ate my clipboard"; the in-process fallback still holds the
+    /// text, so paste within the app keeps working either way.
+    pub(crate) fn copy_to(&mut self, target: clipboard::Target, text: &str) {
+        if let Err(error) = self.clipboard.set_to(target, text) {
+            self.model
+                .set_notice(&format!("clipboard unavailable: {error}"));
+        }
+    }
+
+    /// Publish the live selection to the primary selection, so middle click
+    /// pastes what was just highlighted.
+    ///
+    /// Deliberately *not* the ordinary clipboard: this fires on every drag, so
+    /// writing there would mean highlighting a word silently destroys whatever
+    /// the user had copied. On platforms without a primary selection this is a
+    /// no-op, which is the honest behaviour rather than a surprising one.
+    pub(crate) fn publish_primary_selection(&mut self) {
+        let Some(text) = self.any_selected_text() else {
+            return;
+        };
+        self.copy_to(clipboard::Target::Primary, &text);
+    }
+
+    /// Paste the primary selection at the composer's cursor. Middle click is
+    /// the paste half of the select-to-copy convention.
+    pub(crate) fn paste_primary_selection(&mut self) {
+        let Some(text) = self.clipboard.get_from(clipboard::Target::Primary) else {
+            return;
+        };
+        self.model.editor.insert_str(&text);
+        self.model.caret.touch();
+        self.request_redraw();
+    }
+}

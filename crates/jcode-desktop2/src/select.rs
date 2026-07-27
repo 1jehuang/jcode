@@ -219,6 +219,59 @@ impl Granularity {
     }
 }
 
+/// Consecutive clicks at one spot, which is what decides whether a press is a
+/// caret, a word, or a line.
+///
+/// Its own type rather than a tuple in the app, because "is this the same
+/// click again" has three real rules (soon enough, close enough, and not
+/// interrupted by a drag) and each one is a bug when it is missing: no time
+/// limit and two unrelated clicks grab a word, no distance limit and a click
+/// across the window continues the streak, no drag reset and releasing a drag
+/// then clicking silently selects a word.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClickStreak {
+    last: Option<(std::time::Instant, (f64, f64))>,
+    count: usize,
+}
+
+/// How far the pointer may move between clicks and still count as the same
+/// spot, in logical units. Zero would make a double click impossible on a
+/// trackpad, where the finger always drifts a little.
+const CLICK_SLOP: f64 = 3.0;
+
+impl ClickStreak {
+    /// Record a press and report the granularity it selects with.
+    pub fn press(&mut self, x: f64, y: f64, window: std::time::Duration) -> Granularity {
+        self.press_at(std::time::Instant::now(), x, y, window)
+    }
+
+    /// As [`Self::press`], with an explicit clock so the rules are testable
+    /// without sleeping.
+    pub fn press_at(
+        &mut self,
+        now: std::time::Instant,
+        x: f64,
+        y: f64,
+        window: std::time::Duration,
+    ) -> Granularity {
+        let continues = self.last.is_some_and(|(at, (last_x, last_y))| {
+            now.duration_since(at) < window
+                && (last_x - x).abs() <= CLICK_SLOP
+                && (last_y - y).abs() <= CLICK_SLOP
+        });
+        self.count = if continues { self.count + 1 } else { 1 };
+        self.last = Some((now, (x, y)));
+        Granularity::for_click(self.count)
+    }
+
+    /// End the streak. A drag is a gesture in its own right, so pressing again
+    /// after one is a fresh click rather than the second half of a double.
+    pub fn interrupt(&mut self) {
+        self.last = None;
+        self.count = 0;
+    }
+}
+
 /// The selection a click of `granularity` makes at a point, or `None` when
 /// there is nothing laid out there.
 ///
@@ -559,5 +612,90 @@ mod tests {
     fn an_empty_range_draws_no_band() {
         let laid = lay(&[Message::assistant("text")]);
         assert!(block_bands(&laid[0].blocks[0], (3, 3), SCALE).is_empty());
+    }
+    /// The click ladder: caret, word, line, then back to a caret so someone
+    /// leaning on the button is not stuck selecting whole lines.
+    #[test]
+    fn the_click_ladder_cycles_caret_word_line() {
+        let expected = [
+            Granularity::Character,
+            Granularity::Word,
+            Granularity::Line,
+            Granularity::Character,
+            Granularity::Word,
+            Granularity::Line,
+        ];
+        for (index, want) in expected.iter().enumerate() {
+            assert_eq!(
+                Granularity::for_click(index + 1),
+                *want,
+                "click {}",
+                index + 1
+            );
+        }
+    }
+
+    /// Each of these rules is a bug when it is missing, so each is asserted
+    /// separately rather than through one happy-path double click.
+    #[test]
+    fn a_streak_continues_only_when_it_is_soon_enough_and_close_enough() {
+        let window = std::time::Duration::from_millis(400);
+        let start = std::time::Instant::now();
+
+        // Same spot, straight away: a double click.
+        let mut streak = ClickStreak::default();
+        assert_eq!(
+            streak.press_at(start, 10.0, 10.0, window),
+            Granularity::Character
+        );
+        assert_eq!(
+            streak.press_at(start, 10.0, 10.0, window),
+            Granularity::Word,
+            "a second click at the same spot was not a double click"
+        );
+
+        // Too slow: a fresh click.
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        assert_eq!(
+            streak.press_at(start + window * 2, 10.0, 10.0, window),
+            Granularity::Character,
+            "a slow second click was treated as a double click"
+        );
+
+        // Too far: a fresh click.
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        assert_eq!(
+            streak.press_at(start, 400.0, 10.0, window),
+            Granularity::Character,
+            "clicks at two different spots were treated as a double click"
+        );
+
+        // Interrupted by a drag: a fresh click.
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        streak.interrupt();
+        assert_eq!(
+            streak.press_at(start, 10.0, 10.0, window),
+            Granularity::Character,
+            "a click after a drag continued the streak"
+        );
+    }
+
+    /// A trackpad finger always drifts, so a tiny move must not break a double
+    /// click. Without this, double click is unreliable on exactly the input
+    /// device most users have.
+    #[test]
+    fn a_small_drift_between_clicks_still_counts_as_a_double() {
+        let window = std::time::Duration::from_millis(400);
+        let start = std::time::Instant::now();
+        let mut streak = ClickStreak::default();
+        streak.press_at(start, 10.0, 10.0, window);
+        assert_eq!(
+            streak.press_at(start, 10.0 + CLICK_SLOP / 2.0, 10.0, window),
+            Granularity::Word,
+            "a trackpad's drift broke the double click"
+        );
     }
 }

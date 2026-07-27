@@ -500,11 +500,17 @@ fn two_slow_clicks_are_not_a_double_click() {
     let mut app = app_with_transcript();
     let point = point_for(&mut app, at(1, 0, 6));
     multi_click(&mut app, point, 1);
-    // Age the streak past the double-click window.
-    app.click_streak = app
+    // A press outside the double-click window is a fresh click, driven
+    // through the streak's own clock so the test does not have to sleep.
+    let later = std::time::Instant::now() + crate::DOUBLE_CLICK * 2;
+    let granularity = app
         .click_streak
-        .map(|(at, spot, count)| (at - crate::DOUBLE_CLICK * 2, spot, count));
-    multi_click(&mut app, point, 1);
+        .press_at(later, point.0, point.1, crate::DOUBLE_CLICK);
+    assert_eq!(
+        granularity,
+        crate::select::Granularity::Character,
+        "a slow second click was treated as a double click"
+    );
     assert!(
         app.selected_transcript_text().is_none(),
         "two slow clicks selected a word"
