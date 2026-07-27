@@ -5,6 +5,7 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
 mod catalog_routes;
+mod catalog_scheduler;
 pub mod claude;
 pub mod copilot;
 pub mod cursor;
@@ -139,10 +140,26 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
 // Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
 // the active OpenRouter/OpenAI-compatible runtime. We continue serving the
 // cached routes immediately while a background refresh updates the catalog.
-const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
+pub(crate) const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
 
 fn openai_compatible_profile_catalog_cache_is_stale(cached_at: u64, now: u64) -> bool {
     now.saturating_sub(cached_at) >= OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS
+}
+
+/// Whether a profile's on-disk catalog cache is missing, mismatched, or stale
+/// and therefore worth a background refresh.
+///
+/// This is the pure predicate the catalog scheduler sweeps on. Route building
+/// deliberately does not call it: rendering must never schedule I/O.
+pub(crate) fn profile_catalog_cache_needs_refresh(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+) -> bool {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    match cached_live_models_for_openai_compatible_profile(&resolved) {
+        Some((_, cache_is_stale)) => cache_is_stale,
+        // Missing or endpoint-mismatched cache: nothing usable to serve.
+        None => true,
+    }
 }
 
 fn cached_live_models_for_openai_compatible_profile(
@@ -179,21 +196,14 @@ fn direct_openai_compatible_profile_routes(
 ) -> Vec<ModelRoute> {
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
     let static_models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
-    let (mut models, from_live_catalog) = if let Some((models, cache_is_stale)) =
+    // Pure read: staleness is observed but never acted on here. The catalog
+    // scheduler owns refresh cadence so rendering routes (which happens on
+    // every session attach and picker open) cannot fan out HTTP requests.
+    let (mut models, from_live_catalog) = if let Some((models, _cache_is_stale)) =
         cached_live_models_for_openai_compatible_profile(&resolved)
     {
-        if cache_is_stale {
-            crate::provider::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
-                profile,
-                "inactive direct profile stale route cache",
-            );
-        }
         (models, true)
     } else {
-        crate::provider::openrouter::maybe_schedule_openai_compatible_profile_catalog_refresh(
-            profile,
-            "inactive direct profile route cache miss",
-        );
         let mut models = static_models;
         if models.is_empty()
             && let Some(default_model) = resolved.default_model.as_ref()
@@ -440,6 +450,16 @@ fn catalog_generation() -> u64 {
     CATALOG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Invalidate every memoized route catalog in the process.
+///
+/// Called when provider catalogs change out-of-band (background catalog
+/// refresh completion, auth changes). This is what keeps the route memo TTL a
+/// backstop rather than the mechanism: a completed refresh is reflected on the
+/// next render instead of waiting for the memo to expire.
+pub fn bump_catalog_generation() {
+    CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl MultiProvider {
     /// Drop this instance's route-catalog memo. Use for changes that are
     /// captured by [`Self::routes_memo_key`] (model/provider/profile switches):
@@ -523,7 +543,18 @@ impl MultiProvider {
     /// shared memo (so shared-server forks reuse one build), then a
     /// single-flight build that followers wait on instead of duplicating.
     fn fresh_routes_memo_entry(&self) -> RoutesMemoEntry {
-        const ROUTES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        // Route catalogs are rebuilt from caches only. Invalidation is
+        // event-driven (auth generation, catalog generation bumped by refresh
+        // completion), so this TTL is just a backstop against state we forgot
+        // to bump a generation for. A short TTL used to make every session
+        // attach rebuild the full catalog.
+        const ROUTES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+        // Rendering no longer schedules catalog I/O; the background sweeper
+        // does. Starting it here guarantees it runs in any process that
+        // actually looks at model routes, without a separate wiring step in
+        // every composition root.
+        catalog_scheduler::ensure_started();
 
         let auth_generation = pricing::auth_pricing_generation();
         let catalog_gen = catalog_generation();

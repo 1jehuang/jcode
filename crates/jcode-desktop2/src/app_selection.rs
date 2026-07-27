@@ -29,6 +29,12 @@ impl App {
         let top = self.frame.body_top;
         let bottom = self.frame.body_bottom;
         let max = self.max_scroll();
+        // A drag is already a continuous gesture: smoothing it would put the
+        // drawn view behind the pointer, so the text the user is selecting is
+        // not the text under their finger. Land each step immediately and just
+        // keep the scrollbar lit.
+        self.model.smooth.settle();
+        self.model.smooth.show(std::time::Instant::now());
         if y < top + MARGIN {
             // Scrolling up reveals older text, which is what dragging toward
             // the top of the window is asking for.

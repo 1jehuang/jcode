@@ -107,6 +107,9 @@ fn connecting() -> Model {
         // Closed: the overview is a held gesture, so every ordinary node
         // renders with it away.
         overview: crate::overview::Overview::default(),
+        // Captures are still frames, so the scroll is settled rather than
+        // mid-glide.
+        smooth: crate::scroll::Smooth::default(),
         // Detached: no session, so no directory to name.
         working_dir: None,
     }
@@ -174,6 +177,9 @@ fn attached_empty() -> Model {
         // stream draws every glyph.
         stream: crate::stream::Stream::default(),
         overview: crate::overview::Overview::default(),
+        // Captures are still frames, so the scroll is settled rather than
+        // mid-glide.
+        smooth: crate::scroll::Smooth::default(),
         // Fixed path, so captures do not depend on where the repo is checked
         // out or on whose `$HOME` the capture ran under.
         working_dir: Some("/home/j/jcode".into()),
