@@ -1151,6 +1151,13 @@ impl DisplayConfig {
         })
     }
 
+    /// Whether the user explicitly chose a reasoning display mode, as opposed
+    /// to inheriting the legacy `show_thinking` fallback. Front-ends use this
+    /// to apply their own default without overriding a deliberate choice.
+    pub fn has_explicit_reasoning_display(&self) -> bool {
+        self.reasoning_display.is_some()
+    }
+
     /// Set the reasoning display mode and keep `show_thinking` in sync so the
     /// provider request path (which still keys off `show_thinking`) requests
     /// reasoning whenever any display mode is active.
@@ -1615,4 +1622,35 @@ pub struct LaunchHotkeysConfig {
     /// Set true once auto-import has populated `entries`, so we only bake the
     /// per-repo mapping a single time and never clobber later user edits.
     pub imported: bool,
+}
+
+#[cfg(test)]
+mod reasoning_display_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_reasoning_display_is_distinguishable_from_the_legacy_fallback() {
+        // Front-ends (the desktop) apply their own default only when the user
+        // has not chosen one, so this flag must not be true just because
+        // `show_thinking` happens to be set.
+        let mut display = DisplayConfig {
+            reasoning_display: None,
+            show_thinking: true,
+            ..DisplayConfig::default()
+        };
+        assert!(!display.has_explicit_reasoning_display());
+        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Full);
+
+        display.set_reasoning_display(ReasoningDisplayMode::Current);
+        assert!(display.has_explicit_reasoning_display());
+        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Current);
+        assert!(
+            display.show_thinking,
+            "any active display mode must keep reasoning requested from the provider"
+        );
+
+        display.set_reasoning_display(ReasoningDisplayMode::Off);
+        assert!(display.has_explicit_reasoning_display());
+        assert!(!display.show_thinking);
+    }
 }
