@@ -583,7 +583,11 @@ impl PermissionsApp {
             }
         };
 
-        ratatui::restore();
+        // See #599: ratatui::restore() reports failures with eprintln!, which
+        // itself panics when the terminal (and therefore stderr) is already
+        // dead. This crate has no logger, and a failed restore during teardown
+        // is not actionable, so drop the error rather than risk the panic.
+        let _ = ratatui::try_restore();
         result
     }
 }
