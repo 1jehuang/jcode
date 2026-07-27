@@ -606,6 +606,20 @@ impl App {
         }
     }
 
+    /// Drop every side panel page belonging to the discarded session.
+    ///
+    /// `/clear` starts a fresh session, so any page written by the old one is
+    /// orphaned. Without this the panel keeps rendering the previous session's
+    /// content indefinitely: the server only emits `SidePanelState` when a page
+    /// is actually written, so nothing else ever tells the client to drop them.
+    /// See issue #605.
+    pub(crate) fn clear_side_panel_for_new_session(&mut self) {
+        self.apply_side_panel_snapshot(crate::side_panel::SidePanelSnapshot::default());
+        self.last_side_panel_focus_id = None;
+        self.diff_pane_scroll = 0;
+        self.diff_pane_scroll_x = 0;
+    }
+
     pub(super) fn set_side_panel_snapshot(
         &mut self,
         snapshot: crate::side_panel::SidePanelSnapshot,

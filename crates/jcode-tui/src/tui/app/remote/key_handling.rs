@@ -1645,6 +1645,10 @@ async fn handle_remote_key_internal(
                     // (same rationale as reset_current_session in
                     // commands_review.rs).
                     crate::tui::mermaid::clear_active_diagrams();
+                    // The discarded session's side panel pages are orphaned too
+                    // (see issue #605); the server only pushes SidePanelState
+                    // when a page is written, so clear them client-side.
+                    app.clear_side_panel_for_new_session();
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
                     app.set_status_notice("Session cleared");
