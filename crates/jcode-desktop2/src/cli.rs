@@ -245,6 +245,10 @@ fn run_e2e(message: &str) -> Result<()> {
                 println!("[e2e] activity: {label}");
                 model.activity.set_label(label, std::time::Instant::now());
             }
+            harness::HarnessUpdate::Tool { call_id, label } => {
+                println!("[e2e] tool: {label}");
+                model.transcript.upsert_tool(&call_id, &label);
+            }
             harness::HarnessUpdate::Sessions(_) => {}
         }
     }

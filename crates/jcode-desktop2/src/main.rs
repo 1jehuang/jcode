@@ -417,6 +417,17 @@ impl App {
                         .activity
                         .set_label(label, std::time::Instant::now());
                 }
+                harness::HarnessUpdate::Tool { call_id, label } => {
+                    // Progress belongs in the transcript, not only in the
+                    // composer's activity line: each call is one muted line
+                    // that refines in place as its streamed intent arrives.
+                    self.model.busy = true;
+                    self.model.transcript.upsert_tool(&call_id, &label);
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
                     self.model.activity.finish();

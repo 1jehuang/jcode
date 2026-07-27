@@ -859,6 +859,20 @@ fn draw_transcript(
             );
         }
 
+        // A tool line gets a single dot where the rule would start: the app's
+        // halftone mark, one per call, so a run of tool calls reads as a list
+        // of actions rather than as one long quoted thought.
+        if placed.message.role == Role::Tool {
+            let line = frame.body_line_height() * f64::from(crate::transcript::REASONING_SCALE);
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.muted,
+                None,
+                &Circle::new((text_left + 2.0, message_top + line / 2.0), 2.0),
+            );
+        }
+
         // Glyphs in this message, and how many earlier blocks have consumed,
         // so the reveal sweeps across block boundaries as one motion.
         let message_glyphs: usize = match streaming_index {

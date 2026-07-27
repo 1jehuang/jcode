@@ -38,6 +38,11 @@ pub enum Role {
     /// indistinguishable from a stall, but visibly subordinate to the answer:
     /// muted ink behind a rule, never mistaken for the reply itself.
     Reasoning,
+    /// A tool call the agent made, shown as its `intent`: one line of "what
+    /// is being done" per call. It stays in the transcript after the turn,
+    /// so the conversation records not just what was said but what was done,
+    /// and a running turn shows progress where the user is already looking.
+    Tool,
 }
 
 /// One turn of the conversation.
@@ -47,6 +52,10 @@ pub struct Message {
     /// Markdown source. Kept raw so a streaming message can be re-parsed as it
     /// grows, and so copy yields what the model actually wrote.
     pub source: String,
+    /// The tool call this message reports, when `role` is [`Role::Tool`].
+    /// Kept so a streamed `intent` can replace the tool's bare name in place
+    /// rather than appending a second line for the same call.
+    pub call_id: Option<String>,
 }
 
 impl Message {
@@ -54,6 +63,7 @@ impl Message {
         Self {
             role: Role::User,
             source: source.into(),
+            call_id: None,
         }
     }
 
@@ -61,6 +71,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             source: source.into(),
+            call_id: None,
         }
     }
 
@@ -68,6 +79,15 @@ impl Message {
         Self {
             role: Role::Reasoning,
             source: source.into(),
+            call_id: None,
+        }
+    }
+
+    pub fn tool(call_id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            source: label.into(),
+            call_id: Some(call_id.into()),
         }
     }
 }
@@ -113,6 +133,26 @@ impl Transcript {
         match self.messages.last_mut() {
             Some(last) if last.role == Role::Reasoning => last.source.push_str(text),
             _ => self.messages.push(Message::reasoning(text)),
+        }
+    }
+
+    /// Record a tool call's current label, keyed by its call id.
+    ///
+    /// A call announces itself by name the moment it opens, then its streamed
+    /// arguments usually carry an `intent` ("check the build"), which is the
+    /// better line. Updating in place is what turns those two events into one
+    /// transcript line instead of a name followed by a duplicate.
+    pub fn upsert_tool(&mut self, call_id: &str, label: &str) {
+        let label = label.trim();
+        if label.is_empty() {
+            return;
+        }
+        let existing = self.messages.iter_mut().rev().find(|message| {
+            message.role == Role::Tool && message.call_id.as_deref() == Some(call_id)
+        });
+        match existing {
+            Some(message) => message.source = label.to_string(),
+            None => self.messages.push(Message::tool(call_id, label)),
         }
     }
 
@@ -168,7 +208,7 @@ impl LaidMessage {
     pub fn top_padding(&self) -> f64 {
         match self.role {
             Role::User => USER_PAD_Y,
-            Role::Assistant | Role::Reasoning => 0.0,
+            Role::Assistant | Role::Reasoning | Role::Tool => 0.0,
         }
     }
 }
@@ -250,8 +290,10 @@ pub fn lay_out_message(
     let document: Document = parse_markdown(&message.source);
     // Reasoning is the same document machinery in a subordinate voice: muted,
     // slightly smaller, and indented behind a rule the scene draws.
+    // A tool line is the same subordinate voice: it reports what the agent
+    // did, not what it said, so it must never be mistaken for the reply.
     let (base, role_inset) = match message.role {
-        Role::Reasoning => (
+        Role::Reasoning | Role::Tool => (
             ParagraphStyle {
                 font_size: base.font_size * REASONING_SCALE,
                 line_height: base.line_height,
@@ -263,7 +305,7 @@ pub fn lay_out_message(
         _ => (base, 0.0),
     };
     let tint = match message.role {
-        Role::Reasoning => Some(theme.muted),
+        Role::Reasoning | Role::Tool => Some(theme.muted),
         _ => None,
     };
     let mut blocks = Vec::new();
@@ -589,6 +631,57 @@ mod tests {
         transcript.append_assistant("ld**");
         assert_eq!(transcript.messages().len(), 2);
         assert_eq!(transcript.messages()[1].source, "**bold**");
+    }
+
+    /// A tool call is one transcript line however many events it produced:
+    /// the name that opened it and the streamed intent that refined it must
+    /// land on the same message, or every call would render twice.
+    #[test]
+    fn a_tool_call_refines_one_line_in_place() {
+        let mut transcript = Transcript::default();
+        transcript.upsert_tool("call_1", "bash");
+        transcript.upsert_tool("call_1", "check the build");
+        assert_eq!(transcript.messages().len(), 1);
+        assert_eq!(transcript.messages()[0].role, Role::Tool);
+        assert_eq!(transcript.messages()[0].source, "check the build");
+    }
+
+    /// Distinct calls are distinct lines, in the order they happened, and text
+    /// arriving between them still appends rather than merging into a call.
+    #[test]
+    fn distinct_tool_calls_are_distinct_lines() {
+        let mut transcript = Transcript::default();
+        transcript.upsert_tool("call_1", "read the config");
+        transcript.append_assistant("Found it. ");
+        transcript.upsert_tool("call_2", "run the tests");
+        let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::Tool, Role::Assistant, Role::Tool]);
+        // Refining the *first* call later must not touch the second.
+        transcript.upsert_tool("call_1", "read the config file");
+        assert_eq!(transcript.messages()[0].source, "read the config file");
+        assert_eq!(transcript.messages()[2].source, "run the tests");
+    }
+
+    /// A blank label is noise, not a line: an empty intent must not blank an
+    /// existing label or create an empty message.
+    #[test]
+    fn a_blank_tool_label_changes_nothing() {
+        let mut transcript = Transcript::default();
+        transcript.upsert_tool("call_1", "   ");
+        assert!(transcript.messages().is_empty());
+        transcript.upsert_tool("call_1", "list the crate");
+        transcript.upsert_tool("call_1", "");
+        assert_eq!(transcript.messages()[0].source, "list the crate");
+    }
+
+    /// A tool line is streamed like reasoning: it counts toward the reveal, so
+    /// it sweeps in rather than popping.
+    #[test]
+    fn a_trailing_tool_line_is_part_of_the_stream() {
+        let mut transcript = Transcript::default();
+        transcript.push(Message::user("go"));
+        transcript.upsert_tool("call_1", "running tests");
+        assert_eq!(transcript.streaming_len(), "running tests".chars().count());
     }
 
     /// Reasoning coalesces like a reply, and the answer that follows it starts
