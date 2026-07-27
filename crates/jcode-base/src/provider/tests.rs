@@ -313,7 +313,7 @@ fn openai_model_route_roundtrip_preserves_auth_method_for_model_switches() {
             (
                 primary,
                 "openai-oauth",
-                "openai",
+                "openai-oauth",
                 "openai-oauth",
                 openai::OpenAICredentialMode::OAuth,
             ),

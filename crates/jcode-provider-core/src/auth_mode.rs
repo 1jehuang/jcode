@@ -59,6 +59,20 @@ impl DualAuthProvider {
             Self::OpenAI => ActiveProvider::OpenAI,
         }
     }
+
+    /// Model prefix that routes to this provider *without* pinning a
+    /// credential, leaving the runtime in automatic mode (prefer OAuth, fall
+    /// back to an API key). This is the counterpart to
+    /// [`AuthRoute::model_prefix`], which always pins one credential.
+    ///
+    /// `AuthRoute::parse_explicit_credential_prefix` treats exactly these
+    /// prefixes as non-pinning, so the two stay in lockstep.
+    pub const fn bare_model_prefix(self) -> &'static str {
+        match self {
+            Self::Anthropic => "claude",
+            Self::OpenAI => "openai",
+        }
+    }
 }
 
 /// Which credential a dual-auth provider will actually use for a request.
@@ -207,10 +221,22 @@ impl AuthRoute {
     }
 
     /// Canonical session `provider_key` (the folded, route-free form).
+    ///
+    /// Unlike [`Self::runtime_provider_key`], the OAuth variants spell
+    /// themselves out (`claude-oauth` / `openai-oauth`) instead of reusing the
+    /// bare provider name. A session's `provider_key` is also written by
+    /// `derive_session_provider_key` for sessions in *automatic* credential
+    /// mode, where it is the bare name. Sharing one spelling made a deliberate
+    /// OAuth pin indistinguishable from "auto" on restore, so restore promoted
+    /// every Anthropic session to a hard OAuth pin and disabled the runtime's
+    /// API-key fallback.
     pub const fn session_provider_key(self) -> &'static str {
-        // Identical to the runtime-env vocabulary today; kept as its own method
-        // so the session-key meaning is explicit at call sites.
-        self.runtime_provider_key()
+        match (self.provider, self.mode) {
+            (DualAuthProvider::Anthropic, AuthMode::Oauth) => "claude-oauth",
+            (DualAuthProvider::Anthropic, AuthMode::ApiKey) => "claude-api",
+            (DualAuthProvider::OpenAI, AuthMode::Oauth) => "openai-oauth",
+            (DualAuthProvider::OpenAI, AuthMode::ApiKey) => "openai-api",
+        }
     }
 
     /// Canonical CLI `--provider` argument value.
