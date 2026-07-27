@@ -46,7 +46,7 @@ pub(super) fn destructive_command_refusal(
 /// sync, and so bash.rs stays inside the code-size budget.
 pub(super) fn bash_parameters_schema() -> serde_json::Value {
     let cmd_desc = if cfg!(windows) {
-        "The shell command to execute (via cmd.exe). If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`."
+        "The Windows command to execute via cmd.exe. Use cmd.exe syntax and quoting, not Bash syntax. Double-quote individual arguments containing spaces. Invoke PowerShell explicitly when PowerShell syntax is needed. If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`."
     } else {
         "The bash command to execute. If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`. Put large temporary files and worktrees under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed."
     };
