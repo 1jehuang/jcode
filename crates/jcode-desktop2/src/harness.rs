@@ -332,6 +332,11 @@ fn run(
                             session_id: session.session_id,
                             working_dir: session.working_dir,
                             busy: session.status == "busy",
+                            // The overview sizes a blob by how much
+                            // conversation the session holds; a session the
+                            // server could not measure is drawn at the floor
+                            // rather than dropped.
+                            weight: session.transcript_bytes.unwrap_or(0) as f64,
                         })
                         .collect(),
                 ));
