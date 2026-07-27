@@ -238,6 +238,67 @@ fn distance_to(top: f64, height: f64, y: f64) -> f64 {
     }
 }
 
+/// Lay the model's transcript out through the shared cache. Hit-testing,
+/// copying, and drawing all go through this one call, so a click and the pixels
+/// it lands on can never come from different layouts.
+fn laid_for<'a>(
+    painter: &'a mut crate::paint::Painter,
+    model: &crate::Model,
+    frame: crate::layout::Frame,
+) -> &'a [LaidMessage] {
+    let style = crate::scene::transcript_body_style(model);
+    let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+    let crate::paint::Painter {
+        text,
+        transcript: cache,
+    } = painter;
+    cache.lay_out(
+        text,
+        &model.transcript,
+        width,
+        &model.theme,
+        style,
+        frame.scale,
+    )
+}
+
+/// The transcript position under a window point, in logical units.
+///
+/// The conversion into transcript coordinates lives here rather than at the
+/// call site: y is measured from the top of the region and x from the message's
+/// text left edge, which is inset by the user card's padding so both roles
+/// share one measure.
+pub fn position_at_in_frame(
+    painter: &mut crate::paint::Painter,
+    model: &crate::Model,
+    frame: crate::layout::Frame,
+    x: f64,
+    y: f64,
+) -> Option<Position> {
+    let region = (frame.body_bottom - frame.body_top).max(1.0);
+    let scroll = model.scroll;
+    let laid = laid_for(painter, model, frame);
+    let view = Viewport::new(laid, region, scroll);
+    position_at(
+        &view,
+        x - (frame.left + crate::transcript::USER_PAD_X),
+        y - frame.body_top,
+        frame.scale,
+    )
+}
+
+/// The model's selected transcript text, read from the same cached layouts the
+/// renderer drew, so copy returns exactly the characters that were highlighted.
+pub fn selection_text_in_frame(
+    painter: &mut crate::paint::Painter,
+    model: &crate::Model,
+    frame: crate::layout::Frame,
+) -> Option<String> {
+    let selection = model.selection.filter(|selection| !selection.is_empty())?;
+    let copied = selected_text(laid_for(painter, model, frame), &selection);
+    (!copied.is_empty()).then_some(copied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

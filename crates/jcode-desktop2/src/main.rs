@@ -45,6 +45,14 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("--script") {
         return run_script(&args[1..]);
     }
+    // `--version` before anything that can open a window: build tooling
+    // validates a fresh binary by running it, and a GUI process that ignores
+    // an unknown flag and puts a window up instead of answering hangs that
+    // check forever.
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("jcode-desktop2 {}", jcode_build_meta::version());
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--keys") {
         print_keys();
         return Ok(());
@@ -753,70 +761,14 @@ impl App {
             && x <= self.frame.right
     }
 
-    /// The transcript position under a logical point, hit-tested against the
-    /// very layouts the renderer draws (the shared [`paint::TranscriptCache`]),
-    /// so a click lands on the glyph the user aimed at.
+    /// The transcript position under a logical point.
     fn transcript_position_at(&mut self, x: f64, y: f64) -> Option<select::Position> {
-        let frame = self.frame;
-        let style = crate::scene::transcript_body_style(&self.model);
-        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
-        let region = self.transcript_region_height();
-        let App {
-            painter,
-            model: state,
-            ..
-        } = self;
-        let paint::Painter {
-            text,
-            transcript: cache,
-        } = painter;
-        let laid = cache.lay_out(
-            text,
-            &state.transcript,
-            width,
-            &state.theme,
-            style,
-            frame.scale,
-        );
-        let view = crate::viewport::Viewport::new(laid, region, state.scroll);
-        // Transcript coordinates: y from the top of the region, x from the
-        // message's text left edge, which is inset by the user card's padding
-        // so both roles share one measure.
-        select::position_at(
-            &view,
-            x - (frame.left + crate::transcript::USER_PAD_X),
-            y - frame.body_top,
-            frame.scale,
-        )
+        select::position_at_in_frame(&mut self.painter, &self.model, self.frame, x, y)
     }
 
-    /// The selected transcript text, if any. Reads the same cached layouts the
-    /// renderer drew, so copy returns exactly the characters that were
-    /// highlighted.
+    /// The selected transcript text, if any.
     fn selected_transcript_text(&mut self) -> Option<String> {
-        let selection = self.model.selection.filter(|s| !s.is_empty())?;
-        let frame = self.frame;
-        let style = crate::scene::transcript_body_style(&self.model);
-        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
-        let App {
-            painter,
-            model: state,
-            ..
-        } = self;
-        let paint::Painter {
-            text,
-            transcript: cache,
-        } = painter;
-        let laid = cache.lay_out(
-            text,
-            &state.transcript,
-            width,
-            &state.theme,
-            style,
-            frame.scale,
-        );
-        let copied = select::selected_text(laid, &selection);
-        (!copied.is_empty()).then_some(copied)
+        select::selection_text_in_frame(&mut self.painter, &self.model, self.frame)
     }
 
     /// Show a text caret over the composer and the default arrow elsewhere, so
