@@ -924,6 +924,10 @@ pub struct App {
     /// final confidence increase. Low or missing completion confidence keeps
     /// retrying, but a spike gets one dedicated independent-validation turn.
     todo_confidence_spike_challenged: bool,
+    /// Whether this turn's deferred quality-check digest has already been
+    /// delivered. The digest asks the model to verify weak points, so re-asking
+    /// after it has done so would loop; one delivery per turn is the contract.
+    todo_gate_digest_delivered: bool,
     /// How many completion-confidence gate nudges the current auto-poke cycle
     /// has sent. Without a budget, a model that stops updating its todos gets
     /// nudged on every turn forever, silently burning an API call per tick.

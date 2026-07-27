@@ -247,6 +247,14 @@ pub struct TodoPlan {
         skip_serializing_if = "Option::is_none"
     )]
     pub understands_user_intent: Option<u8>,
+    /// Every distinct `understands_user_intent` value this plan has carried,
+    /// oldest first, ending with the current one. Maintained by the todo tool,
+    /// not the model: understanding of a request typically starts low and rises
+    /// as the agent explores, so the trajectory distinguishes an agent that
+    /// resolved the ambiguity by investigating from one that never did.
+    /// Model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub understands_user_intent_history: Vec<u8>,
 }
 
 /// A plan field changed by a todo-tool update.
@@ -285,6 +293,10 @@ pub struct TodoGoal {
     /// against a quantifiable, verifiable objective and iterated on?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hill_climbability: Option<u8>,
+    /// Every distinct `hill_climbability` value this goal has carried, oldest
+    /// first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hill_climbability_history: Vec<u8>,
     /// The concrete feedback loop used to judge whether each iteration improves
     /// the outcome (e.g. a benchmark command and the metric it reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +306,10 @@ pub struct TodoGoal {
     /// validation, cleanup, and explicit disclosure of remaining gaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_to_end_ownership: Option<u8>,
+    /// Every distinct `end_to_end_ownership` value this goal has carried,
+    /// oldest first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub end_to_end_ownership_history: Vec<u8>,
 }
 
 /// A goal field changed by a todo-tool update. This lets transcript renderers

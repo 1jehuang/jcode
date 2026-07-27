@@ -1456,6 +1456,45 @@ impl App {
             || self.schedule_overnight_poke_followup_if_needed()
     }
 
+    /// Deliver this turn's deferred quality-check reminder, if anything is
+    /// still unresolved. Returns true when a continuation was queued.
+    ///
+    /// Delivered at most once per turn: the reminder asks the model to verify
+    /// weak points, and re-asking after it has done so would loop. The
+    /// observation log is cleared either way, so the next turn starts clean.
+    fn deliver_deferred_gate_digest_if_needed(&mut self) -> bool {
+        if self.todo_gate_digest_delivered {
+            return false;
+        }
+        let session_id = self.session_id().to_string();
+        let observations = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
+        if observations.is_empty() {
+            return false;
+        }
+        let plan = crate::todo::load_plan(&session_id).unwrap_or_default();
+        let goals = crate::todo::load_goals(&session_id).unwrap_or_default();
+        let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
+        let _ = crate::todo::clear_gate_observations(&session_id);
+        let Some(digest) = digest else {
+            crate::logging::info(&format!(
+                "TODO_GATE_DIGEST action=skip reason=all_resolved observations={}",
+                observations.len()
+            ));
+            return false;
+        };
+        self.todo_gate_digest_delivered = true;
+        crate::logging::info(&format!(
+            "TODO_GATE_DIGEST action=queue observations={}",
+            observations.len()
+        ));
+        self.push_display_message(DisplayMessage::system(
+            "🔎 Todo quality review: double-checking the weak points from this turn.",
+        ));
+        self.queued_messages.push(digest);
+        self.pending_queued_dispatch = true;
+        true
+    }
+
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
@@ -1478,6 +1517,13 @@ impl App {
                 );
                 self.auto_poke_incomplete_todos = false;
                 return false;
+            }
+            // Deferred quality checks land here, once, instead of interrupting
+            // every todo write during the turn. Points whose scores rose while
+            // the agent worked are filtered out, so this stays silent in the
+            // common case where exploration resolved them on its own.
+            if self.deliver_deferred_gate_digest_if_needed() {
+                return true;
             }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
             let confidence_label =
