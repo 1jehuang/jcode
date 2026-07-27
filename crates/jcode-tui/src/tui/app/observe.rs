@@ -201,10 +201,14 @@ fn todo_gate_notice(name: &str, output: &str, is_error: bool) -> Option<&'static
     }
 
     if output.contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE) {
-        Some("🛑 The agent tried to finish without owning the full outcome. We asked it to follow through.")
+        Some(
+            "🛑 The agent tried to finish without owning the full outcome. We asked it to follow through.",
+        )
     } else if !is_error && output.contains(crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
     {
-        Some("👉 The agent's plan has no clear way to measure progress. We asked it for a stronger feedback loop.")
+        Some(
+            "👉 The agent's plan has no clear way to measure progress. We asked it for a stronger feedback loop.",
+        )
     } else {
         None
     }
