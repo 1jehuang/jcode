@@ -175,7 +175,7 @@ impl Provider for OpenRouterSpecCaptureProvider {
     }
 }
 
-fn create_test_app() -> App {
+pub(crate) fn create_test_app() -> App {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
