@@ -518,6 +518,18 @@ impl Overview {
         self.open = false;
     }
 
+    /// Take the field off screen *now*, with no zoom out.
+    ///
+    /// The escape hatch for the instant-open gesture: Alt opens the field on
+    /// the keydown, so a chord like Alt+B has to erase it in the same frame
+    /// the letter arrives. Zooming out here would leave the blobs washing
+    /// over the composer for a tenth of a second after the user has already
+    /// moved on, which reads as lag rather than as an animation.
+    pub fn abort(&mut self) {
+        self.open = false;
+        self.phase = 0;
+    }
+
     /// Whether the field should be drawn at all.
     pub fn is_visible(&self) -> bool {
         self.open || self.phase > 0
