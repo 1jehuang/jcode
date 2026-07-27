@@ -177,3 +177,43 @@ fn normalize_never_escapes_above_root() {
     assert_eq!(expanded, PathBuf::from("/"));
     assert!(is_catastrophic_target(&expanded, &ctx));
 }
+
+#[test]
+fn individual_credential_files_are_protected_not_just_their_directory() {
+    // Exact-match alone left an obvious hole: deleting one private key is as
+    // damaging as deleting ~/.ssh wholesale.
+    let ctx = ctx();
+    for path in [
+        "/home/u/.ssh/id_ed25519",
+        "/home/u/.ssh/config",
+        "/home/u/.gnupg/secring.gpg",
+        "/home/u/.aws/credentials",
+        "/home/u/.kube/config",
+    ] {
+        assert!(
+            is_catastrophic_target(Path::new(path), &ctx),
+            "{path} must be protected"
+        );
+    }
+}
+
+#[test]
+fn ordinary_config_files_remain_editable() {
+    // The inverse: config directories are protected as a whole, but agents
+    // legitimately rewrite individual files inside them all day.
+    let ctx = ctx();
+    for path in [
+        "/home/u/.config/app/settings.toml",
+        "/home/u/.jcode/sessions/old.json",
+        "/home/u/Documents/notes/draft.md",
+    ] {
+        assert!(
+            !is_catastrophic_target(Path::new(path), &ctx),
+            "{path} should stay editable"
+        );
+    }
+    // ...while the roots themselves stay protected.
+    for path in ["/home/u/.config", "/home/u/.jcode", "/home/u/Documents"] {
+        assert!(is_catastrophic_target(Path::new(path), &ctx), "{path}");
+    }
+}
