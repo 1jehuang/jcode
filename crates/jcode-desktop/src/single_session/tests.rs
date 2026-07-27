@@ -501,7 +501,8 @@ fn thinking_display_off_is_surfaced_instead_of_failing_silently() {
     app.push_thinking_display_notice("off");
     let body = app.body_lines();
     assert!(
-        body.iter().any(|line| line.contains("thinking display is off")),
+        body.iter()
+            .any(|line| line.contains("thinking display is off")),
         "an off mode should explain the empty transcript, got {body:?}"
     );
     assert!(
