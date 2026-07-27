@@ -772,6 +772,24 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// The disk-cache namespace this provider's *foreground* catalog reads and
+    /// writes should use.
+    ///
+    /// Every `new_named_openai_compatible()` constructor sets the process-global
+    /// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
+    /// profiles in one process the last one constructed wins and all profiles
+    /// collide on a single `<last-profile>_models.json`. The background refresh
+    /// path already passes an explicit namespace; the foreground paths did not.
+    /// See issue #607.
+    ///
+    /// Standard/direct OpenRouter and built-in profiles keep the existing
+    /// env-var-driven `cache_path()` semantics.
+    pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
+        self.is_user_named_profile()
+            .then(|| self.profile_id.clone())
+            .flatten()
+    }
+
     /// True when this instance was built from a user-declared
     /// `[providers.<name>]` profile in config.toml rather than a built-in
     /// OpenAI-compatible profile (Cerebras, NVIDIA NIM, ...).

@@ -1826,7 +1826,15 @@ impl OpenRouterProvider {
     pub(crate) fn load_usable_model_disk_cache_entry(
         &self,
     ) -> Option<jcode_provider_openrouter::DiskCache> {
-        load_disk_cache_entry().filter(|entry| self.model_disk_cache_source_matches(entry))
+        // Read from this profile's own namespace rather than whichever profile
+        // last won the process-global env var (#607).
+        let entry = match self.foreground_cache_namespace() {
+            Some(namespace) => {
+                jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&namespace)
+            }
+            None => load_disk_cache_entry(),
+        };
+        entry.filter(|entry| self.model_disk_cache_source_matches(entry))
     }
 
     fn begin_background_model_catalog_refresh(&self) -> bool {
@@ -2027,9 +2035,11 @@ impl OpenRouterProvider {
         let models_cache = Arc::clone(&self.models_cache);
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
+        let cache_namespace = self.foreground_cache_namespace();
 
         handle.spawn(async move {
-            match fetch_models_from_api(client, api_base, auth, models_cache, None).await {
+            match fetch_models_from_api(client, api_base, auth, models_cache, cache_namespace).await
+            {
                 Ok(models) => {
                     let updated = models_fingerprint(&models) != previous_fingerprint;
                     if updated {
@@ -2508,7 +2518,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            None,
+            self.foreground_cache_namespace(),
         )
         .await
     }
@@ -2520,7 +2530,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            None,
+            self.foreground_cache_namespace(),
         )
         .await
     }
