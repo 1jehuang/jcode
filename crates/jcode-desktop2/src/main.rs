@@ -583,6 +583,17 @@ impl App {
             .or_else(|| self.model.editor.selected_text().map(str::to_string))
     }
 
+    /// Copy to a system buffer, reporting a failure rather than losing it
+    /// silently. A copy that quietly did nothing is the bug users describe as
+    /// "the app ate my clipboard"; the in-process fallback still holds the
+    /// text, so paste within the app keeps working either way.
+    fn copy_to(&mut self, target: clipboard::Target, text: &str) {
+        if let Err(error) = self.clipboard.set_to(target, text) {
+            self.model
+                .set_notice(&format!("clipboard unavailable: {error}"));
+        }
+    }
+
     /// Publish the live selection to the primary selection, so middle click
     /// pastes what was just highlighted.
     ///
@@ -594,7 +605,7 @@ impl App {
         let Some(text) = self.any_selected_text() else {
             return;
         };
-        self.clipboard.set_to(clipboard::Target::Primary, &text);
+        self.copy_to(clipboard::Target::Primary, &text);
     }
 
     /// Paste the primary selection at the composer's cursor. Middle click is
@@ -868,11 +879,11 @@ impl App {
             Action::DeleteWordForward => self.model.editor.delete_word_forward(),
             Action::KillToStart => {
                 let killed = self.model.editor.kill_to_start();
-                self.clipboard.set(&killed);
+                self.copy_to(clipboard::Target::Clipboard, &killed);
             }
             Action::KillToEnd => {
                 let killed = self.model.editor.kill_to_end();
-                self.clipboard.set(&killed);
+                self.copy_to(clipboard::Target::Clipboard, &killed);
             }
             Action::CutLine => {
                 // Cut the selection when there is one, matching normal fields.
@@ -880,7 +891,7 @@ impl App {
                     Some(selected) => selected,
                     None => self.model.editor.cut_line(),
                 };
-                self.clipboard.set(&cut);
+                self.copy_to(clipboard::Target::Clipboard, &cut);
             }
 
             Action::Undo => {
@@ -893,7 +904,7 @@ impl App {
                 // copying the composer instead would silently paste something
                 // the user never highlighted.
                 if let Some(text) = self.selected_transcript_text() {
-                    self.clipboard.set(&text);
+                    self.copy_to(clipboard::Target::Clipboard, &text);
                     return true;
                 }
                 // Copy the selection when there is one, else the whole line.
@@ -903,7 +914,7 @@ impl App {
                     .selected_text()
                     .unwrap_or_else(|| self.model.editor.text())
                     .to_string();
-                self.clipboard.set(&text);
+                self.copy_to(clipboard::Target::Clipboard, &text);
             }
             Action::Paste => match self.clipboard.get() {
                 Some(text) => self.model.editor.insert_str(&text),
