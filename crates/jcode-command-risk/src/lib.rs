@@ -151,6 +151,30 @@ const DESTRUCTIVE_COMMANDS: &[&str] = &[
     "rm", "rmdir", "shred", "unlink", "truncate", "dd", "mkfs", "fdisk", "parted", "wipefs", "srm",
 ];
 
+/// Commands that run another command. The real program is one of their
+/// arguments, so `sudo rm -rf ~` must be unwrapped before classification or the
+/// destructive verb is never seen at all.
+const WRAPPER_COMMANDS: &[&str] = &[
+    "sudo", "doas", "env", "nice", "ionice", "time", "timeout", "nohup", "xargs", "command",
+    "builtin", "exec", "setsid", "stdbuf", "chroot", "su", "watch", "eval",
+];
+
+/// Wrapper options that consume the following word as their value.
+const WRAPPER_FLAGS_WITH_VALUES: &[&str] = &[
+    "-n",
+    "-u",
+    "-s",
+    "-c",
+    "-k",
+    "--signal",
+    "--adjustment",
+    "--user",
+];
+
+/// Shells, which take their program from a string argument we cannot parse
+/// reliably. Treated as opaque rather than assumed safe.
+const SHELL_COMMANDS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
 /// Commands that are destructive only with specific flags.
 const CONDITIONALLY_DESTRUCTIVE: &[(&str, &[&str])] = &[
     ("find", &["-delete", "-exec"]),
@@ -177,10 +201,87 @@ pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
 }
 
 fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFinding>) {
+    // Strip wrapper programs (`sudo`, `env`, `xargs`, ...) so the destructive
+    // verb underneath is the one we classify. Without this, any common prefix
+    // is a complete bypass.
+    let mut tokens = tokens;
+    let mut wrapped_by: Option<String> = None;
+    loop {
+        let Some(first) = tokens.first() else {
+            // Ran off the end while unwrapping: the payload is invisible.
+            if let Some(wrapper) = wrapped_by {
+                findings.push(RiskFinding {
+                    level: RiskLevel::Confirm,
+                    reason: format!(
+                        "`{wrapper}` runs another command that could not be \
+                         identified statically"
+                    ),
+                    target: None,
+                });
+            }
+            return;
+        };
+        let name = first.basename();
+        if !WRAPPER_COMMANDS.contains(&name.as_str()) {
+            break;
+        }
+        wrapped_by = Some(name);
+        // Skip the wrapper plus its own options and `VAR=value` assignments,
+        // landing on the wrapped program. Options that take a separate value
+        // (`nice -n 10`, `timeout 5`) must consume that value too.
+        let rest = &tokens[1..];
+        let mut idx = 0;
+        while idx < rest.len() {
+            let token = &rest[idx];
+            if token.is_operator || token.text.contains('=') {
+                idx += 1;
+                continue;
+            }
+            if token.is_flag() {
+                idx += 1;
+                // A short flag known to take an argument consumes the next word.
+                if WRAPPER_FLAGS_WITH_VALUES.contains(&token.text.as_str()) && idx < rest.len() {
+                    idx += 1;
+                }
+                continue;
+            }
+            // A bare number is an operand of the wrapper itself (`timeout 5`),
+            // not the program to run.
+            if token.text.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                idx += 1;
+                continue;
+            }
+            break;
+        }
+        tokens = &rest[idx..];
+    }
+
     let Some(program) = tokens.first() else {
+        // A wrapper with nothing recognizable after it hides its payload.
+        if let Some(wrapper) = wrapped_by {
+            findings.push(RiskFinding {
+                level: RiskLevel::Confirm,
+                reason: format!(
+                    "`{wrapper}` runs another command that could not be \
+                     identified statically"
+                ),
+                target: None,
+            });
+        }
         return;
     };
     let program_name = program.basename();
+
+    // A shell invoked with an inline script is opaque to this parser. Assess
+    // the script text too, so `sh -c "rm -rf ~"` is not a free pass.
+    if SHELL_COMMANDS.contains(&program_name.as_str()) {
+        for token in tokens.iter().skip(1).filter(|t| !t.is_flag()) {
+            for segment in tokenize::split_segments(&token.text) {
+                assess_segment(&segment, ctx, findings);
+            }
+        }
+        return;
+    }
 
     let is_destructive = DESTRUCTIVE_COMMANDS.contains(&program_name.as_str());
     let conditional_flags = CONDITIONALLY_DESTRUCTIVE
@@ -212,6 +313,21 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         .filter(|t| !t.is_flag() && !t.is_operator)
         .collect();
     targets.extend(redirect_targets.iter().copied());
+
+    // A destructive command fed by a pipe takes its operands from the previous
+    // command's output, which we cannot enumerate. `find ~ -type f | xargs rm`
+    // is a real deletion of home contents that neither segment reveals on its
+    // own, so escalate rather than trust the visible arguments.
+    if triggered && tokens.first().is_some_and(|t| t.receives_pipe) {
+        findings.push(RiskFinding {
+            level: RiskLevel::Confirm,
+            reason: format!(
+                "`{program_name}` deletes paths supplied by a pipe, so the set \
+                 of affected files cannot be checked before it runs"
+            ),
+            target: None,
+        });
+    }
 
     // A destructive program with no parsable target is more suspicious, not
     // less: we could not see what it would touch.
