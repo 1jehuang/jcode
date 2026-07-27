@@ -2,6 +2,30 @@
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
 use jcode_harness_api::{ApiEvent, ErrorCode, HistoryMessage, ServerFrame, SessionInfo};
+
+/// Default number of messages a `peek_session` returns. A preview is a glance,
+/// so this is a tail rather than a transcript: enough to recognise which
+/// conversation it is, few enough that peeking a dozen sessions stays cheap.
+const PEEK_LIMIT: u64 = 12;
+
+/// Flatten a stored message's `content` to plain text.
+///
+/// The daemon writes content either as a bare string or as an array of typed
+/// blocks, so both shapes are accepted; anything without text (a tool call, an
+/// image) contributes nothing rather than a placeholder.
+fn flatten_content(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    let Some(blocks) = content.as_array() else {
+        return String::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("")
+}
 use serde_json::{Value, json};
 
 /// Where a translated client request should go.
@@ -143,6 +167,21 @@ impl BridgeState {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::History));
                 vec![Outbound::Legacy(json!({"type": "get_history", "id": id}))]
+            }
+            // Answered from the stored record rather than the daemon: the
+            // legacy protocol can only speak about the attached session, and
+            // attaching to a session merely to read it would disturb the very
+            // thing being previewed.
+            "peek_session" => {
+                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let limit = request["limit"].as_u64().unwrap_or(PEEK_LIMIT) as usize;
+                vec![Outbound::Reply(ServerFrame::reply(
+                    api_id,
+                    ApiEvent::History {
+                        session_id: session_id.to_string(),
+                        messages: Self::stored_tail(session_id, limit),
+                    },
+                ))]
             }
             "ping" => {
                 let id = self.legacy_id();
@@ -429,6 +468,52 @@ impl BridgeState {
             .join("sessions")
             .join(format!("{session_id}.json"));
         std::fs::metadata(path).ok().map(|meta| meta.len())
+    }
+
+    /// The last `limit` messages of a session, read from its stored record.
+    ///
+    /// Content blocks are flattened to their text, which is what a preview
+    /// wants: a reader glancing at another session needs the words, not the
+    /// tool-call structure around them.
+    fn stored_tail(session_id: &str, limit: usize) -> Vec<HistoryMessage> {
+        let Some(home) = std::env::var_os("HOME") else {
+            return vec![];
+        };
+        let path = std::path::Path::new(&home)
+            .join(".jcode")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return vec![];
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return vec![];
+        };
+        let Some(messages) = value["messages"].as_array() else {
+            return vec![];
+        };
+        messages
+            .iter()
+            .rev()
+            .filter_map(|message| {
+                let role = message["role"].as_str()?;
+                // Only the conversation: a preview of tool traffic would be
+                // noise where the point is to recognise which conversation
+                // this is.
+                if role != "user" && role != "assistant" {
+                    return None;
+                }
+                let content = flatten_content(&message["content"]);
+                (!content.trim().is_empty()).then(|| HistoryMessage {
+                    role: role.to_string(),
+                    content,
+                })
+            })
+            .take(limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     /// Record the session set the daemon reported, plus any working
