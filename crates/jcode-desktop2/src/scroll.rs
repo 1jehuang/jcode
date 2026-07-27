@@ -72,6 +72,16 @@ impl Smooth {
         self.hold_until = Some(now + HOLD);
     }
 
+    /// A settled view with the scrollbar at full strength. Captures and pixel
+    /// tests use this so the bar is a pure function of the model rather than
+    /// of how recently a clock said the user scrolled.
+    pub fn lit() -> Self {
+        Self {
+            alpha: 1.0,
+            ..Self::default()
+        }
+    }
+
     /// Land immediately: used where a jump is the point (attaching to another
     /// session, clearing the transcript) and easing would replay history.
     pub fn settle(&mut self) {
