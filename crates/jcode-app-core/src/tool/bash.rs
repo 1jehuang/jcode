@@ -610,12 +610,18 @@ struct BashInput {
     notify: bool,
     #[serde(default)]
     wake: bool,
+    /// Set only when re-issuing a call the gate refused (#604).
+    #[serde(default)]
+    justification: Option<String>,
 }
 
 fn default_true() -> bool {
     true
 }
 
+#[path = "bash_destructive_gate.rs"]
+mod destructive_gate;
+use destructive_gate::destructive_command_refusal;
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -631,43 +637,21 @@ impl Tool for BashTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        let cmd_desc = if cfg!(windows) {
-            "The shell command to execute (via cmd.exe). If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`."
-        } else {
-            "The bash command to execute. If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`. Put large temporary files and worktrees under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed."
-        };
-        json!({
-            "type": "object",
-            "required": ["command"],
-            "properties": {
-                "intent": super::intent_schema_property(),
-                "command": {
-                    "type": "string",
-                    "description": cmd_desc
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Timeout in MILLISECONDS (not seconds). Kills the command when exceeded and reports exit 124. e.g. 1000 = 1s, 600000 = 10min. Omit to run with no timeout; do NOT pass small values like 1000 for long jobs such as builds or test suites."
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": format!("Run in background. {}", BACKGROUND_PROGRESS_GUIDANCE)
-                },
-                "notify": {
-                    "type": "boolean",
-                    "description": "Notify on completion."
-                },
-                "wake": {
-                    "type": "boolean",
-                    "description": "Wake on completion."
-                }
-            }
-        })
+        destructive_gate::bash_parameters_schema()
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
+
+        // Destructive-command gate (#604), before background dispatch.
+        if let Some(refusal) = destructive_command_refusal(
+            &params.command,
+            params.justification.as_deref(),
+            ctx.working_dir.clone(),
+        ) {
+            return Err(anyhow::anyhow!(refusal));
+        }
 
         if run_in_background {
             return self.execute_background(params, ctx).await;
