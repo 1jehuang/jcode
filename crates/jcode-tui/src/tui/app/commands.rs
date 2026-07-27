@@ -193,7 +193,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
             )
         }
     )));
-    app.set_status_notice("Poke stopped: non-retryable error");
+    app.set_status_notice("Poke stopped: this error won't fix itself");
     true
 }
 

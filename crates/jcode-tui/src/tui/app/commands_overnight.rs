@@ -306,7 +306,7 @@ impl App {
         self.push_display_message(DisplayMessage::system(
             "🛑 The last request failed in a way that retrying won't fix, so we stopped the overnight run. Check /overnight status and continue manually if it looks right.".to_string(),
         ));
-        self.set_status_notice("Overnight poke stopped: non-retryable error");
+        self.set_status_notice("Overnight run stopped: this error won't fix itself");
         true
     }
 
