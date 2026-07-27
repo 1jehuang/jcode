@@ -1573,11 +1573,15 @@ impl App {
                 self.auto_poke_incomplete_todos = false;
                 self.todo_confidence_spike_challenged = false;
                 self.todo_completion_gate_attempts = 0;
+                self.todo_gate_digest_delivered = false;
                 self.pending_queued_dispatch = false;
                 return false;
             }
             self.auto_poke_incomplete_todos = false;
             self.todo_confidence_spike_challenged = false;
+            // A finished cycle re-arms the review for whatever work comes next;
+            // without this a session could only ever deliver one digest.
+            self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
             self.push_display_message(DisplayMessage::system(format!(
                 "✅ Todos complete. Completion confidence: {}.",
