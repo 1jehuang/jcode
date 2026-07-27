@@ -36,6 +36,8 @@ impl App {
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
 
         'turn_loop: loop {
+            crate::logging::watchdog::beat("turn.request");
+            crate::logging::watchdog::set_detail("provider request");
             let desired_redraw = crate::tui::redraw_interval(self);
             if desired_redraw != redraw_period {
                 redraw_period = desired_redraw;
@@ -471,6 +473,7 @@ impl App {
                         match stream_event {
                             Some(Ok(event)) => {
                                 // Track activity for status display
+                                crate::logging::watchdog::beat("turn.stream");
                                 self.last_stream_activity = Some(Instant::now());
 
                                 if first_event {
@@ -1278,6 +1281,8 @@ impl App {
                 let tool_name = tc.name.clone();
                 let tool_input = tc.input.clone();
                 let tool_start = Instant::now();
+                crate::logging::watchdog::beat("turn.tool");
+                crate::logging::watchdog::set_detail(format!("tool={tool_name}"));
                 let mut tool_future = std::pin::pin!(registry.execute(&tool_name, tool_input, ctx));
 
                 // Subscribe to bus for subagent status updates

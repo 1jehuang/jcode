@@ -4,6 +4,8 @@
 //!
 //! Supports thread-local context for server, session, provider, and model info.
 
+pub mod watchdog;
+
 use chrono::Local;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -229,6 +231,10 @@ pub fn init() {
     // Prune stale daily log files once per process, off the startup path so
     // disk I/O never blocks launch. cleanup_old_logs is scoped to our own
     // `jcode-*.log` files, so it is safe to run unconditionally.
+    // Detect silent hangs in long sessions: without this a freeze leaves the
+    // log simply stopping, with no phase or thread-state evidence.
+    watchdog::start();
+
     if !CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
         std::thread::Builder::new()
             .name("jcode-log-cleanup".to_string())
