@@ -302,6 +302,10 @@ const BLOB_HALO: f64 = 7.0;
 const BUSY_PULSE: f64 = 0.06;
 /// Period of that breath, in seconds.
 const BUSY_PERIOD: f32 = 1.6;
+/// How far the page is veiled behind the field, at full zoom. Short of opaque
+/// on purpose: the transcript underneath is context, not clutter, and seeing
+/// it is what keeps the overview a layer rather than a separate screen.
+const VEIL_OPACITY: f64 = 0.82;
 /// Smallest blob that carries a busy spinner. Below this the spinner would be
 /// larger than the session it belongs to.
 const MIN_SPINNER_RADIUS: f64 = 22.0;
@@ -336,17 +340,18 @@ fn draw_overview(
         return;
     }
 
-    // Cover the page. The conversation underneath must go, not merely dim: a
-    // translucent wash left the transcript and the composer legible *through*
-    // the blobs, which read as two screens fighting rather than as one that
-    // zoomed out. The cover reaches full opacity early in the zoom, so the
-    // handover happens while the field is still flying out and there is never
-    // a frame of double vision.
-    let cover = (phase * 2.5).min(1.0) as f32;
+    // Veil the page rather than replace it. The conversation stays visible
+    // underneath, so the field reads as a layer over the work you were doing
+    // instead of as a different screen you have been taken to: you never lose
+    // your place, and the switch is a glance rather than a context change.
+    //
+    // Just opaque enough that the blobs and their labels win the foreground,
+    // and no more. A full cover made the gesture feel like navigating away.
+    let veil = (VEIL_OPACITY * phase) as f32;
     scene.fill(
         vello::peniko::Fill::NonZero,
         Affine::scale(scale),
-        theme.background.with_alpha(cover),
+        theme.background.with_alpha(veil),
         None,
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
@@ -1108,14 +1113,19 @@ pub fn build_scene(
         } else {
             // Draw the whole layout in one pass: Parley already wrapped it to
             // the well, so per-row drawing would only reintroduce drift.
-            // Clipped to the well: once the text is taller than the well the
-            // layout is scrolled under it, and the rows above and below the
-            // window must not paint over the transcript or the footnote.
-            scene.push_clip_layer(
-                vello::peniko::Fill::NonZero,
-                Affine::scale(scale),
-                &Rect::new(frame.left, clip_top, frame.right, clip_bottom),
+            // Clipped to the text band, not the whole well: the layout is
+            // scrolled under the field once it outgrows it, and clipping to
+            // the well would let the row above bleed a sliced half-glyph into
+            // the top padding. The band is a whole number of rows, so the
+            // window always shows whole lines.
+            let band = Rect::new(
+                frame.left,
+                prompt_y,
+                frame.right,
+                (prompt_y + frame.composer_lines() as f64 * layout::COMPOSER_LINE_HEIGHT)
+                    .min(clip_bottom),
             );
+            scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &band);
             crate::text::TextSystem::draw_layout(
                 scene,
                 input.layout(),

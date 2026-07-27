@@ -22,6 +22,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("selection", selection),
     ("multiline", multiline),
     ("wrapped_long_line", wrapped_long_line),
+    ("unbreakable_paste", unbreakable_paste),
+    ("overlong_paste", overlong_paste),
     ("multiline_selection", multiline_selection),
     ("selection_all", selection_all),
     ("streaming", streaming),
@@ -314,6 +316,32 @@ fn wrapped_long_line() -> Model {
     }
 }
 
+/// A pasted URL longer than the well: one "word" with no break opportunity,
+/// which used to run straight off the right edge of the composer.
+fn unbreakable_paste() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str(
+        "https://example.com/some/extremely/long/path/segment/that/never/offers/a/break/opportunity?query=parameter&another=value",
+    );
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
+/// A paste taller than the well: the composer caps at
+/// [`crate::layout::COMPOSER_MAX_LINES`], so the layout is scrolled under the
+/// field and the rows outside it must be clipped away rather than painted over
+/// the transcript and the footnote.
+fn overlong_paste() -> Model {
+    let mut editor = crate::editor::Editor::default();
+    editor.insert_str(&"the quick brown fox jumps over the lazy dog ".repeat(20));
+    Model {
+        editor,
+        ..attached_empty()
+    }
+}
+
 /// A selection spanning a line break.
 fn multiline_selection() -> Model {
     let mut editor = crate::editor::Editor::default();
@@ -339,6 +367,8 @@ fn scrolled_back() -> Model {
                 .collect(),
         ),
         scroll: 200.0,
+        // Scrolled back is exactly when the bar is up, so the capture shows it.
+        smooth: crate::scroll::Smooth::lit(),
         ..attached_empty()
     }
 }
