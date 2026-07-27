@@ -37,6 +37,12 @@ fn take_sse_event(buffer: &mut String) -> Option<String> {
 pub struct OpenRouterStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
+    /// Carries incomplete multi-byte UTF-8 sequences across chunk boundaries
+    /// so split CJK characters are not dropped (#609).
+    utf8: jcode_core::util::Utf8StreamDecoder,
+    /// A JSON object the upstream proxy split across two SSE events, held back
+    /// so it can be joined with the next event's payload (#609).
+    partial_json: Option<String>,
     pending: VecDeque<StreamEvent>,
     tool_call_accumulators: std::collections::BTreeMap<u64, ToolCallAccumulator>,
     /// Track if we've emitted the provider info (only emit once)
@@ -64,6 +70,8 @@ impl OpenRouterStream {
         Self {
             inner: Box::pin(stream),
             buffer: String::new(),
+            utf8: jcode_core::util::Utf8StreamDecoder::new(),
+            partial_json: None,
             pending: VecDeque::new(),
             tool_call_accumulators: std::collections::BTreeMap::new(),
             provider_emitted: false,
@@ -252,11 +260,43 @@ impl OpenRouterStream {
             if !requeued.is_empty() {
                 self.buffer.insert_str(0, &requeued);
             }
+            // Re-join a JSON object the proxy split across two SSE events.
+            let data = match self.partial_json.take() {
+                Some(mut partial) => {
+                    partial.push_str(&data);
+                    partial
+                }
+                None => data,
+            };
             let data = data.as_str();
 
             let parsed: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
                 Err(error) => {
+                    // Some proxies drop the `\n\n` event separator or split an
+                    // object across two events, so a whole chunk of deltas was
+                    // being discarded here (#609). Try to recover the individual
+                    // objects before giving up.
+                    if let Some(split) = jcode_core::util::split_concatenated_json(data) {
+                        let mut requeued = String::new();
+                        for object in &split.objects {
+                            requeued.push_str("data: ");
+                            requeued.push_str(object);
+                            requeued.push_str("\n\n");
+                        }
+                        if let Some(partial) = &split.trailing_partial {
+                            // Hold the truncated object back and prepend it to the
+                            // next event's payload rather than dropping it.
+                            self.partial_json = Some(partial.clone());
+                        }
+                        if !requeued.is_empty() {
+                            self.buffer.insert_str(0, &requeued);
+                            continue;
+                        }
+                        if split.trailing_partial.is_some() {
+                            continue;
+                        }
+                    }
                     jcode_logging::warn(&format!(
                         "OpenRouter SSE JSON parse failed for model {}: {} payload={} ",
                         self.model,
@@ -429,14 +469,25 @@ impl Stream for OpenRouterStream {
 
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        self.buffer.push_str(text);
-                    }
+                    let text = self.utf8.decode(&bytes);
+                    self.buffer.push_str(&text);
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Some(Err(anyhow::anyhow!("Stream error: {}", e))));
                 }
                 Poll::Ready(None) => {
+                    // Flush any bytes held back mid-character, then force-close a
+                    // buffer that never received a trailing blank line (#609).
+                    let tail = self.utf8.flush();
+                    if !tail.is_empty() {
+                        self.buffer.push_str(&tail);
+                    }
+                    if !self.buffer.trim().is_empty() && !self.buffer.ends_with("\n\n") {
+                        self.buffer.push_str("\n\n");
+                        if let Some(event) = self.parse_next_event() {
+                            return Poll::Ready(Some(Ok(event)));
+                        }
+                    }
                     // Stream ended - emit any pending tool call
                     self.flush_tool_call_accumulators();
                     if let Some(event) = self.pending.pop_front() {
@@ -518,6 +569,125 @@ mod tests {
         .to_string();
 
         assert_eq!(drain_text(&mut stream), "foobar");
+    }
+
+    /// Issue #609: proxies that drop the event separator, split an object across
+    /// two events, or split a multi-byte character across TCP chunks must not
+    /// cause silent data loss.
+    #[test]
+    fn concatenated_json_in_one_event_keeps_both_deltas() {
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#,
+            r#"{"choices":[{"delta":{"content":" world"}}]}"#,
+            "\n\ndata: [DONE]\n\n"
+        )
+        .to_string();
+
+        assert_eq!(drain_text(&mut stream), "hello world");
+    }
+
+    #[test]
+    fn concatenated_json_with_embedded_data_prefix_keeps_both_deltas() {
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":" world"}}]}"#,
+            "\n\ndata: [DONE]\n\n"
+        )
+        .to_string();
+
+        assert_eq!(drain_text(&mut stream), "hello world");
+    }
+
+    #[test]
+    fn object_split_across_two_events_is_rejoined() {
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            r#"data: {"choices":[{"delta":{"content":"Hello "#,
+            "\n\n",
+            r#"data: world"}}]}"#,
+            "\n\ndata: [DONE]\n\n"
+        )
+        .to_string();
+
+        assert_eq!(drain_text(&mut stream), "Hello world");
+    }
+
+    #[test]
+    fn tool_call_arguments_split_across_events_are_not_truncated() {
+        // The reported symptom was `arguments must be a JSON object, got null`.
+        let mut stream = test_stream();
+        stream.buffer = concat!(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"write","arguments":"{\"path\":\"a.txt\""#,
+            "\n\n",
+            r#"data: ,\"content\":\"hi\"}"}}]}}]}"#,
+            "\n\ndata: [DONE]\n\n"
+        )
+        .to_string();
+
+        let mut args = String::new();
+        while let Some(event) = stream.parse_next_event() {
+            if let StreamEvent::ToolInputDelta(delta) = event {
+                args.push_str(&delta);
+            }
+        }
+        let parsed: Value =
+            serde_json::from_str(&args).expect("tool arguments should be complete JSON");
+        assert_eq!(parsed["path"], "a.txt");
+        assert_eq!(parsed["content"], "hi");
+    }
+
+    #[test]
+    fn multibyte_chars_split_across_tcp_chunks_survive_poll_next() {
+        // Drive real bytes through poll_next, splitting mid-character.
+        let payload =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"读取文件\"}}]}\n\ndata: [DONE]\n\n";
+        let bytes = payload.as_bytes();
+        // Split at every offset to sweep the chunk-boundary state space.
+        for split in 0..bytes.len() {
+            let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
+                Ok(Bytes::copy_from_slice(&bytes[..split])),
+                Ok(Bytes::copy_from_slice(&bytes[split..])),
+            ];
+            let mut stream = OpenRouterStream::new(
+                futures::stream::iter(chunks),
+                "test-model".to_string(),
+                Arc::new(std::sync::Mutex::new(None)),
+            );
+            let text = futures::executor::block_on(async {
+                let mut text = String::new();
+                while let Some(Ok(event)) = stream.next().await {
+                    if let StreamEvent::TextDelta(delta) = event {
+                        text.push_str(&delta);
+                    }
+                }
+                text
+            });
+            assert_eq!(text, "读取文件", "lost content at split offset {split}");
+        }
+    }
+
+    #[test]
+    fn stream_ending_without_a_blank_line_still_flushes_the_last_event() {
+        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}";
+        let chunks: Vec<Result<Bytes, reqwest::Error>> =
+            vec![Ok(Bytes::copy_from_slice(payload.as_bytes()))];
+        let mut stream = OpenRouterStream::new(
+            futures::stream::iter(chunks),
+            "test-model".to_string(),
+            Arc::new(std::sync::Mutex::new(None)),
+        );
+        let text = futures::executor::block_on(async {
+            let mut text = String::new();
+            while let Some(Ok(event)) = stream.next().await {
+                if let StreamEvent::TextDelta(delta) = event {
+                    text.push_str(&delta);
+                }
+            }
+            text
+        });
+        assert_eq!(text, "tail");
     }
 
     #[test]
