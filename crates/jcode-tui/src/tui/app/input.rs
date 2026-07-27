@@ -1592,7 +1592,7 @@ impl App {
         }
 
         self.push_display_message(DisplayMessage::system(format!(
-            "👉 Auto-poking: {} incomplete todo{}. /poke off to stop.",
+            "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
         )));
