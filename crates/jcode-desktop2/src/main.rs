@@ -6,6 +6,7 @@
 
 mod capture;
 mod caret;
+mod cli;
 mod clipboard;
 mod donut;
 mod editor;
@@ -16,6 +17,7 @@ mod keymap;
 mod layout;
 mod meta;
 mod paint;
+mod profile;
 mod render;
 mod scene;
 mod select;
@@ -42,240 +44,16 @@ use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--script") {
-        return run_script(&args[1..]);
-    }
-    // `--version` before anything that can open a window: build tooling
-    // validates a fresh binary by running it, and a GUI process that ignores
-    // an unknown flag and puts a window up instead of answering hangs that
-    // check forever.
-    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("jcode-desktop2 {}", jcode_build_meta::version());
-        return Ok(());
-    }
-    if args.first().map(String::as_str) == Some("--keys") {
-        print_keys();
-        return Ok(());
-    }
-    if args.first().map(String::as_str) == Some("--bench-donut") {
-        return bench_donut();
-    }
-    if args.first().map(String::as_str) == Some("--capture") {
-        return run_capture(&args[1..]);
-    }
-    if args.first().map(String::as_str) == Some("--e2e") {
-        return run_e2e(
-            args.get(1)
-                .map(String::as_str)
-                .unwrap_or("Reply with exactly the word: pong"),
-        );
+    // Every entry point that runs *instead of* the window lives in `cli`, so
+    // this stays a router rather than accumulating subcommands.
+    if let Some(result) = cli::dispatch(&args) {
+        return result;
     }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
     event_loop.run_app(&mut app)?;
     Ok(())
-}
-
-/// `--script <chord|text> ...`: drive the app with a keystroke script and
-/// print the resulting composer state. Verifies real chord sequences end to
-/// end without a compositor, which synthetic-input tools make unreliable.
-///
-///   jcode-desktop2 --script 'type:alpha beta' ctrl+a shift+right shift+right
-fn run_script(steps: &[String]) -> Result<()> {
-    let mut app = App::default();
-    app.model.session_id = Some("session_script".into());
-    for step in steps {
-        if let Some(text) = step.strip_prefix("type:") {
-            app.apply(keymap::Action::Insert, Some(text));
-            continue;
-        }
-        let (key, mods) =
-            keymap::parse_chord(step).ok_or_else(|| anyhow::anyhow!("unknown chord '{step}'"))?;
-        let action = keymap::resolve(&key, mods).unwrap_or(keymap::Action::Insert);
-        if !app.apply(action, None) {
-            println!("quit");
-            return Ok(());
-        }
-    }
-    let editor = &app.model.editor;
-    println!("text: {:?}", editor.text());
-    println!("cursor: {}", editor.cursor());
-    match editor.selected_text() {
-        Some(selected) => println!("selected: {selected:?}"),
-        None => println!("selected: none"),
-    }
-    if let Some(notice) = &app.model.notice {
-        println!("notice: {notice}");
-    }
-    Ok(())
-}
-
-/// `--keys`: print the keybindings ported from the TUI, and the ones that were
-/// deliberately skipped. Makes the parity table discoverable to users instead
-/// of living only in the source.
-fn print_keys() {
-    println!("keybindings (ported from the jcode TUI)\n");
-    let width = keymap::PORTED
-        .iter()
-        .map(|row| row.chord.len())
-        .max()
-        .unwrap_or(0);
-    for row in keymap::PORTED {
-        println!(
-            "  {:<width$}  {:<20}  {}",
-            row.chord,
-            format!("{:?}", row.action),
-            row.tui,
-            width = width
-        );
-    }
-    println!("\nnot ported yet:\n");
-    for (chord, reason) in keymap::NOT_PORTED {
-        println!("  {chord:<width$}  {reason}", width = width);
-    }
-}
-
-/// `--e2e [message]`: headless validation of the app's own harness wiring.
-/// Uses the same worker (`harness::spawn`) and model updates as the windowed
-/// app: connect, attach, send one message, stream the reply, exit 0 on
-/// `TurnDone`. Also renders the final model offscreen to prove the full
-/// model -> scene path.
-fn run_e2e(message: &str) -> Result<()> {
-    let (updates, outgoing) = harness::spawn(|| {});
-    let mut model = Model::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let mut sent = false;
-    while std::time::Instant::now() < deadline {
-        let Ok(update) = updates.recv_timeout(std::time::Duration::from_secs(1)) else {
-            continue;
-        };
-        match update {
-            harness::HarnessUpdate::Status(status) => {
-                println!("[e2e] status: {status}");
-                if status.starts_with("disconnected") || status.starts_with("error") {
-                    anyhow::bail!("harness failure: {status}");
-                }
-                model.status = status;
-            }
-            harness::HarnessUpdate::Attached { session_id } => {
-                println!("[e2e] attached: {session_id}");
-                model.status = format!("attached: {session_id}");
-                model.session_id = Some(session_id);
-                model.transcript.push(transcript::Message::user(message));
-                outgoing.send(harness::Command::Send(message.to_string()))?;
-                sent = true;
-            }
-            harness::HarnessUpdate::Model {
-                provider,
-                model: id,
-            } => {
-                println!("[e2e] model: {provider:?} {id:?}");
-                model.model = Some(ModelId {
-                    provider,
-                    model: id,
-                });
-            }
-            harness::HarnessUpdate::Text(text) => {
-                print!("{text}");
-                model.transcript.append_assistant(&text);
-            }
-            harness::HarnessUpdate::TurnDone if sent => {
-                println!("\n[e2e] turn done");
-                let out = std::env::temp_dir().join("jcode-desktop2-e2e.png");
-                let mut painter = paint::Painter::default();
-                let mut scene = Scene::new();
-                build_scene(&mut scene, &mut painter, &model, (1100, 720), 1.0);
-                capture::capture_scene_to_png(&scene, 1100, 720, &out)?;
-                println!("[e2e] final frame -> {}", out.display());
-                println!("[e2e] OK");
-                return Ok(());
-            }
-            harness::HarnessUpdate::TurnDone => {}
-            // The e2e path drives one session, so the list is irrelevant here.
-            harness::HarnessUpdate::Sessions(_) => {}
-        }
-    }
-    anyhow::bail!("e2e timed out")
-}
-
-/// `--bench-donut`: measure the donut's per-frame CPU cost, split between the
-/// SDF raymarch (the luminance field) and building the halftone path. The
-/// website's budget is under 9ms of main-thread time per frame; this prints the
-/// same number so a regression is a measurement, not an impression.
-fn bench_donut() -> Result<()> {
-    const FRAMES: u32 = 120;
-    let mut field = donut::Donut::new(DONUT_GRID);
-    let frame = layout::Frame::new((2200, 1440), 2.0);
-    let Some(hero) = frame.hero() else {
-        anyhow::bail!("no hero block at the bench window size");
-    };
-
-    let start = std::time::Instant::now();
-    for i in 0..FRAMES {
-        field.render(i as f32 / 60.0, 0.0);
-    }
-    let march = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
-
-    let mut painter = paint::Painter::default();
-    let model = Model::default();
-    let start = std::time::Instant::now();
-    for i in 0..FRAMES {
-        field.render(i as f32 / 60.0, 0.0);
-        let mut scene = Scene::new();
-        build_scene(&mut scene, &mut painter, &model, (2200, 1440), 2.0);
-    }
-    let full = start.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
-
-    println!("donut grid       : {DONUT_GRID}x{DONUT_GRID}");
-    println!("halftone box     : {:.0}pt square", hero.donut.width());
-    println!("sdf raymarch     : {march:.3} ms/frame");
-    println!("full scene build : {full:.3} ms/frame");
-    println!("scene minus march: {:.3} ms/frame", full - march);
-    println!("budget           : 9.000 ms/frame (website's main-thread budget)");
-    if full > 9.0 {
-        anyhow::bail!("donut frame cost {full:.3}ms exceeds the 9ms budget");
-    }
-    Ok(())
-}
-
-/// `--capture <node|all> [out.png|out_dir]`: render state-space nodes
-/// offscreen to PNG for visual verification without a window or compositor.
-fn run_capture(args: &[String]) -> Result<()> {
-    // Capture at HiDPI so reviewed frames match what the window shows.
-    const SCALE: f64 = 2.0;
-    const WIDTH: u32 = 2200;
-    const HEIGHT: u32 = 1440;
-    let node = args.first().map(String::as_str).unwrap_or("all");
-    let mut painter = paint::Painter::default();
-    let mut render_node = |name: &str, model: &Model, path: &std::path::Path| -> Result<()> {
-        let mut scene = Scene::new();
-        build_scene(&mut scene, &mut painter, model, (WIDTH, HEIGHT), SCALE);
-        capture::capture_scene_to_png(&scene, WIDTH, HEIGHT, path)?;
-        println!("captured {name} -> {}", path.display());
-        Ok(())
-    };
-    if node == "all" {
-        let dir = std::path::PathBuf::from(args.get(1).map(String::as_str).unwrap_or("captures"));
-        std::fs::create_dir_all(&dir)?;
-        for name in states::names() {
-            let model = states::by_name(name).expect("listed node");
-            render_node(name, &model, &dir.join(format!("{name}.png")))?;
-        }
-        return Ok(());
-    }
-    let Some(model) = states::by_name(node) else {
-        anyhow::bail!(
-            "unknown node '{node}'; available: {}",
-            states::names().join(", ")
-        );
-    };
-    let out = std::path::PathBuf::from(
-        args.get(1)
-            .cloned()
-            .unwrap_or_else(|| format!("{node}.png")),
-    );
-    render_node(node, &model, &out)
 }
 
 struct App {
