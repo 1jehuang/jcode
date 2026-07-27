@@ -5,9 +5,14 @@ This is a parallelism race on process-global state, not a logic bug.
 
 ## Evidence
 
-- `cargo test -p jcode-tui --lib -- --test-threads=1` passes **2005/2005**.
+- `cargo test -p jcode-tui --lib -- --test-threads=1` passes **2006/2006** (16 ignored).
 - The failing set changes between runs at the default thread count.
 - Individually, each failing test passes when run alone.
+
+Counts were taken on 2026-07-27 and will drift as tests are added. Reproduce
+on an otherwise idle machine: under memory pressure (this host has 15 GiB and
+was running concurrent workspace builds) `cargo` gets SIGTERMed mid-compile,
+which is a different failure from the race described here.
 
 ## Root cause
 
@@ -22,7 +27,7 @@ That wipes **process-global** render state: the flicker frame history, layout
 snapshots, status-area snapshots, copy targets, and scroll positions.
 
 Rendering tests guard exactly that state with `render_state_test_lock()`. But
-`create_test_app` clears it *without* taking the lock, so any of its ~571 call
+`create_test_app` clears it *without* taking the lock, so any of its ~810 call
 sites can reset a concurrently-running render test's state mid-assertion.
 
 The mechanism for the most frequent victim
@@ -42,7 +47,7 @@ is why it presents as order-dependent flakiness.
 ## What does not work
 
 **Taking `render_state_test_lock` inside `create_test_app`.** This is correct
-but serializes all ~571 call sites: suite runtime goes from ~12s to over 10
+but serializes all ~810 call sites: suite runtime goes from ~12s to over 10
 minutes. Measured, then reverted.
 
 **Asserting a floor instead of an exact count** in the changelog test's
