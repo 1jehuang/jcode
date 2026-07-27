@@ -172,7 +172,11 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     .await
     .expect("subscribe bookkeeping must not wait for a busy live agent");
 
-    let events = collect_events_until_done(&mut client_event_rx, 77).await;
+    // Resume and subscribe both answer request id 77, so each emits its own
+    // Done. Collect both batches, otherwise the assertions below only ever see
+    // resume's events and subscribe's are invisible.
+    let mut events = collect_events_until_done(&mut client_event_rx, 77).await;
+    events.extend(collect_events_until_done(&mut client_event_rx, 77).await);
     assert!(
         events
             .iter()
