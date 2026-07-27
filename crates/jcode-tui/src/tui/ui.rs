@@ -77,7 +77,7 @@ mod overlays;
 #[path = "ui_pinned.rs"]
 mod pinned_ui;
 #[path = "ui_prepare.rs"]
-mod prepare;
+pub(crate) mod prepare;
 #[path = "ui_smoothness.rs"]
 mod smoothness;
 #[path = "ui_todo_changes.rs"]
