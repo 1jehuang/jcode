@@ -1,0 +1,33 @@
+{
+  "version": "0.61.0",
+  "date": "2026-07-27",
+  "title": "Remote sessions, a destructive-command gate, and a faster desktop preview",
+  "highlights": [
+    "/remote is a new front door for reaching a running session from another machine over the WebSocket gateway",
+    "Destructive shell commands like recursive deletes now pause for an explicit reflection step before running, closing several bypass routes found in review",
+    "The desktop preview gained selectable transcript text, an Alt spatial session overview, live reasoning and tool-intent streaming, and much smoother scrolling"
+  ],
+  "improvements": [
+    "Quality-gate reminders about open todos now arrive once at the end of a turn instead of nagging after every write",
+    "Interactive model switching works across providers instead of failing when the target model lives on a different provider",
+    "Reasoning effort options are shown for OpenAI-compatible routes that support them, and token usage is reported for their chat streams",
+    "Failing OpenAI-compatible model-catalog refreshes back off instead of retrying hot, and each named provider keeps its own model cache",
+    "A stall watchdog logs long silent hangs during active work so they can be diagnosed",
+    "The slash-command registry was cleaned up: /keys no longer collides, missing aliases were restored, and help gaps were filled"
+  ],
+  "fixes": [
+    "Streaming responses no longer lose data when server-sent events split across chunk boundaries",
+    "A turn that stops expecting a tool call but delivers none now recovers instead of stranding the session",
+    "Pressing Enter immediately after pasting no longer sends the message prematurely",
+    "/clear also clears the side panel",
+    "Copilot retries transient 5xx token-exchange failures and sends the Sonnet reasoning effort correctly",
+    "Configured context windows are honored instead of being overridden by a GPT fallback",
+    "MCP servers started for a session now run in that session's working directory",
+    "agentgrep respects the file field when scoping grep and find",
+    "Session restore no longer hard-pins the Claude/OpenAI OAuth route, and a failed OpenRouter switch preserves the previous profile",
+    "Anthropic requests that would end on an assistant turn get a continuation turn instead of erroring",
+    "A dead terminal no longer mislabels a live session as crashed, and terminal state is restored safely on exit",
+    "Rendered LaTeX math recovers after its image cache is evicted",
+    "Quoted shell arguments are preserved on Windows, and the desktop build no longer breaks on Windows over Unix-only IPC"
+  ]
+}
