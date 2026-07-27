@@ -1672,6 +1672,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    // After `/remote-release`: the parser claims only `/remote` + whitespace/end.
+    if super::commands_remote::handle_remote_command(app, trimmed) {
+        return true;
+    }
+
     if trimmed == "/triage" || trimmed.starts_with("/triage ") {
         let rest = trimmed.strip_prefix("/triage").unwrap_or_default();
         handle_triage_command_local(app, rest);

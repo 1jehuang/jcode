@@ -24,12 +24,17 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::logging;
 mod auth;
+pub mod control;
 mod registry;
 use auth::{
     AuthorizedDevice, WsAuth, WsAuthSource, authorize_ws_device, extract_ws_auth, ws_error_response,
 };
 #[cfg(test)]
 pub(crate) use auth::{is_valid_hex_token, parse_bearer_token, parse_query_token};
+pub use control::{
+    PairingInvite, RemoteCommand, RemoteStatus, ToggleOutcome, create_pairing_invite,
+    parse_remote_command, revoke_device, set_gateway_enabled,
+};
 pub use jcode_gateway_types::{PairedDevice, PairingCode};
 pub use registry::DeviceRegistry;
 
@@ -509,6 +514,104 @@ async fn handle_pair_request(
         "server_version": jcode_build_meta::version(),
     });
     http_response(200, "OK", &body.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Reachable-host resolution
+// ---------------------------------------------------------------------------
+
+/// Placeholder returned when no reachable host name can be determined.
+pub const UNKNOWN_CONNECT_HOST: &str = "<this-machine>";
+
+/// Parse the machine's own MagicDNS name out of `tailscale status --json`.
+pub fn parse_tailscale_dns_name(status_json: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(status_json).ok()?;
+    let dns_name = value
+        .get("Self")?
+        .get("DNSName")?
+        .as_str()?
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+
+    if dns_name.is_empty() {
+        None
+    } else {
+        Some(dns_name)
+    }
+}
+
+/// Best-effort MagicDNS name for this machine, if Tailscale is installed.
+pub fn detect_tailscale_dns_name() -> Option<String> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_tailscale_dns_name(&output.stdout)
+}
+
+/// Resolve the address a remote client should actually dial.
+///
+/// A wildcard `bind_addr` says nothing about how to reach this machine, so fall
+/// back through the explicit override, Tailscale MagicDNS, and finally the
+/// system hostname.
+pub fn resolve_connect_host(bind_addr: &str) -> String {
+    if bind_addr != "0.0.0.0" && bind_addr != "::" {
+        return bind_addr.to_string();
+    }
+
+    if let Some(host) = std::env::var("JCODE_GATEWAY_HOST")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return host;
+    }
+
+    if let Some(host) = detect_tailscale_dns_name() {
+        return host;
+    }
+
+    system_hostname().unwrap_or_else(|| UNKNOWN_CONNECT_HOST.to_string())
+}
+
+/// The system hostname, via `$HOSTNAME` and then the `hostname` command.
+///
+/// `$HOSTNAME` is a shell variable that is frequently not exported, so it
+/// cannot be the only source.
+fn system_hostname() -> Option<String> {
+    if let Some(host) = std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(host);
+    }
+
+    match std::process::Command::new("hostname").output() {
+        Ok(output) if output.status.success() => {
+            let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if host.is_empty() { None } else { Some(host) }
+        }
+        Ok(output) => {
+            logging::info(&format!(
+                "gateway: `hostname` exited with {}; cannot infer a reachable address",
+                output.status
+            ));
+            None
+        }
+        Err(error) => {
+            logging::info(&format!(
+                "gateway: could not run `hostname` ({error}); cannot infer a reachable address"
+            ));
+            None
+        }
+    }
 }
 
 #[cfg(test)]
