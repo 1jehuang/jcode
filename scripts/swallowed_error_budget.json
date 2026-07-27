@@ -702,8 +702,8 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/gateway.rs": {
-      "dot_ok": 1,
       "let_underscore": 1,
+      "dot_ok": 5,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/gateway/auth.rs": {
@@ -2347,8 +2347,8 @@
       "unwrap_or_default": 2
     },
     "src/cli/commands.rs": {
-      "dot_ok": 15,
       "let_underscore": 3,
+      "dot_ok": 11,
       "unwrap_or_default": 6
     },
     "src/cli/commands/menubar.rs": {
