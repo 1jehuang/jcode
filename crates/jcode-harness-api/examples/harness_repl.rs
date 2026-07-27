@@ -119,6 +119,7 @@ fn run_demo() {
                             working_dir: None,
                             title: Some("demo".into()),
                             status: "idle".into(),
+                            transcript_bytes: None,
                         },
                     },
                 )),
