@@ -1,0 +1,25 @@
+{
+  "version": "0.59.0",
+  "date": "2026-07-25",
+  "title": "Desktop preview and provider fixes",
+  "highlights": [
+    "The desktop preview (jcode-desktop2) now starts the jcode runtime and harness bridge itself, so it connects on first launch instead of requiring two daemons to be started by hand",
+    "The desktop preview gained an animated, draggable hero donut on an empty session, a focus-aware caret and input border, and soft-wrapping multi-line composer; set JCODE_DESKTOP2_DONUT=0 to turn the motion off",
+    "New Celeris provider support"
+  ],
+  "improvements": [
+    "Model names render structurally for AWS Bedrock, including bare and context-variant revisions",
+    "The auth list hides providers you have no credentials for",
+    "Webfetch extracts pages more cleanly: site chrome is stripped, output is capped, and attribute text no longer leaks into the result",
+    "Snapshot dates render compactly and acronyms are uppercased in the TUI",
+    "The desktop preview remembers window geometry, supports mouse and keyboard text selection, and centres the composer text in its well",
+    "Onboarding opens the bug-review action instantly, and gained a telemetry settings screen"
+  ],
+  "fixes": [
+    "Bare OpenAI-compatible and named-profile model ids route to the right provider profile again",
+    "Only versioned GPT, Claude, and Gemini names are prettified in the model picker, so custom ids show as typed",
+    "Terminal escape remnants pasted at the composer boundary are stripped instead of corrupting input",
+    "Swarm ids and MCP discovery bind to the accepted working directory, fixing cross-directory mixups",
+    "Stranded agent continuations are recovered rather than silently stalling a turn"
+  ]
+}

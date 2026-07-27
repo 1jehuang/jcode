@@ -42,6 +42,46 @@ if [ -n "$stray" ]; then
   fail "font family referenced outside text.rs: $stray"
 fi
 
+# Docs cannot rot: every test named in the checklist must actually exist.
+echo "== checklist references real tests"
+if ! python3 - "$crate" docs/DESKTOP2_VISUAL_CHECKLIST.md <<'PYEOF'
+import pathlib, re, sys
+
+crate, doc_path = sys.argv[1], sys.argv[2]
+doc = pathlib.Path(doc_path).read_text()
+src = "\n".join(p.read_text() for p in pathlib.Path(crate, "src").rglob("*.rs"))
+defined = set(re.findall(r"fn ([a-z_][a-z0-9_]*)\(", src))
+modules = {p.stem for p in pathlib.Path(crate, "src").rglob("*.rs")} | {
+    "tests", "visual_tests", "action_tests", "selection_tests"
+}
+# Only audit the "Enforced by" column of the rule tables: those cells are the
+# claim that a rule is machine-checked, so a name there must resolve to a real
+# test. Prose and file references elsewhere are not claims.
+referenced, missing = set(), []
+for line in doc.splitlines():
+    if not line.startswith("|") or "Enforced by" in line or set(line) <= set("|- "):
+        continue
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 3:
+        continue
+    for cell in re.findall(r"`([a-z_][a-z0-9_:.]*)`", cells[-1]):
+        if cell.endswith(".rs"):
+            continue
+        leaf = cell.split("::")[-1]
+        if leaf in modules:
+            continue
+        referenced.add(leaf)
+        if leaf not in defined:
+            missing.append(leaf)
+if missing:
+    print("checklist names tests that do not exist:", ", ".join(sorted(set(missing))))
+    raise SystemExit(1)
+print(f"  {len(referenced)} checklist test references all resolve")
+PYEOF
+then
+  fail "checklist references a test that does not exist"
+fi
+
 echo "== fast invariants (geometry, typography, theme)"
 cargo test --profile selfdev -p jcode-desktop2 --quiet || status=1
 

@@ -1,6 +1,6 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development without collecting prompts or code.
+jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. **We do not collect your prompts, your code, or your conversation transcripts.**
 
 Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, and schema v5 agent-time / autonomy / pain-attribution metrics.
 
@@ -234,8 +234,8 @@ Most events also carry a few coarse quality / cleanup fields:
 
 ## What We Do NOT Collect
 
+- **No conversation transcripts, prompts, code, or LLM responses**, except text you explicitly submit with `/feedback ...`
 - No file paths, project names, or directory structures
-- No code, prompts, or LLM responses, except text explicitly submitted with `/feedback ...`
 - No tool inputs or tool outputs
 - No MCP server names or configurations
 - No IP addresses (Cloudflare Workers don't log these by default)
@@ -244,6 +244,20 @@ Most events also carry a few coarse quality / cleanup fields:
 - No exact wall-clock timestamps beyond coarse hour-of-day / weekday buckets
 
 The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id`. It is not derived from your machine, username, email, or any identifiable information.
+
+## How We Use and Share Data
+
+Telemetry is used to operate, debug, secure, and improve jcode, and for product and
+retention analytics. We may publish or share **aggregate** statistics (for example
+install counts, OS/provider distribution, version adoption) and we share data with the
+infrastructure providers needed to run the pipeline, currently Cloudflare.
+
+We do **not** sell event-level telemetry, and we do not collect conversation content to
+sell or to train models. If that ever changes, it will be a separate, clearly disclosed,
+**opt-in** program rather than a silent change to this document.
+
+We do not attempt to re-identify users from telemetry, and the client does not link
+telemetry to account identity.
 
 ## How It Works
 
@@ -258,6 +272,12 @@ The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id
 9. If a request fails (offline, firewall, etc.), jcode silently continues - no retries, no queuing
 
 The telemetry endpoint is a Cloudflare Worker that stores events in a D1 database. The source code for the worker is in [`telemetry-worker/`](./telemetry-worker/).
+
+## Changes to This Policy
+
+The version of this document in the repository is the current policy. If we ever want to
+collect conversation content, or to share or sell anything beyond aggregate statistics,
+that will require a separate opt-in rather than a quiet edit here.
 
 ### Schema v5 deployment note
 
@@ -286,6 +306,6 @@ This is open source. The entire telemetry implementation is in [`src/telemetry.r
 
 ## Data Retention
 
-Telemetry data is used in aggregate only (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
+Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
 
 High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.

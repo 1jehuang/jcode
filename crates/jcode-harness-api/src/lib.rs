@@ -18,10 +18,12 @@ use serde::{Deserialize, Serialize};
 mod client;
 mod events;
 mod requests;
+mod sockets;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
 pub use requests::*;
+pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 
 #[cfg(test)]
 #[path = "harness_api_tests/schema_snapshot.rs"]

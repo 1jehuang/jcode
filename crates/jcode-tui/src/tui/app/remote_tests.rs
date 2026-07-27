@@ -1044,3 +1044,71 @@ fn forward_pending_reasoning_effort_is_noop_without_staged_effort() {
     assert!(app.remote_reasoning_effort.is_none());
     assert!(app.pending_reasoning_effort.is_none());
 }
+
+#[test]
+fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
+    // Regression: a terminal file drop like `/tmp/shot.png` starts with `/`, so
+    // remote submit routed it to `submit_remote_slash_input`, which fell back to
+    // `App::submit_input`. That only sets `pending_turn`, which no remote run
+    // loop consumes, so the client hung in "Sending" forever.
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let file = temp.path().join("shot.png");
+    std::fs::write(&file, b"x").expect("write file");
+    let dropped = file.to_string_lossy().to_string();
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: dropped.clone(),
+            expanded: dropped.clone(),
+            images: vec![],
+        },
+    ))
+    .expect("dropped path should send as a normal remote turn");
+
+    assert!(
+        app.active_skill.is_none(),
+        "a file path must never activate a skill"
+    );
+    assert!(
+        app.is_processing,
+        "a dropped path must start a remote turn instead of stranding pending_turn"
+    );
+    assert!(
+        !app.pending_turn,
+        "remote submissions must never park on the local-only pending_turn flag"
+    );
+}
+
+#[test]
+fn remote_submit_input_never_strands_a_local_pending_turn() {
+    // Safety net: any path that reaches `App::submit_input` while attached to a
+    // remote session must queue for the remote tick loop rather than set
+    // `pending_turn`, which only the local run loop consumes.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.input = "plain prompt".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.submit_input();
+
+    assert!(
+        !app.pending_turn,
+        "remote submit_input must not set the local-only pending_turn flag"
+    );
+    assert_eq!(
+        app.queued_messages,
+        vec!["plain prompt".to_string()],
+        "the prompt should be queued for the remote tick loop"
+    );
+}

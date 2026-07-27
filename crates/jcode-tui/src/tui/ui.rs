@@ -36,6 +36,11 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 #[path = "ui_animations.rs"]
 mod animations;
+pub(crate) use animations::{
+    idle_animation_debug_json, idle_donut_reserved_height, last_idle_animation_area,
+    note_idle_animation_fast_path_blocked, note_idle_animation_full_repaint,
+    note_idle_animation_partial_repaint, record_idle_animation_area, render_idle_animation_into,
+};
 #[path = "ui_box.rs"]
 mod box_utils;
 #[path = "ui_changelog.rs"]
@@ -72,7 +77,7 @@ mod overlays;
 #[path = "ui_pinned.rs"]
 mod pinned_ui;
 #[path = "ui_prepare.rs"]
-mod prepare;
+pub(crate) mod prepare;
 #[path = "ui_smoothness.rs"]
 mod smoothness;
 #[path = "ui_todo_changes.rs"]
@@ -1312,6 +1317,7 @@ use frame_metrics::{
     note_body_cache_lookup, note_body_cache_miss, note_body_incremental_reuse, note_body_request,
     note_chat_layout, note_full_prep_built, note_full_prep_cache_hit, note_full_prep_cache_lookup,
     note_full_prep_cache_miss, note_full_prep_phase_metrics, note_full_prep_request,
+    note_prep_aspect, note_prep_overflow, note_prep_prepare_at, note_prep_restage,
     note_viewport_metrics, reset_frame_perf_stats, viewport_stability_hash,
 };
 pub(crate) use frame_metrics::{
@@ -2492,6 +2498,10 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
+    record_idle_animation_area(None);
+    // Suggestions are read many times while composing one frame. Bump the
+    // epoch here so the memo is scoped to exactly this frame.
+    app.advance_command_suggestions_epoch();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
@@ -2508,25 +2518,6 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // is reclaimed even when no image widget renders again.
     crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
 }
-/// Rows reserved below the input for the decorative idle donut.
-///
-/// The donut only shows on an (effectively) empty idle screen, which means it
-/// is pure negative space. When the composer grows past its resting one-row
-/// height (multi-line input, or the `/` command menu adding suggestion rows),
-/// take that growth out of the donut's reservation instead of shrinking the
-/// transcript above: this keeps the header/tips text and info widgets
-/// perfectly still when the slash menu opens on a fresh session. The donut
-/// simply renders shorter for as long as the composer is expanded.
-fn idle_donut_reserved_height(show_donut: bool, input_height: u16) -> u16 {
-    const IDLE_DONUT_HEIGHT: u16 = 14;
-    if show_donut {
-        let composer_growth = input_height.saturating_sub(1);
-        IDLE_DONUT_HEIGHT.saturating_sub(composer_growth)
-    } else {
-        0
-    }
-}
-
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -2883,6 +2874,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
         diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
+    let aspect_start = Instant::now();
     // Aspect-ratio goal for transcript mermaid renders (deferred and
     // synchronous): the pinned pane's aspect wins when the pane is open so
     // inline and pane share one cached PNG; otherwise a terminal-friendly
@@ -2893,10 +2885,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         wide_prepare_width,
         chat_area.height,
     );
+    note_prep_aspect(aspect_start.elapsed());
     let prepare_at = |width: u16| {
-        mermaid::with_preferred_aspect_ratio(transcript_mermaid_aspect_ratio, || {
-            prepare::prepare_messages(app, width, chat_area.height)
-        })
+        let started = Instant::now();
+        let prepared =
+            mermaid::with_preferred_aspect_ratio(transcript_mermaid_aspect_ratio, || {
+                prepare::prepare_messages(app, width, chat_area.height)
+            });
+        note_prep_prepare_at(started.elapsed());
+        prepared
     };
 
     let onboarding_welcome = app.onboarding_welcome_active();
@@ -2957,7 +2954,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         fixed_height - overscroll_height
     };
     let overflows = |prepared: &PreparedChatFrame| {
-        (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height
+        let started = Instant::now();
+        let result =
+            (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height;
+        note_prep_overflow(started.elapsed());
+        result
     };
 
     // Resolving native-scrollbar overflow can require wrapping the transcript at

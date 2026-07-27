@@ -22,7 +22,11 @@ fn create_session_maps_to_subscribe() {
 fn state_event_answers_pending_attach() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 5}));
-    assert_eq!(out.len(), 2, "subscribe + state chase");
+    assert_eq!(
+        out.len(),
+        3,
+        "subscribe + state chase + model catalog probe"
+    );
     let Outbound::Legacy(state_req) = &out[1] else {
         panic!("expected legacy state request");
     };
@@ -142,4 +146,114 @@ fn error_routes_to_pending_request() {
     let frames =
         state.legacy_event_to_api(&json!({"type": "error", "id": legacy_id, "message": "nope"}));
     assert_eq!(frames[0].reply_to, Some(7));
+}
+
+/// Attaching must volunteer the model identity: a client that has to know to
+/// ask would show "unknown model" forever, which is what this fixes.
+#[test]
+fn attaching_probes_and_reports_the_model() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 7}));
+    let Outbound::Legacy(catalog) = &out[2] else {
+        panic!("expected a legacy catalog probe");
+    };
+    assert_eq!(catalog["type"], "get_model_catalog");
+    let catalog_id = catalog["id"].as_u64().unwrap();
+
+    // The daemon answers the probe with a `history`-shaped reply carrying no
+    // messages. That must become an unsolicited model_info event, not a reply
+    // to some client request that never asked for history.
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "history", "id": catalog_id, "messages": [],
+        "provider_name": "anthropic", "provider_model": "claude-sonnet-4-5",
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].reply_to, None,
+        "the probe was not client-initiated"
+    );
+    match &frames[0].event {
+        ApiEvent::ModelInfo {
+            provider, model, ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("anthropic"));
+            assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// A real `get_history` reply must still be a history reply after the probe has
+/// been consumed, or the probe would swallow the client's own request.
+#[test]
+fn a_client_history_request_is_untouched_by_the_probe() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let Outbound::Legacy(catalog) = &out[2] else {
+        panic!("expected a catalog probe");
+    };
+    let catalog_id = catalog["id"].as_u64().unwrap();
+    state.legacy_event_to_api(&json!({"type": "history", "id": catalog_id, "messages": []}));
+
+    let out = state.api_request_to_legacy(&json!({"req": "get_history", "id": 9}));
+    let Outbound::Legacy(request) = &out[0] else {
+        panic!("expected a legacy history request");
+    };
+    let history_id = request["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "history", "id": history_id,
+        "messages": [{"role": "user", "content": "hi"}],
+    }));
+    assert_eq!(frames[0].reply_to, Some(9));
+    assert!(matches!(frames[0].event, ApiEvent::History { .. }));
+}
+
+/// Switching model mid-session must reach the client, or the caption goes stale
+/// and confidently lies about which model answered.
+#[test]
+fn a_model_change_is_forwarded() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 3,
+        "model": "gpt-5.6", "provider_name": "openai",
+    }));
+    match &frames[0].event {
+        ApiEvent::ModelInfo {
+            provider, model, ..
+        } => {
+            assert_eq!(provider.as_deref(), Some("openai"));
+            assert_eq!(model.as_deref(), Some("gpt-5.6"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// A failed model change must not be reported as the active model.
+#[test]
+fn a_failed_model_change_is_not_reported() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 3, "model": "nope", "error": "no such model",
+    }));
+    assert!(frames.is_empty());
+}
+
+/// An auth change re-resolves the route, so the push must update the caption.
+#[test]
+fn an_available_models_push_updates_the_model() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "available_models_updated",
+        "provider_name": "anthropic", "provider_model": "claude-opus-4-5",
+        "available_models": ["claude-opus-4-5"],
+    }));
+    match &frames[0].event {
+        ApiEvent::ModelInfo {
+            session_id, model, ..
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(model.as_deref(), Some("claude-opus-4-5"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
 }

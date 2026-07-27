@@ -7,6 +7,155 @@ use std::sync::OnceLock;
 
 const IDLE_VARIANTS: &[&str] = &["donut", "orbit_rings"];
 
+/// Where (if anywhere) the decorative idle animation rendered on the last full
+/// frame, so the run loop can repaint only those rows on animation ticks.
+///
+/// Packed into one atomic (`None` is the all-ones sentinel, which no real Rect
+/// can be) so publishing it costs nothing on the render path and reading it
+/// cannot fail or block. Ratatui coordinates are `u16`, so all four fields fit.
+#[cfg(not(test))]
+static LAST_IDLE_ANIMATION_AREA: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn pack_area(area: Option<Rect>) -> u64 {
+    match area {
+        None => u64::MAX,
+        Some(area) => {
+            u64::from(area.x) << 48
+                | u64::from(area.y) << 32
+                | u64::from(area.width) << 16
+                | u64::from(area.height)
+        }
+    }
+}
+
+fn unpack_area(packed: u64) -> Option<Rect> {
+    if packed == u64::MAX {
+        return None;
+    }
+    Some(Rect::new(
+        (packed >> 48) as u16,
+        (packed >> 32) as u16,
+        (packed >> 16) as u16,
+        packed as u16,
+    ))
+}
+
+/// Counts of how idle-animation ticks were served, so the partial-repaint fast
+/// path is observable in `draw-stats` instead of having to be inferred from a
+/// profile. A healthy idle screen shows `partial` climbing and `full` flat: a
+/// regression that pushes animation ticks back onto the full frame pipeline
+/// (~50x more expensive) shows up immediately as `full` climbing instead.
+static IDLE_ANIMATION_PARTIAL_REPAINTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static IDLE_ANIMATION_FULL_REPAINTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_idle_animation_partial_repaint() {
+    IDLE_ANIMATION_PARTIAL_REPAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_idle_animation_full_repaint() {
+    IDLE_ANIMATION_FULL_REPAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Tally of why the animation-only repaint was refused, for `draw-stats`.
+///
+/// A tally rather than a "last reason" because the fast path is consulted many
+/// times per second: a single latest value is ambiguous (it can be a rare case
+/// that happened to fire last), while counts show which predicate actually
+/// dominates.
+static IDLE_ANIMATION_FAST_PATH_BLOCKED: std::sync::Mutex<
+    Option<std::collections::BTreeMap<&'static str, u64>>,
+> = std::sync::Mutex::new(None);
+
+pub(crate) fn note_idle_animation_fast_path_blocked(reason: &'static str) {
+    if let Ok(mut slot) = IDLE_ANIMATION_FAST_PATH_BLOCKED.lock() {
+        *slot
+            .get_or_insert_with(std::collections::BTreeMap::new)
+            .entry(reason)
+            .or_insert(0) += 1;
+    }
+}
+
+pub(crate) fn idle_animation_fast_path_blocked_reasons() -> serde_json::Value {
+    match IDLE_ANIMATION_FAST_PATH_BLOCKED.lock() {
+        Ok(slot) => match slot.as_ref() {
+            Some(counts) => serde_json::to_value(counts).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        },
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
+/// Diagnostic snapshot of how idle-animation ticks are being served, embedded
+/// in `draw-stats`. Assembled here so the animation owns its own reporting and
+/// the generic frame-metrics module stays agnostic.
+pub(crate) fn idle_animation_debug_json() -> serde_json::Value {
+    serde_json::json!({
+        "partial_repaints": IDLE_ANIMATION_PARTIAL_REPAINTS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "full_repaints": IDLE_ANIMATION_FULL_REPAINTS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "last_full_frame_reason": crate::tui::last_full_frame_redraw_reason(),
+        "fast_path_blocked": idle_animation_fast_path_blocked_reasons(),
+    })
+}
+
+/// Publish the animated rectangle for the animation-only partial repaint.
+/// `None` means the last frame drew no animation, disabling the fast path.
+pub(crate) fn record_idle_animation_area(area: Option<Rect>) {
+    #[cfg(test)]
+    {
+        TEST_LAST_IDLE_ANIMATION_AREA.with(|snapshot| {
+            *snapshot.borrow_mut() = area;
+        });
+    }
+    #[cfg(not(test))]
+    {
+        LAST_IDLE_ANIMATION_AREA.store(pack_area(area), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn last_idle_animation_area() -> Option<Rect> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_IDLE_ANIMATION_AREA.with(|snapshot| *snapshot.borrow());
+    }
+    #[cfg(not(test))]
+    {
+        unpack_area(LAST_IDLE_ANIMATION_AREA.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// Repaint just the idle-animation rows of an already-rendered frame buffer.
+///
+/// The surrounding cells were already theme/emoji adapted when the full frame
+/// was drawn, so adaptation is applied to the freshly written animation cells
+/// only: `adapt_buffer_for_theme` inverts colors on light terminals and is not
+/// idempotent, so re-running it over the reused buffer would flip everything
+/// back. The animation writes plain box/shade glyphs and a foreground color, so
+/// per-cell foreground adaptation is the complete equivalent here.
+pub(crate) fn render_idle_animation_into(buf: &mut Buffer, area: Rect, elapsed: f32) {
+    let area = area.intersection(*buf.area());
+    // A full frame clears the whole surface before drawing, so the animation
+    // blits over reset cells and leaves its blank cells styleless. Here the rows
+    // still hold the previous tick's glyphs and colors, so reset them first to
+    // reproduce that starting state exactly.
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].reset();
+        }
+    }
+    render_idle_animation(buf, area, elapsed);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buf[(x, y)];
+            cell.fg = jcode_tui_style::adapt_color_for_theme(cell.fg);
+        }
+    }
+}
+
 // Pure math kernels (3D samplers, glyph chooser, HSV->RGB) live in the
 // dependency-free `jcode-tui-anim` crate, which is pinned to opt-level = 3 in
 // all profiles so these trig-heavy loops stay optimized even in debug/selfdev
@@ -111,16 +260,53 @@ impl IdleBuffers {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_LAST_IDLE_ANIMATION_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
+}
+
 thread_local! {
     static IDLE_BUF: RefCell<IdleBuffers> = RefCell::new(IdleBuffers::new());
 }
 
+/// Rows reserved below the input for the decorative idle donut.
+///
+/// The donut only shows on an (effectively) empty idle screen, which means it
+/// is pure negative space. When the composer grows past its resting one-row
+/// height (multi-line input, or the `/` command menu adding suggestion rows),
+/// take that growth out of the donut's reservation instead of shrinking the
+/// transcript above: this keeps the header/tips text and info widgets
+/// perfectly still when the slash menu opens on a fresh session. The donut
+/// simply renders shorter for as long as the composer is expanded.
+pub(crate) fn idle_donut_reserved_height(show_donut: bool, input_height: u16) -> u16 {
+    const IDLE_DONUT_HEIGHT: u16 = 14;
+    if show_donut {
+        let composer_growth = input_height.saturating_sub(1);
+        IDLE_DONUT_HEIGHT.saturating_sub(composer_growth)
+    } else {
+        0
+    }
+}
+
 pub(super) fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    // Remember the animated rows so the run loop can repaint only them between
+    // full frames. Sizes the animation rejects are recorded as "no animation".
+    record_idle_animation_area((area.width >= 4 && area.height >= 2).then_some(area));
+    render_idle_animation(frame.buffer_mut(), area, app.animation_elapsed());
+}
+
+/// Render the decorative idle animation into `buf` over `area`.
+///
+/// Split out from [`draw_idle_animation`] so the run loop can repaint just the
+/// animation rows between full frames: the animation is the only thing that
+/// changes on an idle screen, and re-rendering the whole frame at animation FPS
+/// was costing ~50ms per tick (dominated by transcript/chrome work that
+/// produced byte-identical cells).
+pub(crate) fn render_idle_animation(buf: &mut Buffer, area: Rect, elapsed: f32) {
     if area.width < 4 || area.height < 2 {
         return;
     }
 
-    let elapsed = app.animation_elapsed();
     let cw = area.width as usize;
     let ch = area.height as usize;
 
@@ -183,7 +369,7 @@ pub(super) fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: R
         // plus a Vec<Span>/Vec<Line>/Paragraph allocation on every animation
         // frame (60 FPS) -- the dominant idle-render cost once the samplers were
         // optimized.
-        blit_idle(frame.buffer_mut(), area, hit, lum_map, sw, time_hue);
+        blit_idle(buf, area, hit, lum_map, sw, time_hue);
     });
 }
 
@@ -462,6 +648,32 @@ mod tests {
     fn idle_variants_exclude_retired_variants() {
         assert!(!IDLE_VARIANTS.contains(&"knot"));
         assert!(!IDLE_VARIANTS.contains(&"black_hole"));
+    }
+
+    /// The published animation rectangle is packed into a single atomic word so
+    /// the render path can publish it without a lock. `None` uses an all-ones
+    /// sentinel, which no real `Rect` can produce because a full-`u16` Rect is
+    /// not a valid terminal area. Verify the encoding is lossless.
+    #[test]
+    fn animation_area_packing_round_trips() {
+        for area in [
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 4, 2),
+            Rect::new(7, 26, 94, 14),
+            Rect::new(u16::MAX - 1, u16::MAX - 1, 1, 1),
+            Rect::new(1, 1, u16::MAX, u16::MAX),
+        ] {
+            let packed = pack_area(Some(area));
+            assert_ne!(packed, u64::MAX, "{area:?} collided with the None sentinel");
+            assert_eq!(
+                unpack_area(packed),
+                Some(area),
+                "lossy packing for {area:?}"
+            );
+        }
+
+        assert_eq!(pack_area(None), u64::MAX);
+        assert_eq!(unpack_area(pack_area(None)), None);
     }
 
     #[test]

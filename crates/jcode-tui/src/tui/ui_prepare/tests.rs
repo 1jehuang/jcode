@@ -107,3 +107,36 @@ fn matching_suffix_len_detects_prepended_history() {
     // Identical transcript: full suffix match.
     assert_eq!(matching_suffix_len(&base, &old), 4);
 }
+
+/// The prepared-header cache trades staleness for avoiding a bundle of disk
+/// probes (auth files, goal JSON, skill overlay, update-channel stats) that
+/// measured ~22ms for the auth probe alone. Its TTL is therefore sized for slow
+/// background drift, which is only safe because credential changes are caught
+/// by the signature instead. Guard that: a generation bump must be visible to
+/// the signature so `/login` repaints on the next frame.
+#[test]
+fn auth_generation_change_invalidates_the_header_signature() {
+    let before = crate::auth::auth_status_generation();
+    crate::auth::bump_auth_status_generation_for_tests();
+    let after = crate::auth::auth_status_generation();
+
+    assert_ne!(
+        before, after,
+        "a credential change must bump the generation so the header signature \
+         changes and the auth inventory repaints immediately"
+    );
+}
+
+/// The TTL must stay sized to the underlying data rather than the frame rate.
+/// A sub-second TTL reintroduces the bimodal cost this cache exists to remove:
+/// every lapse pays a full disk-probe rebuild (p50 48ms in TUI_SLOW_FRAME logs)
+/// to usually produce a byte-identical header.
+#[test]
+fn header_cache_ttl_is_not_sized_to_the_frame_rate() {
+    assert!(
+        HEADER_PREP_CACHE_TTL >= std::time::Duration::from_secs(5),
+        "header TTL {HEADER_PREP_CACHE_TTL:?} is short enough to rebuild on a \
+         render-loop cadence; user-visible changes are covered by the \
+         signature, so the TTL should only bound slow background drift"
+    );
+}

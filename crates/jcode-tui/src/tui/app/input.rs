@@ -719,7 +719,7 @@ pub(super) fn promote_dropped_images(app: &mut App) -> bool {
     true
 }
 
-fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
+pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let trimmed = text.trim();
     let literal_path = PathBuf::from(trimmed);
     if literal_path.is_file() {
@@ -2092,10 +2092,10 @@ pub(super) fn handle_pre_control_shortcuts(
                 app.set_status_notice("Swarm view closed");
             }
             super::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice("Swarm: alt+n full page · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             super::tui_state::SwarmPanelView::FullPage => {
-                app.set_status_notice("Swarm page: alt+n chat · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_page_hint());
             }
         }
         return true;
@@ -3691,6 +3691,13 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+
+        // See `stage_turn_for_remote_tick_loop`: a remote client must never
+        // park on the local-only `pending_turn` flag.
+        if super::remote::stage_turn_for_remote_tick_loop(self, &input) {
+            return;
+        }
+
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
             content: raw_input, // Show placeholder to user (condensed view)

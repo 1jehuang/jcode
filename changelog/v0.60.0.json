@@ -1,0 +1,18 @@
+{
+  "version": "0.60.0",
+  "date": "2026-07-26",
+  "title": "Discovery repair and desktop preview polish",
+  "highlights": [
+    "Tool discovery works again for users whose config was frozen while discovery shipped opt-in, so discover_tools is registered instead of staying silently unavailable",
+    "The desktop preview shows which provider and model is answering, and greets an empty session with an animated halftone donut and rotating composer hints"
+  ],
+  "improvements": [
+    "Discovery gained a financial-data category for market, pricing, and company-data tools",
+    "Keybinding hints show ⌥ instead of Alt on macOS",
+    "The desktop preview lays its text out on a consistent vertical rhythm that holds up at any window size",
+    "A hand-written discovery opt-out is still respected, and saving your config no longer bakes today's defaults into it"
+  ],
+  "fixes": [
+    "Idle animations no longer drag the terminal UI into unnecessary full redraws"
+  ]
+}

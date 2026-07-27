@@ -653,7 +653,9 @@ pub(super) fn prepare_messages(
     // A cached prepared frame intentionally owns only image ids. Recover any
     // staged source evicted by the byte budget or a visibility toggle before an
     // exact frame-cache hit can bypass the normal anchored-image resolver.
+    let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
+    super::note_prep_restage(restage_start.elapsed());
     if cfg!(test) {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
@@ -992,7 +994,17 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
 /// - disk-backed surfaces (auth line, goal badge, skills list, update
 ///   badges, changelog) - refreshed only when the TTL lapses, since they
 ///   change rarely and independently of the render loop.
-const HEADER_PREP_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1000);
+///
+/// The TTL is sized to the *data*, not the frame rate. A 1s TTL made the
+/// header cost bimodal: cache hits were <1ms, but every lapse paid the full
+/// disk-probe rebuild (measured p50 48ms, max 273ms in TUI_SLOW_FRAME logs).
+/// Since `AuthStatus` already self-caches for 30-60s, ~29 of every 30
+/// second-boundary rebuilds re-walked goals, skills, and update badges only to
+/// produce a byte-identical header. Matching the auth cache floor keeps the
+/// refresh cadence meaningful while removing the redundant rebuilds; anything
+/// a user can change from inside the TUI is already covered by the signature
+/// and still repaints immediately.
+const HEADER_PREP_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct HeaderPrepCacheState {
     signature: u64,
@@ -1004,6 +1016,19 @@ fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Drop the prepared-header cache so the next frame re-probes the disk-backed
+/// surfaces (auth inventory, skills, goal badge, update badges).
+///
+/// The TTL alone is sized for background drift. Actions taken *inside* the TUI
+/// that change those surfaces - completing `/login`, adding an account,
+/// reloading skills - must be reflected immediately rather than up to a full
+/// TTL later, so they call this directly.
+pub(crate) fn invalidate_header_prep_cache() {
+    if let Ok(mut cache) = header_prep_cache().lock() {
+        *cache = None;
+    }
 }
 
 /// Hash of the header inputs that are cheap to read every frame. Anything
@@ -1028,6 +1053,11 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     app.connected_clients().hash(&mut hasher);
     app.server_sessions().len().hash(&mut hasher);
     app.working_dir().hash(&mut hasher);
+    // Credential changes alter the auth inventory lines. Hashing the auth
+    // generation (cheap atomic load) means `/login` and account edits repaint
+    // the header on the very next frame instead of waiting out the TTL, which
+    // is what lets the TTL itself be sized for slow background drift.
+    crate::auth::auth_status_generation().hash(&mut hasher);
     // The goal badge renders the focused side-panel page title when a goal
     // page is focused; keying on it keeps focus changes instant.
     if let Some(page) = app.side_panel().focused_page() {

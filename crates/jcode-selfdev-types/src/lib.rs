@@ -35,6 +35,8 @@ pub enum SelfDevBuildTarget {
     Auto,
     Tui,
     Desktop,
+    /// The greenfield desktop app (`jcode-desktop2`).
+    Desktop2,
     All,
 }
 
@@ -44,9 +46,10 @@ impl SelfDevBuildTarget {
             "" | "auto" => Ok(Self::Auto),
             "tui" | "jcode" => Ok(Self::Tui),
             "desktop" | "jcode-desktop" => Ok(Self::Desktop),
+            "desktop2" | "jcode-desktop2" => Ok(Self::Desktop2),
             "all" | "both" => Ok(Self::All),
             other => anyhow::bail!(
-                "invalid selfdev build target `{}`; expected auto, tui, desktop, or all",
+                "invalid selfdev build target `{}`; expected auto, tui, desktop, desktop2, or all",
                 other
             ),
         }

@@ -99,6 +99,20 @@ pub enum ApiEvent {
     /// Session-level status change (idle, generating, tool_running, ...).
     SessionStatus { session_id: String, status: String },
 
+    /// The provider and model serving the attached session.
+    ///
+    /// Sent unsolicited after attach, and again whenever the model changes, so
+    /// a client can show which model it is talking to without polling.
+    ModelInfo {
+        session_id: String,
+        /// Provider name, e.g. `anthropic`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// Model id, e.g. `claude-sonnet-4-20250514`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+
     /// Forward-compatibility catch-all: clients must skip this silently.
     #[serde(other)]
     Unknown,

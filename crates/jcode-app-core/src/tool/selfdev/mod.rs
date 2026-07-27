@@ -527,8 +527,8 @@ impl SelfDevTool {
                     "reason": { "type": "string" },
                     "target": {
                         "type": "string",
-                        "enum": ["auto", "tui", "desktop", "all"],
-                        "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; all builds both."
+                        "enum": ["auto", "tui", "desktop", "desktop2", "all"],
+                        "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; desktop2 builds jcode-desktop2; all builds every binary."
                     },
                     "command": {
                         "type": "string",
