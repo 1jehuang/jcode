@@ -75,6 +75,27 @@ pub enum Action {
     SessionDown,
 }
 
+impl Action {
+    /// Whether this action can leave a different selection behind.
+    ///
+    /// Auto-copy keys off this rather than off a diff of the editor state,
+    /// because the point is to publish what the user *selected*: republishing
+    /// on unrelated actions would mean an arrow key quietly overwrites the
+    /// primary selection with the same text over and over.
+    pub fn changes_the_selection(self) -> bool {
+        matches!(
+            self,
+            Self::ExtendLeft
+                | Self::ExtendRight
+                | Self::ExtendWordLeft
+                | Self::ExtendWordRight
+                | Self::ExtendHome
+                | Self::ExtendEnd
+                | Self::SelectAll
+        )
+    }
+}
+
 /// One row of the parity table: the chord, its action, and the TUI binding it
 /// mirrors. `tui` is documentation for humans; the test asserts `chord`
 /// resolves to `action` through [`resolve`].

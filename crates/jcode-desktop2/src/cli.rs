@@ -33,6 +33,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--profile-states") => Some(run_profile_states(&args[1..])),
         Some("--bench-donut") => Some(bench_donut()),
         Some("--capture") => Some(run_capture(&args[1..])),
+        Some("--check-primary-selection") => Some(check_primary_selection()),
         Some("--e2e") => Some(run_e2e(
             args.get(1)
                 .map(String::as_str)
@@ -40,6 +41,54 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+/// `--check-primary-selection`: prove auto-copy against the *real* compositor.
+///
+/// The unit tests deliberately use the in-process fallback so they cannot
+/// clobber a developer's clipboard, which means they never exercise arboard or
+/// the Wayland/X11 selection protocol at all. That is precisely where this
+/// feature can break without a single test failing, so this entry point does
+/// the round trip for real: write a sentinel to the primary selection, read it
+/// back, and assert the ordinary clipboard was left alone.
+fn check_primary_selection() -> Result<()> {
+    use crate::clipboard::{Clipboard, Target};
+
+    if !crate::clipboard::has_primary_selection() {
+        println!("no primary selection on this platform; nothing to check");
+        return Ok(());
+    }
+    let mut clipboard = Clipboard::system();
+    let before = clipboard.get();
+    let sentinel = format!("jcode-primary-check-{}", std::process::id());
+
+    clipboard.set_to(Target::Primary, &sentinel);
+    // The selection is served asynchronously by the compositor, so a read
+    // immediately after the write can legitimately race it.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    let read_back = clipboard.get_from(Target::Primary);
+    if read_back.as_deref() != Some(sentinel.as_str()) {
+        anyhow::bail!(
+            "primary selection round trip failed: wrote {sentinel:?}, read {read_back:?}"
+        );
+    }
+    let after = clipboard.get();
+    if after != before {
+        anyhow::bail!(
+            "writing the primary selection clobbered the clipboard: {before:?} -> {after:?}"
+        );
+    }
+    // Ownership of a selection belongs to the process that set it, so a
+    // short-lived checker proves the write happened but not that the value
+    // survives. Hold it long enough for another process to read it, which is
+    // the situation that actually matters: the window stays open.
+    if std::env::var_os("JCODE_DESKTOP2_HOLD_SELECTION").is_some() {
+        println!("holding {sentinel} for 10s");
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    println!("primary selection round trip ok (clipboard untouched: {before:?})");
+    Ok(())
 }
 
 /// `--profile-states [budget_us]`: measure every state in the space, and fail
