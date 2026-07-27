@@ -185,6 +185,17 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
             .any(|event| matches!(event, ServerEvent::Error { .. })),
         "busy live attach should not emit error events: {events:?}"
     );
+    // A remote (gateway) client has no other way to learn its session id, and
+    // without it a dropped connection cannot reattach: the next Subscribe
+    // carries no `target_session_id`, so the server hands it a fresh session
+    // and the in-flight turn becomes unreachable.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ServerEvent::SessionId { session_id } if session_id == target_session_id
+        )),
+        "subscribe must report the bound session id so clients can reattach: {events:?}"
+    );
 
     let mut peer_reader = tokio::io::BufReader::new(peer_stream);
     let mut line = String::new();

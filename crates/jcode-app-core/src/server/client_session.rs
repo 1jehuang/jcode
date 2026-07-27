@@ -856,6 +856,14 @@ pub(super) async fn handle_subscribe(
     // plan graph immediately instead of waiting for the next plan mutation.
     send_swarm_plan_to_session(client_session_id, swarm_members, swarm_plans).await;
 
+    // Tell the client which session it is bound to. Local clients learn this
+    // from their own launch state, but a remote client (gateway/WebSocket) has
+    // no other source, and without it a dropped connection cannot reattach:
+    // the next Subscribe carries no `target_session_id`, so the server hands
+    // it a brand-new session and the in-flight turn becomes unreachable.
+    let _ = client_event_tx.send(ServerEvent::SessionId {
+        session_id: client_session_id.to_string(),
+    });
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
