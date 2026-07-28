@@ -793,6 +793,10 @@ fn latex() -> Model {
             "what is the cost".into(),
             "The march is $O(n^2)$ per frame, with $n$ the grid side.\n\n\
              $$\\frac{a + b}{c}$$\n\n\
+             The total work is a sum over rays:\n\n\
+             $$\\sum_{i=1}^{n} \\sqrt{x_i^2 + y_i^2} \\leq \\alpha \\cdot \\pi n$$\n\n\
+             with the rotation applied as\n\n\
+             $$\\begin{pmatrix} \\cos\\theta & -\\sin\\theta \\\\ \\sin\\theta & \\cos\\theta \\end{pmatrix}$$\n\n\
              So halving $n$ quarters the work."
                 .into(),
         )]),
