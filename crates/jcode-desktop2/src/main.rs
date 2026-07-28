@@ -69,16 +69,16 @@ struct App {
     harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
-    /// When Alt went down with nothing else pressed since, or `None` when Alt
-    /// is up or has already been used as part of a chord. The field opens on
-    /// the keydown; this is what lets a tap shorter than [`ALT_TAP`] take it
-    /// straight back off screen.
-    alt_held_since: Option<std::time::Instant>,
-    /// Whether holding Alt opens the blob-field overview. Off by default: the
-    /// concept is benched in favour of Super+HJKL strip motion, but the code
-    /// and its tests stay live so it can come back as a flag flip rather than
-    /// a revert.
-    alt_overview: bool,
+    /// When Super went down with nothing else pressed since, or `None` when
+    /// Super is up or has already been used as part of a chord. The field
+    /// opens on the keydown; this is what lets a tap shorter than
+    /// [`SUPER_TAP`] take it straight back off screen.
+    super_held_since: Option<std::time::Instant>,
+    /// Whether holding Super opens the blob-field overview. On by default:
+    /// the compositor muscle memory this app lives inside (niri, GNOME) puts
+    /// "zoom out to everything" on the Super key. The flag stays so the
+    /// gesture can be benched again as a flip rather than a revert.
+    super_overview: bool,
     clipboard: clipboard::Clipboard,
     /// Pointer position in logical units, tracked for click and drag.
     pointer: (f64, f64),
@@ -119,8 +119,8 @@ impl Default for App {
             model: Model::default(),
             harness: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
-            alt_held_since: None,
-            alt_overview: false,
+            super_held_since: None,
+            super_overview: true,
             clipboard: clipboard::Clipboard::default(),
             pointer: (0.0, 0.0),
             dragging: false,
@@ -145,16 +145,17 @@ const DONUT_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Maximum gap between two clicks that still counts as a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// How quickly Alt must go back up for the press to count as a tap rather
+/// How quickly Super must go back up for the press to count as a tap rather
 /// than a gesture.
 ///
-/// The field opens the instant Alt goes down, because a hold threshold made
-/// the most-used shortcut in the app feel like it was thinking. Alt is still
-/// the first half of a dozen editing chords, so the two escapes are: any key
-/// pressed with Alt aborts the field in the same frame, and letting Alt back
-/// up this fast dismisses without switching session. Neither costs the user
-/// anything they had, and a deliberate hold shows the field immediately.
-const ALT_TAP: std::time::Duration = std::time::Duration::from_millis(180);
+/// The field opens the instant Super goes down, because a hold threshold made
+/// the most-used shortcut in the app feel like it was thinking. Super is
+/// still the first half of editing and navigation chords, so the two escapes
+/// are: any chord key pressed with Super aborts the field in the same frame,
+/// and letting Super back up this fast dismisses without switching session.
+/// Neither costs the user anything they had, and a deliberate hold shows the
+/// field immediately.
+const SUPER_TAP: std::time::Duration = std::time::Duration::from_millis(180);
 
 /// Frame interval while the overview zooms (~60fps).
 const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
@@ -220,7 +221,7 @@ pub struct Model {
     pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
-    /// The session overview: the blob field held Alt zooms out into. Part of
+    /// The session overview: the blob field held Super zooms out into. Part of
     /// the model so a frame stays a pure function of it and every phase of
     /// the zoom is capturable.
     pub overview: overview::Overview,
@@ -612,44 +613,93 @@ impl App {
         }
     }
 
-    /// Alt went down or came up.
+    /// Super went down or came up.
     ///
     /// Pressing it opens the session overview at once, and releasing it
     /// commits to the highlighted session unless the press was a tap shorter
-    /// than [`ALT_TAP`]. Tracked from the modifier event rather than from a
+    /// than [`SUPER_TAP`]. Tracked from the modifier event rather than from a
     /// key event because a bare modifier never produces one of its own.
     ///
     /// A named method rather than an inline arm so the tests drive the same
     /// code the window does: a test that reimplemented this gesture would keep
     /// passing after the real handler stopped opening anything.
-    fn on_alt_changed(&mut self, down: bool, now: std::time::Instant) {
-        if !self.alt_overview && !self.model.overview.is_visible() {
-            // The gesture is benched: Alt stays a plain chord modifier. The
-            // visibility check keeps release handling sane if the flag is
-            // ever flipped off while the field is up.
+    fn on_super_changed(&mut self, down: bool, now: std::time::Instant) {
+        if !self.super_overview && !self.model.overview.is_visible() {
+            // The gesture is benched: Super stays a plain chord modifier.
+            // The visibility check keeps release handling sane if the flag
+            // is ever flipped off while the field is up.
             return;
         }
         if down {
-            if self.alt_held_since.is_none() && !self.model.overview.is_open() {
-                self.alt_held_since = Some(now);
+            if self.super_held_since.is_none() && !self.model.overview.is_open() {
+                self.super_held_since = Some(now);
                 self.open_overview();
             }
             return;
         }
         let tap = self
-            .alt_held_since
-            .is_some_and(|since| now.duration_since(since) < ALT_TAP);
-        self.alt_held_since = None;
+            .super_held_since
+            .is_some_and(|since| now.duration_since(since) < SUPER_TAP);
+        self.super_held_since = None;
+        if !self.model.overview.is_open() {
+            // Enter or Escape already resolved the gesture while Super was
+            // still down; the release must not commit a second time.
+            return;
+        }
         if tap && self.model.overview.focus() == self.model.session_id.as_deref() {
-            // A bare tap on Alt, with the highlight never moved: the user was
-            // reaching for a chord they did not finish, not switching session.
-            // Take the field straight off screen rather than zooming it out.
+            // A bare tap on Super, with the highlight never moved: the user
+            // was reaching for a chord they did not finish, not switching
+            // session. Take the field straight off screen rather than
+            // zooming it out.
             self.model.overview.abort();
             self.request_redraw();
             return;
         }
-        // Releasing Alt flies into whichever blob is highlighted.
+        // Releasing Super flies into whichever blob is highlighted.
         self.close_overview(true);
+    }
+
+    /// A key went down while the field is open.
+    ///
+    /// hjkl, the arrows, Tab and Enter drive the field. Anything else means
+    /// the user was reaching for a chord, not gesturing: the field comes
+    /// straight off screen and the chord does what it always does. A key
+    /// that resolves to nothing is swallowed rather than typed, because text
+    /// arriving in a composer the user cannot see would be worse than a dead
+    /// key.
+    ///
+    /// Returns false when the chord asked the app to quit, mirroring
+    /// [`Self::apply`].
+    fn overview_keydown(
+        &mut self,
+        logical_key: &winit::keyboard::Key,
+        typed: Option<&str>,
+    ) -> bool {
+        // Shift+Tab steps backwards, the Alt+Tab habit.
+        let action = if self.modifiers.shift_key()
+            && *logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
+        {
+            Some(keymap::Action::OverviewPrev)
+        } else {
+            keymap::resolve_overview(logical_key)
+        };
+        if let Some(action) = action {
+            let keep = self.apply(action, None);
+            self.request_redraw();
+            return keep;
+        }
+        // The field opened on the Super keydown, so this key is the second
+        // half of a chord the user already knew. Abort rather than zoom out:
+        // blobs washing over the composer after the user has moved on reads
+        // as lag, not as an animation.
+        self.super_held_since = None;
+        self.model.overview.abort();
+        let keep = match keymap::resolve(logical_key, self.modifiers) {
+            Some(action) => self.apply(action, typed),
+            None => true,
+        };
+        self.request_redraw();
+        keep
     }
 
     /// Advance the overview's zoom one frame.
@@ -1065,7 +1115,7 @@ impl App {
     pub fn animation_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
         // The overview is the one animation that must run whether or not the
         // window thinks it is focused: a compositor that steals focus while
-        // Alt is held would otherwise freeze the field mid-zoom.
+        // Super is held would otherwise freeze the field mid-zoom.
         let overview = self
             .model
             .overview
@@ -1476,10 +1526,21 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                self.on_alt_changed(self.modifiers.alt_key(), std::time::Instant::now());
+                self.on_super_changed(self.modifiers.super_key(), std::time::Instant::now());
             }
             WindowEvent::Focused(focused) => {
                 self.model.focused = focused;
+                if !focused {
+                    // The compositor stole the rest of the gesture (niri
+                    // grabs most Super chords for itself), so the release
+                    // will never arrive here. Take the field down rather
+                    // than leaving it stuck open under a window the user
+                    // has already left.
+                    self.super_held_since = None;
+                    if self.model.overview.is_visible() {
+                        self.model.overview.abort();
+                    }
+                }
                 // Restart the blink phase on focus so the caret is immediately
                 // solid rather than appearing mid-off-phase.
                 if focused {
@@ -1497,28 +1558,19 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                // While the field is up it owns the keyboard: an unbound key
-                // is swallowed rather than typed into a composer the user
-                // cannot see. Shift+Tab steps backwards, the Alt+Tab habit.
+                // While the field is up it owns the keyboard: bound keys
+                // drive the field, and anything else is a chord that takes
+                // the field straight back off screen.
                 if self.model.overview.is_open() {
-                    let action = if self.modifiers.shift_key()
-                        && logical_key
-                            == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
-                    {
-                        Some(keymap::Action::OverviewPrev)
-                    } else {
-                        keymap::resolve_overview(&logical_key)
-                    };
-                    if let Some(action) = action {
-                        self.apply(action, None);
-                        self.request_redraw();
+                    if !self.overview_keydown(&logical_key, text.as_ref().map(|t| t.as_str())) {
+                        self.save_geometry(true);
+                        event_loop.exit();
                     }
                     return;
                 }
-                // Alt is the first half of a dozen editing chords, so any key
-                // pressed with it takes the field straight back off screen:
-                // the user is typing, not gesturing.
-                self.alt_held_since = None;
+                // A key landing while the field is still zooming out erases
+                // it in the same frame: the user is typing, not gesturing.
+                self.super_held_since = None;
                 if self.model.overview.is_visible() {
                     self.model.overview.abort();
                 }
