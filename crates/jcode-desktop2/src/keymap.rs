@@ -1,10 +1,20 @@
 //! Keymap: winit key events to editor actions.
 //!
-//! The chords mirror the jcode TUI (see `jcode-tui/src/tui/app/input.rs`) so
-//! muscle memory transfers. Resolution is a pure function of key + modifiers,
-//! which lets [`PORTED`] act as a machine-checkable parity table: every chord
-//! documented as ported is asserted to actually resolve to its action, so the
-//! table cannot drift from the behavior.
+//! desktop2 is a GUI app, so the primary contract is the **web/browser text
+//! field**: Ctrl+A selects all, Ctrl+C copies, Ctrl+Z / Ctrl+Shift+Z undo and
+//! redo, Shift+arrows extend the selection, Ctrl+Tab and Ctrl+PageUp/PageDown
+//! walk the "tabs" (the session strip). Those are the chords a desktop user
+//! already has in their hands, and violating them is a data-loss trap
+//! (Ctrl+A jumping the caret, Ctrl+C killing a turn while text is selected).
+//!
+//! TUI/emacs chords are kept wherever they do not collide, so terminal muscle
+//! memory still mostly works: Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+B/F. Where
+//! the two disagree the web binding wins and start-of-line stays reachable via
+//! Home.
+//!
+//! Resolution is a pure function of key + modifiers, which lets [`PORTED`] act
+//! as a machine-checkable table: every documented chord is asserted to really
+//! resolve to its action, so the table cannot drift from the behavior.
 //!
 //! Like the TUI, Ctrl / Cmd (Super) / Alt are accepted interchangeably where
 //! the meaning is unambiguous, because which one reaches the app depends on
@@ -35,6 +45,15 @@ pub enum Action {
     ExtendWordRight,
     ExtendHome,
     ExtendEnd,
+    /// Shift+Up / Shift+Down: grow the selection a line at a time, clamping to
+    /// the buffer edges like a browser textarea.
+    ExtendLineUp,
+    ExtendLineDown,
+    /// Ctrl+Home / Ctrl+End inside a text field: caret to the very start/end.
+    MoveDocStart,
+    MoveDocEnd,
+    ExtendDocStart,
+    ExtendDocEnd,
     SelectAll,
 
     DeleteBack,
@@ -46,7 +65,12 @@ pub enum Action {
     CutLine,
 
     Undo,
+    Redo,
     Copy,
+    /// Ctrl+C: copy when something is selected, otherwise interrupt or quit.
+    /// The web meaning wins whenever it can apply, so Ctrl+C never silently
+    /// kills a turn while the user was trying to copy.
+    CopyOrInterrupt,
     Paste,
 
     HistoryPrev,
@@ -106,6 +130,10 @@ impl Action {
                 | Self::ExtendWordRight
                 | Self::ExtendHome
                 | Self::ExtendEnd
+                | Self::ExtendLineUp
+                | Self::ExtendLineDown
+                | Self::ExtendDocStart
+                | Self::ExtendDocEnd
                 | Self::SelectAll
         )
     }
@@ -166,8 +194,13 @@ pub const PORTED: &[Ported] = &[
     // Emacs motion, from handle_control_key.
     Ported {
         chord: "ctrl+a",
-        action: Action::MoveHome,
-        tui: "Ctrl+A start of line",
+        action: Action::SelectAll,
+        tui: "web: select all (Home keeps start-of-line)",
+    },
+    Ported {
+        chord: "super+a",
+        action: Action::SelectAll,
+        tui: "web: Cmd+A select all",
     },
     Ported {
         chord: "ctrl+e",
@@ -299,9 +332,79 @@ pub const PORTED: &[Ported] = &[
         tui: "Alt+V paste",
     },
     Ported {
+        chord: "ctrl+c",
+        action: Action::CopyOrInterrupt,
+        tui: "web: copy when selected, else interrupt",
+    },
+    Ported {
+        chord: "super+c",
+        action: Action::CopyOrInterrupt,
+        tui: "web: Cmd+C copy",
+    },
+    Ported {
         chord: "ctrl+shift+c",
         action: Action::Copy,
         tui: "copy selection",
+    },
+    Ported {
+        chord: "ctrl+shift+a",
+        action: Action::SelectAll,
+        tui: "web: select all (alias)",
+    },
+    Ported {
+        chord: "ctrl+shift+z",
+        action: Action::Redo,
+        tui: "web: redo",
+    },
+    Ported {
+        chord: "ctrl+y",
+        action: Action::Redo,
+        tui: "web/Windows: redo",
+    },
+    Ported {
+        chord: "ctrl+delete",
+        action: Action::DeleteWordForward,
+        tui: "web: delete word forward",
+    },
+    Ported {
+        chord: "shift+up",
+        action: Action::ExtendLineUp,
+        tui: "web: extend selection a line up",
+    },
+    Ported {
+        chord: "shift+down",
+        action: Action::ExtendLineDown,
+        tui: "web: extend selection a line down",
+    },
+    Ported {
+        chord: "ctrl+shift+home",
+        action: Action::ExtendDocStart,
+        tui: "web: extend to start of field",
+    },
+    Ported {
+        chord: "ctrl+shift+end",
+        action: Action::ExtendDocEnd,
+        tui: "web: extend to end of field",
+    },
+    Ported {
+        chord: "ctrl+tab",
+        action: Action::SessionRight,
+        tui: "web: next tab",
+    },
+    Ported {
+        chord: "ctrl+shift+tab",
+        action: Action::SessionLeft,
+        tui: "web: previous tab",
+    },
+    Ported {
+        chord: "ctrl+pagedown",
+        action: Action::SessionRight,
+        tui: "web: next tab",
+    },
+    Ported {
+        chord: "ctrl+pageup",
+        action: Action::SessionLeft,
+        tui: "web: previous tab",
     },
     // History.
     Ported {
@@ -337,24 +440,29 @@ pub const PORTED: &[Ported] = &[
     },
     Ported {
         chord: "ctrl+home",
-        action: Action::ScrollTop,
-        tui: "scroll to top",
+        action: Action::MoveDocStart,
+        tui: "web: caret to start of field",
     },
     Ported {
         chord: "ctrl+end",
+        action: Action::MoveDocEnd,
+        tui: "web: caret to end of field",
+    },
+    Ported {
+        chord: "alt+home",
+        action: Action::ScrollTop,
+        tui: "scroll transcript to top",
+    },
+    Ported {
+        chord: "alt+end",
         action: Action::ScrollBottom,
-        tui: "scroll to bottom",
+        tui: "scroll transcript to bottom",
     },
     // Interrupt / cancel.
     Ported {
         chord: "escape",
         action: Action::Cancel,
         tui: "Esc cancel or clear input",
-    },
-    Ported {
-        chord: "ctrl+c",
-        action: Action::InterruptOrQuit,
-        tui: "Ctrl+C interrupt or quit",
     },
     Ported {
         chord: "ctrl+d",
@@ -407,8 +515,12 @@ pub const PORTED: &[Ported] = &[
 /// TUI chords deliberately **not** ported, with the reason. Keeps the scope
 /// honest: these depend on surfaces desktop2 does not have yet.
 pub const NOT_PORTED: &[(&str, &str)] = &[
-    ("tab", "no slash-command autocomplete yet"),
+    (
+        "tab",
+        "no slash-command autocomplete yet (Ctrl+Tab switches sessions)",
+    ),
     ("ctrl+t", "no queue mode yet"),
+    ("ctrl+a as start-of-line", "web select-all wins; use Home"),
     ("ctrl+s", "no input stash yet"),
     ("ctrl+p", "no auto-poke yet"),
     ("ctrl+r", "no session recovery yet"),
@@ -461,7 +573,8 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
     let sup = mods.super_key();
     let shift = mods.shift_key();
     // Ctrl and Cmd are interchangeable for editing chords: which one arrives
-    // depends on the platform.
+    // depends on the platform, and a Linux user pressing Ctrl+C expects the
+    // same thing a macOS user pressing Cmd+C does.
     let cmd = ctrl || sup;
 
     match key {
@@ -473,6 +586,13 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
             NamedKey::ArrowRight if ctrl && alt => Some(Action::SessionRight),
             NamedKey::ArrowUp if ctrl && alt => Some(Action::SessionUp),
             NamedKey::ArrowDown if ctrl && alt => Some(Action::SessionDown),
+            // Ctrl+Tab / Ctrl+PageUp / Ctrl+PageDown are the browser's tab
+            // chords, and sessions are this app's tabs.
+            NamedKey::Tab if cmd => Some(if shift {
+                Action::SessionLeft
+            } else {
+                Action::SessionRight
+            }),
             NamedKey::Enter => Some(if shift {
                 Action::InsertNewline
             } else {
@@ -487,9 +607,11 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                 }
             }
             NamedKey::Delete => {
-                // Option+Delete is word-delete-back on macOS keyboards, which
-                // the TUI also honors.
-                if alt || sup {
+                if ctrl {
+                    // Web/Windows: Ctrl+Delete deletes the word *ahead*.
+                    Some(Action::DeleteWordForward)
+                } else if alt || sup {
+                    // Option+Delete is word-delete-back on macOS keyboards.
                     Some(Action::DeleteWordBack)
                 } else {
                     Some(Action::DeleteForward)
@@ -509,37 +631,59 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                 (false, true, _) => Action::MoveWordRight,
                 (false, false, false) => Action::MoveRight,
             }),
-            NamedKey::ArrowUp => Some(Action::HistoryPrev),
-            NamedKey::ArrowDown => Some(Action::HistoryNext),
-            NamedKey::Home => Some(if shift {
-                Action::ExtendHome
-            } else if cmd {
-                Action::ScrollTop
+            // Shift+Up/Down extends by line, exactly like a textarea. Without
+            // shift the caret walks lines and falls through to history recall
+            // at the edges (handled by the app).
+            NamedKey::ArrowUp => Some(if shift {
+                Action::ExtendLineUp
             } else {
-                Action::MoveHome
+                Action::HistoryPrev
             }),
-            NamedKey::End => Some(if shift {
-                Action::ExtendEnd
-            } else if cmd {
-                Action::ScrollBottom
+            NamedKey::ArrowDown => Some(if shift {
+                Action::ExtendLineDown
             } else {
-                Action::MoveEnd
+                Action::HistoryNext
             }),
-            NamedKey::PageUp => Some(Action::PageUp),
-            NamedKey::PageDown => Some(Action::PageDown),
+            // Home/End behave as they do in a focused text field: line edges,
+            // and with Ctrl the whole field. Transcript scroll-to-edge lives on
+            // the Alt chords, since the field owns the Ctrl ones.
+            NamedKey::Home => Some(match (shift, cmd, alt) {
+                (_, _, true) => Action::ScrollTop,
+                (true, true, _) => Action::ExtendDocStart,
+                (true, false, _) => Action::ExtendHome,
+                (false, true, _) => Action::MoveDocStart,
+                (false, false, _) => Action::MoveHome,
+            }),
+            NamedKey::End => Some(match (shift, cmd, alt) {
+                (_, _, true) => Action::ScrollBottom,
+                (true, true, _) => Action::ExtendDocEnd,
+                (true, false, _) => Action::ExtendEnd,
+                (false, true, _) => Action::MoveDocEnd,
+                (false, false, _) => Action::MoveEnd,
+            }),
+            NamedKey::PageUp => Some(if cmd {
+                Action::SessionLeft
+            } else {
+                Action::PageUp
+            }),
+            NamedKey::PageDown => Some(if cmd {
+                Action::SessionRight
+            } else {
+                Action::PageDown
+            }),
             _ => None,
         },
         Key::Character(text) => {
             let ch = text.chars().next().map(|c| c.to_ascii_lowercase())?;
-            // Shifted J/K with a nav modifier scroll by line, matching the
-            // TUI's ScrollKeys fallback.
             if (ctrl || sup || alt) && shift {
                 match ch {
+                    // Ctrl+Shift+Z is redo everywhere on the web.
+                    'z' => return Some(Action::Redo),
+                    // Shifted J/K with a nav modifier scroll by line, matching
+                    // the TUI's ScrollKeys fallback.
                     'k' => return Some(Action::ScrollUp),
                     'j' => return Some(Action::ScrollDown),
                     'c' => return Some(Action::Copy),
-                    // Ctrl+A stays "start of line" (emacs, matching the TUI),
-                    // so select-all takes the shifted chord.
                     'a' => return Some(Action::SelectAll),
                     _ => {}
                 }
@@ -568,17 +712,21 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
             }
             if cmd {
                 return match ch {
-                    'a' => Some(Action::MoveHome),
+                    // Web first: select all, copy, cut, paste, undo, redo.
+                    'a' => Some(Action::SelectAll),
+                    'c' => Some(Action::CopyOrInterrupt),
+                    'x' => Some(Action::CutLine),
+                    'v' => Some(Action::Paste),
+                    'z' => Some(Action::Undo),
+                    'y' => Some(Action::Redo),
+                    // Emacs chords that do not collide with the web set.
                     'e' => Some(Action::MoveEnd),
                     'b' => Some(Action::MoveWordLeft),
                     'f' => Some(Action::MoveWordRight),
                     'u' => Some(Action::KillToStart),
                     'k' => Some(Action::KillToEnd),
                     'w' => Some(Action::DeleteWordBack),
-                    'x' => Some(Action::CutLine),
-                    'z' => Some(Action::Undo),
-                    'v' => Some(Action::Paste),
-                    'c' | 'd' => Some(Action::InterruptOrQuit),
+                    'd' => Some(Action::InterruptOrQuit),
                     _ => None,
                 };
             }
@@ -614,6 +762,7 @@ pub fn parse_chord(chord: &str) -> Option<(Key, ModifiersState)> {
                     "end" => Key::Named(NamedKey::End),
                     "pageup" => Key::Named(NamedKey::PageUp),
                     "pagedown" => Key::Named(NamedKey::PageDown),
+                    "tab" => Key::Named(NamedKey::Tab),
                     other if other.chars().count() == 1 => {
                         Key::Character(winit::keyboard::SmolStr::new(other))
                     }
@@ -727,7 +876,7 @@ mod tests {
     fn cmd_and_ctrl_are_interchangeable_for_editing() {
         // 'k' is deliberately absent: Super+K is session-up (niri motion)
         // while Ctrl+K keeps its emacs kill-to-end.
-        for ch in ['a', 'e', 'u', 'w', 'x', 'z', 'v'] {
+        for ch in ['a', 'e', 'u', 'w', 'x', 'z', 'v', 'c'] {
             let key = Key::Character(SmolStr::new(ch.to_string()));
             let with_ctrl = resolve(&key, ModifiersState::CONTROL);
             let with_cmd = resolve(&key, ModifiersState::SUPER);
@@ -863,20 +1012,103 @@ mod tests {
         );
     }
 
-    /// Ctrl+A must remain start-of-line (emacs, as in the TUI); select-all is
-    /// the shifted chord. Getting this backwards would break muscle memory.
+    /// Ctrl+A is select-all, as in every browser and GUI text field, and
+    /// start-of-line stays reachable on Home. Reverting this would make the
+    /// most reflexive shortcut on the platform silently do something else.
     #[test]
-    fn ctrl_a_stays_start_of_line_and_select_all_is_shifted() {
+    fn ctrl_a_selects_all_like_the_web() {
         let a = Key::Character(SmolStr::new("a"));
+        for mods in [
+            ModifiersState::CONTROL,
+            ModifiersState::SUPER,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ] {
+            assert_eq!(
+                resolve(&a, mods),
+                Some(Action::SelectAll),
+                "{mods:?}+A is not select-all"
+            );
+        }
         assert_eq!(
-            resolve(&a, ModifiersState::CONTROL),
+            resolve(&Key::Named(NamedKey::Home), ModifiersState::empty()),
             Some(Action::MoveHome),
-            "Ctrl+A stopped being start-of-line"
+            "start-of-line must stay reachable on Home"
+        );
+    }
+
+    /// The web clipboard/undo set must be exactly what a browser does.
+    #[test]
+    fn the_web_clipboard_and_undo_set_matches_a_browser() {
+        for (ch, action) in [
+            ('a', Action::SelectAll),
+            ('c', Action::CopyOrInterrupt),
+            ('x', Action::CutLine),
+            ('v', Action::Paste),
+            ('z', Action::Undo),
+        ] {
+            let key = Key::Character(SmolStr::new(ch.to_string()));
+            for mods in [ModifiersState::CONTROL, ModifiersState::SUPER] {
+                assert_eq!(
+                    resolve(&key, mods),
+                    Some(action),
+                    "{mods:?}+{ch} diverged from the web binding"
+                );
+            }
+        }
+        let z = Key::Character(SmolStr::new("z"));
+        assert_eq!(
+            resolve(&z, ModifiersState::CONTROL | ModifiersState::SHIFT),
+            Some(Action::Redo),
+            "Ctrl+Shift+Z is redo on the web"
         );
         assert_eq!(
-            resolve(&a, ModifiersState::CONTROL | ModifiersState::SHIFT),
-            Some(Action::SelectAll)
+            resolve(&Key::Character(SmolStr::new("y")), ModifiersState::CONTROL),
+            Some(Action::Redo),
+            "Ctrl+Y is redo on Windows/web"
         );
+    }
+
+    /// Ctrl+Tab and Ctrl+PageUp/PageDown are the browser's tab chords, and
+    /// sessions are this app's tabs.
+    #[test]
+    fn browser_tab_chords_walk_the_session_strip() {
+        for (chord, action) in [
+            ("ctrl+tab", Action::SessionRight),
+            ("ctrl+shift+tab", Action::SessionLeft),
+            ("ctrl+pagedown", Action::SessionRight),
+            ("ctrl+pageup", Action::SessionLeft),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(resolve(&key, mods), Some(action), "'{chord}' did not bind");
+        }
+        // Bare PageUp/PageDown must still scroll the transcript.
+        assert_eq!(
+            resolve(&Key::Named(NamedKey::PageUp), ModifiersState::empty()),
+            Some(Action::PageUp)
+        );
+        assert_eq!(
+            resolve(&Key::Named(NamedKey::PageDown), ModifiersState::empty()),
+            Some(Action::PageDown)
+        );
+    }
+
+    /// Shift+arrows extend, Ctrl+Home/End move within the field, and only the
+    /// Alt chords reach the transcript, matching a focused browser textarea.
+    #[test]
+    fn field_navigation_matches_a_browser_textarea() {
+        for (chord, action) in [
+            ("shift+up", Action::ExtendLineUp),
+            ("shift+down", Action::ExtendLineDown),
+            ("ctrl+home", Action::MoveDocStart),
+            ("ctrl+end", Action::MoveDocEnd),
+            ("ctrl+shift+home", Action::ExtendDocStart),
+            ("ctrl+shift+end", Action::ExtendDocEnd),
+            ("alt+home", Action::ScrollTop),
+            ("alt+end", Action::ScrollBottom),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(resolve(&key, mods), Some(action), "'{chord}' did not bind");
+        }
     }
 
     #[test]

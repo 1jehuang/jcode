@@ -46,6 +46,11 @@ pub enum HarnessUpdate {
         label: String,
     },
     TurnDone,
+    /// Something failed: a turn that could not run, a provider that could not
+    /// be reached, the runtime going away. Distinct from `Status` because a
+    /// status line is hidden once a session is attached, which is exactly when
+    /// a failure matters most.
+    Failed(String),
     /// The daemon's current session list, for the session strip.
     Sessions(Vec<crate::strip::Entry>),
     /// The tail of another session's conversation, for the overview's preview.
@@ -165,8 +170,22 @@ fn wait_for_socket(path: &Path, what: &str) -> Result<(), Box<dyn std::error::Er
     Err(format!("timed out waiting for the {what} at {}", path.display()).into())
 }
 
+/// Backoff between reconnection attempts, and its ceiling.
+///
+/// A dropped runtime is usually back within a second (a rebuild, a restart), so
+/// the first retry is quick; the ceiling exists so a window left open against a
+/// runtime that is gone for good does not spin.
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
 /// Spawn the connection worker. Returns the receiving side for the UI and a
 /// sender for outgoing user messages.
+///
+/// The worker reconnects on its own. A desktop app whose connection dies once
+/// and then silently accepts input forever is the failure this exists to
+/// prevent: every attempt reports why it failed, and the next attempt
+/// re-attaches the session the user was looking at rather than starting a new
+/// one behind their back.
 pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Sender<Command>) {
     let (update_tx, update_rx) = channel::<HarnessUpdate>();
     let (outgoing_tx, outgoing_rx) = channel::<Command>();
@@ -175,16 +194,67 @@ pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Se
             let _ = update_tx.send(update);
             redraw();
         };
-        if let Err(error) = run(&send, outgoing_rx) {
-            send(HarnessUpdate::Status(format!("disconnected: {error}")));
+        // Shared across attempts: the command queue must survive a reconnect,
+        // and the session to re-attach to has to be remembered.
+        let outgoing = Arc::new(Mutex::new(outgoing_rx));
+        let resume = Arc::new(Mutex::new(String::new()));
+        let mut backoff = RECONNECT_BACKOFF;
+        loop {
+            // Each attempt gets its own generation, so the previous attempt's
+            // writer and poller threads retire instead of writing into a dead
+            // socket (or stealing a command from the live one).
+            let generation = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let error = match run(
+                &send,
+                Arc::clone(&outgoing),
+                Arc::clone(&resume),
+                Arc::clone(&generation),
+            ) {
+                // `run` only returns on failure; `Ok` would mean the stream
+                // ended cleanly, which is still a lost connection.
+                Ok(()) => "the harness closed the connection".to_string(),
+                Err(error) => error.to_string(),
+            };
+            generation.store(false, Ordering::Relaxed);
+            send(HarnessUpdate::Failed(format!("disconnected: {error}")));
+            send(HarnessUpdate::Status(format!(
+                "reconnecting in {}s...",
+                backoff.as_secs_f64().round().max(1.0)
+            )));
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
         }
     });
     (update_rx, outgoing_tx)
 }
 
+/// Human wording for a failure, when the cause is one the user can act on.
+///
+/// Provider errors arrive as whatever the HTTP stack said, and "error sending
+/// request for url (...): dns error: failed to lookup address information" does
+/// not tell a user their wifi is off. Everything unrecognised is passed through
+/// unchanged: a wrong guess would be worse than the raw text.
+pub fn explain(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    const OFFLINE: [&str; 6] = [
+        "dns error",
+        "failed to lookup address information",
+        "temporary failure in name resolution",
+        "network is unreachable",
+        "no route to host",
+        "name or service not known",
+    ];
+    if OFFLINE.iter().any(|needle| lower.contains(needle)) {
+        return format!("no network connection: {message}");
+    }
+    message.to_string()
+}
+
 fn run(
     send: &impl Fn(HarnessUpdate),
-    outgoing: Receiver<Command>,
+    outgoing: Arc<Mutex<Receiver<Command>>>,
+    resume: Arc<Mutex<String>>,
+    generation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = api_socket_path();
     send(HarnessUpdate::Status(format!(
@@ -198,9 +268,17 @@ fn run(
     let mut client = HarnessClient::new(reader, stream.try_clone()?);
     client.hello(concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")))?;
     send(HarnessUpdate::Status("connected, attaching...".into()));
-    client.send(ApiRequest::CreateSession {
-        working_dir: default_working_dir(),
-    })?;
+    // Re-attach after a reconnect, so the conversation the user was reading
+    // comes back instead of being replaced by a fresh empty session.
+    let previous = resume.lock().map(|guard| guard.clone()).unwrap_or_default();
+    match previous.is_empty() {
+        true => client.send(ApiRequest::CreateSession {
+            working_dir: default_working_dir(),
+        })?,
+        false => client.send(ApiRequest::AttachSession {
+            session_id: previous,
+        })?,
+    };
 
     // Writer thread: forwards user messages immediately even while the read
     // loop below is blocked on the stream. Frame ids start high so they never
@@ -209,9 +287,22 @@ fn run(
     let writer_ids = AtomicU64::new(1_000_000);
     std::thread::spawn({
         let session_id = Arc::clone(&session_id);
+        let resume = Arc::clone(&resume);
+        let generation = Arc::clone(&generation);
         let mut writer_stream = stream.try_clone()?;
         move || {
-            while let Ok(command) = outgoing.recv() {
+            // `recv_timeout` rather than `recv`: a blocking receive would hold
+            // the queue past this connection's death and swallow the first
+            // command the *next* connection should have sent.
+            while generation.load(Ordering::Relaxed) {
+                let command = {
+                    let Ok(queue) = outgoing.lock() else { break };
+                    match queue.recv_timeout(Duration::from_millis(100)) {
+                        Ok(command) => command,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                };
                 let request = match command {
                     Command::Send(content) => {
                         let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
@@ -229,6 +320,9 @@ fn run(
                     // switch must land in the session the user is looking at.
                     Command::Attach(target) => {
                         if let Ok(mut guard) = session_id.lock() {
+                            *guard = target.clone();
+                        }
+                        if let Ok(mut guard) = resume.lock() {
                             *guard = target.clone();
                         }
                         ApiRequest::AttachSession { session_id: target }
@@ -256,8 +350,9 @@ fn run(
     std::thread::spawn({
         let mut poll_stream = stream.try_clone()?;
         let poll_ids = AtomicU64::new(2_000_000);
+        let generation = Arc::clone(&generation);
         move || {
-            loop {
+            while generation.load(Ordering::Relaxed) {
                 let frame = ClientFrame::new(
                     poll_ids.fetch_add(1, Ordering::Relaxed),
                     ApiRequest::ListSessions,
@@ -285,6 +380,12 @@ fn run(
         match frame.event {
             ApiEvent::Attached { session } => {
                 if let Ok(mut guard) = session_id.lock() {
+                    *guard = session.session_id.clone();
+                }
+                // Remember it for a reconnect: coming back to a different
+                // session than the one on screen would look like the app lost
+                // the conversation.
+                if let Ok(mut guard) = resume.lock() {
                     *guard = session.session_id.clone();
                 }
                 // The daemon reports the full session set only alongside
@@ -408,9 +509,47 @@ fn run(
             }
             ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
             ApiEvent::Error { message, .. } => {
-                send(HarnessUpdate::Status(format!("error: {message}")));
+                // A failed request is also the end of the turn it belonged to:
+                // the daemon sends `error` *instead of* `done`, so without this
+                // the UI would spin its activity indicator forever.
+                send(HarnessUpdate::Failed(explain(&message)));
+                send(HarnessUpdate::TurnDone);
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The failure a user is most likely to hit, and the one that motivated
+    /// this: the machine is offline, so the provider's DNS lookup fails. The
+    /// raw text names a URL and a resolver; the user needs to be told their
+    /// network is down.
+    #[test]
+    fn an_offline_failure_is_explained_in_the_users_terms() {
+        let raw = "error sending request for url (https://api.example.com/v1/messages): \
+                   dns error: failed to lookup address information: Name or service not known";
+        let explained = explain(raw);
+        assert!(
+            explained.starts_with("no network connection"),
+            "offline was not named: {explained}"
+        );
+        assert!(
+            explained.contains("dns error"),
+            "the underlying cause must survive: {explained}"
+        );
+    }
+
+    /// Anything unrecognised is passed through untouched. A wrong guess about a
+    /// cause is worse than the provider's own words.
+    #[test]
+    fn an_unrecognised_failure_is_passed_through() {
+        assert_eq!(
+            explain("overloaded_error: try again"),
+            "overloaded_error: try again"
+        );
     }
 }
