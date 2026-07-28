@@ -285,13 +285,17 @@ fn draw_strip(
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
-/// Draw the working directory on the trailing end of the top chrome row.
+/// Draw the working directory and the RAM readout on the trailing end of the
+/// top chrome row.
 ///
 /// Right-aligned against the strip's bars so the row reads as "these sessions,
 /// this place": the answer to "which checkout am I talking to" was previously
 /// only inferable from the strip's leaf labels, and not available at all in a
 /// single-session window. Head-elided rather than middle-elided because the
-/// tail of a path is the part that identifies it.
+/// tail of a path is the part that identifies it. The RAM caption sits after
+/// the path (`ui 105 MB · srv 428 MB`): it is metadata about the same corner
+/// of the app, and a second row for it would spend a whole band on two
+/// numbers.
 fn draw_place(
     scene: &mut Scene,
     text: &mut text::TextSystem,
@@ -300,13 +304,12 @@ fn draw_place(
     frame: &layout::Frame,
     scale: f64,
 ) {
-    let Some(dir) = model.working_dir.as_deref() else {
-        return;
-    };
-    let path = crate::place::display_path(dir, crate::place::home().as_deref());
-    if path.is_empty() {
-        return;
-    }
+    let path = model
+        .working_dir
+        .as_deref()
+        .map(|dir| crate::place::display_path(dir, crate::place::home().as_deref()))
+        .filter(|path| !path.is_empty());
+    let mem = model.mem.as_ref().map(crate::mem::Readout::caption);
     let (top, bottom) = band;
     let style = ParagraphStyle {
         font_size: layout::STRIP_LABEL_SIZE,
@@ -317,13 +320,26 @@ fn draw_place(
         ..Default::default()
     };
     // Never more than half the row: the strip is the interactive half and must
-    // not be pushed off the page by a deep path.
+    // not be pushed off the page by a deep path. The RAM caption is small and
+    // fixed-format, so it is kept whole and the path absorbs the elision.
     let budget = (frame.column() / (f64::from(layout::STRIP_LABEL_SIZE) * 0.62) / 2.0) as usize;
-    let path = elide_head(&path, budget.max(8));
+    let label = match (path, mem) {
+        (Some(path), Some(mem)) => {
+            let path_budget = budget.max(8).saturating_sub(mem.chars().count() + 3);
+            if path_budget >= 8 {
+                format!("{}  ·  {mem}", elide_head(&path, path_budget))
+            } else {
+                mem
+            }
+        }
+        (Some(path), None) => elide_head(&path, budget.max(8)),
+        (None, Some(mem)) => mem,
+        (None, None) => return,
+    };
     let label_top = top + (bottom - top - f64::from(layout::STRIP_LABEL_SIZE)) / 2.0;
     text.draw_paragraph_scaled(
         scene,
-        &path,
+        &label,
         (frame.left, label_top),
         frame.column() as f32,
         style,
