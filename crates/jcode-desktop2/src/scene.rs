@@ -42,8 +42,6 @@ const CIRCLE_TOLERANCE: f64 = 0.05;
 /// caption line so it reads as part of the text row rather than as a graphic
 /// bolted next to it.
 pub(crate) const SPINNER_SIZE: f64 = 13.0;
-/// Gap between the spinner and the phase text.
-pub(crate) const SPINNER_GAP: f64 = 8.0;
 
 /// The activity spinner: a ring of halftone dots with a bright head that walks
 /// around it. Same visual language as the hero donut, so "the agent is working"
@@ -482,11 +480,14 @@ fn draw_transcript(
     // height. It decays to zero, so this cannot drift the scroll position.
     let view = crate::viewport::Viewport::new(laid, region_height, model.view_scroll());
 
-    // Only the trailing assistant message is being revealed; everything above
-    // it has been read and must be drawn whole.
+    // Only the trailing text message is being revealed; everything above it
+    // has been read and must be drawn whole. The live tool card is skipped:
+    // it is pinned to the tail as a status readout and appears whole, while
+    // the reveal animates the text arriving above it (the same message
+    // `Transcript::streaming_len` counts, or the two would disagree).
     let streaming_index = laid
-        .len()
-        .checked_sub(1)
+        .iter()
+        .rposition(|message| message.role != Role::Tool)
         .filter(|_| model.stream.is_revealing())
         .filter(|index| laid[*index].role != Role::User);
 
@@ -883,34 +884,16 @@ pub fn build_scene(
         // could actually type teaches what the thing is for. While busy it says
         // so instead, because "nothing is happening" and "working" must never
         // look the same.
-        // The busy line is the activity line when a turn is running: a
-        // spinner, the current phase, and elapsed time, so a long turn shows
-        // progress instead of a frozen label.
+        // The busy line is the activity line when a turn is running: the
+        // current phase and elapsed time, so a long turn shows progress
+        // instead of a frozen label. The elapsed clock is the liveness
+        // signal; a spinner here would only add noise beside the caret.
         let busy_line = model
             .busy
             .then(|| model.activity.line(std::time::Instant::now()))
             .flatten()
             .unwrap_or_else(|| "working... esc to interrupt".to_string());
         if model.editor.is_empty() {
-            // While busy the line is indented past the spinner, which is drawn
-            // in the space this makes.
-            let (line_x, line_width) = if model.busy {
-                let inset = SPINNER_SIZE + SPINNER_GAP;
-                draw_spinner(
-                    scene,
-                    &model.activity,
-                    (
-                        prompt_x + SPINNER_SIZE / 2.0,
-                        prompt_y + f64::from(prompt_style.font_size) * 0.55,
-                    ),
-                    theme.faint,
-                    scale,
-                    std::time::Instant::now(),
-                );
-                (prompt_x + inset, prompt_width - inset as f32)
-            } else {
-                (prompt_x, prompt_width)
-            };
             text.draw_paragraph_scaled(
                 scene,
                 if model.busy {
@@ -918,8 +901,8 @@ pub fn build_scene(
                 } else {
                     crate::hints::hint(model.hint)
                 },
-                (line_x, prompt_y),
-                line_width,
+                (prompt_x, prompt_y),
+                prompt_width,
                 ParagraphStyle {
                     color: theme.faint,
                     ..prompt_style

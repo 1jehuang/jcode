@@ -1065,51 +1065,39 @@ fn rich_content_never_inks_the_composer() {
     }
 }
 
-/// The activity spinner must actually reach the pixels, in the space the busy
-/// line is indented for. A silent turn was the whole bug this fixes, so an
-/// indicator the renderer forgets to draw is the regression to guard.
+/// The busy line starts at the composer's text margin, with no spinner drawn
+/// before it. The elapsed clock in the line itself is the liveness signal, so
+/// the phase text must reach the pixels right at the margin: a working turn
+/// that renders nothing there looks frozen.
 #[test]
 #[ignore = "requires a GPU"]
-fn the_activity_spinner_is_drawn_beside_the_busy_line() {
+fn the_busy_line_starts_at_the_text_margin_with_no_spinner() {
     let model = states::by_name("working").expect("node");
     let Some(r) = Rendered::new(&model) else {
         return;
     };
     let f = r.frame;
-    let darkest = r.darkest_in(
+    // The phase text starts right at the margin...
+    let darkest_text = r.darkest_in(
+        f.composer_text_left(),
+        f.composer_top + 3.0,
+        f.composer_text_left() + 80.0,
+        f.composer_bottom - 3.0,
+    );
+    assert!(
+        darkest_text < 0.92,
+        "no busy-line ink at the text margin ({darkest_text:.3}), so a working turn looks frozen"
+    );
+    // ...and the band to its left stays clean, or the spinner is back.
+    let darkest_left = r.darkest_in(
+        f.left + 2.0,
+        f.composer_top + 3.0,
         f.composer_text_left() - 1.0,
-        f.composer_top + 3.0,
-        f.composer_text_left() + crate::scene::SPINNER_SIZE,
         f.composer_bottom - 3.0,
     );
     assert!(
-        darkest < 0.92,
-        "no spinner ink beside the busy line ({darkest:.3}), so a working turn looks frozen"
-    );
-}
-
-/// The busy line must be indented clear of the spinner. Without the inset the
-/// phase text would run through the ring and both become unreadable, which is
-/// the failure an ink-anywhere test would happily pass.
-#[test]
-#[ignore = "requires a GPU"]
-fn the_busy_line_is_indented_clear_of_the_spinner() {
-    let model = states::by_name("working").expect("node");
-    let Some(r) = Rendered::new(&model) else {
-        return;
-    };
-    let f = r.frame;
-    // The gap sits between the ring's right edge and the text's left edge.
-    let gap_left = f.composer_text_left() + crate::scene::SPINNER_SIZE + 1.0;
-    let darkest = r.darkest_in(
-        gap_left,
-        f.composer_top + 3.0,
-        gap_left + crate::scene::SPINNER_GAP - 2.0,
-        f.composer_bottom - 3.0,
-    );
-    assert!(
-        darkest > 0.9,
-        "the phase text ran into the spinner ({darkest:.3})"
+        darkest_left > 0.9,
+        "ink before the busy line ({darkest_left:.3}), so the spinner is back"
     );
 }
 
