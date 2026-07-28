@@ -132,7 +132,10 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
                 goal.feedback_loop = prev.feedback_loop.clone();
             }
         }
-        record_score_observation(&mut goal.closed_feedback_loop_history, goal.closed_feedback_loop);
+        record_score_observation(
+            &mut goal.closed_feedback_loop_history,
+            goal.closed_feedback_loop,
+        );
         record_score_observation(
             &mut goal.end_to_end_ownership_history,
             goal.end_to_end_ownership,
@@ -568,7 +571,7 @@ impl Tool for TodoTool {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessment, 0-100, of how closed this goal's feedback loop is: does every requirement have an observation that reports back whether the work satisfies or violates it, so progress can be measured and compared across iterations? An open loop is one where you would only know by inspection or by asking the user."
+                                "description": "Self-assessment, 0-100, of how closed the `feedback_loop` below is: how much of this goal reports back on its own whether the work is right, rather than needing your inspection or the user's."
                             },
                             "feedback_loop": {
                                 "type": "string",
@@ -1220,7 +1223,10 @@ mod tests {
         assert_eq!(changes[0].after.as_ref(), Some(&after));
         assert_eq!(
             changes[0].fields,
-            vec![TodoGoalField::ClosedFeedbackLoop, TodoGoalField::FeedbackLoop,]
+            vec![
+                TodoGoalField::ClosedFeedbackLoop,
+                TodoGoalField::FeedbackLoop,
+            ]
         );
     }
 
