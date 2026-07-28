@@ -533,8 +533,8 @@ impl DesktopTheme {
     pub(crate) fn dark() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            background: ColorRgba::rgba(0.055, 0.060, 0.075, 1.0),
-            panel: ColorRgba::rgba(0.11, 0.12, 0.15, 0.86),
+            background: ColorRgba::rgba(0.0, 0.0, 0.0, 1.0),
+            panel: ColorRgba::rgba(0.07, 0.075, 0.09, 0.86),
             text: ColorRgba::rgba(0.88, 0.90, 0.94, 1.0),
             muted_text: ColorRgba::rgba(0.60, 0.63, 0.70, 1.0),
             accent: ColorRgba::rgba(0.50, 0.62, 1.0, 1.0),
