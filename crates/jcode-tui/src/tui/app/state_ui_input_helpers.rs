@@ -63,6 +63,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
     RegisteredCommand::public("/git", "Show git status for the session working directory"),
     RegisteredCommand::public("/hotkeys", "List hotkeys with your personal usage"),
+    RegisteredCommand::public("/terminal-setup", "Fix Shift+Enter newlines"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public(
         "/commit-push",
