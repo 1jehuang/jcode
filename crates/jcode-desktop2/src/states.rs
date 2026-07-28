@@ -50,6 +50,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("overview_many_sessions", overview_many_sessions),
     ("notice", notice),
     ("error", error),
+    ("offline", offline),
     ("long_paragraph", long_paragraph),
     // Heavy nodes. Every node above is a small, pretty screen, which is what a
     // capture wants and exactly the wrong thing to profile: a sweep over them
@@ -106,6 +107,7 @@ fn connecting() -> Model {
         scroll: 0.0,
         selection: None,
         notice: None,
+        failure: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
         // Captures pin the hint, so the ghost line is a tested state rather
@@ -191,6 +193,7 @@ fn attached_empty() -> Model {
         scroll: 0.0,
         selection: None,
         notice: None,
+        failure: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
         // Captures pin the hint, so the ghost line is a tested state rather
@@ -899,6 +902,28 @@ fn error() -> Model {
     Model {
         status: "disconnected: daemon connection closed".into(),
         ..turn_done()
+    }
+}
+
+/// The failure this whole path exists for: the machine is offline, so the turn
+/// the user asked for could not run. The report has to be *in the
+/// conversation*, because the status line is suppressed for an attached
+/// session and a failure nobody can see reads as an app that ignored them.
+fn offline() -> Model {
+    let mut transcript = conversation(vec![(
+        "explain the harness API handshake".into(),
+        String::new(),
+    )]);
+    transcript.push_notice(
+        "no network connection: error sending request for \
+         url (https://api.anthropic.com/v1/messages): dns error",
+    );
+    Model {
+        transcript,
+        busy: false,
+        status: "no network connection".into(),
+        failure: Some("no network connection".into()),
+        ..attached_empty()
     }
 }
 
