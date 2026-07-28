@@ -46,6 +46,16 @@ struct RemoteModelCatalogCache {
     observed_at_unix_secs: u64,
 }
 
+/// Result of applying an incoming remote model-catalog snapshot.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CatalogReplaceOutcome {
+    /// Provider name/model identity changed (terminal title needs refresh).
+    pub(super) provider_meta_changed: bool,
+    /// Any catalog content changed. When false the snapshot was an exact
+    /// duplicate and no cache invalidation, persistence, or redraw is needed.
+    pub(super) catalog_changed: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ModelPickerUsageEntry {
     count: u32,
@@ -496,7 +506,7 @@ impl App {
     pub(super) fn replace_remote_model_catalog_snapshot(
         &mut self,
         snapshot: jcode_provider_core::ModelCatalogSnapshot,
-    ) -> bool {
+    ) -> CatalogReplaceOutcome {
         let mut provider_meta_changed = false;
         let mut provider_name_changed = false;
         if let Some(name) = snapshot.provider_name
@@ -519,12 +529,30 @@ impl App {
         // fallback routes for any newly appearing models. If the provider
         // identity changed, the old routes are stale and must be dropped.
         let names_only = snapshot.model_routes.is_empty() && !snapshot.available_models.is_empty();
+        let replace_routes = !names_only || provider_name_changed;
+        // Shared-server bus chatter rebroadcasts the catalog frequently (every
+        // session's refresh fans out to every connected client). When nothing
+        // actually changed, skip the invalidation entirely: invalidating here
+        // forces a picker-cache rebuild, an ~100KB cache rewrite to disk, and a
+        // full-frame redraw on every idle client, which starves the input line.
+        let catalog_changed = provider_meta_changed
+            || self.remote_available_entries != snapshot.available_models
+            || (replace_routes && self.remote_model_options != snapshot.model_routes);
+        if !catalog_changed {
+            return CatalogReplaceOutcome {
+                provider_meta_changed,
+                catalog_changed,
+            };
+        }
         self.remote_available_entries = snapshot.available_models;
-        if !names_only || provider_name_changed {
+        if replace_routes {
             self.remote_model_options = snapshot.model_routes;
         }
         self.invalidate_model_picker_cache();
-        provider_meta_changed
+        CatalogReplaceOutcome {
+            provider_meta_changed,
+            catalog_changed,
+        }
     }
 
     /// Ensure every advertised remote model has at least one picker route.
