@@ -844,7 +844,18 @@ fn draw_transcript(
         // A reasoning message carries a rule down its whole left edge: one
         // mark for the thought, rather than a label repeated per paragraph.
         // It is the quote convention, which is exactly what a thought is here.
+        // Adjacent reasoning messages are one thought that happened to arrive
+        // in pieces, so the rule bridges the gap between them instead of
+        // restarting: the thought reads as one aside, not several.
         if placed.message.role == Role::Reasoning {
+            let joins_previous = placed
+                .index
+                .checked_sub(1)
+                .is_some_and(|previous| laid[previous].role == Role::Reasoning);
+            let rule_top = match joins_previous {
+                true => message_top - crate::transcript::MESSAGE_GAP,
+                false => message_top,
+            };
             scene.fill(
                 vello::peniko::Fill::NonZero,
                 Affine::scale(scale),
@@ -852,7 +863,7 @@ fn draw_transcript(
                 None,
                 &Rect::new(
                     text_left,
-                    message_top,
+                    rule_top,
                     text_left + frame.hairline() * 2.0,
                     message_top + placed.message.height,
                 ),

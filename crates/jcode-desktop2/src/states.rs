@@ -29,6 +29,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("streaming", streaming),
     ("reasoning", reasoning),
     ("reasoning_streaming", reasoning_streaming),
+    ("reasoning_paragraphs", reasoning_paragraphs),
     ("tool_progress", tool_progress),
     ("working", working),
     ("turn_done", turn_done),
@@ -606,6 +607,35 @@ fn reasoning() -> Model {
         "The cursor counts markdown *source* characters, but the renderer \
          draws laid-out glyphs. Every `**` and backtick makes those two \
          numbers differ, so a count would run ahead of the visible edge.",
+    ));
+    transcript.push(Message::assistant(
+        "Because the reveal cursor and the drawn glyphs are counted in \
+         different units, and only a fraction is well defined across both.",
+    ));
+    Model {
+        transcript,
+        ..attached_empty()
+    }
+}
+
+/// A long thought that spans paragraphs and is interleaved with a tool call:
+/// the case where the left rule fragments today. Each reasoning message draws
+/// its own rule, so the thought reads as several separate asides instead of
+/// one continuous think.
+fn reasoning_paragraphs() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("why is the reveal a fraction, not a count?"));
+    transcript.push(Message::reasoning(
+        "The cursor counts markdown *source* characters, but the renderer \
+         draws laid-out glyphs. Every `**` and backtick makes those two \
+         numbers differ.\n\nSo a count would run ahead of the visible edge \
+         whenever the reply contains markup, which is most replies.\n\nA \
+         fraction is the only unit both sides agree on.",
+    ));
+    transcript.push(Message::reasoning(
+        "Second thought after a tool call: the fraction also survives \
+         re-layout when the window resizes, which a glyph count would not.",
     ));
     transcript.push(Message::assistant(
         "Because the reveal cursor and the drawn glyphs are counted in \
