@@ -55,12 +55,62 @@ fn cli_client_version() -> String {
         .unwrap_or_else(|| CLI_CLIENT_VERSION_DEFAULT.to_string())
 }
 
+/// Extract a bare host from a value that may be a full URL, a host with a
+/// scheme, or a host with trailing path/port noise.
+fn normalize_agent_host(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let raw = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or(raw);
+    let host = raw.split('/').next().unwrap_or_default().trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Regional agent host cached by the official `cursor-agent` CLI.
+///
+/// `cursor-agent` bootstraps `GetServerConfig` and caches the endpoint its team
+/// is actually routed to. Teams pinned to a region reject the `global` host with
+/// "This region is not yet available for your team" (issue #637), so reuse the
+/// CLI's cached value when it is present.
+fn agent_host_from_cursor_cli_config() -> Option<String> {
+    let path = jcode_base::storage::user_home_path(".cursor/cli-config.json").ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let url_config = value.get("serverConfigCache")?.get("agentUrlConfig")?;
+    let candidate = url_config
+        .get("agentnUrl")
+        .and_then(|v| v.as_str())
+        .or_else(|| url_config.get("agentUrl").and_then(|v| v.as_str()))?;
+    let host = normalize_agent_host(candidate)?;
+    jcode_base::logging::info(&format!(
+        "Cursor: using regional agent host {host} from {}",
+        path.display()
+    ));
+    Some(host)
+}
+
+/// Resolve the Cursor agent host, in precedence order:
+/// 1. `JCODE_CURSOR_AGENT_HOST` / `CURSOR_AGENT_HOST` (explicit override)
+/// 2. `~/.cursor/cli-config.json` regional endpoint cached by `cursor-agent`
+/// 3. the `global` host, as a last-resort fallback
 fn agent_host() -> String {
-    std::env::var("JCODE_CURSOR_AGENT_HOST")
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-        .unwrap_or_else(|| AGENT_HOST.to_string())
+    for var in ["JCODE_CURSOR_AGENT_HOST", "CURSOR_AGENT_HOST"] {
+        if let Some(host) = std::env::var(var).ok().and_then(|raw| {
+            let raw = raw.trim().to_string();
+            if raw.is_empty() { None } else { Some(raw) }
+        }) {
+            return host;
+        }
+    }
+    agent_host_from_cursor_cli_config().unwrap_or_else(|| AGENT_HOST.to_string())
 }
 
 // --------------------------------------------------------------------------
@@ -511,6 +561,29 @@ pub async fn run_agent_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for issue #637: teams routed to a region reject the
+    /// hardcoded `global` agent host, so a regional endpoint expressed as a full
+    /// URL must reduce to a bare host.
+    #[test]
+    fn normalize_agent_host_reduces_urls_to_bare_hosts() {
+        assert_eq!(
+            normalize_agent_host("https://agentn.us.api5.cursor.sh"),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        assert_eq!(
+            normalize_agent_host("http://agentn.eu.api5.cursor.sh/agent.v1.AgentService/Run"),
+            Some("agentn.eu.api5.cursor.sh".to_string())
+        );
+        // Already-bare hosts pass through, case-normalized.
+        assert_eq!(
+            normalize_agent_host("  AgentN.US.api5.cursor.sh  "),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        assert_eq!(normalize_agent_host(""), None);
+        assert_eq!(normalize_agent_host("   "), None);
+        assert_eq!(normalize_agent_host("https://"), None);
+    }
 
     #[test]
     fn frames_are_well_formed_connect_frames() {
