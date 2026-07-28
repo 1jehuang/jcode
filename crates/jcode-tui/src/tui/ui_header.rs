@@ -1449,7 +1449,6 @@ mod tests {
                 has_oauth: true,
                 oauth_state: AuthState::Available,
                 has_api_key: true,
-                ..Default::default()
             },
             ..AuthStatus::default()
         };
