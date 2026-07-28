@@ -157,6 +157,80 @@ fn a_pinned_caret_needs_no_wakes() {
     );
 }
 
+/// Continuous animations are paced by the display: the redraw handler chains
+/// the next frame immediately instead of waiting for a timer, because a timer
+/// beating against the refresh interval skips frames and reads as a hitch.
+mod display_pacing {
+    use super::*;
+
+    /// The donut is the archetypal continuous animation: while it spins, every
+    /// drawn frame must ask for the next one.
+    #[test]
+    fn a_spinning_donut_chains_frames() {
+        let mut app = focused_app();
+        app.model.donut = Some(crate::donut::Donut::new(8));
+        assert!(
+            app.wants_display_paced_frame(Instant::now()),
+            "the donut was left to the timer, so its spin will hitch"
+        );
+    }
+
+    /// A streaming reveal in flight must also chain, or a reply sweeps in at
+    /// the timer's beat rather than the display's.
+    #[test]
+    fn a_streaming_reveal_chains_frames() {
+        let mut app = focused_app();
+        app.model.donut = None;
+        app.model.caret = Caret::pinned(true);
+        let now = Instant::now();
+        app.model.stream.extend_to(400, now);
+        assert!(
+            app.wants_display_paced_frame(now),
+            "a mid-reveal frame did not chain the next one"
+        );
+    }
+
+    /// The scroll ease is continuous while the lag decays.
+    #[test]
+    fn a_scroll_ease_chains_frames() {
+        let mut app = focused_app();
+        app.model.donut = None;
+        app.model.caret = Caret::pinned(true);
+        let now = Instant::now();
+        app.model.smooth.nudge(80.0, now);
+        assert!(
+            app.wants_display_paced_frame(now),
+            "a scroll mid-ease did not chain the next frame"
+        );
+    }
+
+    /// The caret's blink is sparse. It must stay on the timer, or an idle
+    /// focused window would repaint at the display rate forever.
+    #[test]
+    fn an_idle_blink_does_not_chain_frames() {
+        let mut app = focused_app();
+        app.model.donut = None;
+        // Fresh activity: the next toggle is a full grace period away.
+        app.model.caret = Caret::with_activity(Instant::now());
+        assert!(
+            !app.wants_display_paced_frame(Instant::now()),
+            "an idle blinking caret chained display-rate frames"
+        );
+    }
+
+    /// Nothing animating, nothing chained: the resting state must sleep.
+    #[test]
+    fn an_idle_window_does_not_chain_frames() {
+        let mut app = focused_app();
+        app.model.donut = None;
+        app.model.caret = Caret::pinned(true);
+        assert!(
+            !app.wants_display_paced_frame(Instant::now()),
+            "an idle window kept drawing"
+        );
+    }
+}
+
 /// The footnote is the app's only remaining chrome row, so what wins it matters:
 /// a single row that shows the wrong one of four possible messages is worse
 /// than no row at all.

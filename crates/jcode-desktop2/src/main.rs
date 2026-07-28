@@ -159,6 +159,18 @@ const ALT_TAP: std::time::Duration = std::time::Duration::from_millis(180);
 /// Frame interval while the overview zooms (~60fps).
 const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// Deadlines closer than this are a continuous animation (the donut, the
+/// overview zoom, the streaming reveal, the scroll glide), and those are paced
+/// by the display rather than by the timer: the next frame is requested the
+/// moment one is drawn, and the compositor's frame callback decides when it
+/// paints. A timer cannot do this job. 16ms beats against a 16.7ms refresh, so
+/// the wake periodically lands just after the compositor's deadline and a
+/// frame is skipped: a visible hitch every few hundred milliseconds in an
+/// otherwise smooth glide. Wide enough to catch every per-frame cadence in
+/// use, narrow enough to exclude the sparse wakes (the 90ms spinner, the
+/// caret's half-second blink), which stay on timers so an idle window sleeps.
+const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// UI model: what the frame is built from.
 pub struct Model {
     pub theme: theme::Theme,
@@ -1082,6 +1094,16 @@ impl App {
             .min()
     }
 
+    /// Whether the frame just drawn should be followed immediately by another:
+    /// true while a continuous animation (donut, overview zoom, streaming
+    /// reveal, scroll glide) is running. Sparse wakes (the caret's blink, the
+    /// 90ms spinner) return false and stay on the `WaitUntil` timer, so an
+    /// idle window still sleeps.
+    pub fn wants_display_paced_frame(&self, now: std::time::Instant) -> bool {
+        self.animation_deadline(now)
+            .is_some_and(|at| at <= now + CONTINUOUS_FRAME)
+    }
+
     /// Height of the transcript region in logical units.
     fn transcript_region_height(&self) -> f64 {
         (self.frame.body_bottom - self.frame.body_top).max(1.0)
@@ -1544,6 +1566,17 @@ impl ApplicationHandler for App {
                     if let Err(error) = state.render(&scene) {
                         eprintln!("render error: {error:#}");
                     }
+                }
+                // A continuous animation is paced by the display, not by the
+                // timer: ask for the next frame now and let the compositor's
+                // frame callback schedule it against the refresh. A timer
+                // wake (`WaitUntil` + `request_redraw` in `new_events`) beats
+                // against the refresh interval and skips a frame every few
+                // hundred milliseconds, which is exactly the intermittent
+                // hitch this replaces. Sparse animations (blink, spinner)
+                // keep the timer path, so an idle window still sleeps.
+                if self.wants_display_paced_frame(std::time::Instant::now()) {
+                    self.request_redraw();
                 }
             }
             _ => {}
