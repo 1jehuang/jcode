@@ -571,7 +571,7 @@ impl Tool for TodoTool {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessment, 0-100, of how closed the `feedback_loop` below is: how much of this goal reports back on its own whether the work is right, rather than needing your inspection or the user's."
+                                "description": "Self-assessment, 0-100: how much of this goal's correctness the `feedback_loop` below can tell you on its own, without your judgment or the user's."
                             },
                             "feedback_loop": {
                                 "type": "string",
