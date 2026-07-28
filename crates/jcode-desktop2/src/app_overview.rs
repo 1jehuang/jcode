@@ -97,7 +97,18 @@ impl App {
             self.model.overview.set_focus(&id);
             self.request_peek();
             self.request_redraw();
+            return;
         }
+        // No neighbour that way: one project row makes j/k dead, and a row of
+        // one makes h/l dead. A motion key that does nothing reads as broken,
+        // so fall back to the reading-order step in the same sense. Every
+        // direction then always goes somewhere as long as there is somewhere
+        // to go.
+        let step = match dir {
+            overview::Dir::Left | overview::Dir::Up => -1,
+            overview::Dir::Right | overview::Dir::Down => 1,
+        };
+        self.cycle_overview(step);
     }
 
     /// Step the highlight through the field in reading order.
@@ -190,6 +201,12 @@ impl App {
         };
         if let Some(action) = action {
             let keep = self.apply(action, None);
+            if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
+                eprintln!(
+                    "[input] overview {action:?} -> focus {:?}",
+                    self.model.overview.focus()
+                );
+            }
             self.request_redraw();
             return keep;
         }
@@ -203,6 +220,32 @@ impl App {
             Some(action) => self.apply(action, typed),
             None => true,
         };
+        self.request_redraw();
+        keep
+    }
+
+    /// A key went down: the whole keyboard path, field or not.
+    ///
+    /// Extracted from the window arm so a headless script can drive exactly
+    /// what the compositor drives. The overview gesture is the one part of
+    /// this app whose bugs live entirely in dispatch order, and synthetic
+    /// compositor input is too flaky to be the only way to check it.
+    pub(crate) fn key_pressed(
+        &mut self,
+        logical_key: &winit::keyboard::Key,
+        typed: Option<&str>,
+    ) -> bool {
+        if self.model.overview.is_open() {
+            return self.overview_keydown(logical_key, typed);
+        }
+        // A key landing while the field is still zooming out erases it in the
+        // same frame: the user is typing, not gesturing.
+        self.super_held_since = None;
+        if self.model.overview.is_visible() {
+            self.model.overview.abort();
+        }
+        let action = keymap::resolve(logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
+        let keep = self.apply(action, typed);
         self.request_redraw();
         keep
     }
