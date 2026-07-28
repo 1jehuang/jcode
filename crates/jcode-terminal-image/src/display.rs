@@ -53,7 +53,7 @@ impl ImageProtocol {
                 return Self::Kitty;
             }
             if term_program == "iTerm.app" {
-                return Self::ITerm2;
+                return iterm2_protocol();
             }
             // WezTerm supports Sixel
             if term_program == "WezTerm" {
@@ -65,7 +65,7 @@ impl ImageProtocol {
         if let Ok(lc_terminal) = std::env::var("LC_TERMINAL")
             && lc_terminal == "iTerm2"
         {
-            return Self::ITerm2;
+            return iterm2_protocol();
         }
 
         // Check for Sixel-capable terminals
@@ -110,6 +110,28 @@ impl ImageProtocol {
     /// Check if image display is supported
     pub fn is_supported(&self) -> bool {
         *self != Self::None
+    }
+}
+
+/// iTerm2's inline-image protocol corrupts jcode's TUI output in real iTerm2,
+/// so image display is disabled there unless the user opts back in with
+/// `JCODE_ITERM2_IMAGES=1`.
+fn iterm2_images_enabled() -> bool {
+    matches!(
+        std::env::var("JCODE_ITERM2_IMAGES")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn iterm2_protocol() -> ImageProtocol {
+    if iterm2_images_enabled() {
+        ImageProtocol::ITerm2
+    } else {
+        ImageProtocol::None
     }
 }
 
@@ -455,6 +477,14 @@ mod tests {
         assert!(can_display_to_stdout(ImageProtocol::ITerm2, true));
         assert!(can_display_to_stdout(ImageProtocol::Sixel, true));
         assert!(!can_display_to_stdout(ImageProtocol::None, true));
+    }
+
+    #[test]
+    fn iterm2_images_are_disabled_unless_opted_in() {
+        // Default (no opt-in env var in test process): iTerm2 is treated as
+        // having no usable image protocol.
+        assert_eq!(iterm2_protocol(), ImageProtocol::None);
+        assert!(!iterm2_images_enabled());
     }
 
     #[test]

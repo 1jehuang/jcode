@@ -155,7 +155,14 @@ pub(super) fn infer_protocol_from_env(
     }
 
     if term_program.contains("iterm") || term.contains("iterm") || lc_terminal.contains("iterm") {
-        return Some(ProtocolType::Iterm2);
+        // Real iTerm2 renders jcode's inline images incorrectly (corrupted
+        // scrollback / broken layout), so treat it as having no usable image
+        // protocol and fall back to Mermaid source text. Set
+        // JCODE_ITERM2_IMAGES=1 to opt back in.
+        if iterm2_images_opt_in() {
+            return Some(ProtocolType::Iterm2);
+        }
+        return None;
     }
 
     if term.contains("sixel") {
@@ -163,6 +170,36 @@ pub(super) fn infer_protocol_from_env(
     }
 
     None
+}
+
+/// True when we are running in real iTerm2 (not WezTerm, which also speaks the
+/// iTerm2 protocol correctly) and the user has not opted image output back in.
+pub(super) fn real_iterm2_without_opt_in() -> bool {
+    let term_program = std::env::var("TERM_PROGRAM")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let lc_terminal = std::env::var("LC_TERMINAL")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if term_program.contains("wezterm") || lc_terminal.contains("wezterm") {
+        return false;
+    }
+    let is_iterm = term_program.contains("iterm")
+        || lc_terminal.contains("iterm")
+        || std::env::var("TERM")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("iterm");
+    is_iterm && !iterm2_images_opt_in()
+}
+
+/// Whether the user explicitly opted iTerm2 image output back in.
+pub(super) fn iterm2_images_opt_in() -> bool {
+    std::env::var("JCODE_ITERM2_IMAGES")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
 }
 
 fn query_font_size() -> (u16, u16) {
@@ -223,7 +260,13 @@ fn probe_picker() -> Picker {
     let mut picker = fast_picker();
     match Picker::from_query_stdio() {
         Ok(probed) => {
-            let protocol = probed.protocol_type();
+            let mut protocol = probed.protocol_type();
+            if protocol == ProtocolType::Iterm2 && real_iterm2_without_opt_in() {
+                crate::log_info(
+                    "Probe reported iTerm2 images, but iTerm2 image output is disabled;                      falling back to halfblocks",
+                );
+                protocol = ProtocolType::Halfblocks;
+            }
             crate::log_info(&format!(
                 "Mermaid picker stdio probe detected protocol: {:?}",
                 protocol
@@ -664,9 +707,10 @@ mod tests {
 
     #[test]
     fn infer_protocol_detects_iterm_and_sixel() {
+        // Real iTerm2 breaks on inline images, so it reports no protocol.
         assert_eq!(
             infer_protocol_from_env(None, Some("iTerm.app"), None, None),
-            Some(ProtocolType::Iterm2)
+            None
         );
         assert_eq!(
             infer_protocol_from_env(None, Some("WezTerm"), None, None),
