@@ -13,6 +13,38 @@ fn test_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
+    let req = Request::SoftInterrupt {
+        id: 2,
+        content: "look at this".to_string(),
+        images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
+        urgent: true,
+    };
+    let json = serde_json::to_string(&req)?;
+    let decoded = parse_request_json(&json)?;
+    let Request::SoftInterrupt {
+        content,
+        images,
+        urgent,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(content, "look at this");
+    assert_eq!(images, vec![("image/png".to_string(), "ZmFrZQ==".to_string())]);
+    assert!(urgent);
+
+    let legacy = r#"{"type":"soft_interrupt","id":3,"content":"legacy","urgent":false}"#;
+    let decoded = parse_request_json(legacy)?;
+    let Request::SoftInterrupt { images, .. } = decoded else {
+        return Err(anyhow!("wrong legacy request type"));
+    };
+    assert!(images.is_empty());
+    Ok(())
+}
+
+#[test]
 fn test_compacted_history_request_roundtrip() -> Result<()> {
     let req = Request::GetCompactedHistory {
         id: 7,

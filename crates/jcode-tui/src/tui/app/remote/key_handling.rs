@@ -10,13 +10,14 @@ pub(in crate::tui::app) fn handle_remote_char_input(app: &mut App, c: char) {
 pub(in crate::tui::app) async fn send_interleave_now(
     app: &mut App,
     content: String,
+    images: Vec<(String, String)>,
     remote: &mut RemoteConnection,
 ) {
     if content.trim().is_empty() {
         return;
     }
     let msg_clone = content.clone();
-    match remote.soft_interrupt(content, false).await {
+    match remote.soft_interrupt(content, images, false).await {
         Err(e) => {
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to send interleave: {}",
@@ -772,7 +773,8 @@ async fn handle_remote_key_internal(
                     app.queued_messages.push(prepared.expanded);
                 }
                 SendAction::Interleave => {
-                    app.send_interleave_now(prepared.expanded, remote).await;
+                    app.send_interleave_now(prepared.expanded, prepared.images, remote)
+                        .await;
                 }
             }
         }
@@ -1876,7 +1878,10 @@ async fn handle_remote_key_internal(
                     if app.is_processing {
                         let pause_message = app_mod::commands::transfer_pause_message();
                         let pause_display = pause_message.clone();
-                        match remote.soft_interrupt(pause_message, false).await {
+                        match remote
+                            .soft_interrupt(pause_message, Vec::new(), false)
+                            .await
+                        {
                             Ok(request_id) => {
                                 app.track_pending_soft_interrupt(request_id, pause_display);
                                 app.pending_transfer_request = true;
@@ -1973,7 +1978,10 @@ async fn handle_remote_key_internal(
                     };
                     if app.is_processing {
                         app.push_display_message(DisplayMessage::system(launch_notice(true)));
-                        match remote.soft_interrupt(prompt.clone(), false).await {
+                        match remote
+                            .soft_interrupt(prompt.clone(), Vec::new(), false)
+                            .await
+                        {
                             Ok(request_id) => {
                                 app.track_pending_soft_interrupt(request_id, prompt);
                                 app.set_status_notice(format!("Interrupting for {}...", cmd_label));
@@ -2552,7 +2560,8 @@ async fn handle_remote_key_internal(
                         app.queued_messages.push(prepared.expanded);
                     }
                     SendAction::Interleave => {
-                        app.send_interleave_now(prepared.expanded, remote).await;
+                        app.send_interleave_now(prepared.expanded, prepared.images, remote)
+                            .await;
                     }
                 }
             }

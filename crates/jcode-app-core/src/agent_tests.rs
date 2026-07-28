@@ -192,6 +192,38 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
 }
 
 #[tokio::test]
+async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+
+    agent.queue_soft_interrupt(
+        "look at this".to_string(),
+        vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
+        false,
+        SoftInterruptSource::User,
+    );
+    let injected = agent.inject_soft_interrupts();
+
+    assert_eq!(injected.len(), 1);
+    let message = agent
+        .session
+        .messages
+        .last()
+        .expect("soft interrupt should append a user message");
+    assert!(matches!(
+        &message.content[0],
+        ContentBlock::Image { media_type, data }
+            if media_type == "image/png" && data == "ZmFrZQ=="
+    ));
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::Text { text, .. } if text == "look at this"
+    ));
+}
+
+#[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
@@ -747,6 +779,7 @@ fn seed_transient_session_state(agent: &mut Agent) {
     agent.push_alert("pending alert".to_string());
     agent.queue_soft_interrupt(
         "queued interrupt".to_string(),
+        Vec::new(),
         true,
         SoftInterruptSource::User,
     );
@@ -1014,6 +1047,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     agent.session.save().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
+        Vec::new(),
         true,
         SoftInterruptSource::System,
     );

@@ -1146,11 +1146,13 @@ pub(super) async fn handle_client(
             Request::SoftInterrupt {
                 id,
                 content,
+                images,
                 urgent,
             } => {
                 queue_soft_interrupt(
                     id,
                     content,
+                    images,
                     urgent,
                     SoftInterruptSource::User,
                     &session_control,
@@ -3078,6 +3080,7 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
 fn queue_soft_interrupt(
     id: u64,
     content: String,
+    images: Vec<(String, String)>,
     urgent: bool,
     source: SoftInterruptSource,
     session_control: &SessionControlHandle,
@@ -3089,7 +3092,7 @@ fn queue_soft_interrupt(
         "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
         id, session_control.session_id, source, urgent, content_bytes, content_chars
     ));
-    let queued = session_control.queue_soft_interrupt(content, urgent, source);
+    let queued = session_control.queue_soft_interrupt(content, images, urgent, source);
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",

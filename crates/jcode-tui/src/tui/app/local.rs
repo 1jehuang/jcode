@@ -514,6 +514,7 @@ pub(super) fn finish_turn(app: &mut App) {
     app.stream_message_ended = false;
     app.processing_started = None;
     app.interleave_message = None;
+    app.interleave_images.clear();
     app.pending_soft_interrupts.clear();
     app.pending_soft_interrupt_requests.clear();
     app.thought_line_inserted = false;
