@@ -3236,11 +3236,12 @@ impl App {
     /// thought stays readable and anchored until the next user prompt removes
     /// the turn's traces.
     pub(super) fn anchor_current_reasoning_block(&mut self) {
-        let block_start = self
-            .reasoning_block_start
-            .take()
-            .unwrap_or(0)
-            .min(self.streaming.streaming_text.len());
+        // Same hazard as `strip_reasoning_partial_tail`: this is a byte offset
+        // recorded against an earlier state of the buffer, so clamping to the
+        // length is not enough. `split_off` panics on a non-boundary offset, so
+        // snap it to a character boundary (see issues #632/#633/#635).
+        let block_start = self.reasoning_block_start.take().unwrap_or(0);
+        let block_start = floor_char_boundary(&self.streaming.streaming_text, block_start);
         // Everything from the block start onward is the reasoning markup. Split it
         // off so the preceding answer text (if any) stays in the live stream.
         let block = self.streaming.streaming_text.split_off(block_start);

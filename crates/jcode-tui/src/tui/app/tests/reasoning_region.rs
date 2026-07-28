@@ -931,3 +931,23 @@ fn strip_reasoning_partial_tail_snaps_to_char_boundary() {
     assert_eq!(app.streaming_text(), "\u{6f22}");
     assert_eq!(app.reasoning_partial_len, 0);
 }
+
+/// Sibling of the `strip_reasoning_partial_tail` hazard: `reasoning_block_start`
+/// is also a byte offset recorded against an earlier state of the buffer, and
+/// `split_off` panics on a non-boundary offset just like `truncate` does.
+/// Clamping to the length alone does not prevent landing mid-character.
+#[test]
+fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
+    with_reasoning_current_home(|| {
+        let mut app = create_test_app();
+        // Two 3-byte characters.
+        app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string();
+        // Offset 4 is within the buffer but inside the second character.
+        app.reasoning_block_start = Some(4);
+        app.reasoning_streaming = true;
+        // Used to panic inside `split_off`.
+        app.anchor_current_reasoning_block();
+        // Buffer is still valid UTF-8 and no character was cut in half.
+        assert!(app.streaming_text().is_char_boundary(app.streaming_text().len()));
+    });
+}
