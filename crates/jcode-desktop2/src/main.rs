@@ -32,6 +32,7 @@ mod scroll;
 mod select;
 mod states;
 mod stream;
+mod stream_bench;
 mod strip;
 #[cfg(test)]
 mod tests;
@@ -181,6 +182,26 @@ const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16)
 /// caret's half-second blink), which stay on timers so an idle window sleeps.
 const CONTINUOUS_FRAME: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// Frame interval for an *unfocused* window that still has something to say:
+/// a turn in flight, a reply streaming in, a scroll glide landing. Those
+/// animations carry information (the spinner proves the agent is alive, the
+/// reveal is the reply arriving), so freezing them while the user watches
+/// from another window reads as a hang. Ten frames a second keeps the window
+/// visibly alive at a fraction of the display-rate cost; decorative motion
+/// (the caret's blink, the donut) stays asleep until focus returns. Wider
+/// than [`CONTINUOUS_FRAME`], so background wakes stay on the timer path
+/// rather than chaining display-paced frames.
+const BACKGROUND_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Lines of transcript one notch of a discrete mouse wheel travels.
+///
+/// A notch is not a line: it is the coarsest input the user has, and every
+/// other application on the desktop moves a handful of lines per notch (three
+/// is the GTK, Chromium and Firefox default). Moving one line per notch is the
+/// single loudest reason wheel scrolling here felt like wading, because it
+/// makes a page of transcript cost thirty notches.
+const WHEEL_LINES: f64 = 3.0;
+
 /// UI model: what the frame is built from.
 pub struct Model {
     pub theme: theme::Theme,
@@ -218,6 +239,13 @@ pub struct Model {
     pub selection: Option<select::Selection>,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
+    /// The most recent failure, until the next turn starts.
+    ///
+    /// Separate from [`Self::status`] because the status line is suppressed for
+    /// an attached session (a healthy connection is noise), and a failure is
+    /// the one thing that must survive that rule: losing the connection
+    /// mid-session is invisible otherwise.
+    pub failure: Option<String>,
     /// The hero donut's luminance field, or `None` when the donut is off
     /// (reduced motion, or a headless capture that wants a still frame).
     pub donut: Option<donut::Donut>,
@@ -294,6 +322,7 @@ impl Default for Model {
             scroll: 0.0,
             selection: None,
             notice: None,
+            failure: None,
             donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
@@ -343,6 +372,43 @@ impl Model {
             .nudge(self.scroll - before, std::time::Instant::now());
     }
 
+    /// Move the view by `delta` logical pixels from a wheel or trackpad
+    /// gesture: positive travels toward older content. Unlike a keyboard jump
+    /// this lands the pixels immediately and feeds the momentum estimator, so
+    /// the transcript tracks the fingers and then coasts like a browser page.
+    ///
+    /// Returns whether the whole delta fitted; a clamped edge is reported so
+    /// the caller can end the fling rather than grind against the boundary.
+    fn scroll_gesture(&mut self, delta: f64, max: f64, now: std::time::Instant) -> bool {
+        let before = self.scroll;
+        self.scroll = (self.scroll + delta).clamp(0.0, max.max(0.0));
+        let moved = self.scroll - before;
+        self.smooth.glide_from(delta, now);
+        (moved - delta).abs() < 0.5
+    }
+
+    /// Apply the travel a fling still owes the view. Called once per frame, so
+    /// the coast is paced by the display rather than by event arrival.
+    /// Whether a fling still owes the view travel, so the caller can skip the
+    /// cost of measuring the document on an idle frame.
+    fn has_momentum(&self) -> bool {
+        self.smooth.has_momentum()
+    }
+
+    fn apply_momentum(&mut self, max: f64) {
+        let pending = self.smooth.take_momentum();
+        if pending == 0.0 {
+            return;
+        }
+        let before = self.scroll;
+        self.scroll = (self.scroll + pending).clamp(0.0, max.max(0.0));
+        // Coasting into the top or the tail is over: grinding against the
+        // clamp would keep the window repainting for no visible movement.
+        if ((self.scroll - before) - pending).abs() >= 0.5 {
+            self.smooth.stop();
+        }
+    }
+
     /// The scroll offset the frame is actually drawn at.
     ///
     /// The logical `scroll` is where the user asked to be; the glide holds the
@@ -386,15 +452,11 @@ impl Model {
         if let Some(notice) = &self.notice {
             return Some(notice.clone());
         }
-        // The activity line normally lives in the empty composer. When the user
-        // has already typed the next message the ghost line is gone, so it
-        // moves down here rather than disappearing: "is it working?" must be
-        // answerable in every state, not just the idle-composer one.
-        if self.busy
-            && !self.editor.is_empty()
-            && let Some(line) = self.activity.line(std::time::Instant::now())
-        {
-            return Some(line);
+        // A failure outranks progress: whatever the app was doing, this is what
+        // the user needs to know, and it is shown whether or not a session is
+        // attached.
+        if let Some(failure) = &self.failure {
+            return Some(failure.clone());
         }
         if self.scroll > 0.0 {
             return Some("scrolled back".to_string());
@@ -423,6 +485,10 @@ impl App {
         // animate text they are already looking at.
         self.model.stream.reveal_all();
         self.model.busy = true;
+        // Sending clears the last failure: the user has responded to it, and a
+        // stale "no network" footnote hanging over a fresh turn would be a
+        // report about the past.
+        self.model.failure = None;
         self.model.activity.start(std::time::Instant::now());
         // Submitting jumps back to the live tail; otherwise the reply streams
         // in off-screen.
@@ -805,7 +871,34 @@ impl App {
             .is_animating()
             .then(|| now + OVERVIEW_FRAME);
         if !self.model.focused {
-            return overview;
+            // An unfocused window drops the decorative motion (the caret, the
+            // donut) but not the informative kind: the spinner is the proof a
+            // turn is still running, and the streaming reveal is the reply
+            // itself arriving. Freezing those while the user watches from
+            // another window makes progress look like a hang, so they keep
+            // ticking at a low background cadence instead of the display rate.
+            let spinner = self
+                .model
+                .activity
+                .next_frame_at(now)
+                .map(|_| now + BACKGROUND_FRAME);
+            let stream = self
+                .model
+                .stream
+                .next_frame_at(now)
+                .map(|_| now + BACKGROUND_FRAME);
+            // The scroll ease and the bar's fade also finish in the
+            // background, so a window left mid-glide does not freeze with the
+            // scrollbar half-faded until focus returns.
+            let smooth = self
+                .model
+                .smooth
+                .next_frame_at(now)
+                .map(|_| now + BACKGROUND_FRAME);
+            return [overview, spinner, stream, smooth]
+                .into_iter()
+                .flatten()
+                .min();
         }
         let caret = (!self.model.busy)
             .then(|| self.model.caret.next_toggle_at(now))
@@ -1189,21 +1282,50 @@ impl ApplicationHandler for App {
             } => {
                 self.paste_primary_selection();
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, phase, .. } => {
                 // Scrolling the transcript with the wheel, in logical pixels
                 // so a trackpad's fine-grained deltas are not quantised to
                 // whole lines.
-                let pixels = match delta {
+                //
+                // A notch from a discrete wheel is a jump, so it keeps the
+                // exponential ease that turns the teleport into a glide. A
+                // trackpad's pixel deltas are the finger's own position, so
+                // they land immediately and feed the momentum estimator: the
+                // page tracks the fingers and then coasts, like a browser.
+                //
+                // `phase` is what makes the coast trustworthy. Guessing the
+                // release from event timing turns every pause in a slow drag
+                // into a fling that fights the finger, so the backend's own
+                // start/end is taken whenever it offers one.
+                match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                        f64::from(y) * self.frame.body_line_height()
+                        let pixels = f64::from(y) * self.frame.body_line_height() * WHEEL_LINES;
+                        if pixels > 0.0 {
+                            let max = self.max_scroll();
+                            self.model.scroll_up(pixels, max);
+                        } else if pixels < 0.0 {
+                            self.model.scroll_down(-pixels);
+                        }
                     }
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y / self.frame.scale,
-                };
-                if pixels > 0.0 {
-                    let max = self.max_scroll();
-                    self.model.scroll_up(pixels, max);
-                } else if pixels < 0.0 {
-                    self.model.scroll_down(-pixels);
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        // Only here is the phase meaningful: a discrete notch
+                        // arrives with a hard-coded `Moved` that never ends, so
+                        // reading it would pin the view in a gesture that never
+                        // closes. See `Smooth::phase_known`.
+                        let held = matches!(
+                            phase,
+                            winit::event::TouchPhase::Started | winit::event::TouchPhase::Moved
+                        );
+                        self.model.smooth.gesture_held(held);
+                        let pixels = pos.y / self.frame.scale;
+                        if pixels != 0.0 {
+                            let max = self.max_scroll();
+                            let now = std::time::Instant::now();
+                            if !self.model.scroll_gesture(pixels, max, now) {
+                                self.model.smooth.stop();
+                            }
+                        }
+                    }
                 }
                 self.request_redraw();
             }
@@ -1293,6 +1415,12 @@ impl ApplicationHandler for App {
                 self.animate_donut();
                 self.model.stream.advance(std::time::Instant::now());
                 self.model.smooth.advance(std::time::Instant::now());
+                // A fling coasts on the frame clock, not on event arrival, so
+                // the travel stays smooth after the fingers leave the pad.
+                if self.model.has_momentum() {
+                    let max = self.max_scroll();
+                    self.model.apply_momentum(max);
+                }
                 let mut scene = Scene::new();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();
