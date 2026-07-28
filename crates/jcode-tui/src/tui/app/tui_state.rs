@@ -277,7 +277,12 @@ impl App {
             return Some(resolved.into());
         }
 
-        let auth_status = crate::auth::AuthStatus::check_fast();
+        // Render path: use the non-blocking probe. `check_fast` blocks on a
+        // cold/expired snapshot (~20-30ms of credential-file reads) directly on
+        // the frame thread, which shows up as a periodic stall while typing.
+        // `auth_status()` above already made this choice; these sibling
+        // per-frame lookups must match it.
+        let auth_status = crate::auth::AuthStatus::check_fast_nonblocking();
         let runtime_provider = active_runtime_provider_key();
         crate::auth::resolve_dual_credential_auth(
             provider,
@@ -333,7 +338,8 @@ impl App {
             WidgetProviderKind::CostBasedApiKey => crate::tui::info_widget::AuthMethod::ApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
-                let auth_status = crate::auth::AuthStatus::check_fast();
+                // Per-frame: never block the render thread on a credential probe.
+                let auth_status = crate::auth::AuthStatus::check_fast_nonblocking();
                 if auth_status.gemini == crate::auth::AuthState::Available {
                     crate::tui::info_widget::AuthMethod::GeminiOAuth
                 } else {
