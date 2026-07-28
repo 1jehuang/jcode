@@ -111,15 +111,29 @@ pub struct Band {
 /// highlight is the text's geometry rather than a re-measured guess, so it is
 /// right for proportional fonts, clusters, and bidi runs.
 pub fn block_bands(block: &LaidBlock, range: (usize, usize), scale: f64) -> Vec<Band> {
+    layout_bands(&block.layout, range, scale)
+}
+
+/// As [`block_bands`], for a bare Parley layout.
+///
+/// Split out so the transcript can derive the wash behind an inline code span
+/// from the same geometry a selection highlight uses. A code wash and a
+/// selection band are the same question asked of the same layout ("where on
+/// screen is this byte range?"), and answering it twice was how the two came
+/// to disagree by a pixel on HiDPI.
+pub fn layout_bands(
+    layout: &parley::Layout<vello::peniko::Brush>,
+    range: (usize, usize),
+    scale: f64,
+) -> Vec<Band> {
     let (start, end) = range;
     if start >= end {
         return Vec::new();
     }
-    let cursor =
-        |offset: usize| Cursor::from_byte_index(&block.layout, offset, Affinity::Downstream);
+    let cursor = |offset: usize| Cursor::from_byte_index(layout, offset, Affinity::Downstream);
     let selection = ParleySelection::new(cursor(start), cursor(end));
     let mut bands = Vec::new();
-    selection.geometry_with(&block.layout, |rect, _line| {
+    selection.geometry_with(layout, |rect, _line| {
         bands.push(Band {
             rect: Rect::new(
                 rect.x0 / scale,
