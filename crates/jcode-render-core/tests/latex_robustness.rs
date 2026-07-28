@@ -24,7 +24,10 @@ fn assert_visible_and_deterministic(source: &str) {
 #[test]
 fn renders_the_supported_symbol_vocabulary() {
     let cases = [
-        (r"\alpha \beta \gamma \delta \epsilon \varepsilon", "α β γ δ ε ε"),
+        (
+            r"\alpha \beta \gamma \delta \epsilon \varepsilon",
+            "α β γ δ ε ε",
+        ),
         (
             r"\theta \vartheta \lambda \mu \pi \varpi \phi \varphi \omega",
             "θ ϑ λ μ π ϖ φ ϕ ω",
@@ -37,7 +40,10 @@ fn renders_the_supported_symbol_vocabulary() {
             r"\sum \prod \coprod \int \iint \iiint \oint \partial \nabla \infty",
             "∑ ∏ ∐ ∫ ∬ ∭ ∮ ∂ ∇ ∞",
         ),
-        (r"\times \div \cdot \circ \pm \mp \ast \star", "× ÷ · ∘ ± ∓ ∗ ⋆"),
+        (
+            r"\times \div \cdot \circ \pm \mp \ast \star",
+            "× ÷ · ∘ ± ∓ ∗ ⋆",
+        ),
         (
             r"\le \leq \ge \geq \ne \neq \approx \sim \simeq \equiv \propto",
             "≤ ≤ ≥ ≥ ≠ ≠ ≈ ∼ ≃ ≡ ∝",
