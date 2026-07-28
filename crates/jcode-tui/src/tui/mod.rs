@@ -36,7 +36,8 @@ mod redraw_schedule;
 pub(crate) use redraw_schedule::{
     REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
     REDRAW_REMOTE_STARTUP, REDRAW_SWARM_SPINNER, idle_donut_active, last_full_frame_redraw_reason,
-    periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    current_full_frame_redraw_reason, periodic_redraw_required,
+    periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
 mod remote_diff;
@@ -199,6 +200,12 @@ pub trait TuiState {
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;
+    /// JSON payload for the pinned todo band rendered at the top of the chat
+    /// viewport when `display.pin_todos` is enabled. `None` when the feature
+    /// is off or the session has no todos.
+    fn pinned_todos_payload(&self) -> Option<&str> {
+        None
+    }
 
     // ---- Input ----
     fn input(&self) -> &str;
@@ -350,6 +357,15 @@ pub trait TuiState {
     fn connected_clients(&self) -> Option<usize>;
     /// Short-lived notice shown in the status line (e.g., model switch, toggle diff)
     fn status_notice(&self) -> Option<String>;
+    /// How long since the user last pressed a key, scrolled, or pasted, or
+    /// `None` when they have not interacted yet.
+    ///
+    /// Distinct from [`time_since_activity`], which tracks provider output:
+    /// typing into an idle session produces no stream events, so only this can
+    /// tell "actively composing" from "sitting untouched".
+    fn time_since_user_interaction(&self) -> Option<Duration> {
+        None
+    }
     /// Distinct learned-keybinding nudge shown in its own pop-out color, e.g.
     /// "you usually do X the slow way, press <key>". Separate from
     /// [`status_notice`] so the UI can style it differently.
