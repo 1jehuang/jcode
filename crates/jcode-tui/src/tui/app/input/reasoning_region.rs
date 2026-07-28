@@ -10,14 +10,13 @@
 //! (issues #632/#633/#635). Every slice here therefore snaps to a character
 //! boundary, and every buffer replacement clears the offsets.
 
-use super::App;
-use super::input::floor_char_boundary;
-use crate::tui::app::DisplayMessage;
+use super::floor_char_boundary;
+use crate::tui::app::{App, DisplayMessage};
 
 impl App {
     /// Begin a reasoning region. Reasoning renders as dim, italic text (no
     /// blockquote gutter, no header, no footer). Idempotent while open.
-    pub(super) fn open_reasoning_region(&mut self) {
+    pub(in crate::tui::app) fn open_reasoning_region(&mut self) {
         if self.reasoning_streaming {
             return;
         }
@@ -43,7 +42,7 @@ impl App {
     /// Remove the live partial-reasoning tail (the rendered, not-yet-committed
     /// in-progress line) from the streaming buffer so it can be rebuilt. No-op
     /// when there is no live partial.
-    pub(super) fn strip_reasoning_partial_tail(&mut self) {
+    pub(in crate::tui::app) fn strip_reasoning_partial_tail(&mut self) {
         if self.reasoning_partial_len > 0 {
             let new_len = self
                 .streaming
@@ -67,7 +66,7 @@ impl App {
     /// dim+italic markdown; the trailing partial line is rendered as a live tail
     /// that is re-emitted in place on each delta. The whole-line emphasis run is
     /// preserved (each line is its own `*…*`) so styling never breaks mid-line.
-    pub(super) fn append_reasoning_text(&mut self, text: &str) {
+    pub(in crate::tui::app) fn append_reasoning_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -98,7 +97,7 @@ impl App {
     /// Promote the live partial line to a committed line and end the region. The
     /// `_footer` argument is ignored (the "Thought for Xs" footer was removed);
     /// it is kept for call-site compatibility.
-    pub(super) fn close_reasoning_region(&mut self, _footer: Option<String>) {
+    pub(in crate::tui::app) fn close_reasoning_region(&mut self, _footer: Option<String>) {
         if !self.reasoning_streaming {
             return;
         }
@@ -137,7 +136,7 @@ impl App {
 
     /// True when the active reasoning-display mode is `current` (live-only,
     /// ephemeral reasoning).
-    pub(super) fn reasoning_current_mode(&self) -> bool {
+    pub(in crate::tui::app) fn reasoning_current_mode(&self) -> bool {
         matches!(
             crate::config::config().display.reasoning_display(),
             crate::config::ReasoningDisplayMode::Current
@@ -150,7 +149,7 @@ impl App {
     /// (content below it can only be appended, never inserted above), so the
     /// thought stays readable and anchored until the next user prompt removes
     /// the turn's traces.
-    pub(super) fn anchor_current_reasoning_block(&mut self) {
+    pub(in crate::tui::app) fn anchor_current_reasoning_block(&mut self) {
         // Same hazard as `strip_reasoning_partial_tail`: this is a byte offset
         // recorded against an earlier state of the buffer, so clamping to the
         // length is not enough. `split_off` panics on a non-boundary offset, so
@@ -197,7 +196,7 @@ impl App {
     /// ephemeral across turns: the trace never moves while on screen, it is
     /// simply gone the next time the user acts (a moment when the transcript
     /// reflows anyway).
-    pub(super) fn clear_turn_reasoning_traces(&mut self) {
+    pub(in crate::tui::app) fn clear_turn_reasoning_traces(&mut self) {
         if self.turn_reasoning_traces.is_empty() {
             return;
         }
