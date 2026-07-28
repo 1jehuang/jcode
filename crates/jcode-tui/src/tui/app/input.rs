@@ -18,6 +18,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+/// Streaming reasoning region, split out to keep this file under the
+/// code-size budget. See the module docs for the byte-offset invariant.
+mod reasoning_region;
+
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
 
 /// Largest UTF-8 character boundary at or below `index` (clamped to the string

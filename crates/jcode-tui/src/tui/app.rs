@@ -81,7 +81,6 @@ mod onboarding_flow_control;
 mod onboarding_repair;
 mod onboarding_sim;
 mod productivity;
-mod reasoning_region;
 mod remote;
 mod remote_notifications;
 mod replay;
