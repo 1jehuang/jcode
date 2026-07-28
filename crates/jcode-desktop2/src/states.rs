@@ -126,6 +126,9 @@ fn connecting() -> Model {
         smooth: crate::scroll::Smooth::default(),
         // Detached: no session, so no directory to name.
         working_dir: None,
+        // Pinned off: a live RAM figure would make every capture depend on
+        // the machine and moment it ran on.
+        mem: None,
     }
 }
 
@@ -206,6 +209,9 @@ fn attached_empty() -> Model {
         // Fixed path, so captures do not depend on where the repo is checked
         // out or on whose `$HOME` the capture ran under.
         working_dir: Some("/home/j/jcode".into()),
+        // Pinned off: a live RAM figure would make every capture depend on
+        // the machine and moment it ran on.
+        mem: None,
     }
 }
 

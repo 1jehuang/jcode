@@ -19,6 +19,7 @@ mod hints;
 mod input;
 mod keymap;
 mod layout;
+mod mem;
 mod meta;
 mod overview;
 mod paint;
@@ -112,6 +113,10 @@ struct App {
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
     frame: layout::Frame,
+    /// Throttled `/proc` reader behind the chrome row's RAM caption. Owned
+    /// here rather than by the model so a frame stays a pure function of the
+    /// model.
+    mem_sampler: mem::Sampler,
 }
 
 impl Default for App {
@@ -138,6 +143,7 @@ impl Default for App {
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
+            mem_sampler: mem::Sampler::default(),
         }
     }
 }
@@ -243,6 +249,10 @@ pub struct Model {
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
     pub model: Option<ModelId>,
+    /// Live RAM readout for this window and the daemon, drawn on the trailing
+    /// end of the top chrome row. `None` until the first sample, and always
+    /// `None` in pinned captures, so frames stay deterministic.
+    pub mem: Option<mem::Readout>,
 }
 
 /// The provider and model answering this session.
@@ -294,6 +304,7 @@ impl Default for Model {
             peeks: overview::Peeks::default(),
             working_dir: None,
             model: None,
+            mem: None,
         }
     }
 }
@@ -462,7 +473,8 @@ impl App {
         // than one session to move between (the strip proper), or a working
         // directory to name. With neither it would be a widget saying "1 of 1"
         // about nowhere, so nothing is reserved and the page is unchanged.
-        let strip = model.strip.len() > 1 || model.working_dir.is_some();
+        let strip =
+            model.strip.len() > 1 || model.working_dir.is_some() || model.mem.is_some();
         // Measure the conversation so the composer can sit just under the
         // last reply while it is short, instead of floating at the middle of
         // the page with a gap above it. Content height is a function of the
@@ -1272,6 +1284,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
+                // Refresh the chrome row's RAM caption. Throttled inside the
+                // sampler, so per-frame redraws do not become per-frame /proc
+                // reads; between samples the previous readout stays shown.
+                if let Some(readout) = self.mem_sampler.sample(std::time::Instant::now()) {
+                    self.model.mem = Some(readout);
+                }
                 self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
                 self.model.stream.advance(std::time::Instant::now());
