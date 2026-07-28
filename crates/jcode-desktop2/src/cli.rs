@@ -7,7 +7,7 @@
 
 use crate::{
     App, DONUT_GRID, Model, ModelId, build_scene, capture, donut, harness, keymap, layout, paint,
-    profile, states, transcript,
+    profile, scroll_bench, states, transcript,
 };
 use anyhow::Result;
 use vello::Scene;
@@ -31,9 +31,12 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
             Some(Ok(()))
         }
         Some("--profile-states") => Some(run_profile_states(&args[1..])),
+        Some("--bench-stream") => Some(bench_stream(&args[1..])),
+        Some("--bench-scroll") => Some(bench_scroll()),
         Some("--bench-donut") => Some(bench_donut()),
         Some("--capture") => Some(run_capture(&args[1..])),
         Some("--check-primary-selection") => Some(check_primary_selection()),
+        Some("--check-reconnect") => Some(check_reconnect()),
         Some("--e2e") => Some(run_e2e(
             args.get(1)
                 .map(String::as_str)
@@ -251,10 +254,13 @@ fn run_e2e(message: &str) -> Result<()> {
         match update {
             harness::HarnessUpdate::Status(status) => {
                 println!("[e2e] status: {status}");
-                if status.starts_with("disconnected") || status.starts_with("error") {
-                    anyhow::bail!("harness failure: {status}");
-                }
                 model.status = status;
+            }
+            // The worker now retries rather than giving up, but a probe must
+            // still fail loudly on the first failure instead of watching it
+            // reconnect until the deadline.
+            harness::HarnessUpdate::Failed(message) => {
+                anyhow::bail!("harness failure: {message}");
             }
             harness::HarnessUpdate::Attached { session_id, .. } => {
                 println!("[e2e] attached: {session_id}");
@@ -312,6 +318,96 @@ fn run_e2e(message: &str) -> Result<()> {
         }
     }
     anyhow::bail!("e2e timed out")
+}
+
+/// `--bench-stream [history_turns] [reply_chars] [delta_ms]`: replay a
+/// scripted token stream through the real per-frame path and report every
+/// frame class. This is "the streaming feels laggy" turned into numbers: a
+/// per-frame cost distribution, the early-vs-late growth curve, and the exact
+/// count of frames that did layout work they should not have.
+fn bench_stream(args: &[String]) -> Result<()> {
+    use crate::stream_bench::{Config, FrameKind, run};
+
+    let mut config = Config::default();
+    let parse = |value: &String| -> Result<u64> {
+        value
+            .parse::<u64>()
+            .map_err(|error| anyhow::anyhow!("invalid number '{value}': {error}"))
+    };
+    if let Some(value) = args.first() {
+        config.history_turns = parse(value)? as usize;
+    }
+    if let Some(value) = args.get(1) {
+        config.reply_chars = parse(value)? as usize;
+    }
+    if let Some(value) = args.get(2) {
+        config.delta_interval_ms = parse(value)?;
+    }
+
+    println!(
+        "streaming {} chars into a {}-turn session, one delta per {}ms, 8ms frames\n",
+        config.reply_chars, config.history_turns, config.delta_interval_ms
+    );
+    let report = run(&config);
+
+    println!(
+        "{:<8} {:>7} {:>9} {:>9} {:>9} {:>9}",
+        "frames", "count", "mean", "p50", "p95", "max"
+    );
+    println!("{}", "-".repeat(56));
+    for (kind, name) in [
+        (FrameKind::Delta, "delta"),
+        (FrameKind::Reveal, "reveal"),
+        (FrameKind::Idle, "idle"),
+    ] {
+        let Some(stats) = report.stats(kind) else {
+            continue;
+        };
+        let ms = |us: u64| us as f64 / 1000.0;
+        println!(
+            "{:<8} {:>7} {:>7.2}ms {:>7.2}ms {:>7.2}ms {:>7.2}ms",
+            name,
+            stats.count,
+            ms(stats.mean_us),
+            ms(stats.p50_us),
+            ms(stats.p95_us),
+            ms(stats.max_us)
+        );
+    }
+
+    println!();
+    if let Some((early, late)) = report.delta_growth() {
+        println!(
+            "delta cost, first quarter of the reply: {:.2}ms -> last quarter: {:.2}ms ({:.1}x)",
+            early as f64 / 1000.0,
+            late as f64 / 1000.0,
+            late as f64 / early.max(1) as f64
+        );
+    }
+    println!(
+        "frames over 8.3ms (120Hz): {} | over 16.6ms (60Hz): {}",
+        report.over(8_333),
+        report.over(16_600)
+    );
+
+    // The exact gates: these fail the command on any machine, because they
+    // count work rather than time.
+    let wasteful = report.wasteful_animation_frames();
+    let overworked = report.overworked_delta_frames();
+    if !wasteful.is_empty() {
+        anyhow::bail!(
+            "{} reveal/idle frames re-laid messages: animation frames must do no layout work",
+            wasteful.len()
+        );
+    }
+    if !overworked.is_empty() {
+        anyhow::bail!(
+            "{} delta frames laid out more than the tail message",
+            overworked.len()
+        );
+    }
+    println!("exact gates ok: animation frames did no layout, deltas re-laid only the tail");
+    Ok(())
 }
 
 /// `--bench-donut`: measure the donut's per-frame CPU cost, split between the
@@ -391,4 +487,121 @@ fn run_capture(args: &[String]) -> Result<()> {
             .unwrap_or_else(|| format!("{node}.png")),
     );
     render_node(node, &model, &out)
+}
+
+/// `--check-reconnect`: prove the client survives losing the harness.
+///
+/// This is the "no network" report at the transport layer: the connection dies
+/// mid-session, and the app has to say so and then come back rather than sitting
+/// there accepting input into nothing. Checked against the real runtime because
+/// the bug was in the wiring, not in a pure function: attach, drop the bridge,
+/// then require both a reported failure and a re-attach to *the same* session.
+fn check_reconnect() -> Result<()> {
+    // Its own *bridge* socket, on the shared daemon. The check works by killing
+    // the bridge, and the developer's live desktop windows talk to the shared
+    // one: taking that down to test a client would be a check that breaks the
+    // thing it is checking. The daemon is left shared because it is expensive
+    // to start and this check does not disturb it.
+    let runtime = std::env::temp_dir().join(format!("jcode-reconnect-{}", std::process::id()));
+    std::fs::create_dir_all(&runtime)?;
+    // SAFETY: single-threaded, before any connection thread is spawned.
+    unsafe {
+        std::env::set_var("JCODE_API_SOCKET", runtime.join("api.sock"));
+    }
+    let bridge = |kill: bool| -> Option<u32> {
+        let listening = std::process::Command::new("pgrep")
+            .args(["-f", "jcode-harness-api-bridge"])
+            .output()
+            .ok()?;
+        let pids: Vec<u32> = String::from_utf8_lossy(&listening.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        // Only ever the bridge this check started: the newest pid, and only
+        // one that was not running before we began.
+        let mine = pids.into_iter().max()?;
+        if kill {
+            let _ = std::process::Command::new("kill")
+                .arg(mine.to_string())
+                .status();
+        }
+        Some(mine)
+    };
+    let pre_existing = bridge(false);
+
+    let (updates, _outgoing) = harness::spawn(|| {});
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    let mut first_session: Option<String> = None;
+    let mut failure: Option<String> = None;
+    let mut dropped = false;
+
+    while std::time::Instant::now() < deadline {
+        let Ok(update) = updates.recv_timeout(std::time::Duration::from_secs(1)) else {
+            continue;
+        };
+        match update {
+            harness::HarnessUpdate::Status(status) => println!("[reconnect] status: {status}"),
+            harness::HarnessUpdate::Failed(message) => {
+                println!("[reconnect] failure: {message}");
+                failure = Some(message);
+            }
+            harness::HarnessUpdate::Attached { session_id, .. } => match first_session.clone() {
+                None => {
+                    println!("[reconnect] attached: {session_id}");
+                    first_session = Some(session_id);
+                    // Drop the bridge this check started. It comes back on the
+                    // next attempt (`ensure_runtime` starts it), so this is the
+                    // same shape as the runtime restart a rebuild produces.
+                    match bridge(false) {
+                        Some(pid) if Some(pid) != pre_existing => {
+                            bridge(true);
+                            dropped = true;
+                            println!("[reconnect] dropped the bridge (pid {pid})");
+                        }
+                        _ => anyhow::bail!(
+                            "could not identify this check's own bridge process to drop"
+                        ),
+                    }
+                }
+                Some(previous) => {
+                    if !dropped {
+                        continue;
+                    }
+                    let reported = failure.clone().ok_or_else(|| {
+                        anyhow::anyhow!("reconnected without ever reporting a failure")
+                    })?;
+                    if session_id != previous {
+                        anyhow::bail!(
+                            "reconnect landed in a different session: {previous} -> {session_id}"
+                        );
+                    }
+                    println!("[reconnect] re-attached {session_id} after: {reported}");
+                    println!("[reconnect] OK");
+                    let _ = std::fs::remove_dir_all(&runtime);
+                    return Ok(());
+                }
+            },
+            _ => {}
+        }
+    }
+    anyhow::bail!(
+        "reconnect check timed out (attached={first_session:?} dropped={dropped} \
+         failure={failure:?})"
+    )
+}
+
+/// `--bench-scroll`: replay the scroll gestures a hand actually makes and
+/// report how the view answered them.
+///
+/// "The scrollwheel feels wrong" is an impression, and impressions cannot be
+/// tuned against: every constant in `scroll.rs` trades against another one, so
+/// tightening the ease for a wheel notch quietly ruins a trackpad drag. This
+/// turns the feel into numbers (latency, tracking error, travel ratio, jerk)
+/// over a fixed set of gestures, so a change can be judged instead of felt.
+fn bench_scroll() -> Result<()> {
+    let reports = scroll_bench::sweep();
+    if !scroll_bench::report(&reports) {
+        anyhow::bail!("the scroll misbehaved on one or more gestures");
+    }
+    Ok(())
 }
