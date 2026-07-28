@@ -557,7 +557,7 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: Some("Inspect a debug frame".to_string()),
         end_to_end_ownership: Some(90),
         ..Default::default()
@@ -578,7 +578,7 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
         .join("\n");
 
     assert!(
-        plain.contains("Hill climbability 95% · Ownership 90%"),
+        plain.contains("Closed feedback loop 95% · Ownership 90%"),
         "{plain}"
     );
     // Plan-level intent renders once, above the groups.
@@ -611,7 +611,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: None,
         end_to_end_ownership: None,
         ..Default::default()
@@ -657,7 +657,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: None,
         end_to_end_ownership: Some(90),
         ..Default::default()
@@ -672,7 +672,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("Hill climbability 95%"), "{plain}");
+    assert!(plain.contains("Closed feedback loop 95%"), "{plain}");
     assert!(plain.contains("Ownership 90%"), "{plain}");
     assert!(
         lines.iter().all(|line| line.width() <= 38),
@@ -715,7 +715,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(95),
+        closed_feedback_loop: Some(95),
         feedback_loop: Some("Inspect the rendered frame".to_string()),
         end_to_end_ownership: Some(92),
         ..Default::default()
@@ -724,7 +724,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         "[todo] [tool timing: start=2026-07-13T19:51:50.261Z finish=2026-07-13T19:51:50.265Z duration=4ms] {}\n\nGoals:\n{}\n\n{}",
         serde_json::to_string_pretty(&todos).unwrap(),
         serde_json::to_string_pretty(&goals).unwrap(),
-        crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE
+        crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
         role: "tool".to_string(),
@@ -750,7 +750,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(!plain.contains("Todos"), "{plain}");
     assert!(plain.contains("todo rendering  ●"), "{plain}");
     assert!(
-        plain.contains("Hill climbability 95% · Ownership 92%"),
+        plain.contains("Closed feedback loop 95% · Ownership 92%"),
         "{plain}"
     );
     assert!(plain.contains("● Render the todo result · 92%"), "{plain}");
@@ -778,13 +778,13 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
     }];
     let before = crate::todo::TodoGoal {
         group: Some("todo rendering".to_string()),
-        hill_climbability: Some(90),
+        closed_feedback_loop: Some(90),
         feedback_loop: Some("Inspect one frame".to_string()),
         end_to_end_ownership: None,
         ..Default::default()
     };
     let after = crate::todo::TodoGoal {
-        hill_climbability: Some(98),
+        closed_feedback_loop: Some(98),
         feedback_loop: Some(
             "Render before and after fixtures and assert unchanged fields are absent".to_string(),
         ),
@@ -794,7 +794,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         before: Some(before),
         after: Some(after.clone()),
         fields: vec![
-            crate::todo::TodoGoalField::HillClimbability,
+            crate::todo::TodoGoalField::ClosedFeedbackLoop,
             crate::todo::TodoGoalField::FeedbackLoop,
         ],
     }];
@@ -803,7 +803,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         serde_json::to_string_pretty(&todos).unwrap(),
         serde_json::to_string_pretty(&vec![after]).unwrap(),
         serde_json::to_string_pretty(&updates).unwrap(),
-        crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
+        crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
     );
     let msg = DisplayMessage {
         role: "tool".to_string(),
@@ -827,7 +827,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         .join("\n");
 
     assert!(plain.contains("todo rendering  updated"), "{plain}");
-    assert!(plain.contains("Hill climbability 90% → 98%"), "{plain}");
+    assert!(plain.contains("Closed feedback loop 90% → 98%"), "{plain}");
     assert!(
         plain.contains(
             "Feedback · Render before and after fixtures and assert unchanged fields are absent"
@@ -996,13 +996,13 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let initial = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            hill_climbability: Some(90),
+            closed_feedback_loop: Some(90),
             feedback_loop: Some(INITIAL_FEEDBACK.to_string()),
             end_to_end_ownership: None,
             ..Default::default()
         },
         "Make a pelican riding a bike animation that clearly works in a browser",
-        Some(crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE),
+        Some(crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE),
         Some(crate::message::ToolCall {
             id: "call_initial_todo".to_string(),
             name: "todo".to_string(),
@@ -1022,7 +1022,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let revised = render(
         crate::todo::TodoGoal {
             group: Some("pelican-bike-animation".to_string()),
-            hill_climbability: Some(98),
+            closed_feedback_loop: Some(98),
             feedback_loop: Some(REVISED_FEEDBACK.to_string()),
             end_to_end_ownership: None,
             ..Default::default()
@@ -1054,7 +1054,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
 #[test]
 fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     // This fixture is only the first todo retry emitted after the
-    // hill-climbability continuation. The eval stops here and deliberately does
+    // closed feedback loop continuation. The eval stops here and deliberately does
     // not depend on the model implementing or completing the visual task.
     const PROMPT: &str =
         "make the most visually appealing pelican on a bike animation with html and vanillia js";
@@ -1077,7 +1077,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("pelican-bike".to_string()),
-        hill_climbability: Some(98),
+        closed_feedback_loop: Some(98),
         feedback_loop: Some(FEEDBACK.to_string()),
         end_to_end_ownership: None,
         ..Default::default()
@@ -1165,7 +1165,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
     }];
     let goals = vec![crate::todo::TodoGoal {
         group: Some("ship outcome".to_string()),
-        hill_climbability: Some(100),
+        closed_feedback_loop: Some(100),
         feedback_loop: Some("Run the complete workflow".to_string()),
         end_to_end_ownership: Some(80),
         ..Default::default()

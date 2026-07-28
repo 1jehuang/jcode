@@ -169,7 +169,7 @@ fn test_session_end_event_serialization() {
         tool_cat_other: 0,
         tool_cat_todo: 2,
         todo_gate_ownership_count: 1,
-        todo_gate_hill_count: 1,
+        todo_gate_feedback_loop_count: 1,
         todo_gate_completion_count: 0,
         todo_gate_spike_count: 0,
         command_login_used: false,
@@ -235,7 +235,7 @@ fn test_session_end_event_serialization() {
     assert_eq!(json["tool_cat_todo"], 2);
     assert_eq!(json["feature_todo_used"], true);
     assert_eq!(json["todo_gate_ownership_count"], 1);
-    assert_eq!(json["todo_gate_hill_count"], 1);
+    assert_eq!(json["todo_gate_feedback_loop_count"], 1);
     assert_eq!(json["todo_gate_completion_count"], 0);
     assert_eq!(json["todo_gate_spike_count"], 0);
     assert_eq!(json["workflow_coding_used"], true);
