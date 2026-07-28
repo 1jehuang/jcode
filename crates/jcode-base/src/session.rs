@@ -35,6 +35,7 @@ use std::collections::HashSet;
 use std::path::Path;
 mod crash;
 mod journal;
+mod load_telemetry;
 mod maintenance;
 mod memory_profile;
 mod model;

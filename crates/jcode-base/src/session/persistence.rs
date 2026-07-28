@@ -194,6 +194,16 @@ impl Session {
             session.schedule_checkpoint_after_corrupt_journal(&journal_path);
         }
         let finalize_ms = finalize_start.elapsed().as_millis();
+        // Bulk scans of a large sessions directory can drive tens of thousands
+        // of loads through here. Logging each one floods the log and hides the
+        // scan that caused it, so hand the sample to the burst detector and let
+        // it decide between per-load detail and a single attributed summary.
+        let load_elapsed = load_start.elapsed();
+        if !super::load_telemetry::note_load(load_elapsed, snapshot_bytes + journal_bytes)
+            .should_log()
+        {
+            return Ok(session);
+        }
         crate::logging::info(&format!(
             "[TIMING] session_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, env_snapshots={}, replay_events={}, total={}ms",
             session.id,
@@ -206,7 +216,7 @@ impl Session {
             session.messages.len(),
             session.env_snapshots.len(),
             session.replay_events.len(),
-            load_start.elapsed().as_millis(),
+            load_elapsed.as_millis(),
         ));
         crate::logging::event_info(
             "SESSION_PERSISTENCE",
@@ -224,7 +234,7 @@ impl Session {
                 ("snapshot_ms", snapshot_ms.to_string()),
                 ("journal_ms", journal_ms.to_string()),
                 ("finalize_ms", finalize_ms.to_string()),
-                ("elapsed_ms", load_start.elapsed().as_millis().to_string()),
+                ("elapsed_ms", load_elapsed.as_millis().to_string()),
             ],
         );
         Ok(session)
