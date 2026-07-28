@@ -1466,6 +1466,8 @@ pub struct App {
     active_experimental_feature_notice: Option<String>,
     // Message to interleave during processing (set via Ctrl+Enter in queue mode)
     interleave_message: Option<String>,
+    // Image attachments associated with the staged interleave message.
+    interleave_images: Vec<(String, String)>,
     // Message sent as soft interrupt but not yet injected (shown in queue preview until injected)
     pending_soft_interrupts: Vec<String>,
     // Soft interrupts written to the socket but not yet acknowledged by the server.
