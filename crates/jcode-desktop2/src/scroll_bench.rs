@@ -663,12 +663,13 @@ pub fn gate(report: &Report) -> Vec<String> {
             report.final_lag()
         ));
     }
-    // Momentum must not keep the window awake forever. A browser's flick
-    // coasts for well under a second; past that the view is sliding on its own
-    // long after the hand has moved on, which reads as the page ignoring the
-    // user rather than as momentum. The friction constants are tuned to land
-    // comfortably inside this, so it is a regression gate and not a target.
-    if report.settle_ms.is_some_and(|ms| ms > 1_000) {
+    // Momentum must not keep the window awake forever, but the bound has to be
+    // a browser's, not a stricter guess: Chrome and Firefox both carry a real
+    // flick past a second, and the earlier 1s ceiling here was what made this
+    // scroll feel like it stopped the moment you let go. Past ~1.6s the view is
+    // sliding long after the hand has moved on, which reads as the page
+    // ignoring the user rather than as momentum.
+    if report.settle_ms.is_some_and(|ms| ms > 1_600) {
         failures.push(format!(
             "still moving {}ms after the last event",
             report.settle_ms.unwrap()
@@ -749,14 +750,18 @@ mod tests {
         );
     }
 
-    /// A flick coasts: the page carries on past where the fingers let go, and
-    /// then stops. Without this the transcript feels like it is bolted down.
+    /// A flick coasts: the page carries on well past where the fingers let go,
+    /// and then stops. Without this the transcript feels like it is bolted down.
+    ///
+    /// The floor is 4x rather than a token 1.2x because 1.2x *passed* while the
+    /// scroll still felt like it had no momentum at all: a bound that weak
+    /// cannot tell a browser-like fling from a stroke that merely finishes.
     #[test]
     fn a_flick_carries_past_the_fingers() {
         let report = report_for("flick");
         let ratio = report.travel_ratio().expect("no input travel");
         assert!(
-            ratio > 1.2,
+            ratio > 4.0,
             "a flick barely coasted: {ratio:.2}x the input travel\n  {}",
             report.line()
         );
