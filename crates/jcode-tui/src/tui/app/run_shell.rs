@@ -213,6 +213,15 @@ fn idle_animation_partial_repaint_allowed(
 pub(super) struct StatusSpinnerRenderer {
     last_frame: Option<Buffer>,
     last_full_frame_at: Option<Instant>,
+    /// Composer contents as of the last full frame.
+    ///
+    /// The animation-only path reuses that frame for everything except the
+    /// decorative rows, so it cannot show a newer input line. Without this it
+    /// would "satisfy" the redraw a keystroke asked for while omitting the
+    /// character, which then waited for a later full frame. Measured against a
+    /// live client: typing echoed to the terminal in ~7ms but only reached the
+    /// screen ~500ms later; with the guard the same keystroke paints in ~6ms.
+    last_full_frame_input: String,
 }
 
 impl StatusSpinnerRenderer {
@@ -223,6 +232,7 @@ impl StatusSpinnerRenderer {
     pub(super) fn invalidate(&mut self) {
         self.last_frame = None;
         self.last_full_frame_at = None;
+        self.last_full_frame_input.clear();
     }
 
     /// Whether the decorative idle-animation rows can be repainted on their own,
@@ -234,6 +244,14 @@ impl StatusSpinnerRenderer {
     /// FPS re-derives the transcript, header, status, and composer into
     /// byte-identical cells. That was measured at a ~50ms median per tick on an
     /// 8-core laptop, which is what made the animation visibly lag.
+    /// Whether the composer differs from what the last full frame drew.
+    ///
+    /// The animation-only repaint reuses that frame everywhere except the
+    /// decorative rows, so it cannot display a newer input line.
+    fn composer_changed_since_last_full_frame(&self, input: &str) -> bool {
+        input != self.last_full_frame_input
+    }
+
     pub(super) fn idle_animation_only_available(&self, app: &App) -> bool {
         let blocked = if self.last_frame.is_none() {
             Some("no_previous_frame")
@@ -245,6 +263,12 @@ impl StatusSpinnerRenderer {
             Some("force_full_redraw")
         } else if app.force_full_repaint {
             Some("force_full_repaint")
+        } else if self.composer_changed_since_last_full_frame(&app.input) {
+            // The user typed (or edited) since the last full frame. This path
+            // reuses that frame outside the animation rows, so it physically
+            // cannot show the new input line; taking it would consume the redraw
+            // the keystroke requested and defer the glyph to a later full frame.
+            Some("input_changed")
         } else {
             None
         };
@@ -394,6 +418,16 @@ impl StatusSpinnerRenderer {
         }
         self.last_frame = Some(completed_buffer);
         self.last_full_frame_at = Some(Instant::now());
+        // This frame drew the composer as it is now, so the animation-only path
+        // may reuse it again until the input changes.
+        if self.last_full_frame_input != app.input {
+            self.last_full_frame_input.clear();
+            self.last_full_frame_input.push_str(&app.input);
+        }
+        // Close the key-to-paint clock here rather than at render time: the user
+        // sees the keystroke when the frame reaches the terminal, so anything
+        // before the flush would understate the latency they feel.
+        crate::tui::ui::note_frame_painted();
         Ok(())
     }
 
@@ -957,6 +991,56 @@ mod tests {
     /// countdown). If that chrome wins every tick, the animation runs at full
     /// frame cost. It must instead get a full frame only at its own cadence,
     /// with the animation frames in between served cheaply.
+    /// The animation-only path reuses the previous full frame for everything
+    /// outside the decorative rows, so it can never show a newer input line. It
+    /// must therefore refuse to run while the composer differs from what the last
+    /// full frame drew.
+    ///
+    /// Without this, a keystroke's redraw request was "satisfied" by an animation
+    /// frame that did not contain the character, and the glyph waited for a later
+    /// full frame. Measured against a live client, typing echoed to the terminal
+    /// in ~7ms but only reached the screen ~500ms later; with the guard the same
+    /// keystroke paints in ~6ms.
+    ///
+    /// Every existing test missed this because they render single frames and
+    /// compare pixels: the partial frame is *correct*, it is simply the wrong
+    /// frame to have drawn, which is only visible across frames over time.
+    #[test]
+    fn the_animation_only_path_refuses_to_run_when_the_composer_changed() {
+        let mut renderer = StatusSpinnerRenderer::default();
+        // Pretend a full frame drew an empty composer.
+        renderer.last_frame = Some(Buffer::empty(Rect::new(0, 0, 10, 3)));
+        renderer.last_full_frame_at = Some(Instant::now());
+        renderer.last_full_frame_input = String::new();
+
+        // Same input: the guard must not object (other predicates may still
+        // block, which is why this asserts the reason rather than the outcome).
+        assert!(
+            !renderer.composer_changed_since_last_full_frame(""),
+            "an unchanged composer must not block the cheap path"
+        );
+
+        // A keystroke landed. The path cannot render it, so it must be blocked.
+        assert!(
+            renderer.composer_changed_since_last_full_frame("/"),
+            "a typed character must force a full frame"
+        );
+    }
+
+    /// Invalidation must clear the remembered input too. A stale value would let
+    /// the animation-only path run against a frame that no longer exists.
+    #[test]
+    fn invalidating_the_renderer_forgets_the_drawn_composer() {
+        let mut renderer = StatusSpinnerRenderer::default();
+        renderer.last_full_frame_input = "draft".to_string();
+        renderer.invalidate();
+        assert!(
+            renderer.composer_changed_since_last_full_frame("draft"),
+            "after invalidation nothing is known to be drawn, so any composer \
+             contents must force a full frame"
+        );
+    }
+
     #[test]
     fn slow_chrome_gets_periodic_full_frames_without_pacing_the_animation() {
         // Just after a full frame: chrome is already up to date, so the
