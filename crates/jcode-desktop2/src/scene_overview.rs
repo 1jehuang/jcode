@@ -236,7 +236,10 @@ pub(crate) fn draw_overview(
                 Affine::scale(scale),
                 theme.wash.with_alpha(phase as f32),
                 None,
-                &RoundedRect::from_rect(rect.inflate(CARD_HALO, CARD_HALO), CARD_CORNER + CARD_HALO),
+                &RoundedRect::from_rect(
+                    rect.inflate(CARD_HALO, CARD_HALO),
+                    CARD_CORNER + CARD_HALO,
+                ),
             );
         }
         // Fill: the session you are in is inked, the rest are paper, so "where
@@ -297,8 +300,7 @@ pub(crate) fn draw_overview(
         // for that carries no label at all rather than a row of dots.
         let name = crate::overview::short_id(&card.session_id);
         // Monospace at this size runs about 0.62em per character.
-        let fitted =
-            (rect.width() * 0.85 / (name.chars().count().max(1) as f64 * 0.62)) as f32;
+        let fitted = (rect.width() * 0.85 / (name.chars().count().max(1) as f64 * 0.62)) as f32;
         let size = fitted.clamp(CARD_LABEL_MIN, CARD_LABEL_SIZE);
         if fitted >= CARD_LABEL_MIN {
             text.draw_paragraph_scaled(

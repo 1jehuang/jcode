@@ -1,7 +1,7 @@
 {
-  "total": 3226,
+  "total": 3231,
   "totals_by_pattern": {
-    "dot_ok": 1184,
+    "dot_ok": 1189,
     "let_underscore": 1189,
     "unwrap_or_default": 853
   },
@@ -622,7 +622,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/auth/mod.rs": {
-      "dot_ok": 4,
+      "dot_ok": 5,
       "let_underscore": 0,
       "unwrap_or_default": 4
     },
@@ -1331,6 +1331,16 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
+    "crates/jcode-desktop2/src/app_harness.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-desktop2/src/app_overview.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
+      "unwrap_or_default": 2
+    },
     "crates/jcode-desktop2/src/capture.rs": {
       "dot_ok": 0,
       "let_underscore": 1,
@@ -1353,8 +1363,13 @@
     },
     "crates/jcode-desktop2/src/main.rs": {
       "dot_ok": 0,
-      "let_underscore": 3,
-      "unwrap_or_default": 2
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-desktop2/src/mem.rs": {
+      "dot_ok": 4,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-desktop2/src/meta.rs": {
       "dot_ok": 4,

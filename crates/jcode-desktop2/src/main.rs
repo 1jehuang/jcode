@@ -473,8 +473,7 @@ impl App {
         // than one session to move between (the strip proper), or a working
         // directory to name. With neither it would be a widget saying "1 of 1"
         // about nowhere, so nothing is reserved and the page is unchanged.
-        let strip =
-            model.strip.len() > 1 || model.working_dir.is_some() || model.mem.is_some();
+        let strip = model.strip.len() > 1 || model.working_dir.is_some() || model.mem.is_some();
         // Measure the conversation so the composer can sit just under the
         // last reply while it is short, instead of floating at the middle of
         // the page with a gap above it. Content height is a function of the
