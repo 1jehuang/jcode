@@ -81,15 +81,65 @@ fn normalize_agent_host(raw: &str) -> Option<String> {
 /// "This region is not yet available for your team" (issue #637), so reuse the
 /// CLI's cached value when it is present.
 fn agent_host_from_cursor_cli_config() -> Option<String> {
-    let path = jcode_base::storage::user_home_path(".cursor/cli-config.json").ok()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let url_config = value.get("serverConfigCache")?.get("agentUrlConfig")?;
+    let path = match jcode_base::storage::user_home_path(".cursor/cli-config.json") {
+        Ok(path) => path,
+        Err(err) => {
+            jcode_base::logging::warn(&format!(
+                "Cursor: cannot locate ~/.cursor/cli-config.json ({err}); \
+                 falling back to the global agent host"
+            ));
+            return None;
+        }
+    };
+    // A missing file is the normal case for users who never ran `cursor-agent`,
+    // so that is not worth warning about. Anything else (unreadable, malformed,
+    // unexpected shape) is worth surfacing: silently discarding it is what made
+    // issue #637 hard to diagnose in the first place.
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            jcode_base::logging::warn(&format!(
+                "Cursor: cannot read {} ({err}); falling back to the global agent host",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            jcode_base::logging::warn(&format!(
+                "Cursor: {} is not valid JSON ({err}); falling back to the global agent host",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let Some(url_config) = value
+        .get("serverConfigCache")
+        .and_then(|cache| cache.get("agentUrlConfig"))
+    else {
+        jcode_base::logging::warn(&format!(
+            "Cursor: {} has no serverConfigCache.agentUrlConfig; \
+             falling back to the global agent host. Running `cursor-agent status` \
+             usually repopulates it.",
+            path.display()
+        ));
+        return None;
+    };
     let candidate = url_config
         .get("agentnUrl")
         .and_then(|v| v.as_str())
-        .or_else(|| url_config.get("agentUrl").and_then(|v| v.as_str()))?;
-    let host = normalize_agent_host(candidate)?;
+        .or_else(|| url_config.get("agentUrl").and_then(|v| v.as_str()));
+    let Some(host) = candidate.and_then(normalize_agent_host) else {
+        jcode_base::logging::warn(&format!(
+            "Cursor: {} has no usable agentnUrl/agentUrl host (found {candidate:?}); \
+             falling back to the global agent host",
+            path.display()
+        ));
+        return None;
+    };
     jcode_base::logging::info(&format!(
         "Cursor: using regional agent host {host} from {}",
         path.display()
@@ -103,11 +153,11 @@ fn agent_host_from_cursor_cli_config() -> Option<String> {
 /// 3. the `global` host, as a last-resort fallback
 fn agent_host() -> String {
     for var in ["JCODE_CURSOR_AGENT_HOST", "CURSOR_AGENT_HOST"] {
-        if let Some(host) = std::env::var(var).ok().and_then(|raw| {
-            let raw = raw.trim().to_string();
-            if raw.is_empty() { None } else { Some(raw) }
-        }) {
-            return host;
+        if let Ok(raw) = std::env::var(var) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
         }
     }
     agent_host_from_cursor_cli_config().unwrap_or_else(|| AGENT_HOST.to_string())
