@@ -18,6 +18,10 @@ pub struct Editor {
     anchor: Option<usize>,
     /// Undo stack of (text, cursor) snapshots.
     undo: Vec<(String, usize)>,
+    /// Redo stack, filled by [`Editor::undo`] and cleared by any fresh edit,
+    /// exactly like a browser text field: Ctrl+Shift+Z after a new keystroke
+    /// must not resurrect an abandoned future.
+    redo: Vec<(String, usize)>,
     /// Submitted history, oldest first.
     history: Vec<String>,
     /// Position while recalling history; `None` means editing live input.
@@ -142,6 +146,8 @@ impl Editor {
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
+        // A fresh edit forks history: the redo branch is gone.
+        self.redo.clear();
     }
 
     /// Restore the previous snapshot. Returns false when there is nothing to
@@ -149,8 +155,25 @@ impl Editor {
     pub fn undo(&mut self) -> bool {
         match self.undo.pop() {
             Some((text, cursor)) => {
+                self.redo.push((self.text.clone(), self.cursor));
                 self.text = text;
                 self.cursor = cursor.min(self.text.len());
+                self.anchor = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Redo the most recently undone edit. Returns false when the redo branch
+    /// is empty.
+    pub fn redo(&mut self) -> bool {
+        match self.redo.pop() {
+            Some((text, cursor)) => {
+                self.undo.push((self.text.clone(), self.cursor));
+                self.text = text;
+                self.cursor = cursor.min(self.text.len());
+                self.anchor = None;
                 true
             }
             None => false,
@@ -288,6 +311,7 @@ impl Editor {
         self.cursor = 0;
         self.anchor = None;
         self.undo.clear();
+        self.redo.clear();
         self.history_index = None;
         self.stashed = None;
         if !content.trim().is_empty() && self.history.last().map(String::as_str) != Some(&content) {
@@ -332,6 +356,60 @@ impl Editor {
     pub fn extend_end(&mut self) {
         self.anchor_selection();
         self.cursor = self.line_end(self.cursor);
+    }
+
+    /// Shift+Up / Shift+Down in a browser textarea: extend the selection a
+    /// line at a time, and at the buffer edges extend to the very start or end
+    /// rather than doing nothing. Returns false when the selection could not
+    /// grow at all, so callers can leave history recall alone.
+    pub fn extend_line(&mut self, delta: isize) -> bool {
+        self.anchor_selection();
+        let (line, col) = self.cursor_line_col();
+        let target = if delta < 0 {
+            if line == 0 {
+                // Already on the first line: select to the top of the buffer.
+                let moved = self.cursor != 0;
+                self.cursor = 0;
+                return moved;
+            }
+            line - 1
+        } else {
+            if line + 1 >= self.line_count() {
+                let moved = self.cursor != self.text.len();
+                self.cursor = self.text.len();
+                return moved;
+            }
+            line + 1
+        };
+        let mut start = 0usize;
+        for _ in 0..target {
+            start = self.line_end(start) + 1;
+        }
+        let end = self.line_end(start);
+        self.cursor = self.snap((start + col).min(end));
+        true
+    }
+
+    /// Ctrl+Shift+Home / End: extend to the start or end of the buffer.
+    pub fn extend_to_start(&mut self) {
+        self.anchor_selection();
+        self.cursor = 0;
+    }
+
+    pub fn extend_to_end(&mut self) {
+        self.anchor_selection();
+        self.cursor = self.text.len();
+    }
+
+    /// Ctrl+Home / Ctrl+End inside the composer: move to the buffer edges.
+    pub fn move_to_start(&mut self) {
+        self.cursor = 0;
+        self.anchor = None;
+    }
+
+    pub fn move_to_end(&mut self) {
+        self.cursor = self.text.len();
+        self.anchor = None;
     }
 
     /// Word range containing `offset`, for double-click selection.
@@ -745,6 +823,63 @@ mod tests {
             editor.insert_char('a');
         }
         assert!(editor.undo.len() <= UNDO_LIMIT);
+    }
+
+    #[test]
+    fn redo_replays_an_undone_edit_and_a_new_edit_forks_the_branch() {
+        let mut editor = Editor::with_text("alpha");
+        editor.insert_str(" beta");
+        assert_eq!(editor.text(), "alpha beta");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "alpha");
+        assert!(editor.redo(), "Ctrl+Shift+Z had nothing to replay");
+        assert_eq!(editor.text(), "alpha beta");
+        assert_eq!(editor.cursor(), editor.text().len());
+
+        // A fresh edit after an undo abandons the redo branch, as in a browser:
+        // resurrecting it would paste text the user never asked for.
+        assert!(editor.undo());
+        editor.insert_str(" gamma");
+        assert!(!editor.redo(), "a stale redo branch survived a new edit");
+    }
+
+    #[test]
+    fn redo_reports_when_there_is_nothing_to_redo() {
+        let mut editor = Editor::with_text("alpha");
+        assert!(!editor.redo());
+    }
+
+    #[test]
+    fn shift_arrows_extend_by_line_and_clamp_at_the_edges() {
+        let mut editor = Editor::with_text("one\ntwo\nthree");
+        editor.set_cursor(editor.text().len());
+        // The column clamps to the shorter line, as in a textarea.
+        assert!(editor.extend_line(-1));
+        assert_eq!(editor.selected_text(), Some("\nthree"));
+        assert!(editor.extend_line(-1));
+        assert_eq!(editor.selected_text(), Some("\ntwo\nthree"));
+        // At the first line, extend to the very start rather than stalling.
+        assert!(editor.extend_line(-1));
+        assert_eq!(editor.selected_text(), Some("one\ntwo\nthree"));
+        assert!(
+            !editor.extend_line(-1),
+            "a pinned edge kept reporting motion"
+        );
+    }
+
+    #[test]
+    fn ctrl_home_and_end_reach_the_ends_of_the_field() {
+        let mut editor = Editor::with_text("one\ntwo");
+        editor.set_cursor(5);
+        editor.move_to_start();
+        assert_eq!(editor.cursor(), 0);
+        assert!(editor.selection().is_none());
+        editor.extend_to_end();
+        assert_eq!(editor.selected_text(), Some("one\ntwo"));
+        editor.move_to_end();
+        assert_eq!(editor.cursor(), editor.text().len());
+        editor.extend_to_start();
+        assert_eq!(editor.selected_text(), Some("one\ntwo"));
     }
 
     #[test]

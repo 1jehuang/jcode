@@ -487,7 +487,7 @@ fn draw_transcript(
     // `Transcript::streaming_len` counts, or the two would disagree).
     let streaming_index = laid
         .iter()
-        .rposition(|message| message.role != Role::Tool)
+        .rposition(|message| !matches!(message.role, Role::Tool | Role::Notice))
         .filter(|_| model.stream.is_revealing())
         .filter(|index| laid[*index].role != Role::User);
 
@@ -514,34 +514,10 @@ fn draw_transcript(
         let text_left = frame.left + USER_PAD_X;
         let text_top = message_top + placed.message.top_padding();
 
-        // A reasoning message carries a rule down its whole left edge: one
-        // mark for the thought, rather than a label repeated per paragraph.
-        // It is the quote convention, which is exactly what a thought is here.
-        // Adjacent reasoning messages are one thought that happened to arrive
-        // in pieces, so the rule bridges the gap between them instead of
-        // restarting: the thought reads as one aside, not several.
-        if placed.message.role == Role::Reasoning {
-            let joins_previous = placed
-                .index
-                .checked_sub(1)
-                .is_some_and(|previous| laid[previous].role == Role::Reasoning);
-            let rule_top = match joins_previous {
-                true => message_top - crate::transcript::MESSAGE_GAP,
-                false => message_top,
-            };
-            scene.fill(
-                vello::peniko::Fill::NonZero,
-                Affine::scale(scale),
-                theme.rule,
-                None,
-                &Rect::new(
-                    text_left,
-                    rule_top,
-                    text_left + frame.hairline() * 2.0,
-                    message_top + placed.message.height,
-                ),
-            );
-        }
+        // A thought carries no rule and no indent: it is set apart by being
+        // dimmer and slightly smaller than the reply (see `lay_out_message`).
+        // Furniture down the left edge made every aside look like a quoted
+        // block, which is louder than a thought should ever read.
 
         // The live tool card: one card for the call running right now, on
         // the composer's wash with the app's halftone spinner beside its
@@ -580,15 +556,34 @@ fn draw_transcript(
             }
         }
 
+        // A failure notice: a rule down its left edge, no wash. A washed card
+        // is the user's own message in this theme, and dressing an error as
+        // something the user typed is worse than not marking it at all. The
+        // rule is the print convention for an interjection, and it takes the
+        // error ink so the mark is as loud as the text it labels.
+        if placed.message.role == Role::Notice {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.error,
+                None,
+                &Rect::new(
+                    frame.left + USER_PAD_X,
+                    message_top,
+                    frame.left + USER_PAD_X + frame.hairline() * 2.0,
+                    message_top + placed.message.height,
+                ),
+            );
+        }
+
         // Glyphs in this message, and how many earlier blocks have consumed,
-        // so the reveal sweeps across block boundaries as one motion.
+        // so the reveal sweeps across block boundaries as one motion. Counts
+        // come from layout time, so this is arithmetic, not a per-frame walk
+        // over every glyph run.
         let message_glyphs: usize = match streaming_index {
-            Some(index) if index == placed.index => placed
-                .message
-                .blocks
-                .iter()
-                .map(|block| crate::text::glyph_count(&block.layout))
-                .sum(),
+            Some(index) if index == placed.index => {
+                placed.message.blocks.iter().map(|block| block.glyphs).sum()
+            }
             _ => 0,
         };
         let mut drawn_glyphs = 0usize;
@@ -723,7 +718,7 @@ fn draw_transcript(
                 scale,
                 revealed,
             );
-            drawn_glyphs += crate::text::glyph_count(&block.layout);
+            drawn_glyphs += block.glyphs;
         }
     }
 }
@@ -899,26 +894,16 @@ pub fn build_scene(
 
         // An empty field carries a rotating invitation rather than a label:
         // "message jcode" is a caption you stop seeing, while a prompt you
-        // could actually type teaches what the thing is for. While busy it says
-        // so instead, because "nothing is happening" and "working" must never
-        // look the same.
-        // The busy line is the activity line when a turn is running: the
-        // current phase and elapsed time, so a long turn shows progress
-        // instead of a frozen label. The elapsed clock is the liveness
-        // signal; a spinner here would only add noise beside the caret.
-        let busy_line = model
-            .busy
-            .then(|| model.activity.line(std::time::Instant::now()))
-            .flatten()
-            .unwrap_or_else(|| "working... esc to interrupt".to_string());
+        // could actually type teaches what the thing is for.
+        //
+        // The field never carries the turn's status: liveness belongs to the
+        // transcript's live tool card and the window's own busy cues, and a
+        // phase/elapsed line here fought the caret and the next message the
+        // user was already typing.
         if model.editor.is_empty() {
             text.draw_paragraph_scaled(
                 scene,
-                if model.busy {
-                    busy_line.as_str()
-                } else {
-                    crate::hints::hint(model.hint)
-                },
+                crate::hints::hint(model.hint),
                 (prompt_x, prompt_y),
                 prompt_width,
                 ParagraphStyle {
@@ -954,9 +939,7 @@ pub fn build_scene(
 
         // An unfocused window must not show a blinking caret: it would claim
         // keystrokes land here when they do not.
-        // No caret while a turn runs: it would sit on top of the activity
-        // line, and typing is not what the field is showing right now.
-        if model.focused && model.caret.visible() && !(model.busy && model.editor.is_empty()) {
+        if model.focused && model.caret.visible() {
             let bar = input.caret_rect(model.editor.cursor(), layout::CARET_WIDTH);
             let top = (origin_y + bar.y0).max(clip_top);
             let bottom = (origin_y + bar.y1).min(clip_bottom);

@@ -17,7 +17,7 @@
 
 use crate::text::{ParagraphStyle, TextSystem};
 use crate::theme::Theme;
-use crate::transcript::{LaidMessage, Role, Transcript, lay_out_message};
+use crate::transcript::{LaidMessage, Role, Transcript, lay_out_message_reusing};
 
 /// Everything a frame needs to turn a model into a scene: the font and layout
 /// contexts, and the transcript layout cache. Bundled so the cache travels with
@@ -53,6 +53,12 @@ pub struct TranscriptCache {
     laid: Vec<LaidMessage>,
     hits: usize,
     misses: usize,
+    /// Misses accumulated over the cache's whole life. The per-call `misses`
+    /// resets every call, and a real frame calls `lay_out` several times (the
+    /// frame measurement, the glide observation, the scene build), so "how
+    /// much layout work did this *frame* do" needs a counter that only ever
+    /// goes up: the bench reads it before and after and subtracts.
+    total_misses: usize,
 }
 
 impl TranscriptCache {
@@ -106,7 +112,21 @@ impl TranscriptCache {
                 continue;
             }
             self.misses += 1;
-            let laid = lay_out_message(text, message, width, theme, base, scale);
+            self.total_misses += 1;
+            // A changed message is re-laid *reusing* its own previous blocks:
+            // a streamed delta only appends, so everything before the changed
+            // tail block is byte-identical and keeps its layout. This is what
+            // stops a delta's cost growing with the reply's length. The
+            // matcher inside compares text, kind, and inset, so a genuinely
+            // different message reuses nothing; geometry changes cleared the
+            // whole cache above, so stale widths can never leak through here.
+            let previous = self
+                .laid
+                .get_mut(index)
+                .map(|entry| std::mem::take(&mut entry.blocks))
+                .unwrap_or_default();
+            let (laid, _) =
+                lay_out_message_reusing(text, message, previous, width, theme, base, scale);
             let key = (message.role, message.source.clone());
             match (self.keys.get_mut(index), self.laid.get_mut(index)) {
                 (Some(slot), Some(entry)) => {
@@ -135,6 +155,13 @@ impl TranscriptCache {
     /// regression the moment it appears.
     pub fn stats(&self) -> (usize, usize) {
         (self.hits, self.misses)
+    }
+
+    /// Messages laid out since the cache was created. Monotonic, so a caller
+    /// can meter the layout work of any span of calls (a frame, a whole
+    /// streaming replay) by differencing two readings.
+    pub fn total_relayouts(&self) -> usize {
+        self.total_misses
     }
 }
 
