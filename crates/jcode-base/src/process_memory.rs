@@ -315,7 +315,7 @@ pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
         }))
     }
 
-    #[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
     {
         // glibc has no arena purge API, but malloc_trim(0) walks all arenas
         // and returns freed pages to the OS (MADV_DONTNEED), which is the
@@ -328,7 +328,10 @@ pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
         })
     }
 
-    #[cfg(all(not(target_os = "linux"), not(feature = "jemalloc")))]
+    #[cfg(all(
+        not(all(target_os = "linux", target_env = "gnu")),
+        not(feature = "jemalloc")
+    ))]
     {
         logging::warn("allocator purge requested but no purge mechanism is available");
         Err(anyhow!(
@@ -489,7 +492,7 @@ pub fn release_retained_heap(reason: &str) {
         }
     }
 
-    #[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
     {
         unsafe extern "C" {
             fn malloc_trim(pad: usize) -> i32;
@@ -505,7 +508,10 @@ pub fn release_retained_heap(reason: &str) {
         ));
     }
 
-    #[cfg(all(not(target_os = "linux"), not(feature = "jemalloc")))]
+    #[cfg(all(
+        not(all(target_os = "linux", target_env = "gnu")),
+        not(feature = "jemalloc")
+    ))]
     {
         let _ = reason;
     }
@@ -1048,6 +1054,51 @@ mod tests {
             !ran_again,
             "steady-state retention must not re-trigger the watchdog"
         );
+    }
+
+    /// Guards the musl build (issue #645). `mallopt`/`malloc_trim` are glibc
+    /// extensions, so every allocator path that calls them must be gated on
+    /// `target_env = "gnu"`, not on `target_os = "linux"` alone, and the
+    /// corresponding fallback must widen to match.
+    ///
+    /// This asserts the *shape* of the gating rather than any runtime value:
+    /// exactly one of the glibc arm and the no-op arm may be active for a given
+    /// target. If someone re-widens the glibc gate to bare `target_os`, musl
+    /// selects both arms here and this fails; if a fallback is narrowed by
+    /// mistake, musl selects neither and this also fails.
+    #[test]
+    fn glibc_only_allocator_paths_are_gated_on_gnu_not_just_linux() {
+        let glibc_arm_active = cfg!(all(
+            target_os = "linux",
+            target_env = "gnu",
+            not(feature = "jemalloc")
+        ));
+        let fallback_arm_active = cfg!(all(
+            not(all(target_os = "linux", target_env = "gnu")),
+            not(feature = "jemalloc")
+        ));
+
+        if cfg!(feature = "jemalloc") {
+            // jemalloc supersedes both system-allocator arms.
+            assert!(!glibc_arm_active);
+            assert!(!fallback_arm_active);
+        } else {
+            assert_ne!(
+                glibc_arm_active, fallback_arm_active,
+                "exactly one system-allocator arm must be active: \
+                 glibc={glibc_arm_active} fallback={fallback_arm_active}"
+            );
+        }
+
+        // On a musl target the glibc-only arm must never be the active one,
+        // since the symbols it references do not exist there.
+        if cfg!(all(target_os = "linux", target_env = "musl")) {
+            assert!(
+                !glibc_arm_active,
+                "musl must not select the glibc allocator arm: it references \
+                 mallopt/malloc_trim, which musl does not provide (issue #645)"
+            );
+        }
     }
 
     #[test]
