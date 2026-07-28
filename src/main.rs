@@ -63,7 +63,10 @@ fn parse_alloc_tuning_env(var: &str, default: i32) -> i32 {
 }
 
 /// Pure parsing core of [`parse_alloc_tuning_env`], separated for unit tests.
-#[cfg(any(test, all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc"))))]
+#[cfg(any(
+    test,
+    all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc"))
+))]
 fn parse_alloc_tuning(value: Option<&str>, default: i32) -> i32 {
     value
         .and_then(|value| value.trim().parse::<i32>().ok())
