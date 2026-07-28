@@ -1375,26 +1375,18 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
+                if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
+                    eprintln!(
+                        "[input] key {logical_key:?} mods {:?} overview_open {} visible {}",
+                        self.modifiers,
+                        self.model.overview.is_open(),
+                        self.model.overview.is_visible()
+                    );
+                }
                 // While the field is up it owns the keyboard: bound keys
                 // drive the field, and anything else is a chord that takes
                 // the field straight back off screen.
-                if self.model.overview.is_open() {
-                    if !self.overview_keydown(&logical_key, text.as_ref().map(|t| t.as_str())) {
-                        self.save_geometry(true);
-                        event_loop.exit();
-                    }
-                    return;
-                }
-                // A key landing while the field is still zooming out erases
-                // it in the same frame: the user is typing, not gesturing.
-                self.super_held_since = None;
-                if self.model.overview.is_visible() {
-                    self.model.overview.abort();
-                }
-                let action =
-                    keymap::resolve(&logical_key, self.modifiers).unwrap_or(keymap::Action::Insert);
-                let typed = text.as_ref().map(|t| t.as_str());
-                if !self.apply(action, typed) {
+                if !self.key_pressed(&logical_key, text.as_ref().map(|t| t.as_str())) {
                     self.save_geometry(true);
                     event_loop.exit();
                     return;

@@ -421,3 +421,99 @@ fn committing_to_the_current_session_keeps_the_transcript() {
         "a no-op switch wiped the conversation"
     );
 }
+
+/// The whole gesture through the window's own dispatch: hold Super, press one
+/// of hjkl, release. The previous tests reach into `overview_keydown` and
+/// `apply` directly, so a regression in `key_pressed` (the arm the compositor
+/// actually calls) could not fail any of them.
+#[test]
+fn the_full_super_hjkl_gesture_switches_session_through_key_pressed() {
+    for letter in ["h", "l", "k", "j"] {
+        let mut app = app();
+        app.modifiers = winit::keyboard::ModifiersState::SUPER;
+        let opened = hold_super(&mut app);
+        settle(&mut app, opened);
+        assert!(
+            app.model.overview.is_open(),
+            "{letter}: holding super did not open the field"
+        );
+        app.key_pressed(&Key::Character(SmolStr::new(letter)), Some(letter));
+        assert!(
+            app.model.overview.is_open(),
+            "{letter}: motion dismissed the field"
+        );
+        assert!(
+            app.model.editor.text().is_empty(),
+            "{letter}: the motion key was typed into the composer"
+        );
+        let target = app
+            .model
+            .overview
+            .focus()
+            .expect("the field always highlights something")
+            .to_string();
+        app.modifiers = winit::keyboard::ModifiersState::empty();
+        app.on_super_changed(false, opened + SUPER_TAP * 4);
+        assert_eq!(
+            app.model.session_id.as_deref(),
+            Some(target.as_str()),
+            "{letter}: releasing super did not attach to the highlight"
+        );
+    }
+}
+
+/// At least one of the four directions has to leave the session you started
+/// in, or "super hjkl moves me" is false however green the wiring tests are.
+#[test]
+fn super_hjkl_reaches_other_sessions() {
+    let mut reached = std::collections::BTreeSet::new();
+    for letter in ["h", "l", "k", "j"] {
+        let mut app = app();
+        app.modifiers = winit::keyboard::ModifiersState::SUPER;
+        let opened = hold_super(&mut app);
+        settle(&mut app, opened);
+        app.key_pressed(&Key::Character(SmolStr::new(letter)), Some(letter));
+        app.modifiers = winit::keyboard::ModifiersState::empty();
+        app.on_super_changed(false, opened + SUPER_TAP * 4);
+        if app.model.session_id.as_deref() != Some("session_mushroom_2_b") {
+            reached.insert(app.model.session_id.clone().unwrap_or_default());
+        }
+    }
+    assert!(
+        reached.len() >= 2,
+        "super+hjkl only reached {reached:?} from the starting session"
+    );
+}
+
+/// Everything in one project is the common case in this repo, and it used to
+/// make j/k dead: `neighbor` refuses to leave the row. A motion key that does
+/// nothing reads as a broken binding, so every direction must move.
+#[test]
+fn no_direction_is_dead_in_a_single_row_field() {
+    for dir in [
+        crate::overview::Dir::Up,
+        crate::overview::Dir::Down,
+        crate::overview::Dir::Left,
+        crate::overview::Dir::Right,
+    ] {
+        let entries = (0..4)
+            .map(|i| Entry {
+                session_id: format!("session_{i}"),
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+                weight: 1_000.0 * f64::from(i + 1),
+            })
+            .collect::<Vec<_>>();
+        let mut app = App::default();
+        app.model.session_id = Some("session_0".into());
+        app.model.strip = Strip::build(entries, Some("session_0"));
+        let opened = hold_super(&mut app);
+        settle(&mut app, opened);
+        app.move_overview(dir);
+        assert_ne!(
+            app.model.overview.focus(),
+            Some("session_0"),
+            "{dir:?} went nowhere in a single-row field"
+        );
+    }
+}
