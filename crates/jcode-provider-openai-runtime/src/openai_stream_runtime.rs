@@ -119,13 +119,15 @@ pub(super) async fn stream_response(
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
+    let idle_timeout = effective_https_idle_timeout(&request);
 
-    let response = builder
-        .json(&request)
-        .send()
-        .await
-        .context("Failed to send request to OpenAI API")
-        .map_err(OpenAIStreamFailure::Other)?;
+    let response = jcode_provider_core::transport::send_with_initial_response_timeout(
+        builder.json(&request),
+        idle_timeout,
+    )
+    .await
+    .context("Failed to send request to OpenAI API")
+    .map_err(OpenAIStreamFailure::Other)?;
 
     let connect_ms = connect_start.elapsed().as_millis();
     jcode_base::logging::info(&format!(
@@ -250,8 +252,6 @@ pub(super) async fn stream_response(
     // minutes get cancelled prematurely. Resolved from
     // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
     // (issue #434).
-    let idle_timeout = effective_https_idle_timeout(&request);
-
     use futures::StreamExt;
     loop {
         let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
