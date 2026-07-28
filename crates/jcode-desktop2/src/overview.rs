@@ -1,9 +1,9 @@
 //! The session overview: every live session as a blob in a 2D field.
 //!
-//! Held Alt zooms the window out of the conversation you are in and into the
-//! space of all of them. A session is a circle, its area proportional to how
-//! much conversation it holds, so "the big one on the left" is a thing you can
-//! point at and remember. Sessions sharing a working directory cluster
+//! Held Super zooms the window out of the conversation you are in and into
+//! the space of all of them. A session is a circle, its area proportional to
+//! how much conversation it holds, so "the big one on the left" is a thing you
+//! can point at and remember. Sessions sharing a working directory cluster
 //! together, which makes a project legible as a shape rather than as a list of
 //! ids.
 //!
@@ -660,11 +660,11 @@ impl Overview {
 
     /// Take the field off screen *now*, with no zoom out.
     ///
-    /// The escape hatch for the instant-open gesture: Alt opens the field on
-    /// the keydown, so a chord like Alt+B has to erase it in the same frame
-    /// the letter arrives. Zooming out here would leave the blobs washing
-    /// over the composer for a tenth of a second after the user has already
-    /// moved on, which reads as lag rather than as an animation.
+    /// The escape hatch for the instant-open gesture: Super opens the field
+    /// on the keydown, so a chord like Super+V has to erase it in the same
+    /// frame the letter arrives. Zooming out here would leave the blobs
+    /// washing over the composer for a tenth of a second after the user has
+    /// already moved on, which reads as lag rather than as an animation.
     pub fn abort(&mut self) {
         self.open = false;
         self.phase = 0;
