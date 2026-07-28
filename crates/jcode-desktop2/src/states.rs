@@ -36,6 +36,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("transcript_selection", transcript_selection),
     ("scrolled_back", scrolled_back),
     ("markdown", markdown),
+    ("markdown_typography", markdown_typography),
     ("latex", latex),
     ("code_block", code_block),
     ("session_strip", session_strip),
@@ -812,6 +813,50 @@ fn markdown() -> Model {
              > Framing is unchanged across transports.\n\n\
              | frame | direction |\n|---|---|\n| hello | client |\n| hello_ok | server |\n"
                 .into(),
+        )]),
+        ..attached_empty()
+    }
+}
+
+/// Every inline and block treatment at once, so one capture answers "does
+/// markdown read well" rather than needing a state per feature.
+///
+/// This is the state the typography work is judged against: inline code has to
+/// be visibly literal, a link visibly a link, a list visibly one list, a
+/// heading visibly attached to the text under it, and a rule visibly a rule
+/// rather than three dashes.
+fn markdown_typography() -> Model {
+    Model {
+        transcript: conversation(vec![(
+            "walk me through the renderer".into(),
+            // Written as one block with explicit newlines rather than with Rust
+            // line continuations, because a continuation eats the leading
+            // whitespace and a nested list item would silently flatten.
+            concat!(
+                "# Renderer\n\n",
+                "Markdown comes from `jcode-render-core`, so the desktop and the TUI ",
+                "agree on what a document *is*. See ",
+                "[the notes](https://example.com/notes) for the shape of it.\n\n",
+                "## Blocks\n\n",
+                "A block is laid out once and reused while it is unchanged:\n\n",
+                "- a paragraph wraps to the measure\n",
+                "- a `CodeBlock { language }` sits on its own wash\n",
+                "  - nested items step in\n",
+                "  - and stay one list\n",
+                "- a `Table` is columnised by the front-end, and ~~never~~ by the core\n\n",
+                "Then, in order:\n\n",
+                "1. parse into blocks\n",
+                "2. flatten each into spans\n",
+                "3. hand the spans to **Parley**\n\n",
+                "> Geometry is measured, never estimated.\n\n",
+                "---\n\n",
+                "### Cost\n\n",
+                "Laying out $n$ blocks costs $O(n)$, and a delta re-lays only the ",
+                "tail, so the total is\n\n",
+                "$$\\sum_{i=1}^{n} c_i \\leq n \\cdot \\max_i c_i$$\n\n",
+                "which is why streaming stays flat. Use `--stream-bench` to check it.\n",
+            )
+            .into(),
         )]),
         ..attached_empty()
     }

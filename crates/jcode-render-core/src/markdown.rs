@@ -21,6 +21,13 @@ struct InlineStyle {
     bold: bool,
     italic: bool,
     strike: bool,
+    /// Whether this text is the label of a link. Carried here rather than
+    /// inferred at the end tag because the label's spans are emitted while the
+    /// link is open, and a front-end cannot tell a link's text from ordinary
+    /// prose after the fact: the destination is appended as a separate dim
+    /// span, so without this the clickable-looking part of `[docs](url)` was
+    /// indistinguishable from the sentence around it.
+    link: bool,
 }
 
 impl InlineStyle {
@@ -34,7 +41,9 @@ impl InlineStyle {
     }
 
     fn role(self) -> StyleRole {
-        if self.bold {
+        if self.link {
+            StyleRole::Link
+        } else if self.bold {
             StyleRole::Strong
         } else {
             StyleRole::Text
@@ -296,6 +305,7 @@ pub fn parse_markdown(text: &str) -> Document {
             Event::Start(Tag::Strong) => style.bold = true,
             Event::Start(Tag::Strikethrough) => style.strike = true,
             Event::Start(Tag::Link { dest_url, .. }) => {
+                style.link = true;
                 link_targets.push(dest_url.to_string());
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
@@ -641,6 +651,7 @@ pub fn parse_markdown(text: &str) -> Document {
             Event::End(TagEnd::Strong) => style.bold = false,
             Event::End(TagEnd::Strikethrough) => style.strike = false,
             Event::End(TagEnd::Link) => {
+                style.link = false;
                 if let Some(url) = link_targets.pop()
                     && !url.is_empty()
                 {
