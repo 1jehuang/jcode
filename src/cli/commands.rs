@@ -2549,9 +2549,9 @@ fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
 /// Build the deferred quality-check reminder for a headless run, consuming the
 /// turn's observation log.
 ///
-/// The log is cleared whether or not a reminder results, so a turn whose scores
-/// all resolved does not carry stale observations into the next turn. Returns
-/// `None` when there is nothing left worth saying.
+/// The log is cleared whether or not a reminder results, so one turn's points
+/// cannot be raised again against the next turn's work. Returns `None` only when
+/// the turn recorded nothing.
 fn take_run_gate_digest(session_id: &str, already_delivered: bool) -> Option<String> {
     if already_delivered {
         return None;
