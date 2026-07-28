@@ -31,6 +31,11 @@ pub struct Theme {
     pub rule: Color,
     /// Quiet fill for code blocks and wells.
     pub wash: Color,
+    /// Fill behind an *inline* code span. One density stronger than
+    /// [`Self::wash`], because a wash tuned for a whole block is too faint to
+    /// mark a single word inside a line of prose, and a code span you cannot
+    /// see is the same as no code span.
+    pub code_wash: Color,
     /// Fill of an input field. The composer is a field, not a code block, so
     /// it gets its own role: a grey slab reads as disabled, paper with a
     /// hairline reads as somewhere to type.
@@ -64,6 +69,7 @@ impl Theme {
             faint: Color::from_rgb8(0x99, 0x99, 0x99),
             rule: Color::from_rgb8(0xcc, 0xcc, 0xcc),
             wash: Color::from_rgb8(0xf4, 0xf4, 0xf4),
+            code_wash: Color::from_rgb8(0xea, 0xea, 0xea),
             field: Color::from_rgb8(0xff, 0xff, 0xff),
             field_border: Color::from_rgb8(0xd4, 0xd4, 0xd4),
             field_border_focus: Color::from_rgb8(0x77, 0x77, 0x77),
@@ -83,6 +89,7 @@ impl Theme {
             faint: Color::from_rgb8(0x66, 0x66, 0x66),
             rule: Color::from_rgb8(0x33, 0x33, 0x33),
             wash: Color::from_rgb8(0x14, 0x14, 0x14),
+            code_wash: Color::from_rgb8(0x24, 0x24, 0x24),
             field: Color::from_rgb8(0x10, 0x10, 0x10),
             field_border: Color::from_rgb8(0x3a, 0x3a, 0x3a),
             field_border_focus: Color::from_rgb8(0x88, 0x88, 0x88),
