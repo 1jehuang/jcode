@@ -20,6 +20,17 @@ use std::time::{Duration, Instant};
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
 
+/// Largest UTF-8 character boundary at or below `index` (clamped to the string
+/// length). Equivalent to the still-unstable `str::floor_char_boundary`,
+/// reimplemented so slicing/truncation can never panic on multi-byte text.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 /// Remove reasoning-marked lines from committed transcript text. Reasoning lines
 /// are wrapped in emphasis containing the invisible [`REASONING_SENTINEL`]
 /// (see `jcode_tui_markdown::reasoning_line_markup`). Trailing blank lines left
@@ -3117,13 +3128,19 @@ impl App {
     /// Remove the live partial-reasoning tail (the rendered, not-yet-committed
     /// in-progress line) from the streaming buffer so it can be rebuilt. No-op
     /// when there is no live partial.
-    fn strip_reasoning_partial_tail(&mut self) {
+    pub(super) fn strip_reasoning_partial_tail(&mut self) {
         if self.reasoning_partial_len > 0 {
             let new_len = self
                 .streaming
                 .streaming_text
                 .len()
                 .saturating_sub(self.reasoning_partial_len);
+            // `String::truncate` panics when `new_len` is not a UTF-8 boundary.
+            // The tail length is normally exact, but the buffer can be replaced
+            // out from under us (reconnect/resume replays a server snapshot), so
+            // snap to the nearest boundary at or below `new_len` instead of
+            // trusting the recorded length (see issues #632/#633/#635).
+            let new_len = floor_char_boundary(&self.streaming.streaming_text, new_len);
             self.streaming.streaming_text.truncate(new_len);
             self.reasoning_partial_len = 0;
         }
@@ -3425,6 +3442,14 @@ impl App {
 
     pub(super) fn replace_streaming_text(&mut self, text: String) {
         self.streaming.streaming_text = text;
+        // The live reasoning tail belonged to the *previous* buffer. Keeping its
+        // byte length would make `strip_reasoning_partial_tail` slice at an
+        // offset that has no relation to the new contents (and can land
+        // mid-character, panicking). Reset the reasoning tail state with it.
+        self.reasoning_partial_len = 0;
+        self.reasoning_pending_line.clear();
+        self.reasoning_streaming = false;
+        self.reasoning_block_start = None;
         self.refresh_split_view_if_needed();
     }
 
