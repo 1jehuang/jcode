@@ -65,19 +65,33 @@ pub const STRIP_GROUP_GAP: f64 = 16.0;
 pub const DONUT_SIDE: f64 = 360.0;
 /// Hero wordmark over the donut, as on the website's landing section.
 pub const HERO_WORDMARK_SIZE: f32 = 34.0;
-/// Gap under the wordmark, and under the donut before the tagline.
-pub const HERO_GAP: f64 = 14.0;
+/// Clear space under the wordmark, and under the donut before the tagline.
+/// Measured from painted ink to painted ink, not from box to box, so it is the
+/// gap the eye actually sees. Roughly half the wordmark's size, which is the
+/// smallest gap that still reads as "separate thing" rather than "touching".
+pub const HERO_GAP: f64 = 18.0;
 /// Line height for hero text. Tight, because the hero stacks single lines
 /// against a graphic: body leading would put invisible slack above each line
 /// and make the measured gaps disagree with the optical ones.
 pub const HERO_LINE_HEIGHT: f32 = 1.15;
 /// Tagline under the donut: the one line that says what this is.
 pub const HERO_TAGLINE_SIZE: f32 = 12.5;
-/// Fraction of the donut's square its silhouette actually inks. The torus at
-/// this tilt does not reach the corners or the top and bottom edges, so laying
-/// the stack out on the raw square leaves a gap that looks like a mistake; the
-/// wordmark and tagline are spaced against the *visible* disc instead.
-pub const DONUT_INK_FRACTION: f64 = 0.82;
+/// Fraction of the donut's square its silhouette actually inks vertically, at
+/// the *widest* point of the tilt wobble. The torus at this tilt does not reach
+/// the square's top and bottom edges, so laying the stack out on the raw square
+/// leaves a gap that looks like a mistake; the wordmark and tagline are spaced
+/// against the *visible* disc instead. This is the worst case over the whole
+/// animation, not the average: spacing against the average lets the disc grow
+/// into the gap on the frames where it is tallest, which is exactly when the
+/// text looks touched. Measured by `donut::tests::ink_extent_is_stable_across_
+/// the_wobble`.
+pub const DONUT_INK_FRACTION: f64 = 0.88;
+/// The halftone screen paints a *disc* centred on each sampled cell, so the
+/// painted silhouette reaches about one dot radius further than the cell grid
+/// [`DONUT_INK_FRACTION`] measures. Counted as part of the donut so the gap the
+/// eye sees is the gap the layout asked for. See `scene`'s `DOT_PITCH` and
+/// `DOT_FILL`: 360/76 * 0.62 rounded up.
+pub const DONUT_DOT_BLEED: f64 = 3.0;
 /// Smallest square that still reads as a donut at [`DOT_PITCH`]. Nothing is
 /// drawn between this and [`DONUT_SIDE`] now that the hero is fixed size, but
 /// the renderer and the hit test keep it as their floor so a degenerate box
@@ -102,6 +116,13 @@ pub struct Hero {
     pub tagline_top: f64,
 }
 
+/// The empty band between one edge of the donut's square and the nearest
+/// painted dot, at the tallest point of the wobble. The stack's gaps are laid
+/// against this, so `HERO_GAP` is optical clearance rather than box padding.
+pub fn donut_bleed(side: f64) -> f64 {
+    (side * (1.0 - DONUT_INK_FRACTION) / 2.0 - DONUT_DOT_BLEED).max(0.0)
+}
+
 /// Height of the hero stack as laid on the page: the wordmark, the donut's
 /// *inked* disc (the square's empty bleed bands are not demanded), and the
 /// tagline, with their gaps. One definition shared by [`Frame::hero`]'s fit
@@ -110,7 +131,7 @@ pub struct Hero {
 fn hero_stack_height() -> f64 {
     let wordmark = f64::from(HERO_WORDMARK_SIZE * HERO_LINE_HEIGHT);
     let tagline = f64::from(HERO_TAGLINE_SIZE * HERO_LINE_HEIGHT);
-    let bleed = DONUT_SIDE * (1.0 - DONUT_INK_FRACTION) / 2.0;
+    let bleed = donut_bleed(DONUT_SIDE);
     DONUT_SIDE - bleed * 2.0 + wordmark + tagline + HERO_GAP * 2.0
 }
 
@@ -383,7 +404,7 @@ impl Frame {
         let side = DONUT_SIDE;
         // Space the text against the inked disc, not the square, then centre
         // the whole stack in the region like the website's flexbox.
-        let bleed = side * (1.0 - DONUT_INK_FRACTION) / 2.0;
+        let bleed = donut_bleed(side);
         // Fit is judged on the inked stack, not the raw square: the square's
         // top and bottom `bleed` bands are empty, so demanding room for them
         // would drop the hero on ordinary laptop windows for the sake of
