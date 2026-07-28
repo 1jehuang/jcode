@@ -22,12 +22,21 @@ use std::time::{Duration, Instant};
 const TAU: f64 = 0.055;
 
 /// Time constant of the kinetic friction that bleeds a fling away, in seconds.
-/// A browser's flick coasts for roughly a third of a second of visible travel;
-/// this lands there without feeling like ice.
-const FRICTION_TAU: f64 = 0.30;
+///
+/// Chosen against [`crate::scroll_bench`] rather than against an impression:
+/// paired with `MIN_VELOCITY` below it puts a flick's visible coast at about
+/// 0.7s and roughly 4x the fingers' own travel. The looser 0.30 this replaced
+/// coasted past 1.5s, which the bench caught as the view still sliding long
+/// after the hand had moved on.
+const FRICTION_TAU: f64 = 0.18;
 
 /// Below this speed, in logical pixels per second, a fling is over.
-const MIN_VELOCITY: f64 = 24.0;
+///
+/// An exponential decay never reaches zero, so this cutoff, not the friction
+/// alone, is what ends a coast. Too low and the page creeps for a second after
+/// it has visibly stopped, repainting for motion nobody can see; 80px/s is
+/// about half a line a second, which is where the eye loses it.
+const MIN_VELOCITY: f64 = 80.0;
 
 /// Ceiling on fling speed, in logical pixels per second. A frantic swipe should
 /// travel far, not teleport past everything the user wanted to read.

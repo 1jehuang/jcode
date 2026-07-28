@@ -29,6 +29,7 @@ mod render;
 mod scene;
 mod scene_overview;
 mod scroll;
+mod scroll_bench;
 mod select;
 mod states;
 mod stream;
@@ -200,7 +201,7 @@ const BACKGROUND_FRAME: std::time::Duration = std::time::Duration::from_millis(1
 /// is the GTK, Chromium and Firefox default). Moving one line per notch is the
 /// single loudest reason wheel scrolling here felt like wading, because it
 /// makes a page of transcript cost thirty notches.
-const WHEEL_LINES: f64 = 3.0;
+pub(crate) const WHEEL_LINES: f64 = 3.0;
 
 /// UI model: what the frame is built from.
 pub struct Model {
@@ -357,7 +358,7 @@ fn donut_disabled() -> bool {
 impl Model {
     /// Scroll up by `amount` logical pixels, clamped to `max` so the view
     /// cannot run past the top of the conversation into blank space.
-    fn scroll_up(&mut self, amount: f64, max: f64) {
+    pub(crate) fn scroll_up(&mut self, amount: f64, max: f64) {
         let before = self.scroll;
         self.scroll = (self.scroll + amount).clamp(0.0, max.max(0.0));
         self.smooth
@@ -365,7 +366,7 @@ impl Model {
     }
 
     /// Scroll down by `amount` logical pixels; reaching 0 re-follows the tail.
-    fn scroll_down(&mut self, amount: f64) {
+    pub(crate) fn scroll_down(&mut self, amount: f64) {
         let before = self.scroll;
         self.scroll = (self.scroll - amount).max(0.0);
         self.smooth
@@ -379,7 +380,7 @@ impl Model {
     ///
     /// Returns whether the whole delta fitted; a clamped edge is reported so
     /// the caller can end the fling rather than grind against the boundary.
-    fn scroll_gesture(&mut self, delta: f64, max: f64, now: std::time::Instant) -> bool {
+    pub(crate) fn scroll_gesture(&mut self, delta: f64, max: f64, now: std::time::Instant) -> bool {
         let before = self.scroll;
         self.scroll = (self.scroll + delta).clamp(0.0, max.max(0.0));
         let moved = self.scroll - before;
@@ -391,11 +392,11 @@ impl Model {
     /// the coast is paced by the display rather than by event arrival.
     /// Whether a fling still owes the view travel, so the caller can skip the
     /// cost of measuring the document on an idle frame.
-    fn has_momentum(&self) -> bool {
+    pub(crate) fn has_momentum(&self) -> bool {
         self.smooth.has_momentum()
     }
 
-    fn apply_momentum(&mut self, max: f64) {
+    pub(crate) fn apply_momentum(&mut self, max: f64) {
         let pending = self.smooth.take_momentum();
         if pending == 0.0 {
             return;
