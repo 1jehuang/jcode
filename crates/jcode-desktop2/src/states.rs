@@ -83,7 +83,13 @@ fn fixed_meta() -> crate::meta::Meta {
 
 fn connecting() -> Model {
     Model {
-        theme: crate::theme::Theme::from_env(),
+        // Pinned light: nodes must be a pure function of the model, and
+        // `from_env` now reads the real system preference, which would make
+        // every capture depend on the machine it ran on.
+        theme: crate::theme::Theme::print_light(),
+        // Pinned for the same reason: a capture must not re-resolve on the
+        // machine's live preference behind the pinned palette.
+        theme_preference: crate::theme::ThemeMode::Light,
         meta: fixed_meta(),
         status: "connecting to ~/.jcode/jcode-api.sock...".into(),
         session_id: None,
@@ -159,7 +165,13 @@ fn fixed_caret() -> crate::caret::Caret {
 
 fn attached_empty() -> Model {
     Model {
-        theme: crate::theme::Theme::from_env(),
+        // Pinned light: nodes must be a pure function of the model, and
+        // `from_env` now reads the real system preference, which would make
+        // every capture depend on the machine it ran on.
+        theme: crate::theme::Theme::print_light(),
+        // Pinned for the same reason: a capture must not re-resolve on the
+        // machine's live preference behind the pinned palette.
+        theme_preference: crate::theme::ThemeMode::Light,
         meta: fixed_meta(),
         status: "attached: session_demo_0000".into(),
         session_id: Some("session_demo_0000".into()),

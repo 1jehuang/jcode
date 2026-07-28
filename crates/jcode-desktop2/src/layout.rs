@@ -201,8 +201,7 @@ impl Frame {
             // byte-identical to one built before the strip existed.
             if strip {
                 frame.strip_top = Some(frame.body_top);
-                frame.body_top =
-                    (frame.body_top + STRIP_HEIGHT + STRIP_GAP).min(frame.body_bottom);
+                frame.body_top = (frame.body_top + STRIP_HEIGHT + STRIP_GAP).min(frame.body_bottom);
             }
             frame
         };

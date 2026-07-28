@@ -569,15 +569,18 @@ pub fn short_id(session_id: &str) -> String {
         .unwrap_or_else(|| trimmed.chars().take(8).collect())
 }
 
-/// A 0..1 breath on a wall clock, for the busy pulse.
+/// A 0..1 breath over `elapsed` time, for the busy pulse.
 ///
 /// Lives here rather than in the renderer so the sizing of a blob is one
-/// function of (blob, time) that a test can evaluate without a GPU.
-pub fn breath(now: std::time::Instant, period: f32) -> f64 {
-    // Phase from a process-relative clock: the absolute epoch does not matter,
-    // only that every blob breathes together.
-    let seconds = now.elapsed().as_secs_f32();
-    let turn = std::f32::consts::TAU * seconds / period.max(0.01);
+/// function of (blob, elapsed) that a test can evaluate without a GPU.
+///
+/// Driven by elapsed time rather than the wall clock so a pinned capture is
+/// byte-reproducible: the caller passes [`crate::activity::Activity::elapsed`],
+/// which state-space nodes pin exactly as they pin the caret and the stream.
+/// This also matches the frame scheduling: the loop only wakes for the
+/// spinner while a turn runs, which is exactly when this clock advances.
+pub fn breath(elapsed: std::time::Duration, period: f32) -> f64 {
+    let turn = std::f32::consts::TAU * elapsed.as_secs_f32() / period.max(0.01);
     f64::from(turn.sin())
 }
 

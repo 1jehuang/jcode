@@ -497,9 +497,10 @@ fn draw_overview(
     for blob in &field.blobs {
         let center = place(blob.center);
         // A busy session breathes, so work happening in a conversation you are
-        // not looking at is visible from across the field.
+        // not looking at is visible from across the field. The pulse runs on
+        // the activity's clock, which pinned captures freeze.
         let pulse = if blob.busy {
-            1.0 + BUSY_PULSE * crate::overview::breath(now, BUSY_PERIOD)
+            1.0 + BUSY_PULSE * crate::overview::breath(model.activity.elapsed(now), BUSY_PERIOD)
         } else {
             1.0
         };
