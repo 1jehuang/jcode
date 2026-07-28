@@ -265,14 +265,17 @@ fn goal_changes(before: &[TodoGoal], after: &[TodoGoal]) -> Vec<TodoGoalChange> 
 /// the work.
 ///
 /// So the checks are deferred: observations accumulate and are replayed once at
-/// turn end, filtered against the final scores, by `build_gate_digest`. The one
-/// exception is a first plan write that scores severely low, where the agent is
-/// admitting it does not know the task at all and a whole turn of wrong work
-/// cannot be undone at turn end.
+/// turn end by `build_gate_digest`. Deferred, not forgiven. A score that climbs
+/// late is still raised, because the work done while it was low was never
+/// governed by the better loop that arrived afterwards. The one exception is a
+/// first plan write that scores severely low, where the agent is admitting it
+/// does not know the task at all and a whole turn of wrong work cannot be undone
+/// at turn end.
 fn record_reframe_observations(
     plan: &TodoPlan,
     goals: &[TodoGoal],
     todos: &[TodoItem],
+    previous: &[TodoItem],
 ) -> (Vec<GateObservation>, Vec<String>) {
     let mut observations = Vec::new();
     let mut immediate = Vec::new();
@@ -300,13 +303,17 @@ fn record_reframe_observations(
             immediate.push(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.to_string());
         }
     }
+    let closed_now = crate::todo::groups_closed_by_update(previous, todos);
     for goal in goals {
         let group_open = todos.iter().any(|todo| {
             goal_group_key(todo.group.as_deref()) == goal.group
                 && todo.status != "completed"
                 && todo.status != "cancelled"
         });
-        if !group_open {
+        // A group this write closes counts too: a goal created and finished in
+        // one step is otherwise never observed, and one-step completions are
+        // where a weak feedback loop hides best.
+        if !group_open && !closed_now.contains(&goal.group) {
             continue;
         }
         if goal
@@ -615,7 +622,8 @@ impl Tool for TodoTool {
                         [TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
                     );
                 }
-                let (observations, nudges) = record_reframe_observations(&plan, &goals, &todos);
+                let (observations, nudges) =
+                    record_reframe_observations(&plan, &goals, &todos, &previous);
                 for observation in &observations {
                     let kind = match observation.kind {
                         GateObservationKind::IntentUnderstanding => {
@@ -1186,13 +1194,14 @@ mod tests {
         let plan = load_plan(session).expect("plan");
         assert_eq!(plan.understands_user_intent_history, vec![82, 97]);
 
-        // With intent resolved, the digest reports only the goal that never
-        // became measurable.
+        // The climb does not erase the point. The turn began without solid
+        // understanding, so the work done before it settled still needs a
+        // re-check; the wording just reflects that it settled late.
         let observations = crate::todo::load_gate_observations(session).expect("observations");
         let goals = load_goals(session).expect("goals");
         let digest = crate::todo::build_gate_digest(&observations, &plan, &goals)
-            .expect("the unmeasured goal should still be surfaced");
-        assert!(!digest.contains("what the user actually wants"));
+            .expect("both recorded points should be surfaced");
+        assert!(digest.contains("started this work without understanding"));
         assert!(digest.contains("feedback loop"));
 
         match previous_home {
@@ -1238,7 +1247,7 @@ mod tests {
         let todos = vec![open_todo(Some("design"))];
         let plan = aligned_plan();
         let goals = vec![goal(Some("design"), 95), goal(Some("perf"), 96)];
-        let (observations, nudges) = record_reframe_observations(&plan, &goals, &todos);
+        let (observations, nudges) = record_reframe_observations(&plan, &goals, &todos, &[]);
 
         assert!(
             nudges.is_empty(),
@@ -1253,7 +1262,7 @@ mod tests {
             }]
         );
         // A subsequent write still records, still does not interrupt.
-        let (again, nudges) = record_reframe_observations(&plan, &goals, &todos);
+        let (again, nudges) = record_reframe_observations(&plan, &goals, &todos, &[]);
         assert_eq!(again, observations);
         assert!(nudges.is_empty());
     }
@@ -1267,7 +1276,7 @@ mod tests {
             understands_user_intent_history: vec![95],
         };
         let (observations, nudges) =
-            record_reframe_observations(&plan, &[goal(Some("coverage"), 96)], &todos);
+            record_reframe_observations(&plan, &[goal(Some("coverage"), 96)], &todos, &[]);
 
         assert_eq!(
             observations,
@@ -1293,7 +1302,7 @@ mod tests {
             understands_user_intent: Some(40),
             understands_user_intent_history: vec![40],
         };
-        let (_, nudges) = record_reframe_observations(&plan, &[], &todos);
+        let (_, nudges) = record_reframe_observations(&plan, &[], &todos, &[]);
         assert_eq!(nudges, vec![TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE]);
         assert!(!nudges[0].contains("40"));
         assert!(!nudges[0].to_ascii_lowercase().contains("threshold"));
@@ -1304,18 +1313,49 @@ mod tests {
             understands_user_intent_history: vec![40, 41],
             ..plan
         };
-        let (_, nudges) = record_reframe_observations(&later, &[], &todos);
+        let (_, nudges) = record_reframe_observations(&later, &[], &todos, &[]);
         assert!(nudges.is_empty());
     }
 
+    /// Work that was already complete before this write is grandfathered: the
+    /// turn cannot go back and improve a loop over work it did not do.
     #[test]
-    fn closed_work_records_nothing() {
+    fn work_already_closed_before_this_write_records_nothing() {
         let mut done = open_todo(None);
         done.status = "completed".to_string();
-        let (observations, nudges) =
-            record_reframe_observations(&TodoPlan::default(), &[goal(None, 10)], &[done]);
+        let already = vec![done.clone()];
+        let (observations, nudges) = record_reframe_observations(
+            &TodoPlan::default(),
+            &[goal(None, 10)],
+            &already,
+            &already,
+        );
         assert!(observations.is_empty());
         assert!(nudges.is_empty());
+    }
+
+    /// A group created and finished in one write must still be observed. This is
+    /// where a weak feedback loop hides best: declare it done in one step and no
+    /// "still open" check ever sees it.
+    #[test]
+    fn a_group_closed_by_this_write_is_still_observed() {
+        let mut done = open_todo(Some("one shot"));
+        done.status = "completed".to_string();
+        let (observations, nudges) = record_reframe_observations(
+            &aligned_plan(),
+            &[goal(Some("one shot"), 40)],
+            &[done],
+            &[],
+        );
+        assert!(nudges.is_empty());
+        assert_eq!(
+            observations,
+            vec![GateObservation {
+                kind: GateObservationKind::ClosedFeedbackLoop,
+                group: Some("one shot".to_string()),
+                score: Some(40),
+            }]
+        );
     }
 
     #[test]
@@ -1327,7 +1367,7 @@ mod tests {
             understands_user_intent_history: vec![95],
         };
         let (observations, _) =
-            record_reframe_observations(&plan, &[goal(Some("coverage"), 95)], &todos);
+            record_reframe_observations(&plan, &[goal(Some("coverage"), 95)], &todos, &[]);
         assert_eq!(
             observations
                 .iter()
@@ -1346,7 +1386,8 @@ mod tests {
         let mut goal = goal(Some("coverage"), 96);
         goal.closed_feedback_loop = None;
 
-        let (observations, _) = record_reframe_observations(&TodoPlan::default(), &[goal], &todos);
+        let (observations, _) =
+            record_reframe_observations(&TodoPlan::default(), &[goal], &todos, &[]);
         assert_eq!(
             observations
                 .iter()
@@ -1359,12 +1400,16 @@ mod tests {
         );
     }
 
+    /// Groups already complete before this write are grandfathered, so a
+    /// long-lived session does not re-flag work from previous turns.
     #[test]
-    fn observations_skip_closed_goals() {
+    fn observations_skip_goals_closed_in_an_earlier_write() {
         let mut done = open_todo(Some("legacy"));
         done.status = "completed".to_string();
+        let already = vec![done];
         let goals = vec![goal(Some("legacy"), 10)];
-        let (observations, _) = record_reframe_observations(&aligned_plan(), &goals, &[done]);
+        let (observations, _) =
+            record_reframe_observations(&aligned_plan(), &goals, &already, &already);
         assert!(observations.is_empty());
     }
 
@@ -1372,7 +1417,7 @@ mod tests {
     fn observations_cover_the_ungrouped_implicit_goal() {
         let todos = vec![open_todo(None)];
         let goals = vec![goal(None, 15)];
-        let (observations, _) = record_reframe_observations(&aligned_plan(), &goals, &todos);
+        let (observations, _) = record_reframe_observations(&aligned_plan(), &goals, &todos, &[]);
         assert_eq!(
             observations,
             vec![GateObservation {

@@ -94,7 +94,13 @@ pub struct GateObservation {
 /// replanning. Names categories without disclosing scores or thresholds.
 pub const TODO_GATE_DIGEST_PREFIX: &str = "[automated todo quality review - not a user message] Before you treat this turn as finished, double-check the weak points it surfaced. Do not reply conversationally or wait for the user.";
 
-fn observation_is_resolved(
+/// Whether the score behind this observation has since reached its threshold.
+///
+/// This no longer suppresses the observation: a loop that closed only after
+/// work was already underway did not govern the work done before it. It selects
+/// the wording instead, so a late climb is described as a coverage gap rather
+/// than as a goal that never had a loop at all.
+fn observation_score_later_cleared(
     observation: &GateObservation,
     plan: &TodoPlan,
     goals: &[TodoGoal],
@@ -113,49 +119,64 @@ fn observation_is_resolved(
 
 /// Build the turn-end reminder from this turn's recorded observations.
 ///
-/// Observations whose score has since cleared its threshold are dropped, which
-/// is the mechanism that makes deferral cheaper than gating: an agent whose
-/// understanding rose from 70 to 97 while reading the codebase is never told
-/// anything. Repeats of the same point collapse into one line with a count, so
-/// a long iterative turn cannot generate a wall of duplicates. Returns `None`
-/// when nothing is left to say.
+/// Every point recorded during the turn is surfaced, including ones whose score
+/// later rose past the threshold. A late climb is exactly the case worth
+/// raising: if the goal had no measurable loop while the work was being done,
+/// that work never benefited from the better loop the agent eventually wrote
+/// down, so the score reads as passing while the result behind it is unchecked.
+/// The score still decides the wording, so a late climb is asked to extend its
+/// loop back over the earlier work rather than being told it has no loop.
+///
+/// Repeats of the same point collapse into one line with a count, so a long
+/// iterative turn cannot generate a wall of duplicates. Returns `None` when
+/// nothing was recorded.
 pub fn build_gate_digest(
     observations: &[GateObservation],
     plan: &TodoPlan,
     goals: &[TodoGoal],
 ) -> Option<String> {
-    let mut unresolved: Vec<(GateObservationKind, Option<String>, usize)> = Vec::new();
+    // (kind, group, times flagged, score later cleared)
+    let mut points: Vec<(GateObservationKind, Option<String>, usize, bool)> = Vec::new();
     for observation in observations {
-        if observation_is_resolved(observation, plan, goals) {
-            continue;
-        }
-        match unresolved
+        let cleared = observation_score_later_cleared(observation, plan, goals);
+        match points
             .iter_mut()
-            .find(|(kind, group, _)| *kind == observation.kind && *group == observation.group)
+            .find(|(kind, group, _, _)| *kind == observation.kind && *group == observation.group)
         {
-            Some((_, _, count)) => *count += 1,
-            None => unresolved.push((observation.kind, observation.group.clone(), 1)),
+            Some((_, _, count, _)) => *count += 1,
+            None => points.push((observation.kind, observation.group.clone(), 1, cleared)),
         }
     }
-    if unresolved.is_empty() {
+    if points.is_empty() {
         return None;
     }
 
-    let resolved_count =
-        observations.len() - unresolved.iter().map(|(_, _, count)| *count).sum::<usize>();
     let mut message = String::from(TODO_GATE_DIGEST_PREFIX);
-    for (kind, group, count) in &unresolved {
-        let detail = match kind {
-            GateObservationKind::IntentUnderstanding => {
+    for (kind, group, count, cleared) in &points {
+        let detail = match (kind, cleared) {
+            (GateObservationKind::IntentUnderstanding, false) => {
                 "your understanding of what the user actually wants never became solid. Re-read the request, confirm the work you did matches it, and state any interpretation you had to guess at.".to_string()
             }
-            GateObservationKind::ClosedFeedbackLoop => {
+            (GateObservationKind::IntentUnderstanding, true) => {
+                "you started this work without understanding what the user actually wants, and only settled it later. Re-check the work you did before it settled against the request you now understand, and state any interpretation you had to guess at.".to_string()
+            }
+            (GateObservationKind::ClosedFeedbackLoop, false) => {
                 let label = group
                     .as_deref()
                     .map(|group| format!(" for \"{}\"", group))
                     .unwrap_or_default();
                 format!(
                     "the goal{} never closed its feedback loop: no observation reported back on whether the work satisfied the requirements. Confirm the result is actually better, with concrete evidence rather than inspection.",
+                    label
+                )
+            }
+            (GateObservationKind::ClosedFeedbackLoop, true) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the goal{} was worked on before its feedback loop was closed, so the loop you ended up with never ran over that earlier work. Run it over the whole result now and report what it actually reported back.",
                     label
                 )
             }
@@ -166,13 +187,6 @@ pub fn build_gate_digest(
             String::new()
         };
         message.push_str(&format!("\n- {}{}", detail, repeats));
-    }
-    if resolved_count > 0 {
-        message.push_str(&format!(
-            "\n{} other point{} resolved on their own as the work progressed; no action needed there.",
-            resolved_count,
-            if resolved_count == 1 { "" } else { "s" }
-        ));
     }
     message.push_str(
         "\nAddress the points above, then update the todo tool with the assessments that reflect what you verified.",
@@ -230,6 +244,29 @@ pub fn newly_completed_groups_have_sufficient_ownership(
             .and_then(|goal| goal.end_to_end_ownership)
             .is_some_and(|score| score >= QUALITY_GATE_THRESHOLD)
     })
+}
+
+/// Groups that this update closes: complete in `incoming`, not complete before.
+///
+/// Quality checks need these as well as the still-open groups. A turn that
+/// creates and finishes a group in a single write would otherwise record no
+/// observation at all, and the weakest goals are exactly the ones most likely to
+/// be declared done in one step.
+pub fn groups_closed_by_update(
+    previous: &[TodoItem],
+    incoming: &[TodoItem],
+) -> Vec<Option<String>> {
+    let mut groups: Vec<Option<String>> = Vec::new();
+    for todo in incoming {
+        let group = normalized_group(todo.group.as_deref());
+        if groups.contains(&group) {
+            continue;
+        }
+        if group_is_complete(incoming, &group) && !group_is_complete(previous, &group) {
+            groups.push(group);
+        }
+    }
+    groups
 }
 
 /// Completed todos whose final confidence increase was abrupt rather than
@@ -477,23 +514,61 @@ mod tests {
         }
     }
 
-    /// The point of deferring: understanding of a request starts low and rises
-    /// as the agent explores, so a flag raised early must vanish once the score
-    /// has cleared by turn end. This is the case that used to generate a nudge
-    /// on every single write.
+    /// A score that climbed only after work was underway still gets raised, and
+    /// is described as the coverage gap it is. Suppressing it would let an agent
+    /// clear the gate by writing a good assessment at the end, after the work it
+    /// was supposed to govern was already done and booked.
     #[test]
-    fn digest_drops_points_that_resolved_during_the_turn() {
+    fn digest_still_raises_a_point_whose_score_climbed_late() {
         let observations = vec![
             intent_observation(Some(70)),
             intent_observation(Some(80)),
             intent_observation(Some(92)),
         ];
-        let resolved = TodoPlan {
+        let climbed = TodoPlan {
             understands_user_intent: Some(QUALITY_GATE_THRESHOLD),
             understands_user_intent_history: vec![70, 80, 92, QUALITY_GATE_THRESHOLD],
             ..Default::default()
         };
-        assert_eq!(build_gate_digest(&observations, &resolved, &[]), None);
+        let digest = build_gate_digest(&observations, &climbed, &[])
+            .expect("a late climb must still be raised, not silently dropped");
+        assert_eq!(digest.matches("\n- ").count(), 1);
+        // Worded as "you started without understanding", not "you never
+        // understood": the latter would contradict the passing final score and
+        // invite the model to argue with the reminder instead of acting on it.
+        assert!(digest.contains("started this work without understanding"));
+        assert!(digest.contains("(flagged 3 times this turn)"));
+        assert!(!digest.contains("never became solid"));
+        assert!(!digest.contains(&QUALITY_GATE_THRESHOLD.to_string()));
+    }
+
+    /// The late-climb wording is per point, so one turn can carry both a goal
+    /// that closed its loop late and a goal that never closed one at all.
+    #[test]
+    fn digest_words_late_climbs_and_never_closed_goals_differently() {
+        let observations = vec![
+            loop_observation(Some("closed late"), Some(50)),
+            loop_observation(Some("never closed"), Some(50)),
+        ];
+        let goals = vec![
+            TodoGoal {
+                group: Some("closed late".to_string()),
+                closed_feedback_loop: Some(QUALITY_GATE_THRESHOLD),
+                ..Default::default()
+            },
+            TodoGoal {
+                group: Some("never closed".to_string()),
+                closed_feedback_loop: Some(50),
+                ..Default::default()
+            },
+        ];
+        let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
+            .expect("both goals should be surfaced");
+        assert_eq!(digest.matches("\n- ").count(), 2);
+        assert!(digest.contains(
+            "the goal for \"closed late\" was worked on before its feedback loop was closed"
+        ));
+        assert!(digest.contains("the goal for \"never closed\" never closed its feedback loop"));
     }
 
     #[test]
@@ -539,31 +614,34 @@ mod tests {
         assert!(digest.contains("utf16 transcode"));
     }
 
+    /// Each goal gets its own line, named by group, so a multi-goal turn does
+    /// not blur two different problems into one instruction.
     #[test]
-    fn digest_separates_goals_and_notes_resolved_points() {
+    fn digest_separates_goals_by_group() {
         let observations = vec![
-            loop_observation(Some("measured"), Some(50)),
-            loop_observation(Some("unmeasured"), Some(50)),
-            loop_observation(Some("unmeasured"), Some(55)),
+            loop_observation(Some("transcode"), Some(50)),
+            loop_observation(Some("render"), Some(50)),
+            loop_observation(Some("render"), Some(55)),
         ];
         let goals = vec![
             TodoGoal {
-                group: Some("measured".to_string()),
-                closed_feedback_loop: Some(QUALITY_GATE_THRESHOLD),
+                group: Some("transcode".to_string()),
+                closed_feedback_loop: Some(50),
                 ..Default::default()
             },
             TodoGoal {
-                group: Some("unmeasured".to_string()),
+                group: Some("render".to_string()),
                 closed_feedback_loop: Some(55),
                 ..Default::default()
             },
         ];
         let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
-            .expect("the unmeasured goal should be surfaced");
-        assert_eq!(digest.matches("\n- ").count(), 1);
-        assert!(digest.contains("unmeasured"));
-        assert!(!digest.contains("\"measured\""));
-        assert!(digest.contains("1 other point resolved on their own"));
+            .expect("both goals should be surfaced");
+        assert_eq!(digest.matches("\n- ").count(), 2);
+        assert!(digest.contains("transcode"));
+        assert!(digest.contains("render"));
+        // The repeated goal is collapsed and counted, the single one is not.
+        assert!(digest.contains("(flagged 2 times this turn)"));
     }
 
     /// An ungrouped goal has no label to name, so the line must still read
@@ -716,8 +794,12 @@ mod tests {
 
         assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("strong feedback loop"));
         assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("First, improve"));
-        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("call the todo tool again"));
-        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("before continuing the task"));
+        assert!(
+            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("call the todo tool again")
+        );
+        assert!(
+            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("before continuing the task")
+        );
         // Deliberately terse: think harder about intent, never block on the user.
         assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("think harder"));
         assert!(

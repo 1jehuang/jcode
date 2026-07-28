@@ -1475,7 +1475,7 @@ impl App {
         let _ = crate::todo::clear_gate_observations(&session_id);
         let Some(digest) = digest else {
             crate::logging::info(&format!(
-                "TODO_GATE_DIGEST action=skip reason=all_resolved observations={}",
+                "TODO_GATE_DIGEST action=skip reason=nothing_to_report observations={}",
                 observations.len()
             ));
             return false;
@@ -1517,9 +1517,10 @@ impl App {
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
-            // every todo write during the turn. Points whose scores rose while
-            // the agent worked are filtered out, so this stays silent in the
-            // common case where exploration resolved them on its own.
+            // every todo write during the turn. Every point recorded during the
+            // turn is raised, including ones whose score later climbed: work
+            // done while the score was low never benefited from the assessment
+            // that arrived after it.
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }

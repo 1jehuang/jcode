@@ -451,9 +451,8 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     }
 }
 
-/// The log must be consumed even when everything resolved, or stale
-/// observations would leak into the next turn and re-raise settled points./// The log must be consumed even when everything resolved, or stale
-/// observations would leak into the next turn and re-raise settled points.
+/// The log must be consumed on delivery, or one turn's observations would leak
+/// into the next turn and be raised again against work they never described.
 #[test]
 fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
     let _guard = crate::storage::lock_test_env();
