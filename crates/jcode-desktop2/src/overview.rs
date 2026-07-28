@@ -164,8 +164,7 @@ impl Field {
                     return None;
                 }
                 let step = if dir == Dir::Down { 1isize } else { -1 };
-                let target =
-                    (row as isize + step).rem_euclid(self.members.len() as isize) as usize;
+                let target = (row as isize + step).rem_euclid(self.members.len() as isize) as usize;
                 let from_x = self.cards[members[at]].center().0;
                 self.members[target]
                     .iter()

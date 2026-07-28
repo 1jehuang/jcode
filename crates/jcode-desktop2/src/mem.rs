@@ -126,13 +126,10 @@ impl Sampler {
         // Reuse the cached daemon pid while it still answers; a dead or
         // recycled pid falls through to a rescan, so a daemon restart shows
         // the new process rather than freezing on the old figure.
-        let server_bytes = self
-            .daemon_pid
-            .and_then(rss_of)
-            .or_else(|| {
-                self.daemon_pid = find_daemon_pid();
-                self.daemon_pid.and_then(rss_of)
-            });
+        let server_bytes = self.daemon_pid.and_then(rss_of).or_else(|| {
+            self.daemon_pid = find_daemon_pid();
+            self.daemon_pid.and_then(rss_of)
+        });
         Some(Readout {
             client_bytes,
             server_bytes,
@@ -146,7 +143,8 @@ mod tests {
 
     #[test]
     fn vm_rss_is_parsed_from_a_status_body() {
-        let status = "Name:\tjcode-desktop2\nVmPeak:\t 1319964 kB\nVmRSS:\t  101828 kB\nThreads:\t18\n";
+        let status =
+            "Name:\tjcode-desktop2\nVmPeak:\t 1319964 kB\nVmRSS:\t  101828 kB\nThreads:\t18\n";
         assert_eq!(vm_rss_bytes(status), Some(101_828 * 1024));
     }
 

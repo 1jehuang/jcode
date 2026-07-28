@@ -15,7 +15,6 @@
     "crates/jcode-desktop/src/session_launch/tests.rs": 1207,
     "crates/jcode-desktop/src/single_session_render/tests.rs": 2220,
     "crates/jcode-desktop2/src/tests/actions.rs": 1228,
-    "crates/jcode-desktop2/src/tests/visual.rs": 1280,
     "crates/jcode-plan/src/dag/tests.rs": 1392,
     "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 1936,
     "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 2980,
