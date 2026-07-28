@@ -318,28 +318,28 @@ fn tab_walks_the_whole_field() {
     assert_eq!(seen.len(), 5, "tab did not visit every session");
 }
 
-/// Clicking a blob picks that session, which is the mouse half of the gesture.
+/// Clicking a card picks that session, which is the mouse half of the gesture.
 #[test]
-fn clicking_a_blob_switches_to_it() {
+fn clicking_a_card_switches_to_it() {
     let mut app = app();
     let opened = hold_super(&mut app);
     settle(&mut app, opened);
-    let blob = app
+    let card = app
         .overview_field()
-        .blobs
+        .cards
         .iter()
-        .find(|blob| !blob.current)
+        .find(|card| !card.current)
         .cloned()
         .expect("another session to click");
-    app.pointer = blob.center;
+    app.pointer = card.center();
     app.on_pointer_pressed();
     assert_eq!(
         app.model.session_id.as_deref(),
-        Some(blob.session_id.as_str())
+        Some(card.session_id.as_str())
     );
 }
 
-/// Clicking the paper between blobs dismisses without switching, like any
+/// Clicking the paper between cards dismisses without switching, like any
 /// overview. A click that landed on nothing must not be a commit.
 #[test]
 fn clicking_the_paper_dismisses_without_switching() {
@@ -347,8 +347,8 @@ fn clicking_the_paper_dismisses_without_switching() {
     let opened = hold_super(&mut app);
     settle(&mut app, opened);
     let field = app.overview_field();
-    // A corner of the area: outside every circle by construction, since the
-    // packing centres the field.
+    // A corner of the area: outside every card by construction, since the
+    // layout centres the rows.
     let (x0, y0, _, _) = crate::overview::area(&app.frame);
     assert!(field.hit(x0 + 1.0, y0 + 1.0).is_none());
     app.pointer = (x0 + 1.0, y0 + 1.0);
@@ -363,20 +363,20 @@ fn clicking_the_paper_dismisses_without_switching() {
 /// Hovering moves the highlight, so the mouse and the arrows drive one
 /// selection rather than two competing ones.
 #[test]
-fn hovering_a_blob_highlights_it() {
+fn hovering_a_card_highlights_it() {
     let mut app = app();
     let opened = hold_super(&mut app);
     settle(&mut app, opened);
-    let blob = app
+    let card = app
         .overview_field()
-        .blobs
+        .cards
         .iter()
-        .find(|blob| !blob.current)
+        .find(|card| !card.current)
         .cloned()
         .expect("another session to hover");
-    app.pointer = blob.center;
+    app.pointer = card.center();
     app.on_pointer_moved();
-    assert_eq!(app.model.overview.focus(), Some(blob.session_id.as_str()));
+    assert_eq!(app.model.overview.focus(), Some(card.session_id.as_str()));
     // Still only a highlight: hovering must never switch on its own.
     assert_eq!(
         app.model.session_id.as_deref(),

@@ -1,65 +1,49 @@
-//! The session overview: every live session as a blob in a 2D field.
+//! The session overview: every live session as a card in a niri-style strip.
 //!
 //! Held Super zooms the window out of the conversation you are in and into
-//! the space of all of them. A session is a circle, its area proportional to
-//! how much conversation it holds, so "the big one on the left" is a thing you
-//! can point at and remember. Sessions sharing a working directory cluster
-//! together, which makes a project legible as a shape rather than as a list of
-//! ids.
+//! the space of all of them. The layout is the compositor's own overview,
+//! which is the motion the author already has in his fingers: a *row* is a
+//! working directory (a workspace) and a *card* is a session in it (a
+//! window), so "where am I, and what else is running" reads the same way it
+//! does on the desktop. A card's width tracks how much conversation the
+//! session holds, so "the wide one in the jcode row" is a thing you can point
+//! at and remember.
 //!
-//! Placement is deterministic: a golden-angle spiral seeds the blobs and a
-//! fixed number of relaxation passes push overlaps apart. No randomness and no
-//! clock, so the same session set always lays out identically. That is what
-//! stops the field from reshuffling under the user's fingers between polls,
-//! and what lets the whole thing be tested without a GPU.
+//! Placement is deterministic: rows stack in first-appearance order and cards
+//! run left to right in theirs. No randomness and no clock, so the same
+//! session set always lays out identically. That is what stops the field from
+//! reshuffling under the user's fingers between polls, and what lets the
+//! whole thing be tested without a GPU.
 //!
 //! This module is pure. It owns the sizing, the placement, the focus, and the
 //! directional navigation; the renderer and the app only consume it.
 
 use crate::strip::Entry;
 
-/// Smallest blob radius, in logical units. A session with no conversation yet
-/// is still a target you have to be able to see and click.
-const MIN_RADIUS: f64 = 30.0;
-/// Largest blob radius. Capped so one enormous session cannot crowd the field
-/// down to specks: the overview is for comparing sessions, not for rendering a
-/// truthful bar chart.
-const MAX_RADIUS: f64 = 105.0;
-/// Breathing room between two blobs, in logical units. Tight: sessions in one
-/// project should read as a clutch of eggs, not as scattered planets, and the
-/// eye groups by proximity long before it reads a label.
-const BLOB_GAP: f64 = 4.0;
-/// Room around a cluster. Wider than [`BLOB_GAP`] so two projects still read
-/// as two groups, but only just: what separates them is the *contrast* between
-/// the two spacings, not the absolute size of either.
-const CLUSTER_GAP: f64 = 22.0;
-/// Relaxation passes. Enough to separate a realistic field, few enough that
-/// layout stays trivially cheap to run every frame.
-const RELAX_PASSES: usize = 60;
-/// Compaction passes run after relaxation, pulling every circle back toward
-/// the group's centre until it is just touching. Relaxation alone only ever
-/// pushes apart, so the spiral's initial spread was preserved forever and a
-/// sparse cluster stayed sparse however much room it did not need.
-const COMPACT_PASSES: usize = 40;
-/// How far a compaction pass moves a circle toward the centre, as a fraction
-/// of the slack it has. Below 1 so the group settles rather than oscillating
-/// between overshooting and being pushed back out.
-const COMPACT_RATE: f64 = 0.35;
-/// Golden angle: the seeding spiral's turn per item. Gives an even, non-
-/// repeating packing without any random numbers.
-const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
-/// Fraction of the shorter side of the field left as a margin after fitting.
-const FIT_MARGIN: f64 = 0.03;
-/// Half-angle of the cone a directional move searches, in radians. 60 degrees
-/// each way: wide enough that a blob which is *mostly* to the right counts,
-/// narrow enough that "right" never picks something above you.
-const CONE: f64 = std::f64::consts::FRAC_PI_3;
+/// Narrowest a card may be drawn, in logical units. A session with no
+/// conversation yet is still a target you have to be able to see and click.
+const MIN_CARD_WIDTH: f64 = 96.0;
+/// Widest a card may be drawn. Capped so one enormous session cannot push the
+/// rest of its row off the page: the overview is for comparing sessions, not
+/// for rendering a truthful bar chart.
+const MAX_CARD_WIDTH: f64 = 280.0;
+/// Gap between two cards in a row. Tight, like niri's window gaps: sessions
+/// in one project should read as one workspace, not as scattered tiles.
+const CARD_GAP: f64 = 10.0;
+/// Gap between two rows. Wider than [`CARD_GAP`] so two projects read as two
+/// places: what separates them is the *contrast* between the two spacings.
+const ROW_GAP: f64 = 30.0;
+/// Tallest a row of cards may be. Rows share the field's height evenly and
+/// clamp here, so one lone project is a comfortable band rather than a wall.
+const MAX_ROW_HEIGHT: f64 = 132.0;
+/// Room reserved above each row for its label, in logical units.
+pub const ROW_LABEL_BAND: f64 = 20.0;
 
 /// The region the field is laid out in: the page inside its margins.
 ///
 /// One definition shared by the renderer and by pointer hit-testing, for the
 /// same reason [`crate::layout::Frame`] is: if the two ever disagreed, clicks
-/// would land on a different blob than the one under the cursor.
+/// would land on a different card than the one under the cursor.
 pub fn area(frame: &crate::layout::Frame) -> (f64, f64, f64, f64) {
     let inset = (frame.width * 0.04).clamp(16.0, 56.0);
     // The overview replaces the page rather than sitting in the transcript's
@@ -79,28 +63,16 @@ pub enum Dir {
     Down,
 }
 
-impl Dir {
-    /// Unit vector in screen space, where y grows downward.
-    fn vector(self) -> (f64, f64) {
-        match self {
-            Self::Left => (-1.0, 0.0),
-            Self::Right => (1.0, 0.0),
-            Self::Up => (0.0, -1.0),
-            Self::Down => (0.0, 1.0),
-        }
-    }
-}
-
 /// One placed session.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Blob {
+pub struct Card {
     /// Index into the entry list the field was built from.
     pub index: usize,
     pub session_id: String,
-    /// Label of the cluster this blob belongs to: the working directory's leaf.
+    /// Label of the row this card belongs to: the working directory's leaf.
     pub label: String,
-    pub center: (f64, f64),
-    pub radius: f64,
+    /// The card's drawn bounds, `(x0, y0, x1, y1)` in logical units.
+    pub rect: (f64, f64, f64, f64),
     pub busy: bool,
     pub focused: bool,
     /// Whether this is the session the window is currently attached to, which
@@ -108,96 +80,117 @@ pub struct Blob {
     pub current: bool,
 }
 
-/// A cluster's label anchor: the centroid of its blobs, so the name sits with
-/// the group rather than at a grid position the blobs have drifted away from.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClusterLabel {
-    pub label: String,
-    pub center: (f64, f64),
-    /// Radius of the cluster's bounding circle, so the renderer can place the
-    /// label clear of the blobs instead of on top of them.
-    pub radius: f64,
+impl Card {
+    pub fn center(&self) -> (f64, f64) {
+        (
+            (self.rect.0 + self.rect.2) / 2.0,
+            (self.rect.1 + self.rect.3) / 2.0,
+        )
+    }
 }
 
-/// A laid-out field of blobs.
+/// A row's label anchor: the band reserved above its cards, so the name sits
+/// with the workspace rather than at a grid position of its own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowLabel {
+    pub label: String,
+    /// Left edge of the row's first card, which the label aligns to.
+    pub left: f64,
+    /// Baseline-ish top for the label, inside the reserved band.
+    pub top: f64,
+}
+
+/// A laid-out field of cards.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Field {
-    pub blobs: Vec<Blob>,
-    pub clusters: Vec<ClusterLabel>,
+    pub cards: Vec<Card>,
+    pub rows: Vec<RowLabel>,
+    /// Card indices per row, in left-to-right order. This is the navigation
+    /// structure: left/right walks a row, up/down walks between them.
+    members: Vec<Vec<usize>>,
 }
 
 impl Field {
-    pub fn focused(&self) -> Option<&Blob> {
-        self.blobs.iter().find(|blob| blob.focused)
+    pub fn focused(&self) -> Option<&Card> {
+        self.cards.iter().find(|card| card.focused)
     }
 
-    /// The blob under a logical point, if any. Hit-testing is by distance
-    /// rather than by bounding box, because a blob is drawn as a circle and a
-    /// click in the corner of its box would land on nothing visible.
-    pub fn hit(&self, x: f64, y: f64) -> Option<&Blob> {
-        self.blobs
-            .iter()
-            .filter(|blob| {
-                let (dx, dy) = (x - blob.center.0, y - blob.center.1);
-                dx * dx + dy * dy <= blob.radius * blob.radius
-            })
-            // The smallest containing blob wins, so a dot resting on the edge
-            // of a giant is still clickable.
-            .min_by(|a, b| a.radius.total_cmp(&b.radius))
+    /// The card under a logical point, if any.
+    pub fn hit(&self, x: f64, y: f64) -> Option<&Card> {
+        self.cards.iter().find(|card| {
+            let (x0, y0, x1, y1) = card.rect;
+            x >= x0 && x <= x1 && y >= y0 && y <= y1
+        })
+    }
+
+    /// Row and position of a session, if the field has it.
+    fn locate(&self, session_id: &str) -> Option<(usize, usize)> {
+        for (row, members) in self.members.iter().enumerate() {
+            if let Some(at) = members
+                .iter()
+                .position(|index| self.cards[*index].session_id == session_id)
+            {
+                return Some((row, at));
+            }
+        }
+        None
     }
 
     /// The session a directional move from `from` should land on.
     ///
-    /// Picks the nearest blob within a cone around the direction, scoring by
-    /// distance along the axis plus a penalty for drifting off it. Distance
-    /// rather than index order, because the field is spatial: "right" has to
-    /// mean the thing that looks like it is to the right.
-    pub fn neighbor(&self, from: &str, dir: Dir) -> Option<&Blob> {
-        let origin = self
-            .blobs
-            .iter()
-            .find(|blob| blob.session_id == from)
-            .or_else(|| self.blobs.first())?;
-        let (ux, uy) = dir.vector();
-        self.blobs
-            .iter()
-            .filter(|blob| blob.session_id != origin.session_id)
-            .filter_map(|blob| {
-                let dx = blob.center.0 - origin.center.0;
-                let dy = blob.center.1 - origin.center.1;
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance <= f64::EPSILON {
+    /// Left and right walk the row, wrapping, exactly as the session strip
+    /// does: a row is a ring of a handful of items, and hitting an invisible
+    /// wall at the end reads as the key being broken. Up and down move
+    /// between rows, landing on the card whose centre is nearest the one you
+    /// left, which is the compositor's own column-preserving motion.
+    pub fn neighbor(&self, from: &str, dir: Dir) -> Option<&Card> {
+        let (row, at) = self.locate(from).or_else(|| {
+            self.cards
+                .first()
+                .and_then(|card| self.locate(&card.session_id))
+        })?;
+        let members = &self.members[row];
+        match dir {
+            Dir::Left | Dir::Right => {
+                if members.len() <= 1 {
                     return None;
                 }
-                let along = (dx * ux + dy * uy) / distance;
-                if along < CONE.cos() {
+                let step = if dir == Dir::Right { 1isize } else { -1 };
+                let next = (at as isize + step).rem_euclid(members.len() as isize) as usize;
+                Some(&self.cards[members[next]])
+            }
+            Dir::Up | Dir::Down => {
+                if self.members.len() <= 1 {
                     return None;
                 }
-                // Along-axis distance dominates; the off-axis component is a
-                // tiebreak, so two blobs the same distance ahead resolve to
-                // the better aligned one.
-                let axis = dx * ux + dy * uy;
-                let off = (dx * uy - dy * ux).abs();
-                Some((blob, axis + off * 0.5))
-            })
-            .min_by(|(_, a), (_, b)| a.total_cmp(b))
-            .map(|(blob, _)| blob)
+                let step = if dir == Dir::Down { 1isize } else { -1 };
+                let target =
+                    (row as isize + step).rem_euclid(self.members.len() as isize) as usize;
+                let from_x = self.cards[members[at]].center().0;
+                self.members[target]
+                    .iter()
+                    .map(|index| &self.cards[*index])
+                    .min_by(|a, b| {
+                        (a.center().0 - from_x)
+                            .abs()
+                            .total_cmp(&(b.center().0 - from_x).abs())
+                    })
+            }
+        }
     }
 
     /// Session ids in reading order (left to right, top to bottom), for the
-    /// Tab cycle. Spatial order rather than list order, so Tab walks the field
-    /// the way the eye does.
+    /// Tab cycle. Row order is layout order, so Tab walks the field the way
+    /// the eye does.
     pub fn reading_order(&self) -> Vec<&str> {
-        let mut order: Vec<&Blob> = self.blobs.iter().collect();
-        order.sort_by(|a, b| {
-            // Bucket by row so a blob slightly higher than its neighbour does
-            // not jump the queue; within a row, read left to right.
-            let row = |blob: &Blob| (blob.center.1 / (MIN_RADIUS * 2.0)).floor();
-            row(a)
-                .total_cmp(&row(b))
-                .then(a.center.0.total_cmp(&b.center.0))
-        });
-        order.iter().map(|blob| blob.session_id.as_str()).collect()
+        self.members
+            .iter()
+            .flat_map(|members| {
+                members
+                    .iter()
+                    .map(|index| self.cards[*index].session_id.as_str())
+            })
+            .collect()
     }
 
     /// The next session after `from` in reading order, wrapping.
@@ -212,26 +205,25 @@ impl Field {
     }
 }
 
-/// Blob radius for a session's weight.
+/// Card width for a session's weight.
 ///
-/// Area, not radius, is proportional to the weight: a circle twice as wide
-/// looks four times the session, so scaling the radius linearly would wildly
-/// overstate a long conversation. The square root keeps the *ink* honest.
-/// `sqrt` of a normalized weight, so the largest session in the field sets the
-/// top of the scale and a lone session is always drawn comfortably large.
-fn radius_for(weight: f64, heaviest: f64) -> f64 {
+/// `sqrt` of a normalized weight, so the heaviest session in the field sets
+/// the top of the scale and the difference between a long conversation and a
+/// fresh one stays legible without the long one being drawn ten times as
+/// wide.
+fn width_for(weight: f64, heaviest: f64) -> f64 {
     if heaviest <= 0.0 {
-        return MIN_RADIUS;
+        return MIN_CARD_WIDTH;
     }
     let normalized = (weight.max(0.0) / heaviest).clamp(0.0, 1.0);
-    MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * normalized.sqrt()
+    MIN_CARD_WIDTH + (MAX_CARD_WIDTH - MIN_CARD_WIDTH) * normalized.sqrt()
 }
 
 /// Group entries by working-directory leaf, preserving first-appearance order.
 ///
-/// Same rule as the strip, and for the same reason: a field whose clusters
+/// Same rule as the strip, and for the same reason: a field whose rows
 /// reorder between polls is unreadable.
-fn cluster_of(entry: &Entry) -> String {
+fn row_of(entry: &Entry) -> String {
     let Some(dir) = entry.working_dir.as_deref() else {
         return "-".to_string();
     };
@@ -239,86 +231,6 @@ fn cluster_of(entry: &Entry) -> String {
     match trimmed.rsplit('/').next() {
         Some(leaf) if !leaf.is_empty() => leaf.to_string(),
         _ => "/".to_string(),
-    }
-}
-
-/// Push overlapping circles apart until they clear each other by `gap`.
-///
-/// Shared by the two packing levels (blobs within a cluster, clusters within
-/// the field), because "separate these circles" is the same problem at both
-/// scales and two copies of it would drift.
-fn relax(subjects: &[usize], radii: &[f64], centers: &mut [(f64, f64)], gap: f64) {
-    for _ in 0..RELAX_PASSES {
-        let mut moved = false;
-        for (rank, a) in subjects.iter().enumerate() {
-            for b in &subjects[rank + 1..] {
-                let wanted = radii[*a] + radii[*b] + gap;
-                let dx = centers[*b].0 - centers[*a].0;
-                let dy = centers[*b].1 - centers[*a].1;
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance >= wanted {
-                    continue;
-                }
-                // Two circles seeded exactly on top of each other have no
-                // direction to separate along, so give them a deterministic
-                // one rather than dividing by zero.
-                let (nx, ny) = if distance <= f64::EPSILON {
-                    let angle = GOLDEN_ANGLE * *a as f64;
-                    (angle.cos(), angle.sin())
-                } else {
-                    (dx / distance, dy / distance)
-                };
-                let push = (wanted - distance) / 2.0;
-                centers[*a].0 -= nx * push;
-                centers[*a].1 -= ny * push;
-                centers[*b].0 += nx * push;
-                centers[*b].1 += ny * push;
-                moved = true;
-            }
-        }
-        if !moved {
-            return;
-        }
-    }
-}
-
-/// Pull circles toward their common centre until they are just touching.
-///
-/// The other half of [`relax`]. Relaxation resolves overlaps but never
-/// reclaims space, so a group seeded on a generous spiral stayed exactly as
-/// spread out as it was seeded, however much empty paper sat between its
-/// members. Alternating the two settles a group into a tight clutch: pull
-/// everything in, push apart whatever now collides, repeat.
-fn compact(subjects: &[usize], radii: &[f64], centers: &mut [(f64, f64)], gap: f64) {
-    if subjects.len() < 2 {
-        return;
-    }
-    for _ in 0..COMPACT_PASSES {
-        let count = subjects.len() as f64;
-        let centre = subjects.iter().fold((0.0, 0.0), |acc, index| {
-            (
-                acc.0 + centers[*index].0 / count,
-                acc.1 + centers[*index].1 / count,
-            )
-        });
-        for index in subjects {
-            let dx = centre.0 - centers[*index].0;
-            let dy = centre.1 - centers[*index].1;
-            let distance = (dx * dx + dy * dy).sqrt();
-            if distance <= f64::EPSILON {
-                continue;
-            }
-            // Never step past the centre: a circle that overshoots would be
-            // pushed back out next pass, and the group would shimmer instead
-            // of settling.
-            let step = (distance * COMPACT_RATE).min(distance);
-            centers[*index].0 += dx / distance * step;
-            centers[*index].1 += dy / distance * step;
-        }
-        // Re-separate whatever the pull just pushed together. This is what
-        // makes the result tight rather than merely smaller: the circles end
-        // up resting against one another.
-        relax(subjects, radii, centers, gap);
     }
 }
 
@@ -341,11 +253,11 @@ pub fn layout(
         .map(|entry| entry.weight)
         .fold(0.0f64, f64::max);
 
-    // Bucket into clusters, keeping first-appearance order.
+    // Bucket into rows, keeping first-appearance order.
     let mut labels: Vec<String> = Vec::new();
     let mut members: Vec<Vec<usize>> = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let label = cluster_of(entry);
+        let label = row_of(entry);
         match labels.iter().position(|name| *name == label) {
             Some(at) => members[at].push(index),
             None => {
@@ -355,204 +267,76 @@ pub fn layout(
         }
     }
 
-    let radii: Vec<f64> = entries
-        .iter()
-        .map(|entry| radius_for(entry.weight, heaviest))
-        .collect();
-
-    // Place each cluster's members in the cluster's *own* coordinate space,
-    // then place the clusters as rigid bodies. Relaxing every blob against
-    // every other in one flat pass instead let members drift between groups
-    // until the projects intermingled, which is the one thing the clustering
-    // has to prevent.
-    let mut placed: Vec<(f64, f64)> = vec![(0.0, 0.0); entries.len()];
-    let mut cluster_radius: Vec<f64> = Vec::with_capacity(members.len());
-    for group in &members {
-        // Largest first, so the heavy blobs take the middle of their cluster
-        // and the small ones fill in around them.
-        let mut order = group.clone();
-        order.sort_by(|a, b| radii[*b].total_cmp(&radii[*a]));
-        let mean: f64 = order.iter().map(|i| radii[*i]).sum::<f64>() / order.len() as f64;
-        let pitch = (mean * 2.0 + BLOB_GAP) * 0.75;
-        for (rank, index) in order.iter().enumerate() {
-            let angle = GOLDEN_ANGLE * rank as f64;
-            let distance = pitch * (rank as f64).sqrt();
-            placed[*index] = (distance * angle.cos(), distance * angle.sin());
-        }
-        relax(&order, &radii, &mut placed, BLOB_GAP);
-        compact(&order, &radii, &mut placed, BLOB_GAP);
-        // Recentre on the members' bounding circle so the cluster's own origin
-        // is where it looks like it is, which is what the label hangs off.
-        let count = order.len() as f64;
-        let centroid = order.iter().fold((0.0, 0.0), |acc, index| {
-            (
-                acc.0 + placed[*index].0 / count,
-                acc.1 + placed[*index].1 / count,
-            )
-        });
-        let mut extent: f64 = 0.0;
-        for index in &order {
-            placed[*index].0 -= centroid.0;
-            placed[*index].1 -= centroid.1;
-            let (x, y) = placed[*index];
-            extent = extent.max((x * x + y * y).sqrt() + radii[*index]);
-        }
-        cluster_radius.push(extent.max(MIN_RADIUS));
-    }
-
-    // Now pack the clusters themselves, as circles of their bounding radius,
-    // and carry their members along.
-    let mut origins: Vec<(f64, f64)> = (0..members.len())
-        .map(|cluster| {
-            let angle = GOLDEN_ANGLE * cluster as f64;
-            // Seed off this cluster's own size rather than the biggest one in
-            // the field: using the maximum spaced every pair as if both were
-            // the largest, which pushed a couple of small projects to opposite
-            // corners of the page for no reason.
-            let spread = cluster_radius[cluster];
-            let distance = (spread + CLUSTER_GAP) * (cluster as f64).sqrt();
-            (distance * angle.cos(), distance * angle.sin())
-        })
-        .collect();
-    let all_clusters: Vec<usize> = (0..members.len()).collect();
-    relax(&all_clusters, &cluster_radius, &mut origins, CLUSTER_GAP);
-    compact(&all_clusters, &cluster_radius, &mut origins, CLUSTER_GAP);
-    for (cluster, group) in members.iter().enumerate() {
-        for index in group {
-            placed[*index].0 += origins[cluster].0;
-            placed[*index].1 += origins[cluster].1;
-        }
-    }
-
-    // Fit the whole field into the area: one uniform scale, so the relative
-    // sizes (the entire point of the blobs) survive.
     let (x0, y0, x1, y1) = area;
-    let margin = ((x1 - x0).min(y1 - y0) * FIT_MARGIN).max(8.0);
-    let (fit_w, fit_h) = (
-        (x1 - x0 - margin * 2.0).max(1.0),
-        (y1 - y0 - margin * 2.0).max(1.0),
-    );
-    let mut bounds = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for (index, position) in placed.iter().enumerate() {
-        bounds.0 = bounds.0.min(position.0 - radii[index]);
-        bounds.1 = bounds.1.min(position.1 - radii[index]);
-        bounds.2 = bounds.2.max(position.0 + radii[index]);
-        bounds.3 = bounds.3.max(position.1 + radii[index]);
-    }
-    let span = (
-        (bounds.2 - bounds.0).max(1.0),
-        (bounds.3 - bounds.1).max(1.0),
-    );
-    // Never scale *up*: a single session blown up to fill a 4K window would
-    // read as an error page rather than as one small conversation.
-    let scale = (fit_w / span.0).min(fit_h / span.1).min(1.0);
-    // The session you zoomed out of goes in the middle of the window, and
-    // everything else arranges itself around it. Centring the field's bounding
-    // box instead put the current session wherever the packing happened to
-    // leave it, so the conversation you were reading slid off under your eye
-    // at the exact moment the field appeared. This is the anchor that makes
-    // the zoom feel like the window pulling back rather than a screen change.
-    let anchor = current
-        .and_then(|id| entries.iter().position(|entry| entry.session_id == id))
-        .map(|index| placed[index])
-        .unwrap_or(((bounds.0 + bounds.2) / 2.0, (bounds.1 + bounds.3) / 2.0));
-    let area_center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-    // Anchoring on the current session can hang the far side of a lopsided
-    // field off the page, and a session drawn off-screen is one the user
-    // cannot reach. So the anchor is a *preference*: honoured while the field
-    // still fits, and slid back inside the margins when it does not.
-    //
-    // Measured from the field's real extent after scaling rather than from a
-    // re-projection of the raw bounds: the radii are scaled too, and counting
-    // them at full size left the correction short by exactly the margin it was
-    // supposed to reclaim.
-    let anchored = |position: (f64, f64)| {
-        (
-            area_center.0 + (position.0 - anchor.0) * scale,
-            area_center.1 + (position.1 - anchor.1) * scale,
-        )
-    };
-    let mut extent = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for (index, position) in placed.iter().enumerate() {
-        let (cx, cy) = anchored(*position);
-        let r = radii[index] * scale;
-        extent.0 = extent.0.min(cx - r);
-        extent.1 = extent.1.min(cy - r);
-        extent.2 = extent.2.max(cx + r);
-        extent.3 = extent.3.max(cy + r);
-    }
-    /// Slide a span back inside its edges, or centre it when it cannot fit.
-    fn shift(low: f64, high: f64, edge_low: f64, edge_high: f64) -> f64 {
-        if high - low >= edge_high - edge_low {
-            // Too big for the page even after fitting: centre the field so the
-            // overflow is shared, rather than letting one whole end fall off.
-            return (edge_low + edge_high) / 2.0 - (low + high) / 2.0;
-        }
-        if low < edge_low {
-            edge_low - low
-        } else if high > edge_high {
-            edge_high - high
+    let field_width = (x1 - x0).max(1.0);
+    let field_height = (y1 - y0).max(1.0);
+
+    // Rows share the height evenly, clamped to a comfortable band. The block
+    // is then centred vertically, so one project sits in the middle of the
+    // page rather than hanging off the top.
+    let rows = members.len() as f64;
+    let available = field_height - (rows - 1.0) * ROW_GAP - rows * ROW_LABEL_BAND;
+    let row_height = (available / rows).clamp(12.0, MAX_ROW_HEIGHT);
+    let block = rows * (row_height + ROW_LABEL_BAND) + (rows - 1.0) * ROW_GAP;
+    let mut top = y0 + ((field_height - block) / 2.0).max(0.0);
+
+    let mut cards: Vec<Option<Card>> = vec![None; entries.len()];
+    let mut row_labels: Vec<RowLabel> = Vec::with_capacity(members.len());
+    for (row, group) in members.iter().enumerate() {
+        // Natural widths, then one uniform squeeze when the row cannot fit:
+        // the *relative* widths (the point of the sizing) survive, and the
+        // row never runs off the page the way the compositor's strip can.
+        let widths: Vec<f64> = group
+            .iter()
+            .map(|index| width_for(entries[*index].weight, heaviest))
+            .collect();
+        let natural: f64 =
+            widths.iter().sum::<f64>() + (group.len() as f64 - 1.0).max(0.0) * CARD_GAP;
+        let gaps = (group.len() as f64 - 1.0).max(0.0) * CARD_GAP;
+        let squeeze = if natural > field_width {
+            ((field_width - gaps) / (natural - gaps)).max(0.05)
         } else {
-            0.0
-        }
-    }
-    let dx = shift(extent.0, extent.2, x0 + margin, x1 - margin);
-    let dy = shift(extent.1, extent.3, y0 + margin, y1 - margin);
-    let to_screen = |position: (f64, f64)| {
-        let (cx, cy) = anchored(position);
-        (cx + dx, cy + dy)
-    };
-
-    let blobs: Vec<Blob> = entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| Blob {
-            index,
-            session_id: entry.session_id.clone(),
-            label: cluster_of(entry),
-            center: to_screen(placed[index]),
-            radius: radii[index] * scale,
-            busy: entry.busy,
-            focused: focus == Some(entry.session_id.as_str()),
-            current: current == Some(entry.session_id.as_str()),
-        })
-        .collect();
-
-    let clusters = members
-        .iter()
-        .enumerate()
-        .map(|(cluster, group)| {
-            let count = group.len() as f64;
-            let center = group.iter().fold((0.0, 0.0), |acc, index| {
-                (
-                    acc.0 + blobs[*index].center.0 / count,
-                    acc.1 + blobs[*index].center.1 / count,
-                )
+            1.0
+        };
+        let row_width = (natural - gaps) * squeeze + gaps;
+        // Centred, like the compositor centres the focused column: the rows
+        // read as a stack of workspaces rather than as a table flushed left.
+        let mut x = x0 + (field_width - row_width) / 2.0;
+        let label_top = top;
+        let cards_top = top + ROW_LABEL_BAND;
+        row_labels.push(RowLabel {
+            label: labels[row].clone(),
+            left: x,
+            top: label_top,
+        });
+        for (rank, index) in group.iter().enumerate() {
+            let width = widths[rank] * squeeze;
+            let entry = &entries[*index];
+            cards[*index] = Some(Card {
+                index: *index,
+                session_id: entry.session_id.clone(),
+                label: labels[row].clone(),
+                rect: (x, cards_top, x + width, cards_top + row_height),
+                busy: entry.busy,
+                focused: focus == Some(entry.session_id.as_str()),
+                current: current == Some(entry.session_id.as_str()),
             });
-            let radius = group
-                .iter()
-                .map(|index| {
-                    let blob = &blobs[*index];
-                    let dx = blob.center.0 - center.0;
-                    let dy = blob.center.1 - center.1;
-                    (dx * dx + dy * dy).sqrt() + blob.radius
-                })
-                .fold(0.0f64, f64::max);
-            ClusterLabel {
-                label: labels[cluster].clone(),
-                center,
-                radius,
-            }
-        })
-        .collect();
+            x += width + CARD_GAP;
+        }
+        top = cards_top + row_height + ROW_GAP;
+    }
 
-    Field { blobs, clusters }
+    Field {
+        cards: cards.into_iter().flatten().collect(),
+        rows: row_labels,
+        members,
+    }
 }
 
-/// A blob's caption: the human-readable part of a session id.
+/// A card's caption: the human-readable part of a session id.
 ///
 /// Session ids are `session_<name>_<millis>_<hash>`, of which only the name is
-/// worth reading. Printing the whole id would make every blob look identical
+/// worth reading. Printing the whole id would make every card look identical
 /// at a glance, which is the one thing the field must not do.
 ///
 /// The *first* all-alphabetic segment wins, which is the daemon's generated
@@ -571,8 +355,8 @@ pub fn short_id(session_id: &str) -> String {
 
 /// A 0..1 breath over `elapsed` time, for the busy pulse.
 ///
-/// Lives here rather than in the renderer so the sizing of a blob is one
-/// function of (blob, elapsed) that a test can evaluate without a GPU.
+/// Lives here rather than in the renderer so the sizing of a card is one
+/// function of (card, elapsed) that a test can evaluate without a GPU.
 ///
 /// Driven by elapsed time rather than the wall clock so a pinned capture is
 /// byte-reproducible: the caller passes [`crate::activity::Activity::elapsed`],
@@ -665,7 +449,7 @@ impl Overview {
     ///
     /// The escape hatch for the instant-open gesture: Super opens the field
     /// on the keydown, so a chord like Super+V has to erase it in the same
-    /// frame the letter arrives. Zooming out here would leave the blobs
+    /// frame the letter arrives. Zooming out here would leave the cards
     /// washing over the composer for a tenth of a second after the user has
     /// already moved on, which reads as lag rather than as an animation.
     pub fn abort(&mut self) {
@@ -764,66 +548,82 @@ mod tests {
         )
     }
 
-    /// The whole premise: a bigger conversation is a bigger blob.
+    fn by<'a>(field: &'a Field, id: &str) -> &'a Card {
+        field
+            .cards
+            .iter()
+            .find(|card| card.session_id == id)
+            .unwrap()
+    }
+
+    /// The whole premise: a bigger conversation is a wider card.
     #[test]
-    fn radius_grows_with_the_transcript() {
+    fn width_grows_with_the_transcript() {
         let field = field();
-        let by = |id: &str| {
-            field
-                .blobs
-                .iter()
-                .find(|blob| blob.session_id == id)
-                .unwrap()
-                .radius
+        let width = |id: &str| {
+            let card = by(&field, id);
+            card.rect.2 - card.rect.0
         };
-        assert!(by("a1") > by("a2"), "the heavy session was not the big one");
-        assert!(by("a2") > by("a3"));
-    }
-
-    /// Area, not radius, tracks the weight: a session ten times the size must
-    /// not be drawn ten times as wide.
-    #[test]
-    fn sizing_is_by_area_not_by_radius() {
-        let small = radius_for(10.0, 1000.0);
-        let large = radius_for(1000.0, 1000.0);
         assert!(
-            large < small * 10.0,
-            "radius scaled linearly with the weight"
+            width("a1") > width("a2"),
+            "the heavy session was not the wide one"
         );
+        assert!(width("a2") > width("a3"));
     }
 
-    /// An empty session still gets a blob big enough to see and click.
+    /// The width scale is compressed: a session ten times the size must not
+    /// be drawn ten times as wide, or the rest of its row becomes slivers.
+    #[test]
+    fn sizing_is_compressed_not_linear() {
+        let small = width_for(10.0, 1000.0);
+        let large = width_for(1000.0, 1000.0);
+        assert!(large < small * 10.0, "width scaled linearly with weight");
+    }
+
+    /// An empty session still gets a card big enough to see and click.
     #[test]
     fn a_fresh_session_is_still_a_visible_target() {
         let field = layout(&[entry("solo", "/tmp", 0.0)], Some("solo"), None, AREA);
-        assert_eq!(field.blobs.len(), 1);
-        assert!(field.blobs[0].radius >= MIN_RADIUS * 0.5);
+        assert_eq!(field.cards.len(), 1);
+        let card = &field.cards[0];
+        assert!(card.rect.2 - card.rect.0 >= MIN_CARD_WIDTH * 0.5);
     }
 
-    /// Blobs must not sit on top of one another, or the field is unreadable
+    /// Sessions bucket into one row per directory, in first-appearance order.
+    #[test]
+    fn rows_are_by_working_dir_and_stable() {
+        let field = field();
+        assert_eq!(field.rows.len(), 2);
+        assert_eq!(field.rows[0].label, "jcode");
+        assert_eq!(field.rows[1].label, "site");
+        // A row's cards all share a vertical band; the two rows do not.
+        let a1 = by(&field, "a1");
+        let a2 = by(&field, "a2");
+        let b1 = by(&field, "b1");
+        assert_eq!(a1.rect.1, a2.rect.1, "one row split vertically");
+        assert!(b1.rect.1 > a1.rect.3, "the second row did not stack below");
+    }
+
+    /// Cards must not sit on top of one another, or the field is unreadable
     /// and half the sessions are unclickable.
     #[test]
-    fn blobs_do_not_overlap() {
+    fn cards_do_not_overlap() {
         let field = field();
-        for (i, a) in field.blobs.iter().enumerate() {
-            for b in &field.blobs[i + 1..] {
-                let dx = b.center.0 - a.center.0;
-                let dy = b.center.1 - a.center.1;
-                let distance = (dx * dx + dy * dy).sqrt();
-                assert!(
-                    distance >= a.radius + b.radius - 1.0,
-                    "{} and {} overlap",
-                    a.session_id,
-                    b.session_id
-                );
+        for (i, a) in field.cards.iter().enumerate() {
+            for b in &field.cards[i + 1..] {
+                let apart = a.rect.2 <= b.rect.0 + 1e-9
+                    || b.rect.2 <= a.rect.0 + 1e-9
+                    || a.rect.3 <= b.rect.1 + 1e-9
+                    || b.rect.3 <= a.rect.1 + 1e-9;
+                assert!(apart, "{} and {} overlap", a.session_id, b.session_id);
             }
         }
     }
 
-    /// The field has to fit the window: a blob drawn off-page is a session the
+    /// The field has to fit the window: a card drawn off-page is a session the
     /// user cannot reach.
     #[test]
-    fn every_blob_fits_inside_the_area() {
+    fn every_card_fits_inside_the_area() {
         let field = layout(
             &(0..24)
                 .map(|n| {
@@ -838,17 +638,11 @@ mod tests {
             None,
             AREA,
         );
-        for blob in &field.blobs {
-            assert!(blob.center.0 - blob.radius >= AREA.0 - 1.0, "{blob:?} left");
-            assert!(
-                blob.center.0 + blob.radius <= AREA.2 + 1.0,
-                "{blob:?} right"
-            );
-            assert!(blob.center.1 - blob.radius >= AREA.1 - 1.0, "{blob:?} top");
-            assert!(
-                blob.center.1 + blob.radius <= AREA.3 + 1.0,
-                "{blob:?} bottom"
-            );
+        for card in &field.cards {
+            assert!(card.rect.0 >= AREA.0 - 1.0, "{card:?} left");
+            assert!(card.rect.2 <= AREA.2 + 1.0, "{card:?} right");
+            assert!(card.rect.1 >= AREA.1 - 1.0, "{card:?} top");
+            assert!(card.rect.3 <= AREA.3 + 1.0, "{card:?} bottom");
         }
     }
 
@@ -859,115 +653,58 @@ mod tests {
         assert_eq!(field(), field());
     }
 
-    /// Sessions in one directory must end up nearer each other than to another
-    /// project's, or the clustering says nothing.
+    /// Left and right walk the row, wrapping, exactly like the session strip.
     #[test]
-    fn sessions_in_a_directory_cluster_together() {
+    fn left_and_right_wrap_within_the_row() {
         let field = field();
-        let center = |label: &str| {
-            field
-                .clusters
-                .iter()
-                .find(|cluster| cluster.label == label)
-                .unwrap()
-                .center
-        };
-        let blob = |id: &str| {
-            field
-                .blobs
-                .iter()
-                .find(|b| b.session_id == id)
-                .unwrap()
-                .center
-        };
-        let distance =
-            |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+        assert_eq!(field.neighbor("a1", Dir::Right).unwrap().session_id, "a2");
+        assert_eq!(field.neighbor("a3", Dir::Right).unwrap().session_id, "a1");
+        assert_eq!(field.neighbor("a1", Dir::Left).unwrap().session_id, "a3");
+        // Never into another row: the row is the ring.
         for id in ["a1", "a2", "a3"] {
-            assert!(
-                distance(blob(id), center("jcode")) < distance(blob(id), center("site")),
-                "{id} was nearer the wrong cluster"
-            );
+            let right = field.neighbor(id, Dir::Right).unwrap();
+            assert_eq!(right.label, "jcode", "{id} wrapped into another row");
         }
     }
 
-    /// Clusters must not intermingle: every blob has to be nearer its own
-    /// project's centre than any other's. The first packing relaxed all the
-    /// blobs against each other in one flat pass and members drifted between
-    /// groups until the projects were visibly interleaved, so this is the
-    /// regression the two-level packing exists to prevent.
+    /// Up and down move between rows, wrapping, like the strip's groups.
     #[test]
-    fn clusters_stay_disjoint_in_a_crowded_field() {
-        let entries: Vec<Entry> = (0..18)
-            .map(|n| {
-                entry(
-                    &format!("s{n}"),
-                    &format!("/home/j/proj{}", n % 4),
-                    ((n * 7919) % 400) as f64 * 900.0 + 500.0,
-                )
-            })
-            .collect();
-        let field = layout(&entries, None, None, AREA);
-        let distance =
-            |a: (f64, f64), b: (f64, f64)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
-        for blob in &field.blobs {
-            let own = field
-                .clusters
-                .iter()
-                .find(|cluster| cluster.label == blob.label)
-                .expect("every blob belongs to a cluster");
-            let nearest = field
-                .clusters
-                .iter()
-                .min_by(|a, b| {
-                    distance(blob.center, a.center).total_cmp(&distance(blob.center, b.center))
-                })
-                .expect("at least one cluster");
-            assert_eq!(
-                nearest.label, own.label,
-                "{} sat inside the {} cluster",
-                blob.session_id, nearest.label
-            );
-        }
-    }
-
-    /// Directional navigation is spatial: moving right must land on something
-    /// actually to the right.
-    #[test]
-    fn a_directional_move_lands_in_that_direction() {
+    fn up_and_down_change_rows() {
         let field = field();
-        for blob in &field.blobs {
-            for (dir, ok) in [
-                (Dir::Right, (1.0, 0.0)),
-                (Dir::Left, (-1.0, 0.0)),
-                (Dir::Up, (0.0, -1.0)),
-                (Dir::Down, (0.0, 1.0)),
-            ] {
-                let Some(target) = field.neighbor(&blob.session_id, dir) else {
-                    continue;
-                };
-                let dx = target.center.0 - blob.center.0;
-                let dy = target.center.1 - blob.center.1;
-                let along = (dx * ok.0 + dy * ok.1) / (dx * dx + dy * dy).sqrt();
-                assert!(
-                    along >= CONE.cos() - 1e-9,
-                    "{dir:?} from {} landed off-axis",
-                    blob.session_id
-                );
-            }
+        assert_eq!(field.neighbor("a1", Dir::Down).unwrap().label, "site");
+        assert_eq!(field.neighbor("b1", Dir::Up).unwrap().label, "jcode");
+        // Wraps at the edges rather than dying.
+        assert_eq!(field.neighbor("a1", Dir::Up).unwrap().label, "site");
+    }
+
+    /// A vertical move lands on the card nearest the one you left, so moving
+    /// down and back up returns roughly where you were.
+    #[test]
+    fn a_vertical_move_keeps_the_column() {
+        let field = field();
+        let from = by(&field, "a1");
+        let landed = field.neighbor("a1", Dir::Down).unwrap();
+        // The landing card is the one in the target row with the nearest
+        // centre, checked directly against the alternatives.
+        for other in field.cards.iter().filter(|card| card.label == "site") {
+            assert!(
+                (landed.center().0 - from.center().0).abs()
+                    <= (other.center().0 - from.center().0).abs() + 1e-9
+            );
         }
     }
 
     /// Moving must never be a no-op that looks like a broken key: from any
-    /// blob, at least one direction has to go somewhere.
+    /// card, at least one direction has to go somewhere.
     #[test]
-    fn every_blob_can_reach_another() {
+    fn every_card_can_reach_another() {
         let field = field();
-        for blob in &field.blobs {
+        for card in &field.cards {
             let reachable = [Dir::Left, Dir::Right, Dir::Up, Dir::Down]
                 .into_iter()
-                .filter(|dir| field.neighbor(&blob.session_id, *dir).is_some())
+                .filter(|dir| field.neighbor(&card.session_id, *dir).is_some())
                 .count();
-            assert!(reachable > 0, "{} is stranded", blob.session_id);
+            assert!(reachable > 0, "{} is stranded", card.session_id);
         }
     }
 
@@ -977,41 +714,61 @@ mod tests {
     fn tab_order_covers_every_session_once() {
         let field = field();
         let order = field.reading_order();
-        assert_eq!(order.len(), field.blobs.len());
+        assert_eq!(order.len(), field.cards.len());
         let unique: std::collections::BTreeSet<&str> = order.iter().copied().collect();
-        assert_eq!(unique.len(), field.blobs.len());
+        assert_eq!(unique.len(), field.cards.len());
         let mut at = order[0].to_string();
-        for _ in 0..field.blobs.len() {
+        for _ in 0..field.cards.len() {
             at = field.next_in_order(&at, 1).unwrap().to_string();
         }
         assert_eq!(at, order[0], "the cycle did not wrap to the start");
     }
 
-    /// Clicking inside a blob picks it; clicking the paper between blobs picks
+    /// Clicking inside a card picks it; clicking the paper between cards picks
     /// nothing rather than the nearest.
     #[test]
-    fn hit_testing_is_by_the_drawn_circle() {
+    fn hit_testing_is_by_the_drawn_rect() {
         let field = field();
-        let blob = field.blobs[0].clone();
+        let card = field.cards[0].clone();
+        let (cx, cy) = card.center();
         assert_eq!(
-            field
-                .hit(blob.center.0, blob.center.1)
-                .map(|b| &b.session_id),
-            Some(&blob.session_id)
+            field.hit(cx, cy).map(|hit| &hit.session_id),
+            Some(&card.session_id)
         );
-        let outside = (
-            blob.center.0 + blob.radius * 0.95,
-            blob.center.1 + blob.radius * 0.95,
-        );
+        // Just past the right edge is the gap, which belongs to nobody.
         assert_ne!(
-            field.hit(outside.0, outside.1).map(|b| &b.session_id),
-            Some(&blob.session_id),
-            "the corner of the bounding box was treated as a hit"
+            field
+                .hit(card.rect.2 + CARD_GAP / 2.0, cy)
+                .map(|hit| &hit.session_id),
+            Some(&card.session_id),
+            "the gap between cards was treated as a hit"
         );
     }
 
-    /// The zoom must run to completion and stop, in both directions.
-    /// The label is the whole of a blob's identity, so it must be the name a
+    /// One enormous row must squeeze to fit rather than run off the page.
+    #[test]
+    fn a_crowded_row_squeezes_to_fit() {
+        let field = layout(
+            &(0..12)
+                .map(|n| entry(&format!("s{n}"), "/home/j/one", 100_000.0))
+                .collect::<Vec<_>>(),
+            None,
+            None,
+            AREA,
+        );
+        for card in &field.cards {
+            assert!(card.rect.2 <= AREA.2 + 1.0, "{card:?} ran off the page");
+        }
+        // Still in one row.
+        let tops: std::collections::BTreeSet<i64> = field
+            .cards
+            .iter()
+            .map(|card| card.rect.1.round() as i64)
+            .collect();
+        assert_eq!(tops.len(), 1, "one directory split into several rows");
+    }
+
+    /// The label is the whole of a card's identity, so it must be the name a
     /// human would use and it must differ between sessions.
     #[test]
     fn the_label_is_the_session_name_not_its_hash() {
@@ -1040,6 +797,7 @@ mod tests {
         assert_eq!(labels.len(), ids.len());
     }
 
+    /// The zoom must run to completion and stop, in both directions.
     #[test]
     fn the_zoom_opens_and_closes() {
         let mut overview = Overview::default();

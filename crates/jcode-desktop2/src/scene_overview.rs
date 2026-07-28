@@ -1,4 +1,4 @@
-//! The session overview layer: the blob field, its preview, and its hint.
+//! The session overview layer: the card strip, its preview, and its hint.
 //!
 //! Split from [`crate::scene`] because the overview is a mode drawn over the
 //! page rather than part of it: it has its own constants, its own layering
@@ -10,22 +10,26 @@ use crate::scene::{draw_spinner, elide};
 use crate::text::ParagraphStyle;
 use crate::{Model, layout, text};
 use vello::Scene;
-use vello::kurbo::{Affine, Circle, Rect};
+use vello::kurbo::{Affine, Rect, RoundedRect};
 
-/// Size of a blob's session label, and of the cluster's name above it.
-const BLOB_LABEL_SIZE: f32 = 11.0;
-/// Smallest a blob's name may be set before it is dropped entirely: below this
+/// Size of a card's session label.
+const CARD_LABEL_SIZE: f32 = 12.0;
+/// Smallest a card's name may be set before it is dropped entirely: below this
 /// it is illegible, and illegible text is noise rather than a label.
-const BLOB_LABEL_MIN: f32 = 7.0;
-const CLUSTER_LABEL_SIZE: f32 = 13.0;
-/// Gap between the bottom of a cluster's blobs and its name.
-const CLUSTER_LABEL_GAP: f64 = 8.0;
-/// Ring thickness for an unfocused blob, and for the focused one.
-const BLOB_RING: f64 = 1.25;
-const BLOB_RING_FOCUS: f64 = 2.5;
-/// How far past its radius the focused blob's halo reaches.
-const BLOB_HALO: f64 = 7.0;
-/// How much a busy blob's ring breathes, as a fraction of its radius.
+const CARD_LABEL_MIN: f32 = 7.0;
+/// Size of a row's workspace name, above its cards.
+const ROW_LABEL_SIZE: f32 = 13.0;
+/// Corner radius of a card. Soft enough to read as a tile, square enough to
+/// read as a window rather than a pill.
+const CARD_CORNER: f64 = 7.0;
+/// Border thickness for an unfocused card, and for the focused one. The
+/// focused ring is the compositor's focus border, which is the whole visual
+/// signal the strip carries.
+const CARD_RING: f64 = 1.25;
+const CARD_RING_FOCUS: f64 = 2.5;
+/// How far past its edge the focused card's halo reaches.
+const CARD_HALO: f64 = 5.0;
+/// How much a busy card's border breathes, as a fraction of its ring weight.
 const BUSY_PULSE: f64 = 0.06;
 /// Period of that breath, in seconds.
 const BUSY_PERIOD: f32 = 1.6;
@@ -39,23 +43,22 @@ const PREVIEW_SIZE: f32 = 11.0;
 const PREVIEW_LEADING: f64 = 1.7;
 const PREVIEW_OPACITY: f64 = 0.72;
 /// Fraction of the window height the preview may occupy, measured from the
-/// top. Bounded so it can never reach the cluster names and the hint at the
-/// foot, whichever session is hovered.
-const PREVIEW_BAND: f64 = 0.3;
-/// Smallest blob that carries a busy spinner. Below this the spinner would be
+/// top. Bounded so it can never reach the rows, whichever session is hovered.
+const PREVIEW_BAND: f64 = 0.22;
+/// Smallest card that carries a busy spinner. Below this the spinner would be
 /// larger than the session it belongs to.
-const MIN_SPINNER_RADIUS: f64 = 22.0;
+const MIN_SPINNER_WIDTH: f64 = 44.0;
 
 /// Draw the highlighted session's conversation behind the field.
 ///
-/// The blobs say how big each session is and what it is called, which is
+/// The cards say how big each session is and what it is called, which is
 /// enough to *navigate* and not enough to *choose*: "clover" and "pebble" are
-/// only names until you can see what is in them. Hovering a blob puts that
+/// only names until you can see what is in them. Hovering a card puts that
 /// session's last exchanges on the page underneath, so picking is recognition
 /// rather than recall.
 ///
 /// Set faint and behind the veil on purpose: this is context for a decision
-/// being made in the foreground, and a preview that competed with the blobs
+/// being made in the foreground, and a preview that competed with the cards
 /// would make the field unreadable at exactly the moment it is being used.
 fn draw_preview(
     scene: &mut Scene,
@@ -79,8 +82,8 @@ fn draw_preview(
 
     // Top-down from the head of the page, oldest of the tail first, so the
     // preview reads in conversation order. It lives at the top because that is
-    // where the field is emptiest (the packing centres on the current session)
-    // and because the foot already carries the cluster names and the hint.
+    // the band the rows leave clear, and because the foot already carries the
+    // hint.
     let mut y = frame.body_top;
     let width = frame.column() as f32;
     let ceiling = frame.height * PREVIEW_BAND;
@@ -122,9 +125,10 @@ fn draw_preview(
     }
 }
 
-/// Draw the session overview: every live session as a blob in a 2D field.
+/// Draw the session overview: every live session as a card in a row of
+/// workspaces, the compositor's own overview.
 ///
-/// The field fades and scales in together, from the focused blob's position
+/// The field fades and scales in together, from the current card's position
 /// outward, so opening reads as the window zooming out of the conversation
 /// you are in rather than as a panel appearing over it. That is the whole
 /// illusion, and it is why the phase drives *geometry* here and not just an
@@ -148,7 +152,7 @@ pub(crate) fn draw_overview(
         model.session_id.as_deref(),
         crate::overview::area(frame),
     );
-    if field.blobs.is_empty() {
+    if field.cards.is_empty() {
         return;
     }
 
@@ -157,7 +161,7 @@ pub(crate) fn draw_overview(
     // instead of as a different screen you have been taken to: you never lose
     // your place, and the switch is a glance rather than a context change.
     //
-    // Just opaque enough that the blobs and their labels win the foreground,
+    // Just opaque enough that the cards and their labels win the foreground,
     // and no more. A full cover made the gesture feel like navigating away.
     let veil = (VEIL_OPACITY * phase) as f32;
     scene.fill(
@@ -169,17 +173,17 @@ pub(crate) fn draw_overview(
     );
 
     // The hovered session's own conversation, on the page the veil just
-    // cleared: drawn before the blobs so it is unambiguously behind them.
+    // cleared: drawn before the cards so it is unambiguously behind them.
     draw_preview(scene, text, model, frame, scale, phase);
 
-    // Everything flies out from the blob you came from, so the session on
+    // Everything flies out from the card you came from, so the session on
     // screen stays under the eye through the whole transition.
     let origin = field
-        .blobs
+        .cards
         .iter()
-        .find(|blob| blob.current)
+        .find(|card| card.current)
         .or_else(|| field.focused())
-        .map(|blob| blob.center)
+        .map(|card| card.center())
         .unwrap_or((frame.width / 2.0, frame.height / 2.0));
     let place = |point: (f64, f64)| {
         (
@@ -187,32 +191,27 @@ pub(crate) fn draw_overview(
             origin.1 + (point.1 - origin.1) * phase,
         )
     };
+    // A rect scaled about the origin, so the strip grows out of the card the
+    // window came from exactly as the compositor's overview does.
+    let place_rect = |rect: (f64, f64, f64, f64)| {
+        let (x0, y0) = place((rect.0, rect.1));
+        let (x1, y1) = place((rect.2, rect.3));
+        Rect::new(x0, y0, x1, y1)
+    };
 
-    // A project's name is anchored to the bottom of its cluster's bounding
-    // circle, clear of every blob in it. Hanging it off the centroid put it
-    // inside the group whenever the blobs were not evenly spread, which is
-    // most of the time and all of the time in a crowded field.
-    for cluster in &field.clusters {
-        let center = place(cluster.center);
-        // Clamped into the field, so a cluster sitting at the bottom edge
-        // still gets a name: a project whose label silently fell off the page
-        // is the one case where the field lies about what it contains.
-        let (_, _, _, area_bottom) = crate::overview::area(frame);
-        let top = (center.1 + cluster.radius * phase + CLUSTER_LABEL_GAP)
-            .min(area_bottom - f64::from(CLUSTER_LABEL_SIZE))
-            // Never into the preview's band at the head of the page: the two
-            // are both faint small type, so overlapping them makes each
-            // unreadable rather than merely crowded.
-            .max(frame.height * PREVIEW_BAND);
+    // A workspace's name sits above its row, aligned to the row's left edge
+    // like the strip's own group labels: the label belongs to the place, not
+    // to any one card in it.
+    for row in &field.rows {
+        let (left, top) = place((row.left, row.top));
         text.draw_paragraph_scaled(
             scene,
-            &cluster.label,
-            (center.0 - 120.0, top),
+            &row.label,
+            (left, top),
             240.0,
             ParagraphStyle {
-                font_size: CLUSTER_LABEL_SIZE,
+                font_size: ROW_LABEL_SIZE,
                 color: theme.faint.with_alpha(phase as f32),
-                align: text::Align::Center,
                 letter_spacing_em: 0.14,
                 line_height: 1.0,
                 ..Default::default()
@@ -221,32 +220,23 @@ pub(crate) fn draw_overview(
         );
     }
 
-    for blob in &field.blobs {
-        let center = place(blob.center);
-        // A busy session breathes, so work happening in a conversation you are
-        // not looking at is visible from across the field. The pulse runs on
-        // the activity's clock, which pinned captures freeze.
-        let pulse = if blob.busy {
-            1.0 + BUSY_PULSE * crate::overview::breath(model.activity.elapsed(now), BUSY_PERIOD)
-        } else {
-            1.0
-        };
-        let radius = blob.radius * phase * pulse;
-        if radius <= 1.0 {
+    for card in &field.cards {
+        let rect = place_rect(card.rect);
+        if rect.width() <= 2.0 || rect.height() <= 2.0 {
             continue;
         }
-        let circle = Circle::new(center, radius);
+        let tile = RoundedRect::from_rect(rect, CARD_CORNER * phase);
 
-        // The focused blob carries a halo, so the highlight survives being
-        // next to a much bigger neighbour: a ring alone reads as "big", while
+        // The focused card carries a halo, so the highlight survives being
+        // next to a much wider neighbour: a ring alone reads as "big", while
         // a halo reads as "chosen".
-        if blob.focused {
+        if card.focused {
             scene.fill(
                 vello::peniko::Fill::NonZero,
                 Affine::scale(scale),
                 theme.wash.with_alpha(phase as f32),
                 None,
-                &Circle::new(center, radius + BLOB_HALO),
+                &RoundedRect::from_rect(rect.inflate(CARD_HALO, CARD_HALO), CARD_CORNER + CARD_HALO),
             );
         }
         // Fill: the session you are in is inked, the rest are paper, so "where
@@ -254,71 +244,71 @@ pub(crate) fn draw_overview(
         scene.fill(
             vello::peniko::Fill::NonZero,
             Affine::scale(scale),
-            if blob.current {
+            if card.current {
                 theme.wash.with_alpha(phase as f32)
             } else {
                 theme.background.with_alpha(phase as f32)
             },
             None,
-            &circle,
+            &tile,
         );
-        // Only the highlight gets a heavy ring: a thick ring on a busy blob was
-        // indistinguishable from the focused one, so a field with work running
-        // in it appeared to have two selections.
+        // Only the highlight gets a heavy border: a thick border on a busy
+        // card was indistinguishable from the focused one, so a field with
+        // work running in it appeared to have two selections. A busy card's
+        // border breathes instead, which pinned captures freeze.
+        let pulse = if card.busy {
+            1.0 + BUSY_PULSE * crate::overview::breath(model.activity.elapsed(now), BUSY_PERIOD)
+        } else {
+            1.0
+        };
         scene.stroke(
-            &vello::kurbo::Stroke::new(if blob.focused {
-                BLOB_RING_FOCUS
-            } else {
-                BLOB_RING
-            }),
+            &vello::kurbo::Stroke::new(
+                if card.focused {
+                    CARD_RING_FOCUS
+                } else {
+                    CARD_RING
+                } * pulse,
+            ),
             Affine::scale(scale),
-            if blob.focused { theme.text } else { theme.rule }.with_alpha(phase as f32),
+            if card.focused { theme.text } else { theme.rule }.with_alpha(phase as f32),
             None,
-            &circle,
+            &tile,
         );
-        // Work is signalled by a mark rather than by the ring's weight: a
-        // spinner in the blob's shoulder, the same halftone comet the composer
+        // Work is signalled by a mark rather than by the border's weight: a
+        // spinner in the card's corner, the same halftone comet the composer
         // uses, so "this session is working" looks the same everywhere in the
         // app and cannot be confused with "this session is selected".
-        if blob.busy && radius > MIN_SPINNER_RADIUS {
+        if card.busy && rect.width() > MIN_SPINNER_WIDTH {
             draw_spinner(
                 scene,
                 &model.activity,
-                (center.0 + radius * 0.66, center.1 - radius * 0.66),
+                (rect.x1 - 14.0, rect.y0 + 14.0),
                 theme.muted.with_alpha(phase as f32),
                 scale,
                 now,
             );
         }
 
-        // The label goes inside the blob, centred: a caption hung underneath
-        // would collide with the neighbour below it as soon as the field is
-        // dense, which is exactly when the labels matter. It is elided to what
-        // the circle can actually hold, so a long name on a small session is
-        // shortened rather than drawn out over the paper on both sides.
-        // Scale the type to the circle instead of eliding a short name into
-        // ellipses: "m..." on every blob is strictly worse than a small
-        // "mushroom", because the name is the only thing distinguishing one
-        // session from the next. Clamped so it never becomes unreadable, and
-        // a blob too small even for that carries no label at all rather than
-        // a row of dots.
-        let name = crate::overview::short_id(&blob.session_id);
+        // The label goes inside the card, centred. It is scaled to what the
+        // card can actually hold instead of elided into ellipses: "m..." on
+        // every card is strictly worse than a small "mushroom", because the
+        // name is the only thing distinguishing one session from the next.
+        // Clamped so it never becomes unreadable, and a card too narrow even
+        // for that carries no label at all rather than a row of dots.
+        let name = crate::overview::short_id(&card.session_id);
         // Monospace at this size runs about 0.62em per character.
-        let fitted = (radius * 1.7 / (name.chars().count().max(1) as f64 * 0.62)) as f32;
-        let size = fitted.clamp(BLOB_LABEL_MIN, BLOB_LABEL_SIZE);
-        let label_width = radius * 1.9;
-        if fitted >= BLOB_LABEL_MIN {
+        let fitted =
+            (rect.width() * 0.85 / (name.chars().count().max(1) as f64 * 0.62)) as f32;
+        let size = fitted.clamp(CARD_LABEL_MIN, CARD_LABEL_SIZE);
+        if fitted >= CARD_LABEL_MIN {
             text.draw_paragraph_scaled(
                 scene,
                 &name,
-                (
-                    center.0 - label_width / 2.0,
-                    center.1 - f64::from(size) * 0.6,
-                ),
-                label_width as f32,
+                (rect.x0, (rect.y0 + rect.y1) / 2.0 - f64::from(size) * 0.6),
+                rect.width() as f32,
                 ParagraphStyle {
                     font_size: size,
-                    color: if blob.focused {
+                    color: if card.focused {
                         theme.text
                     } else {
                         theme.muted
@@ -337,12 +327,12 @@ pub(crate) fn draw_overview(
     // field is settled: during the zoom it would be text arriving and leaving
     // in 140ms. Pinned to the bottom margin rather than to the composer's
     // caption row, which sits in the middle of the field and would put the
-    // hint straight through a blob.
+    // hint straight through a card.
     if phase > 0.85 {
         let hint_top = frame.height - layout::FOOTNOTE_HEIGHT * 1.5;
         text.draw_paragraph_scaled(
             scene,
-            "arrows or hjkl to move   release alt to switch   esc to stay",
+            "arrows or hjkl to move   release super to switch   esc to stay",
             (frame.left, hint_top),
             frame.column() as f32,
             ParagraphStyle {

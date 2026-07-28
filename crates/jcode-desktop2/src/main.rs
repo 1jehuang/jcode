@@ -77,7 +77,7 @@ struct App {
     /// opens on the keydown; this is what lets a tap shorter than
     /// [`SUPER_TAP`] take it straight back off screen.
     super_held_since: Option<std::time::Instant>,
-    /// Whether holding Super opens the blob-field overview. On by default:
+    /// Whether holding Super opens the card-strip overview. On by default:
     /// the compositor muscle memory this app lives inside (niri, GNOME) puts
     /// "zoom out to everything" on the Super key. The flag stays so the
     /// gesture can be benched again as a flip rather than a revert.
@@ -228,12 +228,12 @@ pub struct Model {
     pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
-    /// The session overview: the blob field held Super zooms out into. Part of
+    /// The session overview: the card strip held Super zooms out into. Part of
     /// the model so a frame stays a pure function of it and every phase of
     /// the zoom is capturable.
     pub overview: overview::Overview,
     /// Fetched tails of the other sessions, so the field can show *which*
-    /// conversation each blob is rather than only its name.
+    /// conversation each card is rather than only its name.
     pub peeks: overview::Peeks,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
@@ -512,11 +512,11 @@ impl App {
     fn on_pointer_pressed(&mut self) {
         let (x, y) = self.pointer;
         // The field is modal: a click in it picks a session, and a click on
-        // the paper between blobs dismisses, like any overview.
+        // the paper between cards dismisses, like any overview.
         if self.model.overview.is_open() {
             match self.overview_field().hit(x, y) {
-                Some(blob) => {
-                    let id = blob.session_id.clone();
+                Some(card) => {
+                    let id = card.session_id.clone();
                     self.model.overview.set_focus(&id);
                     self.close_overview(true);
                 }
@@ -669,12 +669,12 @@ impl App {
     fn on_pointer_moved(&mut self) {
         // Hovering the field moves the highlight, so the mouse and the arrows
         // drive one selection rather than two competing ones. A hover off the
-        // blobs leaves the highlight where it was: sliding across the gap
+        // cards leaves the highlight where it was: sliding across the gap
         // between two sessions must not deselect the one you were on.
         if self.model.overview.is_open() {
             let (x, y) = self.pointer;
-            if let Some(blob) = self.overview_field().hit(x, y) {
-                let id = blob.session_id.clone();
+            if let Some(card) = self.overview_field().hit(x, y) {
+                let id = card.session_id.clone();
                 if self.model.overview.focus() != Some(id.as_str()) {
                     self.model.overview.set_focus(&id);
                     self.request_peek();
