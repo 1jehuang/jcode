@@ -41,6 +41,7 @@ async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
     tokio::time::timeout(Duration::from_millis(100), async {
         assert!(control.queue_soft_interrupt(
             "please stop".to_string(),
+            Vec::new(),
             true,
             SoftInterruptSource::User,
         ));

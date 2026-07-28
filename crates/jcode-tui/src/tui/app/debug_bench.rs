@@ -153,6 +153,7 @@ impl App {
         self.clear_streaming_render_state();
         self.queued_messages.clear();
         self.interleave_message = None;
+        self.interleave_images.clear();
         self.pending_soft_interrupts.clear();
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
@@ -393,6 +394,7 @@ impl App {
         self.clear_streaming_render_state();
         self.queued_messages.clear();
         self.interleave_message = None;
+        self.interleave_images.clear();
         self.pending_soft_interrupts.clear();
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
@@ -810,6 +812,7 @@ impl App {
         self.clear_streaming_render_state();
         self.queued_messages.clear();
         self.interleave_message = None;
+        self.interleave_images.clear();
         self.pending_soft_interrupts.clear();
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;

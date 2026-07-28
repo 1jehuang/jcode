@@ -60,6 +60,8 @@ pub enum Request {
     SoftInterrupt {
         id: u64,
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
         /// If true, can skip remaining tools at injection point C
         #[serde(default)]
         urgent: bool,

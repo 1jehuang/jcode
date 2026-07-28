@@ -21,6 +21,7 @@ pub(super) fn interrupt_request_log_fields(
             id,
             content,
             urgent,
+            ..
         } => Some(format!(
             "{} urgent={} content_bytes={} content_chars={}",
             base("soft_interrupt", *id),

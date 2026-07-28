@@ -1366,8 +1366,12 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         if let Some(interleave_msg) = app.interleave_message.take()
             && !interleave_msg.trim().is_empty()
         {
+            let interleave_images = std::mem::take(&mut app.interleave_images);
             let msg_clone = interleave_msg.clone();
-            match remote.soft_interrupt(interleave_msg, false).await {
+            match remote
+                .soft_interrupt(interleave_msg, interleave_images, false)
+                .await
+            {
                 Err(e) => {
                     app.push_display_message(DisplayMessage::error(format!(
                         "Failed to queue soft interrupt: {}",
@@ -1383,6 +1387,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     if let Some(interleave_msg) = app.interleave_message.take() {
+        let interleave_images = std::mem::take(&mut app.interleave_images);
         if !interleave_msg.trim().is_empty() {
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
@@ -1392,8 +1397,17 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 title: None,
                 tool_data: None,
             });
-            if let Err(e) =
-                begin_remote_send(app, remote, interleave_msg, vec![], false, None, false, 0).await
+            if let Err(e) = begin_remote_send(
+                app,
+                remote,
+                interleave_msg,
+                interleave_images,
+                false,
+                None,
+                false,
+                0,
+            )
+            .await
             {
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to send message: {}",

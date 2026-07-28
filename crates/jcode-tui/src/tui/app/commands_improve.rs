@@ -445,6 +445,7 @@ pub(super) fn interrupt_and_queue_synthetic_message(
 ) {
     app.cancel_requested = true;
     app.interleave_message = None;
+    app.interleave_images.clear();
     app.pending_soft_interrupts.clear();
     app.pending_soft_interrupt_requests.clear();
     app.set_status_notice(status_notice);

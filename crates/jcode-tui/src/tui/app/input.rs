@@ -1340,6 +1340,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     if let Some(msg) = app.interleave_message.take()
         && !msg.is_empty()
     {
+        app.pending_images.append(&mut app.interleave_images);
         parts.push(msg);
         had_pending = true;
     }
@@ -1742,7 +1743,7 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
         SendAction::Queue => queue_message(app),
         SendAction::Interleave => {
             let prepared = take_prepared_input(app);
-            stage_local_interleave(app, prepared.expanded);
+            stage_local_interleave(app, prepared.expanded, prepared.images);
         }
     }
 }
@@ -2423,6 +2424,7 @@ pub(super) fn handle_global_control_shortcuts(
             if app.is_processing {
                 app.cancel_requested = true;
                 app.interleave_message = None;
+                app.interleave_images.clear();
                 app.pending_soft_interrupts.clear();
                 app.pending_soft_interrupt_requests.clear();
                 if app.cancel_overnight_for_interrupt() {
@@ -2462,7 +2464,7 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
             SendAction::Queue => queue_message(app),
             SendAction::Interleave => {
                 let prepared = take_prepared_input(app);
-                stage_local_interleave(app, prepared.expanded);
+                stage_local_interleave(app, prepared.expanded, prepared.images);
             }
         }
     }
@@ -2552,6 +2554,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                         .any(|message| super::commands::is_poke_message(message));
                 app.cancel_requested = true;
                 app.interleave_message = None;
+                app.interleave_images.clear();
                 app.pending_soft_interrupts.clear();
                 app.pending_soft_interrupt_requests.clear();
                 let cancelled_overnight = app.cancel_overnight_for_interrupt();
@@ -2591,8 +2594,13 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     }
 }
 
-pub(super) fn stage_local_interleave(app: &mut App, content: String) {
+pub(super) fn stage_local_interleave(
+    app: &mut App,
+    content: String,
+    images: Vec<(String, String)>,
+) {
     app.interleave_message = Some(content);
+    app.interleave_images = images;
     app.set_status_notice("⏭ Sending now (interleave)");
 }
 
@@ -3050,9 +3058,10 @@ impl App {
     pub(super) async fn send_interleave_now(
         &mut self,
         content: String,
+        images: Vec<(String, String)>,
         remote: &mut crate::tui::backend::RemoteConnection,
     ) {
-        remote::send_interleave_now(self, content, remote).await;
+        remote::send_interleave_now(self, content, images, remote).await;
     }
 
     /// Retrieve all pending unsent messages into the input for editing.

@@ -1658,6 +1658,23 @@ fn test_send_action_modes() {
 }
 
 #[test]
+fn test_interleave_submission_preserves_pending_images() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.queue_mode = false;
+    app.input = "[image 1] describe this".to_string();
+    app.cursor_pos = app.input.len();
+    let images = vec![("image/png".to_string(), "ZmFrZQ==".to_string())];
+    app.pending_images = images.clone();
+
+    assert!(input::handle_enter(&mut app));
+
+    assert_eq!(app.interleave_message.as_deref(), Some("[image 1] describe this"));
+    assert_eq!(app.interleave_images, images);
+    assert!(app.pending_images.is_empty());
+}
+
+#[test]
 fn test_send_action_submits_bang_commands_while_processing() {
     let mut app = create_test_app();
     app.is_processing = true;

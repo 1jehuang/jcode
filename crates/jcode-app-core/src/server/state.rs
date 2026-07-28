@@ -481,6 +481,7 @@ pub(super) fn session_event_fanout_sender_with_fallback(
 pub(super) fn enqueue_soft_interrupt(
     queue: &SoftInterruptQueue,
     content: String,
+    images: Vec<(String, String)>,
     urgent: bool,
     source: SoftInterruptSource,
 ) -> bool {
@@ -490,6 +491,7 @@ pub(super) fn enqueue_soft_interrupt(
         let pending_before = pending.len();
         pending.push(SoftInterruptMessage {
             content,
+            images,
             urgent,
             source,
         });
@@ -563,10 +565,11 @@ impl SessionControlHandle {
     pub fn queue_soft_interrupt(
         &self,
         content: String,
+        images: Vec<(String, String)>,
         urgent: bool,
         source: SoftInterruptSource,
     ) -> bool {
-        enqueue_soft_interrupt(&self.soft_interrupt_queue, content, urgent, source)
+        enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source)
     }
 
     pub fn clear_soft_interrupts(&self) {
@@ -712,7 +715,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
     sessions: &super::SessionAgents,
 ) -> bool {
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
-        return enqueue_soft_interrupt(&queue, content, urgent, source);
+        return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
     }
 
     let queue = {
@@ -727,7 +730,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
 
     if let Some(queue) = queue {
         register_session_interrupt_queue(queues, session_id, queue.clone()).await;
-        enqueue_soft_interrupt(&queue, content, urgent, source)
+        enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source)
     } else {
         let session_exists = {
             let guard = sessions.read().await;
@@ -742,6 +745,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
             session_id,
             SoftInterruptMessage {
                 content,
+                images: Vec::new(),
                 urgent,
                 source,
             },

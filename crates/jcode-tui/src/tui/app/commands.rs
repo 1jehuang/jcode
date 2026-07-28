@@ -522,6 +522,7 @@ pub(super) fn handle_transfer_command_local(app: &mut App) {
     app.pending_transfer_request = true;
     if app.is_processing {
         app.interleave_message = Some(transfer_pause_message());
+        app.interleave_images.clear();
         app.push_display_message(DisplayMessage::system(
             "Queued /transfer. The current session will be asked to pause, then the compacted handoff will open in a new window."
                 .to_string(),
@@ -830,6 +831,7 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
     if app.is_processing {
         app.cancel_requested = true;
         app.interleave_message = None;
+        app.interleave_images.clear();
         app.pending_soft_interrupts.clear();
         app.pending_soft_interrupt_requests.clear();
         if app.cancel_overnight_for_interrupt() {

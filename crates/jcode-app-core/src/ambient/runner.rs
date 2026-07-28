@@ -106,6 +106,7 @@ impl AmbientRunnerHandle {
         {
             q.push(SoftInterruptMessage {
                 content: format!("[{} message from user]\n{}", source, text),
+                images: Vec::new(),
                 urgent: false,
                 source: SoftInterruptSource::User,
             });

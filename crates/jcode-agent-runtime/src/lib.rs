@@ -4,6 +4,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct SoftInterruptMessage {
     pub content: String,
+    pub images: Vec<(String, String)>,
     /// If true, can skip remaining tools when injected at point C.
     pub urgent: bool,
     pub source: SoftInterruptSource,
