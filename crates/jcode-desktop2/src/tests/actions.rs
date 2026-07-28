@@ -686,8 +686,11 @@ fn a_long_line_wraps_into_multiple_rows_and_grows_the_well() {
     let lines = composer_layout(&mut app, &source, single).line_count();
     assert!(lines > 1, "a long line did not wrap");
     let frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+    // On a hero page the well is seated under the stack and grows downward,
+    // so the invariant is the well's height, not which edge moved.
     assert!(
-        frame.composer_top < single.composer_top,
+        frame.composer_bottom - frame.composer_top
+            > single.composer_bottom - single.composer_top,
         "the well did not grow for wrapped rows"
     );
     // Wrapping is a view concern: it must not touch the buffer.
@@ -727,8 +730,11 @@ fn the_composer_frame_follows_the_input_line_count() {
     app.apply(Action::InsertNewline, None);
     app.apply(Action::Insert, Some("two"));
     let double = App::frame_for_model((1400, 900), 1.0, &app.model);
+    // Height rather than an edge: on a hero page the well is seated under
+    // the stack and grows downward instead of about the centre line.
     assert!(
-        double.composer_top < single.composer_top,
+        double.composer_bottom - double.composer_top
+            > single.composer_bottom - single.composer_top,
         "the composer did not grow when a line was added"
     );
 }
