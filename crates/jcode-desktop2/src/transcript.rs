@@ -39,9 +39,9 @@ pub enum Role {
     /// muted ink behind a rule, never mistaken for the reply itself.
     Reasoning,
     /// A tool call the agent made, shown as its `intent`: one line of "what
-    /// is being done" per call. It stays in the transcript after the turn,
-    /// so the conversation records not just what was said but what was done,
-    /// and a running turn shows progress where the user is already looking.
+    /// is being done". At most one exists, it is always the transcript's
+    /// last message, and it clears when the turn ends: a live status line
+    /// pinned to the bottom of the conversation, not a log of past calls.
     Tool,
 }
 
@@ -118,10 +118,14 @@ impl Transcript {
     /// Append streamed assistant text, continuing the current reply when there
     /// is one. Without this a reply would be split into one block per network
     /// chunk, and markdown spanning a chunk boundary would never parse.
+    ///
+    /// Text lands *above* a live tool card: the card is pinned to the tail,
+    /// so the reply grows over it rather than pushing it up mid-transcript.
     pub fn append_assistant(&mut self, text: &str) {
-        match self.messages.last_mut() {
+        let at = self.text_tail();
+        match at.checked_sub(1).map(|index| &mut self.messages[index]) {
             Some(last) if last.role == Role::Assistant => last.source.push_str(text),
-            _ => self.messages.push(Message::assistant(text)),
+            _ => self.messages.insert(at, Message::assistant(text)),
         }
     }
 
@@ -130,9 +134,20 @@ impl Transcript {
     /// the same way; a new assistant message ends the thought, which is what
     /// makes "thought, then answered" read in order.
     pub fn append_reasoning(&mut self, text: &str) {
-        match self.messages.last_mut() {
+        let at = self.text_tail();
+        match at.checked_sub(1).map(|index| &mut self.messages[index]) {
             Some(last) if last.role == Role::Reasoning => last.source.push_str(text),
-            _ => self.messages.push(Message::reasoning(text)),
+            _ => self.messages.insert(at, Message::reasoning(text)),
+        }
+    }
+
+    /// Where streamed text goes: the end of the transcript, except that a live
+    /// tool card at the tail is skipped over. One definition, so both append
+    /// paths keep the card pinned and neither can strand it mid-transcript.
+    fn text_tail(&self) -> usize {
+        match self.messages.last() {
+            Some(last) if last.role == Role::Tool => self.messages.len() - 1,
+            _ => self.messages.len(),
         }
     }
 
@@ -144,13 +159,17 @@ impl Transcript {
     /// call takes the card over entirely, so a turn with fifty calls reads as
     /// one live line of "what is being done" instead of fifty rows of
     /// history. The reply itself is what records the turn's work.
+    ///
+    /// The card is always the last message: streamed text is inserted above
+    /// it (see [`Self::text_tail`]), so it never drifts up mid-transcript and
+    /// never has to jump back down when the next call opens.
     pub fn set_live_tool(&mut self, call_id: &str, label: &str) {
         let label = label.trim();
         if label.is_empty() {
             return;
         }
-        // Refine the card in place when it is already at the tail, whichever
-        // call it belongs to now: the card is a slot, not a log entry.
+        // Refine the card in place, whichever call it belongs to now: the
+        // card is a slot, not a log entry.
         if let Some(last) = self.messages.last_mut()
             && last.role == Role::Tool
         {
@@ -158,8 +177,8 @@ impl Transcript {
             last.source = label.to_string();
             return;
         }
-        // Text arrived since the last call, so the old card is mid-transcript:
-        // drop it and re-open the card at the tail, where the user is reading.
+        // No card yet: open one at the tail. The clear is a guard against a
+        // stray card left by a replayed history, which must not double up.
         self.clear_live_tool();
         self.messages.push(Message::tool(call_id, label));
     }
@@ -182,8 +201,17 @@ impl Transcript {
     /// Characters in the trailing assistant reply, which is the message the
     /// streaming reveal is animating. Zero when the last turn is the user's,
     /// because nothing is arriving.
+    ///
+    /// A live tool card at the tail is skipped: the card is a status readout
+    /// that appears whole, not prose to sweep in, so the reveal animates the
+    /// text arriving above it.
     pub fn streaming_len(&self) -> usize {
-        match self.messages.last() {
+        let mut tail = self.messages.iter().rev();
+        let mut last = tail.next();
+        if last.is_some_and(|message| message.role == Role::Tool) {
+            last = tail.next();
+        }
+        match last {
             Some(last) if last.role != Role::User => last.source.chars().count(),
             _ => 0,
         }
@@ -677,13 +705,19 @@ mod tests {
     }
 
     /// The card is a slot, not a log: the next call takes it over, and text
-    /// arriving between calls moves the card back to the tail rather than
-    /// leaving a stale line mid-transcript. At most one tool message exists.
+    /// arriving between calls is inserted *above* it, so the card is always
+    /// the transcript's last message. At most one tool message exists.
     #[test]
     fn the_live_tool_card_is_singular() {
         let mut transcript = Transcript::default();
         transcript.set_live_tool("call_1", "read the config");
         transcript.append_assistant("Found it. ");
+        let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![Role::Assistant, Role::Tool],
+            "streamed text did not land above the live card"
+        );
         transcript.set_live_tool("call_2", "run the tests");
         let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
         assert_eq!(roles, vec![Role::Assistant, Role::Tool]);
@@ -697,6 +731,32 @@ mod tests {
             .count();
         assert_eq!(tools, 1, "a second call added a card instead of taking it");
         assert_eq!(transcript.messages()[1].source, "check the diff");
+    }
+
+    /// The card is pinned to the tail: however the turn interleaves text,
+    /// reasoning, and calls, the live tool card is the last message, so it
+    /// always renders at the bottom of the conversation.
+    #[test]
+    fn the_live_tool_card_stays_at_the_bottom() {
+        let mut transcript = Transcript::default();
+        transcript.push(Message::user("go"));
+        transcript.set_live_tool("call_1", "read the config");
+        transcript.append_reasoning("thinking about it ");
+        transcript.append_assistant("Found it. ");
+        transcript.append_assistant("Fixing now. ");
+        assert_eq!(
+            transcript.messages().last().map(|m| m.role),
+            Some(Role::Tool),
+            "streamed text pushed the live card off the tail"
+        );
+        // And the text above it coalesced normally rather than fragmenting
+        // around the card.
+        let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![Role::User, Role::Reasoning, Role::Assistant, Role::Tool]
+        );
+        assert_eq!(transcript.messages()[2].source, "Found it. Fixing now. ");
     }
 
     /// The turn ending removes the card: a card left behind would claim work
@@ -727,14 +787,22 @@ mod tests {
         assert_eq!(transcript.messages()[0].source, "list the crate");
     }
 
-    /// The card is streamed like reasoning: it counts toward the reveal, so
-    /// it sweeps in rather than popping.
+    /// The card is a status readout pinned under the stream, not part of it:
+    /// it must not count toward the reveal, or every call would rewind the
+    /// cursor to sweep a one-line label while the reply above it stalls.
     #[test]
-    fn a_trailing_tool_line_is_part_of_the_stream() {
+    fn the_tool_card_does_not_count_toward_the_reveal() {
         let mut transcript = Transcript::default();
         transcript.push(Message::user("go"));
+        transcript.append_assistant("The fix is in the layout module.");
+        let reply_len = transcript.streaming_len();
+        assert!(reply_len > 0);
         transcript.set_live_tool("call_1", "running tests");
-        assert_eq!(transcript.streaming_len(), "running tests".chars().count());
+        assert_eq!(
+            transcript.streaming_len(),
+            reply_len,
+            "the live card changed the streaming length"
+        );
     }
 
     /// Reasoning coalesces like a reply, and the answer that follows it starts
