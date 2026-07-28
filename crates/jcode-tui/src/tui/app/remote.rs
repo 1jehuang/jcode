@@ -332,6 +332,30 @@ async fn forward_pending_reasoning_effort(app: &mut App, remote: &mut RemoteConn
 
 pub(super) async fn handle_terminal_event(
     app: &mut App,
+    terminal: &mut DefaultTerminal,
+    remote: &mut RemoteConnection,
+    event: Option<std::result::Result<Event, std::io::Error>>,
+) -> Result<bool> {
+    let mut needs_redraw = apply_terminal_event(app, terminal, remote, event).await?;
+    // Coalesce bursts of already-buffered input (fast typing, key repeat,
+    // scroll wheels) into a single frame instead of paying one full render per
+    // event. Without this, typing faster than the frame rate queues events and
+    // each one costs handle + full draw serially, which reads as input-line
+    // lag. Mirrors the identical drain in `local::handle_terminal_event`.
+    const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
+    for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
+        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+            break;
+        }
+        if let Ok(event) = crossterm::event::read() {
+            needs_redraw |= apply_terminal_event(app, terminal, remote, Some(Ok(event))).await?;
+        }
+    }
+    Ok(needs_redraw)
+}
+
+async fn apply_terminal_event(
+    app: &mut App,
     _terminal: &mut DefaultTerminal,
     remote: &mut RemoteConnection,
     event: Option<std::result::Result<Event, std::io::Error>>,
