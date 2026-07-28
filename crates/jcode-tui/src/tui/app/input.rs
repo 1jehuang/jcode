@@ -602,6 +602,7 @@ where
     true
 }
 
+pub(in crate::tui::app) mod newline;
 mod paste_guard;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
@@ -1384,10 +1385,6 @@ pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     } else {
         SendAction::Interleave
     }
-}
-
-pub(super) fn handle_shift_enter(app: &mut App) {
-    insert_input_text(app, "\n");
 }
 
 impl App {
@@ -2798,9 +2795,9 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Enter and Alt/Option+Enter insert a newline in the input box.
-        if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-            handle_shift_enter(self);
+        // Shift+Enter, Alt/Option+Enter, and the trailing-backslash fallback all
+        // insert a newline in the input box.
+        if newline::enter_inserts_newline(self, code, modifiers) {
             return Ok(());
         }
 

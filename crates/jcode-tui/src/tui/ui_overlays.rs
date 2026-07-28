@@ -558,6 +558,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Insert newline in input",
     ));
     lines.push(key_entry(
+        "Trailing \\ then Enter",
+        "Insert newline (works on terminals that cannot report Shift+Enter)",
+    ));
+    lines.push(key_entry(
         "Ctrl+Enter / Cmd+Enter",
         "Use opposite send mode while processing",
     ));

@@ -1894,8 +1894,7 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-        input::insert_input_text(app, "\n");
+    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
     }
 
