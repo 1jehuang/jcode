@@ -21,7 +21,7 @@ type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
-/// assessments (hill-climbability etc.). Module-level so the app can force a
+/// assessments (closed feedback loop etc.). Module-level so the app can force a
 /// refresh the moment it persists a todo write locally, instead of showing
 /// the previous list until the TTL lapses.
 type TodosCacheEntry = (
@@ -1023,7 +1023,7 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 
 /// Fetch a session's todos plus its goal-level assessments through the same
 /// stale-while-revalidate cache, so the info widget can render goal metadata
-/// (hill-climbability and objectives) without extra disk reads per frame.
+/// (closed feedback loop and objectives) without extra disk reads per frame.
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {

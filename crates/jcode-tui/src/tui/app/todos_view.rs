@@ -446,9 +446,9 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         return String::new();
     };
     let mut line = String::new();
-    if let Some(score) = goal.hill_climbability {
+    if let Some(score) = goal.closed_feedback_loop {
         line.push('\n');
-        line.push_str(&format!("- Hill climbability: **{}%**\n", score));
+        line.push_str(&format!("- Closed feedback loop: **{}%**\n", score));
     }
     if let Some(feedback_loop) = goal
         .feedback_loop
@@ -648,7 +648,7 @@ fn hash_todos_payload(
     plan.understands_user_intent.hash(&mut hasher);
     for goal in goals {
         goal.group.hash(&mut hasher);
-        goal.hill_climbability.hash(&mut hasher);
+        goal.closed_feedback_loop.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
         goal.end_to_end_ownership.hash(&mut hasher);
     }
@@ -779,7 +779,7 @@ mod tests {
             &plan(),
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
-                hill_climbability: Some(90),
+                closed_feedback_loop: Some(90),
                 feedback_loop: Some(
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
@@ -802,7 +802,7 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Hill climbability: **90%**"),
+            markdown.contains("- Closed feedback loop: **90%**"),
             "{markdown}"
         );
         assert!(
@@ -839,7 +839,7 @@ mod tests {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         let goals = vec![crate::todo::TodoGoal {
-            hill_climbability: Some(30),
+            closed_feedback_loop: Some(30),
             ..Default::default()
         }];
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);

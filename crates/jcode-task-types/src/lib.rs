@@ -279,24 +279,33 @@ pub struct TodoPlanChange {
 /// A goal-level assessment attached to a todo group (or, for an ungrouped
 /// flat list, the whole list as one implicit goal with `group: None`).
 ///
-/// Hill-climbability is a property of an objective, not of individual steps:
-/// "optimize grep latency" is hill-climbable because progress has a metric,
-/// while "design an onboarding screen" is not because success is a taste
-/// judgment. Items like "read the auth code" have no meaningful score of
+/// A closed feedback loop is a property of an objective, not of individual
+/// steps: "optimize grep latency" can close its loop because progress has a
+/// metric, while "design an onboarding screen" cannot because success is a
+/// taste judgment. Items like "read the auth code" have no meaningful score of
 /// their own, so the score lives here instead of on `TodoItem`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoGoal {
     /// Group label this goal describes. `None` covers the ungrouped list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// How hill-climbable this goal is, from 0-100: can progress be measured
-    /// against a quantifiable, verifiable objective and iterated on?
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hill_climbability: Option<u8>,
-    /// Every distinct `hill_climbability` value this goal has carried, oldest
+    /// How closed this goal's feedback loop is, from 0-100: does every
+    /// requirement have an observation that reports back whether the work
+    /// satisfies or violates it, so progress can be measured and iterated on?
+    #[serde(
+        default,
+        alias = "hill_climbability",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub closed_feedback_loop: Option<u8>,
+    /// Every distinct `closed_feedback_loop` value this goal has carried, oldest
     /// first. Tool-maintained; model-supplied values are ignored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hill_climbability_history: Vec<u8>,
+    #[serde(
+        default,
+        alias = "hill_climbability_history",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub closed_feedback_loop_history: Vec<u8>,
     /// The concrete feedback loop used to judge whether each iteration improves
     /// the outcome (e.g. a benchmark command and the metric it reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,7 +326,8 @@ pub struct TodoGoal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoGoalField {
-    HillClimbability,
+    #[serde(alias = "hill_climbability")]
+    ClosedFeedbackLoop,
     FeedbackLoop,
     EndToEndOwnership,
 }

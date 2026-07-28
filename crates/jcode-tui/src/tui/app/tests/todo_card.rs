@@ -139,7 +139,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
     }];
     let goal = |score| crate::todo::TodoGoal {
         group: None,
-        hill_climbability: Some(score),
+        closed_feedback_loop: Some(score),
         feedback_loop: Some("inspect the frame".to_string()),
         end_to_end_ownership: Some(90),
         ..Default::default()
@@ -160,7 +160,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         .iter()
         .find(|message| message.role == "todos")
         .expect("todo card pushed");
-    assert!(card.content.contains("\"hill_climbability\":70"));
+    assert!(card.content.contains("\"closed_feedback_loop\":70"));
     assert!(card.content.contains("\"understands_user_intent\":95"));
 
     crate::todo::save_goals(&session_id, &[goal(95)]).unwrap();
@@ -170,7 +170,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         .iter()
         .find(|message| message.role == "todos")
         .expect("todo card still present");
-    assert!(card.content.contains("\"hill_climbability\":95"));
+    assert!(card.content.contains("\"closed_feedback_loop\":95"));
 
     let _ = crate::todo::save_todos(&session_id, &[]);
     let _ = crate::todo::save_goals(&session_id, &[]);
