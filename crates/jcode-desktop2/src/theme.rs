@@ -73,17 +73,17 @@ impl Theme {
         }
     }
 
-    /// Print language inverted: paper ink on near-black, same densities.
+    /// Print language inverted: paper ink on pure black, same densities.
     pub fn print_dark() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            background: Color::from_rgb8(0x0e, 0x0e, 0x0e),
+            background: Color::from_rgb8(0x00, 0x00, 0x00),
             text: Color::from_rgb8(0xee, 0xee, 0xee),
             muted: Color::from_rgb8(0x99, 0x99, 0x99),
             faint: Color::from_rgb8(0x66, 0x66, 0x66),
             rule: Color::from_rgb8(0x33, 0x33, 0x33),
-            wash: Color::from_rgb8(0x1a, 0x1a, 0x1a),
-            field: Color::from_rgb8(0x16, 0x16, 0x16),
+            wash: Color::from_rgb8(0x14, 0x14, 0x14),
+            field: Color::from_rgb8(0x10, 0x10, 0x10),
             field_border: Color::from_rgb8(0x3a, 0x3a, 0x3a),
             field_border_focus: Color::from_rgb8(0x88, 0x88, 0x88),
             error: Color::from_rgb8(0xee, 0xee, 0xee),
