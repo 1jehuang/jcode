@@ -109,7 +109,7 @@ impl Rendered {
     /// drawn. Sampled on a column just inside the right edge of the measure
     /// column, where only the well can ink, so prompt glyphs cannot be
     /// mistaken for the well itself.
-    fn wash_band(&self) -> Option<(f64, f64)> {
+    pub(super) fn wash_band(&self) -> Option<(f64, f64)> {
         // The composer is an outlined field, so it is found by its horizontal
         // border rules rather than by a fill: scan a column just inside the
         // right edge (where only the field's own borders can ink) and take the
@@ -129,7 +129,7 @@ impl Rendered {
     }
 }
 
-fn nodes() -> Vec<(&'static str, Model)> {
+pub(super) fn nodes() -> Vec<(&'static str, Model)> {
     states::names()
         .into_iter()
         .map(|name| (name, states::by_name(name).expect("listed node")))
@@ -199,99 +199,6 @@ fn the_selection_band_lines_up_with_the_selected_glyphs() {
                 "{name}: band ended at {drawn_end}px, expected {expected_end}px"
             );
         }
-    }
-}
-
-/// The input box must be *drawn* on the middle of the window, not merely laid
-/// out there: this catches a renderer that ignores the centred geometry.
-#[test]
-#[ignore = "requires a GPU"]
-fn the_composer_well_is_drawn_on_the_middle_of_the_window() {
-    for (name, model) in nodes() {
-        let Some(r) = Rendered::new(&model) else {
-            return;
-        };
-        let f = r.frame;
-        let Some((top, bottom)) = r.wash_band() else {
-            panic!("{name}: no composer well was drawn");
-        };
-        assert!(
-            (top - f.composer_top).abs() < 2.0 && (bottom - f.composer_bottom).abs() < 2.0,
-            "{name}: the drawn well {top:.1}..{bottom:.1} left its geometry {:.1}..{:.1}",
-            f.composer_top,
-            f.composer_bottom
-        );
-        let center = (top + bottom) / 2.0;
-        // An empty session seats the well under the hero stack instead of on
-        // the centre line (see `layout::resolve`), and a transcript pushes it
-        // down the page; both only ever move the well *down*. What this test
-        // still owes is that nothing moves it up or detaches it from its own
-        // geometry, which the assertion above already pins.
-        let below_middle = center >= f.height / 2.0 - 2.0;
-        assert!(
-            below_middle,
-            "{name}: the well centre {center:.1} rose above the page middle {:.1}",
-            f.height / 2.0
-        );
-    }
-}
-
-#[test]
-#[ignore = "requires a GPU"]
-fn nothing_draws_in_the_gap_above_the_composer() {
-    for (name, model) in nodes() {
-        // The overview is a full-page layer over everything by design, so
-        // the page-band invariants below it do not apply while it is up.
-        if model.overview.is_visible() {
-            continue;
-        }
-        let Some(r) = Rendered::new(&model) else {
-            eprintln!("skipping {name}: no GPU");
-            return;
-        };
-        let f = r.frame;
-        // The band between the transcript and the well must stay paper:
-        // this is the overlap bug that made long replies collide.
-        let darkest = r.darkest_in(f.left, f.body_bottom + 2.0, f.right, f.composer_top - 2.0);
-        assert!(
-            darkest > 0.9,
-            "{name}: ink ({darkest:.3} luma) in the composer gap"
-        );
-    }
-}
-
-/// The top of the page must be bare paper. The app previously carried a
-/// wordmark, a status caption, a build-identity row, and a rule up there,
-/// which is the clutter this test exists to keep out: any of them reappearing
-/// inks the band above the transcript.
-///
-/// The session strip is the one sanctioned exception, and only when there is
-/// more than one session to move between, so it is excluded by *its own
-/// reserved band* rather than by relaxing the threshold: anything drawn above
-/// the transcript outside that band still fails.
-#[test]
-#[ignore = "requires a GPU"]
-fn the_top_of_the_page_is_clear() {
-    for (name, model) in nodes() {
-        // The overview washes the whole page and draws blobs over it: it is
-        // the one sanctioned full-page layer, so this band test skips it.
-        if model.overview.is_visible() {
-            continue;
-        }
-        let Some(r) = Rendered::new(&model) else {
-            eprintln!("skipping {name}: no GPU");
-            return;
-        };
-        let f = r.frame;
-        let top = match f.strip() {
-            Some((_, strip_bottom)) => strip_bottom + 1.0,
-            None => 0.0,
-        };
-        let darkest = r.darkest_in(0.0, top, f.width - 1.0, f.body_top - 2.0);
-        assert!(
-            darkest > 0.9,
-            "{name}: ink ({darkest:.3} luma) above the transcript"
-        );
     }
 }
 
@@ -602,32 +509,13 @@ fn state_nodes_render_deterministically() {
         let Some(second) = Rendered::new(&model) else {
             return;
         };
-        let mut wobble = 0usize;
-        for (a, b) in first
-            .pixels
-            .chunks_exact(4)
-            .zip(second.pixels.chunks_exact(4))
-        {
-            if a == b {
-                continue;
-            }
-            let step = a
-                .iter()
-                .zip(b)
-                .map(|(x, y)| x.abs_diff(*y))
-                .max()
-                .unwrap_or(0);
-            assert!(
-                step <= 1,
-                "{name} rendered differently 700ms later (time-dependent frame: \
-                 a pixel moved {step} steps)"
-            );
-            wobble += 1;
-        }
+        let pairs = first.pixels.iter().zip(&second.pixels);
+        let wobble = pairs.clone().filter(|(a, b)| a != b).count();
+        let worst = pairs.map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
         assert!(
-            wobble <= MAX_WOBBLE_PIXELS,
+            worst <= 1 && wobble <= MAX_WOBBLE_PIXELS,
             "{name} rendered differently 700ms later (time-dependent frame: \
-             {wobble} pixels changed)"
+             {wobble} bytes changed, worst step {worst})"
         );
     }
 }
@@ -733,55 +621,6 @@ fn the_caret_disappears_on_the_blink_off_phase() {
         darkest > 0.85,
         "something was drawn past the text on the blink off phase ({darkest:.3})"
     );
-}
-
-/// The caret must never escape its well, at any window size.
-#[test]
-#[ignore = "requires a GPU"]
-fn the_caret_stays_inside_the_composer_well() {
-    for (name, model) in nodes() {
-        // The overview is a full-page layer: its blobs legitimately cross
-        // every band, so the page invariants beneath it do not apply.
-        if model.overview.is_visible() {
-            continue;
-        }
-        let Some(r) = Rendered::new(&model) else {
-            return;
-        };
-        let f = r.frame;
-        // Bands immediately above and below the well must stay paper.
-        let above = r.darkest_in(f.left, f.composer_top - 6.0, f.right, f.composer_top - 3.0);
-        assert!(above > 0.9, "{name}: ink just above the composer well");
-        let below = r.darkest_in(
-            f.left,
-            f.composer_bottom + 1.0,
-            f.right,
-            f.footnote_top - 1.0,
-        );
-        assert!(below > 0.9, "{name}: ink between the well and the footnote");
-    }
-}
-
-#[test]
-#[ignore = "requires a GPU"]
-fn margins_stay_empty() {
-    for (name, model) in nodes() {
-        // The overview's blob field spreads across the whole window on
-        // purpose, margins included, so it is exempt from the column bound.
-        if model.overview.is_visible() {
-            continue;
-        }
-        let Some(r) = Rendered::new(&model) else {
-            return;
-        };
-        let f = r.frame;
-        // Nothing may be drawn outside the measure column: proves text is
-        // wrapped to the column and not clipped by the window edge.
-        let left_margin = r.darkest_in(0.0, 0.0, f.left - 3.0, f.height - 1.0);
-        assert!(left_margin > 0.9, "{name}: ink in the left margin");
-        let bottom = r.darkest_in(0.0, f.footnote_bottom + 2.0, f.width - 1.0, f.height - 1.0);
-        assert!(bottom > 0.9, "{name}: ink below the footnote row");
-    }
 }
 
 /// A model that is not attached must still say so somewhere, or a dead

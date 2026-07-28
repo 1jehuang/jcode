@@ -10,6 +10,7 @@
 mod actions;
 mod hero_visual;
 mod overview_gesture;
+mod page_bands;
 mod scheduling;
 mod selection_visual;
 mod strip_visual;
