@@ -109,6 +109,9 @@ impl App {
     }
 
     pub(super) fn note_client_interaction(&mut self) {
+        // Every key/mouse/paste event routes through here, which makes this the
+        // one place that reliably knows the user is actively driving the UI.
+        self.last_user_interaction = Some(std::time::Instant::now());
         // A terminal only delivers key/mouse/paste events to the focused window,
         // so receiving one is proof this window is focused *right now*. Adopt that
         // focus state directly instead of relying solely on FocusGained reports:
