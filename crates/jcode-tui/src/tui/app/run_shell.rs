@@ -537,14 +537,9 @@ impl App {
             } else {
                 // Wait for input or redraw tick
                 tokio::select! {
-                    _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
-                        if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
-                            needs_redraw = true;
-                        }
-                    }
-                    _ = redraw_interval.tick() => {
-                        needs_redraw |= local::handle_tick(&mut self);
-                    }
+                    // Declaration-order polling: user input outranks timers and
+                    // bus chatter (see the remote loop for the rationale).
+                    biased;
                     event = event_stream.next() => {
                         if event.is_some() {
                             needs_redraw |= local::handle_terminal_event(&mut self, &mut terminal, event)?;
@@ -561,6 +556,14 @@ impl App {
                         } else {
                             tokio::time::sleep(redraw_period).await;
                         }
+                    }
+                    _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
+                        if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
+                            needs_redraw = true;
+                        }
+                    }
+                    _ = redraw_interval.tick() => {
+                        needs_redraw |= local::handle_tick(&mut self);
                     }
                     command = async {
                         match handterm_native_scroll.as_mut() {
@@ -744,6 +747,29 @@ impl App {
                 }
 
                 tokio::select! {
+                    // Poll in declaration order so user input always wins the
+                    // race against server/bus chatter. During heavy streaming
+                    // the remote event branch is almost always ready; with the
+                    // default random polling it repeatedly outcompetes buffered
+                    // keystrokes, which shows up as a laggy, stuttering input
+                    // line while a turn is running.
+                    biased;
+                    event = event_stream.next() => {
+                        if event.is_some() {
+                            needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                        } else if super::terminal_liveness::terminal_abandoned() {
+                            // Input EOF with the controlling terminal gone:
+                            // orphaned client (see local loop). Exit; the
+                            // server-side session keeps running and can be
+                            // reattached with --resume.
+                            crate::logging::warn(
+                                "Terminal input closed and controlling terminal is gone; exiting orphaned client",
+                            );
+                            self.should_quit = true;
+                        } else {
+                            tokio::time::sleep(redraw_period).await;
+                        }
+                    }
                     _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(&self) => {
                         if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
                             needs_redraw = true;
@@ -766,22 +792,6 @@ impl App {
                             remote::RemoteEventOutcome::Continue => {}
                             remote::RemoteEventOutcome::Reconnect => continue 'outer,
                             remote::RemoteEventOutcome::Quit => break 'outer,
-                        }
-                    }
-                    event = event_stream.next() => {
-                        if event.is_some() {
-                            needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
-                        } else if super::terminal_liveness::terminal_abandoned() {
-                            // Input EOF with the controlling terminal gone:
-                            // orphaned client (see local loop). Exit; the
-                            // server-side session keeps running and can be
-                            // reattached with --resume.
-                            crate::logging::warn(
-                                "Terminal input closed and controlling terminal is gone; exiting orphaned client",
-                            );
-                            self.should_quit = true;
-                        } else {
-                            tokio::time::sleep(redraw_period).await;
                         }
                     }
                     command = async {
