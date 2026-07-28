@@ -424,18 +424,28 @@ mod tests {
     fn ink_extent_is_stable_across_the_wobble() {
         let mut donut = Donut::new(96);
         let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        // Vertical extent only: the hero's clearance problem is the donut
+        // touching the wordmark above and the tagline below, and the torus is
+        // wider than it is tall at this tilt, so folding width in would demand
+        // more top/bottom padding than the shape ever needs.
+        let mut wide = 0.0f32;
         for step in 0..40 {
-            donut.render(step as f32 * 0.4, 0.0);
+            donut.render(step as f32 * 0.4, step as f32 * 0.7);
             let (w, h) = donut.ink_extent();
-            lo = lo.min(w.min(h));
-            hi = hi.max(w.max(h));
+            wide = wide.max(w);
+            lo = lo.min(h);
+            hi = hi.max(h);
         }
+        assert!(wide <= 1.0, "the donut overflowed its box sideways: {wide}");
         assert!(lo > 0.6, "the donut shrank out of its box: {lo}");
         assert!(hi <= 1.0, "the donut overflowed its box: {hi}");
+        // Layout spaces the hero text against the *widest* the silhouette ever
+        // gets, so the gap cannot close on the frames where the disc is
+        // tallest. Anything smaller than `hi` would let the donut eat into the
+        // wordmark's clearance mid-animation.
         assert!(
-            (crate::layout::DONUT_INK_FRACTION as f32) <= hi
-                && (crate::layout::DONUT_INK_FRACTION as f32) >= lo,
-            "DONUT_INK_FRACTION {} is outside the measured {lo}..{hi}",
+            (crate::layout::DONUT_INK_FRACTION as f32) >= hi - 1e-3,
+            "DONUT_INK_FRACTION {} is under the measured maximum {hi}",
             crate::layout::DONUT_INK_FRACTION
         );
     }
