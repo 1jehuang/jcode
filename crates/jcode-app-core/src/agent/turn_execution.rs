@@ -770,8 +770,11 @@ impl Agent {
                 continue;
             }
 
-            // Check for skill invocation
-            if let Some(invocation) = SkillRegistry::parse_invocation(input) {
+            // Check for skill invocation. Resolve against the registry (not
+            // the bare tokenizer) so a `SKILL.md` `name:` field containing
+            // spaces, e.g. "My Custom Skill", can still be matched: the
+            // bare parse always stops at the first whitespace.
+            if let Some(invocation) = skills.resolve_invocation(input) {
                 if let Some(skill) = skills.get(invocation.name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
