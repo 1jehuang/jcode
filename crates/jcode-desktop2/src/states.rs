@@ -40,6 +40,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("code_block", code_block),
     ("session_strip", session_strip),
     ("session_strip_second_group", session_strip_second_group),
+    ("mem_readout", mem_readout),
     ("overview", overview),
     ("overview_opening", overview_opening),
     ("overview_other_session", overview_other_session),
@@ -454,6 +455,19 @@ fn session_strip() -> Model {
         session_id: Some("session_mushroom_1785129393446_e7007f8".into()),
         strip: demo_strip("session_mushroom_1785129393446_e7007f8"),
         ..attached_empty()
+    }
+}
+
+/// The chrome row's RAM caption beside the working directory: `ui`/`srv`
+/// figures pinned so the capture is a tested arrangement rather than whatever
+/// the machine was using.
+fn mem_readout() -> Model {
+    Model {
+        mem: Some(crate::mem::Readout {
+            client_bytes: 105 * 1024 * 1024,
+            server_bytes: Some(428 * 1024 * 1024),
+        }),
+        ..session_strip()
     }
 }
 
