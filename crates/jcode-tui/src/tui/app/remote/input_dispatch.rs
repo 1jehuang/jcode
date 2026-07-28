@@ -1,6 +1,5 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
-use crate::skill::SkillRegistry;
 
 #[expect(
     clippy::too_many_arguments,
@@ -161,15 +160,18 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     //
     // `/?` is the one builtin whose token is not identifier-shaped, so it is
     // allowed through explicitly.
+    // Resolve registered multi-word skill names before falling back to the
+    // existing single-token command handling.
+    let snapshot = app.current_skills_snapshot();
     let trimmed = raw_input.trim();
     let is_command_shaped = trimmed == "/?"
         || (input::parse_dropped_paths(&raw_input).is_none()
-            && SkillRegistry::parse_invocation(&raw_input).is_some());
+            && snapshot.resolve_invocation(&raw_input).is_some());
     if !is_command_shaped {
         return submit_prepared_remote_input(app, remote, prepared).await;
     }
 
-    let Some(invocation) = SkillRegistry::parse_invocation(&raw_input) else {
+    let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
         app.input = raw_input;
         app.cursor_pos = app.input.len();
         app.submit_input();
@@ -184,7 +186,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     };
 
     let skill_name = invocation.name.to_string();
-    let mut skill = app.current_skills_snapshot().get(&skill_name).cloned();
+    let mut skill = snapshot.get(&skill_name).cloned();
     if skill.is_none() {
         app.refresh_skills_snapshot();
         skill = app.current_skills_snapshot().get(&skill_name).cloned();
@@ -207,7 +209,9 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
-    let expanded_prompt = SkillRegistry::parse_invocation(&prepared.expanded)
+    let expanded_prompt = app
+        .current_skills_snapshot()
+        .resolve_invocation(&prepared.expanded)
         .and_then(|invocation| invocation.prompt)
         .unwrap_or(trailing_prompt)
         .to_string();
