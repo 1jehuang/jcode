@@ -8,9 +8,21 @@
 use super::visual::Rendered;
 use crate::states;
 
+/// Surface for hero tests: 800x720 logical at 1.75x. The hero is fixed-size
+/// (see [`crate::layout::DONUT_SIDE`]), so it needs a page tall enough for
+/// the whole stack plus the strip row; the visual suite's default 800x514
+/// logical surface honestly cannot hold it, and rendering there would test
+/// the fallback (no hero) rather than the hero.
+const HERO_SURFACE: (u32, u32, f64) = (1400, 1260, 1.75);
+
+fn hero_render(model: &crate::Model) -> Rendered {
+    let (width, height, scale) = HERO_SURFACE;
+    Rendered::at(model, width, height, scale).expect("a GPU render")
+}
+
 fn hero_frame() -> (Rendered, crate::layout::Hero) {
     let model = states::by_name("attached_empty").expect("node");
-    let r = Rendered::new(&model).expect("a GPU render");
+    let r = hero_render(&model);
     let hero = r.frame.hero().expect("a hero at test size");
     (r, hero)
 }
@@ -36,12 +48,23 @@ fn ink_band(r: &Rendered, x0: f64, x1: f64, y0: f64, y1: f64) -> Option<(f64, f6
 #[ignore = "requires a GPU"]
 fn the_wordmark_sits_above_the_donut_and_the_tagline_below_it() {
     let (r, hero) = hero_frame();
+    // The layout spaces the text against the donut's *inked disc*: the square
+    // bleeds up into the gap (its top band is mostly empty), and the disc's
+    // soft silhouette wobbles a few pixels around DONUT_INK_FRACTION with the
+    // animation pose. So the wordmark is measured in its own line box, and
+    // the donut in the disc band, rather than either scan absorbing the
+    // other's ink.
+    let bleed = hero.donut.width() * (1.0 - crate::layout::DONUT_INK_FRACTION) / 2.0;
+    let disc_top = hero.donut.y0 + bleed;
+    let disc_bottom = hero.donut.y1 - bleed;
+    let wordmark_height =
+        f64::from(crate::layout::HERO_WORDMARK_SIZE * crate::layout::HERO_LINE_HEIGHT);
     let wordmark = ink_band(
         &r,
         r.frame.left,
         r.frame.right,
         hero.wordmark_top - 2.0,
-        hero.donut.y0,
+        hero.wordmark_top + wordmark_height,
     )
     .expect("wordmark ink");
     let tagline = ink_band(
@@ -57,15 +80,13 @@ fn the_wordmark_sits_above_the_donut_and_the_tagline_below_it() {
         "the hero stack is out of order: wordmark {wordmark:?}, tagline {tagline:?}"
     );
     // Neither line may collide with the donut's own ink.
-    let donut = ink_band(
-        &r,
-        hero.donut.x0,
-        hero.donut.x1,
-        hero.donut.y0,
-        hero.donut.y1,
-    )
-    .expect("donut ink");
-    assert!(donut.0 > wordmark.1, "the donut runs into the wordmark");
+    let donut =
+        ink_band(&r, hero.donut.x0, hero.donut.x1, disc_top, disc_bottom).expect("donut ink");
+
+    assert!(
+        donut.0 > wordmark.1,
+        "the donut runs into the wordmark: wordmark {wordmark:?}, donut {donut:?}"
+    );
     assert!(donut.1 < tagline.0, "the donut runs into the tagline");
 }
 
@@ -130,9 +151,9 @@ fn the_hero_is_horizontally_centred() {
 fn the_hero_leaves_no_ink_once_there_is_a_transcript() {
     let empty = states::by_name("attached_empty").expect("node");
     let streaming = states::by_name("streaming").expect("node");
-    let r = Rendered::new(&empty).expect("a GPU render");
+    let r = hero_render(&empty);
     let hero = r.frame.hero().expect("a hero");
-    let with_text = Rendered::new(&streaming).expect("a GPU render");
+    let with_text = hero_render(&streaming);
     // Sample the donut's own hole region, which the transcript's own lines
     // cannot reach in the streaming node's short text.
     let cx = (hero.donut.x0 + hero.donut.x1) / 2.0;
