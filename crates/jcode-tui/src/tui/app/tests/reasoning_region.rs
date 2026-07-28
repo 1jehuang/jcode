@@ -878,3 +878,56 @@ fn answer_text_appended_into_open_region_does_not_glue_next_reasoning() {
         "answer text must not be glued onto reasoning: {text:?}"
     );
 }
+
+/// Regression test for issues #632/#633/#635: a hard panic
+/// (`assertion failed: self.is_char_boundary(new_len)`) inside
+/// `strip_reasoning_partial_tail`.
+///
+/// The live reasoning tail's byte length is recorded against the buffer it was
+/// appended to. When that buffer is replaced wholesale (a reconnect/resume
+/// replays a server-side snapshot), the stale length no longer describes the
+/// contents, and subtracting it lands at an arbitrary byte offset. With
+/// multi-byte UTF-8 text in the buffer that offset falls mid-character and
+/// `String::truncate` panics, killing the whole process.
+#[test]
+fn replace_streaming_text_resets_reasoning_tail_and_never_panics_on_multibyte() {
+    let mut app = create_test_app();
+
+    // Stream a reasoning tail so `reasoning_partial_len` is non-zero.
+    app.open_reasoning_region();
+    app.append_reasoning_text("thinking about the problem");
+    assert!(
+        app.reasoning_partial_len > 0,
+        "expected a live reasoning tail to be recorded"
+    );
+
+    // A reconnect/resume replaces the buffer with a snapshot made of multi-byte
+    // characters, shorter than the recorded tail length.
+    app.replace_streaming_text("\u{6f22}\u{5b57}\u{1f600}".to_string());
+    assert_eq!(
+        app.reasoning_partial_len,
+        0,
+        "replacing the stream must drop the stale reasoning tail length"
+    );
+
+    // Any subsequent reasoning delta strips the tail first. This is the call
+    // that used to panic.
+    app.append_reasoning_text("more thought");
+    // Buffer is still valid UTF-8 and the process survived.
+    assert!(app.streaming_text().contains("more thought"));
+}
+
+/// Directly exercise the boundary-safe truncation: even if a tail length is
+/// somehow inconsistent with the buffer, stripping must not panic.
+#[test]
+fn strip_reasoning_partial_tail_snaps_to_char_boundary() {
+    let mut app = create_test_app();
+    // Two 3-byte characters: 6 bytes total.
+    app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string();
+    // Claim a 2-byte tail so new_len = 4, which is *not* a char boundary.
+    app.reasoning_partial_len = 2;
+    app.strip_reasoning_partial_tail();
+    // Snapped down to 3: the first character survives intact, no panic.
+    assert_eq!(app.streaming_text(), "\u{6f22}");
+    assert_eq!(app.reasoning_partial_len, 0);
+}
