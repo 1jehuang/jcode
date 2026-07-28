@@ -25,18 +25,21 @@ const TAU: f64 = 0.055;
 ///
 /// Chosen against [`crate::scroll_bench`] rather than against an impression:
 /// paired with `MIN_VELOCITY` below it puts a flick's visible coast at about
-/// 0.7s and roughly 4x the fingers' own travel. The looser 0.30 this replaced
-/// coasted past 1.5s, which the bench caught as the view still sliding long
-/// after the hand had moved on.
-const FRICTION_TAU: f64 = 0.18;
+/// 1.3s and roughly 8x the fingers' own travel, which is the range a browser
+/// page fling lands in. The 0.18 this replaced measured 4x, and read as a page
+/// that stops the moment you let go: a flick should cross a long reply, not
+/// just finish the stroke.
+const FRICTION_TAU: f64 = 0.32;
 
 /// Below this speed, in logical pixels per second, a fling is over.
 ///
 /// An exponential decay never reaches zero, so this cutoff, not the friction
 /// alone, is what ends a coast. Too low and the page creeps for a second after
-/// it has visibly stopped, repainting for motion nobody can see; 80px/s is
-/// about half a line a second, which is where the eye loses it.
-const MIN_VELOCITY: f64 = 80.0;
+/// it has visibly stopped, repainting for motion nobody can see. 40px/s is
+/// about a quarter of a line a second: slow enough that the tail of a fling
+/// still drifts the way a browser's does, fast enough that the stop is not a
+/// creep.
+const MIN_VELOCITY: f64 = 60.0;
 
 /// Ceiling on fling speed, in logical pixels per second. A frantic swipe should
 /// travel far, not teleport past everything the user wanted to read.
