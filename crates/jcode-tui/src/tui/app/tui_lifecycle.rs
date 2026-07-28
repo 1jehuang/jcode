@@ -28,7 +28,6 @@ impl App {
             self.push_display_message(DisplayMessage::system(message).with_title(title));
         }
         self.interleave_message = None;
-        self.interleave_images.clear();
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
         self.observe_page_markdown = restored.observe_page_markdown;
@@ -399,6 +398,7 @@ impl App {
             context_info: crate::prompt::ContextInfo::default(),
             context_revision: 0,
             last_stream_activity: None,
+            last_user_interaction: None,
             stream_message_ended: false,
             deferred_stream_done_id: None,
             remote_resume_activity: None,
@@ -578,6 +578,9 @@ impl App {
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
             todo_card_rendered_hash: 0,
+            pinned_todos_payload: None,
+            pinned_todos_rendered_hash: 0,
+            pinned_todos_checked_at: None,
             last_side_panel_refresh: None,
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
@@ -639,7 +642,6 @@ impl App {
             experimental_feature_warnings_seen: HashSet::new(),
             active_experimental_feature_notice: None,
             interleave_message: None,
-            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
             autoreview_after_current_turn: false,
@@ -831,6 +833,7 @@ impl App {
             context_info,
             context_revision: 0,
             last_stream_activity: None,
+            last_user_interaction: None,
             stream_message_ended: false,
             deferred_stream_done_id: None,
             remote_resume_activity: None,
@@ -1010,6 +1013,9 @@ impl App {
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
             todo_card_rendered_hash: 0,
+            pinned_todos_payload: None,
+            pinned_todos_rendered_hash: 0,
+            pinned_todos_checked_at: None,
             last_side_panel_refresh: None,
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
@@ -1071,7 +1077,6 @@ impl App {
             experimental_feature_warnings_seen: HashSet::new(),
             active_experimental_feature_notice: None,
             interleave_message: None,
-            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
             autoreview_after_current_turn: false,
