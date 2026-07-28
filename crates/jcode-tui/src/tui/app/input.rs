@@ -3195,6 +3195,15 @@ impl App {
         if self.reasoning_streaming && !text.trim().is_empty() {
             self.close_reasoning_region(None);
         }
+        // A whitespace-only append skips the close above, so it pushes text
+        // *past* the live reasoning tail while `reasoning_partial_len` still
+        // claims the tail sits at the end of the buffer. That offset then no
+        // longer describes the buffer, which is the same desync class as
+        // #632/#633/#635. The tail is only rebuildable while it is still the
+        // suffix, so drop it here rather than leave a stale length behind.
+        if self.reasoning_partial_len > 0 {
+            self.reasoning_partial_len = 0;
+        }
         self.streaming.streaming_text.push_str(text);
         self.refresh_split_view_if_needed();
     }

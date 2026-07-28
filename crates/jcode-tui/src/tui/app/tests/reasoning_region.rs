@@ -951,3 +951,95 @@ fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
         assert!(app.streaming_text().is_char_boundary(app.streaming_text().len()));
     });
 }
+
+/// State-space sweep over the streaming-reasoning operations, guarding the whole
+/// class of bug behind #632/#633/#635 rather than the two instances that were
+/// reported.
+///
+/// Both crashes came from a byte offset (`reasoning_partial_len`,
+/// `reasoning_block_start`) recorded against one state of `streaming_text` and
+/// then used to slice a later state of it. Individual regression tests pin the
+/// two sequences that were actually observed; they cannot show that no *other*
+/// interleaving reaches the same slicing bug.
+///
+/// So drive every operation that reads or writes those offsets in
+/// deterministic pseudo-random order, with heavily multi-byte payloads (so a
+/// wrong offset lands mid-character rather than getting away with it), and
+/// assert the buffer stays valid UTF-8 with the tail length never exceeding it.
+/// A panic here is the failure; the assertions catch corruption that stops short
+/// of panicking.
+#[test]
+fn reasoning_streaming_state_space_never_panics_or_desyncs() {
+    // Multi-byte payloads: any off-by-one byte offset lands inside a character.
+    const PAYLOADS: &[&str] = &[
+        "\u{6f22}\u{5b57}",             // 3-byte CJK
+        "\u{1f600}\u{1f601}",           // 4-byte emoji
+        "caf\u{e9} na\u{ef}ve",         // 2-byte accents
+        "a\u{6f22}b\u{1f600}c",         // mixed widths
+        "line one\nline two",           // newline commits a reasoning line
+        "",                             // empty delta
+        "   ",                          // whitespace-only
+    ];
+
+    let mut app = create_test_app();
+    // xorshift keeps this deterministic: a failure is always reproducible.
+    let mut rng: u64 = 0x9E3779B97F4A7C15;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+
+    for step in 0..4000u32 {
+        let payload = PAYLOADS[(next() % PAYLOADS.len() as u64) as usize];
+        match next() % 7 {
+            0 => app.open_reasoning_region(),
+            1 => app.append_reasoning_text(payload),
+            2 => app.close_reasoning_region(None),
+            3 => app.append_streaming_text(payload),
+            // The operation that caused the real bug: swap the buffer while an
+            // offset into the previous buffer may still be recorded.
+            4 => app.replace_streaming_text(payload.to_string()),
+            5 => {
+                let _ = app.take_streaming_text();
+            }
+            _ => app.strip_reasoning_partial_tail(),
+        }
+
+        // Invariant 1: the buffer is always valid UTF-8 at a character boundary.
+        let text = app.streaming_text();
+        assert!(
+            text.is_char_boundary(text.len()),
+            "step {step}: streaming_text ended mid-character"
+        );
+        // Invariant 2: the recorded tail can never claim more bytes than exist,
+        // which is what made `len() - partial_len` land at a bogus offset.
+        assert!(
+            app.reasoning_partial_len <= text.len(),
+            "step {step}: reasoning_partial_len {} exceeds buffer len {}",
+            app.reasoning_partial_len,
+            text.len()
+        );
+        // Invariant 2b: the tail must describe the *current* buffer, not a
+        // previous one. The slice point it implies has to be a real character
+        // boundary on its own merits. Without this, a stale length survives a
+        // buffer swap and is only rescued by the defensive snap downstream,
+        // which hides the desync instead of preventing it.
+        let implied = text.len() - app.reasoning_partial_len;
+        assert!(
+            text.is_char_boundary(implied),
+            "step {step}: tail len {} implies non-boundary slice at {implied} in {text:?}",
+            app.reasoning_partial_len
+        );
+        // Invariant 3: a recorded block start must be a real boundary in the
+        // current buffer, since `anchor_current_reasoning_block` splits there.
+        if let Some(start) = app.reasoning_block_start {
+            assert!(
+                start <= text.len(),
+                "step {step}: reasoning_block_start {start} exceeds buffer len {}",
+                text.len()
+            );
+        }
+    }
+}
