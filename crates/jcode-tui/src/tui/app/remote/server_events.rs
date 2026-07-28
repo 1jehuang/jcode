@@ -1676,8 +1676,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_models,
                 available_model_routes,
             );
-            let catalog_outcome =
-                app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
             app.session.autoreview_enabled = autoreview_enabled;
