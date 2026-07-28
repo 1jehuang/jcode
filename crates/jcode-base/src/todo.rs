@@ -11,11 +11,10 @@ pub use jcode_task_types::{
 /// not provide enough evidence to clear their respective quality gate.
 pub const QUALITY_GATE_THRESHOLD: u8 = 96;
 
-/// Goals with a hill-climbability score strictly below this are considered
-/// low: no credible metric to iterate against. The todo tool nudges the model
-/// on every applicable write to reframe the objective into something
-/// quantifiable and verifiable.
-pub const LOW_HILL_CLIMBABILITY: u8 = QUALITY_GATE_THRESHOLD;
+/// Goals whose closed-feedback-loop score is strictly below this are considered
+/// open-loop: no observation reports back whether the work satisfies the
+/// requirements, so there is nothing credible to iterate against.
+pub const LOW_CLOSED_FEEDBACK_LOOP: u8 = QUALITY_GATE_THRESHOLD;
 
 /// Below this score the agent does not yet understand the user's intent well
 /// enough to work confidently against it.
@@ -29,9 +28,14 @@ const LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score i
 /// Deliberately small: think more about the user's intent, do not ask the user.
 pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Your understanding of the user's intent is not high enough. Re-read the request and think harder about what the user actually wants and left implicit, using the conversation and codebase as evidence. Do not ask the user; resolve the ambiguity yourself, then update the plan's user intention and understands_user_intent.";
 
-/// Model-facing continuation for the private hill-climbability check. Names the
-/// assessment category without disclosing the score or threshold.
-pub const TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-climbability is not high enough. First, improve the goal's objective and feedback loop so progress can be measured across iterations. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
+/// Model-facing continuation for the private closed-feedback-loop check. Names
+/// the assessment category without disclosing the score or threshold.
+pub const TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Your feedback loop is not closed. First, improve the goal's objective and name the observation that reports back on each requirement, so progress can be measured across iterations. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
+
+/// Pre-rename ("hill-climbability") version of the closed-feedback-loop
+/// continuation. Kept only so persisted transcripts still classify it as a
+/// synthetic gate message rather than a user turn.
+const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-climbability is not high enough. First, improve the goal's objective and feedback loop so progress can be measured across iterations. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
 
 /// Model-facing continuation for the private end-to-end ownership check. Names
 /// the assessment category without disclosing the score or threshold.
@@ -61,7 +65,7 @@ pub const SEVERE_INTENT_MISUNDERSTANDING: u8 = 60;
 #[serde(rename_all = "snake_case")]
 pub enum GateObservationKind {
     IntentUnderstanding,
-    HillClimbability,
+    ClosedFeedbackLoop,
 }
 
 /// A point during the turn that would previously have interrupted the model
@@ -99,11 +103,11 @@ fn observation_is_resolved(
         GateObservationKind::IntentUnderstanding => plan
             .understands_user_intent
             .is_some_and(|score| score >= LOW_INTENT_UNDERSTANDING),
-        GateObservationKind::HillClimbability => goals
+        GateObservationKind::ClosedFeedbackLoop => goals
             .iter()
             .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
-            .and_then(|goal| goal.hill_climbability)
-            .is_some_and(|score| score >= LOW_HILL_CLIMBABILITY),
+            .and_then(|goal| goal.closed_feedback_loop)
+            .is_some_and(|score| score >= LOW_CLOSED_FEEDBACK_LOOP),
     }
 }
 
@@ -145,13 +149,13 @@ pub fn build_gate_digest(
             GateObservationKind::IntentUnderstanding => {
                 "your understanding of what the user actually wants never became solid. Re-read the request, confirm the work you did matches it, and state any interpretation you had to guess at.".to_string()
             }
-            GateObservationKind::HillClimbability => {
+            GateObservationKind::ClosedFeedbackLoop => {
                 let label = group
                     .as_deref()
                     .map(|group| format!(" for \"{}\"", group))
                     .unwrap_or_default();
                 format!(
-                    "the goal{} never had a feedback loop you could measure progress against. Confirm the result is actually better, with concrete evidence rather than inspection.",
+                    "the goal{} never closed its feedback loop: no observation reported back on whether the work satisfied the requirements. Confirm the result is actually better, with concrete evidence rather than inspection.",
                     label
                 )
             }
@@ -275,7 +279,8 @@ pub fn is_auto_poke_message(message: &str) -> bool {
     (trimmed.starts_with("You have ")
         && trimmed.contains(" incomplete todo")
         && trimmed.ends_with("update the todo tool."))
-        || trimmed.starts_with(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
@@ -464,9 +469,9 @@ mod tests {
         }
     }
 
-    fn hill_observation(group: Option<&str>, score: Option<u8>) -> GateObservation {
+    fn loop_observation(group: Option<&str>, score: Option<u8>) -> GateObservation {
         GateObservation {
-            kind: GateObservationKind::HillClimbability,
+            kind: GateObservationKind::ClosedFeedbackLoop,
             group: group.map(str::to_string),
             score,
         }
@@ -516,11 +521,11 @@ mod tests {
     #[test]
     fn digest_collapses_repeats_and_counts_them() {
         let observations: Vec<GateObservation> = (0..9)
-            .map(|_| hill_observation(Some("utf16 transcode"), Some(84)))
+            .map(|_| loop_observation(Some("utf16 transcode"), Some(84)))
             .collect();
         let goals = vec![TodoGoal {
             group: Some("utf16 transcode".to_string()),
-            hill_climbability: Some(84),
+            closed_feedback_loop: Some(84),
             ..Default::default()
         }];
         let digest = build_gate_digest(&observations, &TodoPlan::default(), &goals)
@@ -537,19 +542,19 @@ mod tests {
     #[test]
     fn digest_separates_goals_and_notes_resolved_points() {
         let observations = vec![
-            hill_observation(Some("measured"), Some(50)),
-            hill_observation(Some("unmeasured"), Some(50)),
-            hill_observation(Some("unmeasured"), Some(55)),
+            loop_observation(Some("measured"), Some(50)),
+            loop_observation(Some("unmeasured"), Some(50)),
+            loop_observation(Some("unmeasured"), Some(55)),
         ];
         let goals = vec![
             TodoGoal {
                 group: Some("measured".to_string()),
-                hill_climbability: Some(QUALITY_GATE_THRESHOLD),
+                closed_feedback_loop: Some(QUALITY_GATE_THRESHOLD),
                 ..Default::default()
             },
             TodoGoal {
                 group: Some("unmeasured".to_string()),
-                hill_climbability: Some(55),
+                closed_feedback_loop: Some(55),
                 ..Default::default()
             },
         ];
@@ -566,16 +571,16 @@ mod tests {
     #[test]
     fn digest_handles_the_ungrouped_goal() {
         let digest = build_gate_digest(
-            &[hill_observation(None, Some(10))],
+            &[loop_observation(None, Some(10))],
             &TodoPlan::default(),
             &[TodoGoal {
-                hill_climbability: Some(10),
+                closed_feedback_loop: Some(10),
                 ..Default::default()
             }],
         )
         .expect("ungrouped goal should be surfaced");
         assert!(!digest.contains("\"\""));
-        assert!(digest.contains("the goal never had a feedback loop"));
+        assert!(digest.contains("the goal never closed its feedback loop"));
     }
 
     #[test]
@@ -606,7 +611,7 @@ mod tests {
                 .is_empty()
         );
         append_gate_observations(session, &[intent_observation(Some(70))]).expect("append");
-        append_gate_observations(session, &[hill_observation(Some("perf"), Some(80))])
+        append_gate_observations(session, &[loop_observation(Some("perf"), Some(80))])
             .expect("append");
         let stored = load_gate_observations(session).expect("load");
         assert_eq!(stored.len(), 2);
@@ -655,7 +660,7 @@ mod tests {
         assert!(is_auto_poke_message(&build_auto_poke_message(1)));
         assert!(is_auto_poke_message(&build_auto_poke_message(3)));
         assert!(is_auto_poke_message(
-            TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE
+            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
         ));
         assert!(is_auto_poke_message(
             LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE
@@ -675,8 +680,8 @@ mod tests {
     fn quality_continuations_are_actionable_without_private_calibration() {
         for (message, category) in [
             (
-                TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
-                "hill-climbability",
+                TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
+                "feedback loop is not closed",
             ),
             (
                 TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
@@ -709,10 +714,10 @@ mod tests {
             }
         }
 
-        assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("strong feedback loop"));
-        assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("First, improve"));
-        assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("call the todo tool again"));
-        assert!(TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE.contains("before continuing the task"));
+        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("strong feedback loop"));
+        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("First, improve"));
+        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("call the todo tool again"));
+        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("before continuing the task"));
         // Deliberately terse: think harder about intent, never block on the user.
         assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("think harder"));
         assert!(

@@ -1,7 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
-    GateObservation, GateObservationKind, LOW_HILL_CLIMBABILITY, LOW_INTENT_UNDERSTANDING,
+    GateObservation, GateObservationKind, LOW_CLOSED_FEEDBACK_LOOP, LOW_INTENT_UNDERSTANDING,
     SEVERE_INTENT_MISUNDERSTANDING, TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
     TODO_OWNERSHIP_CONTINUATION_MESSAGE, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
     TodoPlan, TodoPlanChange, TodoPlanField, append_gate_observations, load_goals, load_plan,
@@ -111,8 +111,8 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
         let previous = stored
             .iter()
             .find(|prev| goal_group_key(prev.group.as_deref()) == goal.group);
-        goal.hill_climbability_history = previous
-            .map(|prev| prev.hill_climbability_history.clone())
+        goal.closed_feedback_loop_history = previous
+            .map(|prev| prev.closed_feedback_loop_history.clone())
             .unwrap_or_default();
         goal.end_to_end_ownership_history = previous
             .map(|prev| prev.end_to_end_ownership_history.clone())
@@ -122,8 +122,8 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
         // turn-end digest would read a stale `None` and re-raise a point the
         // agent had already resolved.
         if let Some(prev) = previous {
-            if goal.hill_climbability.is_none() {
-                goal.hill_climbability = prev.hill_climbability;
+            if goal.closed_feedback_loop.is_none() {
+                goal.closed_feedback_loop = prev.closed_feedback_loop;
             }
             if goal.end_to_end_ownership.is_none() {
                 goal.end_to_end_ownership = prev.end_to_end_ownership;
@@ -132,7 +132,7 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
                 goal.feedback_loop = prev.feedback_loop.clone();
             }
         }
-        record_score_observation(&mut goal.hill_climbability_history, goal.hill_climbability);
+        record_score_observation(&mut goal.closed_feedback_loop_history, goal.closed_feedback_loop);
         record_score_observation(
             &mut goal.end_to_end_ownership_history,
             goal.end_to_end_ownership,
@@ -157,10 +157,10 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
 
 fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> Vec<TodoGoalField> {
     let mut fields = Vec::new();
-    if before.and_then(|goal| goal.hill_climbability)
-        != after.and_then(|goal| goal.hill_climbability)
+    if before.and_then(|goal| goal.closed_feedback_loop)
+        != after.and_then(|goal| goal.closed_feedback_loop)
     {
-        fields.push(TodoGoalField::HillClimbability);
+        fields.push(TodoGoalField::ClosedFeedbackLoop);
     }
     if before.and_then(|goal| goal.feedback_loop.as_ref())
         != after.and_then(|goal| goal.feedback_loop.as_ref())
@@ -307,13 +307,13 @@ fn record_reframe_observations(
             continue;
         }
         if goal
-            .hill_climbability
-            .is_none_or(|score| score < LOW_HILL_CLIMBABILITY)
+            .closed_feedback_loop
+            .is_none_or(|score| score < LOW_CLOSED_FEEDBACK_LOOP)
         {
             observations.push(GateObservation {
-                kind: GateObservationKind::HillClimbability,
+                kind: GateObservationKind::ClosedFeedbackLoop,
                 group: goal.group.clone(),
-                score: goal.hill_climbability,
+                score: goal.closed_feedback_loop,
             });
         }
     }
@@ -433,6 +433,9 @@ fn normalize_todo_input(mut input: Value) -> Value {
                     "completion_confidence",
                     "alignment_score",
                     "user_intention_alignment",
+                    "closed_feedback_loop",
+                    // Pre-rename alias; some prompts and replayed transcripts
+                    // still carry the old key.
                     "hill_climbability",
                     "end_to_end_ownership",
                 ] {
@@ -555,17 +558,17 @@ impl Tool for TodoTool {
                     "description": "Optional goal-level assessments, one per todo group. Use group: null for an ungrouped list. Stored assessments for groups omitted from an update are retained.",
                     "items": {
                         "type": "object",
-                        "required": ["hill_climbability", "feedback_loop"],
+                        "required": ["closed_feedback_loop", "feedback_loop"],
                         "properties": {
                             "group": {
                                 "type": "string",
                                 "description": "Group label this goal describes. Omit or null for the ungrouped list."
                             },
-                            "hill_climbability": {
+                            "closed_feedback_loop": {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessment, 0-100, of how readily progress toward this goal can be measured and compared across iterations."
+                                "description": "Self-assessment, 0-100, of how closed this goal's feedback loop is: does every requirement have an observation that reports back whether the work satisfies or violates it, so progress can be measured and compared across iterations? An open loop is one where you would only know by inspection or by asking the user."
                             },
                             "feedback_loop": {
                                 "type": "string",
@@ -615,8 +618,8 @@ impl Tool for TodoTool {
                         GateObservationKind::IntentUnderstanding => {
                             crate::telemetry::TodoGateKind::IntentUnderstanding
                         }
-                        GateObservationKind::HillClimbability => {
-                            crate::telemetry::TodoGateKind::HillClimbability
+                        GateObservationKind::ClosedFeedbackLoop => {
+                            crate::telemetry::TodoGateKind::ClosedFeedbackLoop
                         }
                     };
                     crate::telemetry::record_todo_gate(kind);
@@ -711,7 +714,7 @@ mod tests {
             .expect("todo item should advertise properties");
         assert!(item_props.contains_key("confidence"));
         assert!(item_props.contains_key("completion_confidence"));
-        assert!(!item_props.contains_key("hill_climbability"));
+        assert!(!item_props.contains_key("closed_feedback_loop"));
         assert_eq!(
             item_props["confidence"]["description"],
             "Self-assessed confidence, 0-100, that this todo can be completed correctly. Reassess it as evidence accumulates while working."
@@ -742,7 +745,7 @@ mod tests {
             .and_then(|v| v.as_object())
             .expect("goals should describe item objects");
         assert!(goal_props.contains_key("group"));
-        assert!(goal_props.contains_key("hill_climbability"));
+        assert!(goal_props.contains_key("closed_feedback_loop"));
         assert!(goal_props.contains_key("feedback_loop"));
         assert!(goal_props.contains_key("end_to_end_ownership"));
         // Intent lives on the plan, not per goal.
@@ -757,7 +760,7 @@ mod tests {
         assert!(
             goal_required
                 .iter()
-                .any(|value| value == "hill_climbability")
+                .any(|value| value == "closed_feedback_loop")
         );
         assert!(goal_required.iter().any(|value| value == "feedback_loop"));
 
@@ -818,12 +821,12 @@ mod tests {
                 .contains("threshold")
         );
 
-        let hill_description = goal_props["hill_climbability"]
+        let loop_description = goal_props["closed_feedback_loop"]
             .get("description")
             .and_then(Value::as_str)
-            .expect("hill-climbability should describe the assessment neutrally");
-        assert!(!hill_description.contains(&LOW_HILL_CLIMBABILITY.to_string()));
-        assert!(!hill_description.to_ascii_lowercase().contains("threshold"));
+            .expect("closed feedback loop should describe the assessment neutrally");
+        assert!(!loop_description.contains(&LOW_CLOSED_FEEDBACK_LOOP.to_string()));
+        assert!(!loop_description.to_ascii_lowercase().contains("threshold"));
 
         let model_visible_schema = serde_json::to_string(&schema)
             .expect("todo schema should serialize")
@@ -922,8 +925,8 @@ mod tests {
         let input = json!({
             "plan": {"user_intention": "make repository search feel instant", "understands_user_intent": "97"},
             "goals": [
-                {"group": "optimize grep", "hill_climbability": "95", "feedback_loop": "run the grep benchmark and compare p50"},
-                {"hill_climbability": 20}
+                {"group": "optimize grep", "closed_feedback_loop": "95", "feedback_loop": "run the grep benchmark and compare p50"},
+                {"closed_feedback_loop": 20}
             ]
         });
         let parsed = parse(input).expect("goals and plan should parse");
@@ -934,7 +937,7 @@ mod tests {
             Some("make repository search feel instant")
         );
         let goals = parsed.goals.expect("goals present");
-        assert_eq!(goals[0].hill_climbability, Some(95));
+        assert_eq!(goals[0].closed_feedback_loop, Some(95));
         assert_eq!(
             goals[0].feedback_loop.as_deref(),
             Some("run the grep benchmark and compare p50")
@@ -981,13 +984,13 @@ mod tests {
     fn goal(group: Option<&str>, score: u8) -> TodoGoal {
         TodoGoal {
             group: group.map(str::to_string),
-            hill_climbability: Some(score),
+            closed_feedback_loop: Some(score),
             ..Default::default()
         }
     }
 
     /// A plan whose intent assessment clears the private gate, so goal-level
-    /// tests observe only hill-climbability behavior.
+    /// tests observe only closed feedback loop behavior.
     fn aligned_plan() -> TodoPlan {
         TodoPlan {
             user_intention: Some("understood".to_string()),
@@ -1003,7 +1006,7 @@ mod tests {
         let merged = merge_goals(&stored, Some(vec![goal(Some(" a "), 30)]));
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].group.as_deref(), Some("a"));
-        assert_eq!(merged[0].hill_climbability, Some(30));
+        assert_eq!(merged[0].closed_feedback_loop, Some(30));
         assert_eq!(merged[1].group.as_deref(), Some("b"));
         // No incoming goals: stored goals unchanged.
         assert_eq!(merge_goals(&stored, None).len(), 2);
@@ -1127,7 +1130,7 @@ mod tests {
                     },
                     "goals": [{
                         "group": "speed",
-                        "hill_climbability": 80,
+                        "closed_feedback_loop": 80,
                         "feedback_loop": "run ./grade and read the score",
                     }],
                 }),
@@ -1160,7 +1163,7 @@ mod tests {
         let plan = load_plan(session).expect("plan");
         assert_eq!(plan.understands_user_intent_history, vec![82]);
         let goals = load_goals(session).expect("goals");
-        assert_eq!(goals[0].hill_climbability_history, vec![80]);
+        assert_eq!(goals[0].closed_feedback_loop_history, vec![80]);
 
         // Second write at a higher score: still silent, history grows, and the
         // digest now has the trajectory available.
@@ -1199,13 +1202,13 @@ mod tests {
     fn goal_changes_include_only_updated_quality_fields() {
         let before = TodoGoal {
             group: Some("search".to_string()),
-            hill_climbability: Some(90),
+            closed_feedback_loop: Some(90),
             feedback_loop: Some("Run one benchmark".to_string()),
             end_to_end_ownership: None,
             ..Default::default()
         };
         let after = TodoGoal {
-            hill_climbability: Some(98),
+            closed_feedback_loop: Some(98),
             feedback_loop: Some("Run five benchmarks and compare p50".to_string()),
             ..before.clone()
         };
@@ -1217,7 +1220,7 @@ mod tests {
         assert_eq!(changes[0].after.as_ref(), Some(&after));
         assert_eq!(
             changes[0].fields,
-            vec![TodoGoalField::HillClimbability, TodoGoalField::FeedbackLoop,]
+            vec![TodoGoalField::ClosedFeedbackLoop, TodoGoalField::FeedbackLoop,]
         );
     }
 
@@ -1233,12 +1236,12 @@ mod tests {
 
         assert!(
             nudges.is_empty(),
-            "a low hill-climbability score must not interrupt the write"
+            "a low closed feedback loop score must not interrupt the write"
         );
         assert_eq!(
             observations,
             vec![GateObservation {
-                kind: GateObservationKind::HillClimbability,
+                kind: GateObservationKind::ClosedFeedbackLoop,
                 group: Some("design".to_string()),
                 score: Some(95),
             }]
@@ -1326,7 +1329,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 GateObservationKind::IntentUnderstanding,
-                GateObservationKind::HillClimbability,
+                GateObservationKind::ClosedFeedbackLoop,
             ]
         );
     }
@@ -1335,7 +1338,7 @@ mod tests {
     fn missing_quality_scores_still_record_observations() {
         let todos = vec![open_todo(Some("coverage"))];
         let mut goal = goal(Some("coverage"), 96);
-        goal.hill_climbability = None;
+        goal.closed_feedback_loop = None;
 
         let (observations, _) = record_reframe_observations(&TodoPlan::default(), &[goal], &todos);
         assert_eq!(
@@ -1345,7 +1348,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 GateObservationKind::IntentUnderstanding,
-                GateObservationKind::HillClimbability,
+                GateObservationKind::ClosedFeedbackLoop,
             ]
         );
     }
@@ -1367,7 +1370,7 @@ mod tests {
         assert_eq!(
             observations,
             vec![GateObservation {
-                kind: GateObservationKind::HillClimbability,
+                kind: GateObservationKind::ClosedFeedbackLoop,
                 group: None,
                 score: Some(15),
             }]
@@ -1406,9 +1409,9 @@ mod tests {
         assert_eq!(merged.understands_user_intent_history, vec![70, 88]);
 
         let stored_goals = merge_goals(&[], Some(vec![goal(Some("perf"), 60)]));
-        assert_eq!(stored_goals[0].hill_climbability_history, vec![60]);
+        assert_eq!(stored_goals[0].closed_feedback_loop_history, vec![60]);
         let merged_goals = merge_goals(&stored_goals, Some(vec![goal(Some("perf"), 91)]));
-        assert_eq!(merged_goals[0].hill_climbability_history, vec![60, 91]);
+        assert_eq!(merged_goals[0].closed_feedback_loop_history, vec![60, 91]);
     }
 
     /// A write that revises one assessment must not erase the others, or the
@@ -1419,7 +1422,7 @@ mod tests {
             &[],
             Some(vec![TodoGoal {
                 group: Some("perf".to_string()),
-                hill_climbability: Some(97),
+                closed_feedback_loop: Some(97),
                 feedback_loop: Some("cargo bench".to_string()),
                 end_to_end_ownership: Some(96),
                 ..Default::default()
@@ -1432,7 +1435,7 @@ mod tests {
                 ..Default::default()
             }]),
         );
-        assert_eq!(merged[0].hill_climbability, Some(97));
+        assert_eq!(merged[0].closed_feedback_loop, Some(97));
         assert_eq!(merged[0].feedback_loop.as_deref(), Some("cargo bench"));
         assert_eq!(merged[0].end_to_end_ownership, Some(96));
     }
@@ -1440,6 +1443,30 @@ mod tests {
     #[test]
     fn garbage_string_still_errors() {
         assert!(parse(json!({"todos": "not json at all"})).is_err());
+    }
+
+    /// Sessions and model calls written before the rename carry
+    /// `hill_climbability`. Those must keep loading, or resuming an old session
+    /// silently drops its goal assessments and re-raises resolved gate points.
+    #[test]
+    fn pre_rename_hill_climbability_keys_still_load() {
+        let goal: crate::todo::TodoGoal = serde_json::from_value(json!({
+            "group": "optimize grep",
+            "hill_climbability": 91,
+            "hill_climbability_history": [70, 91],
+            "feedback_loop": "cargo bench grep"
+        }))
+        .expect("the pre-rename key must still deserialize");
+        assert_eq!(goal.closed_feedback_loop, Some(91));
+        assert_eq!(goal.closed_feedback_loop_history, vec![70, 91]);
+
+        let goals = parse(json!({
+            "goals": [{"group": "optimize grep", "hill_climbability": "88", "feedback_loop": "bench"}]
+        }))
+        .expect("a pre-rename tool call must still parse")
+        .goals
+        .expect("goals should be present");
+        assert_eq!(goals[0].closed_feedback_loop, Some(88));
     }
 
     fn history_todo(id: &str, confidence: Option<u8>, history: Vec<u8>) -> TodoItem {

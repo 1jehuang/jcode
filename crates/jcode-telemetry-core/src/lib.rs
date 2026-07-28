@@ -113,7 +113,7 @@ struct TurnTelemetry {
     tool_cat_other: u32,
     tool_cat_todo: u32,
     todo_gate_ownership_count: u32,
-    todo_gate_hill_count: u32,
+    todo_gate_feedback_loop_count: u32,
     todo_gate_alignment_count: u32,
     todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
@@ -199,7 +199,7 @@ struct SessionTelemetry {
     tool_cat_other: u32,
     tool_cat_todo: u32,
     todo_gate_ownership_count: u32,
-    todo_gate_hill_count: u32,
+    todo_gate_feedback_loop_count: u32,
     todo_gate_alignment_count: u32,
     todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
@@ -294,7 +294,7 @@ impl TurnTelemetry {
             tool_cat_other: 0,
             tool_cat_todo: 0,
             todo_gate_ownership_count: 0,
-            todo_gate_hill_count: 0,
+            todo_gate_feedback_loop_count: 0,
             todo_gate_alignment_count: 0,
             todo_gate_intent_count: 0,
             todo_gate_completion_count: 0,
@@ -1313,7 +1313,7 @@ fn finalize_current_turn(
         tool_cat_other: turn.tool_cat_other,
         tool_cat_todo: turn.tool_cat_todo,
         todo_gate_ownership_count: turn.todo_gate_ownership_count,
-        todo_gate_hill_count: turn.todo_gate_hill_count,
+        todo_gate_feedback_loop_count: turn.todo_gate_feedback_loop_count,
         todo_gate_alignment_count: turn.todo_gate_alignment_count,
         todo_gate_intent_count: turn.todo_gate_intent_count,
         todo_gate_completion_count: turn.todo_gate_completion_count,
@@ -1714,7 +1714,7 @@ fn begin_session_with_mode(
         tool_cat_other: 0,
         tool_cat_todo: 0,
         todo_gate_ownership_count: 0,
-        todo_gate_hill_count: 0,
+        todo_gate_feedback_loop_count: 0,
         todo_gate_alignment_count: 0,
         todo_gate_intent_count: 0,
         todo_gate_completion_count: 0,
@@ -2005,8 +2005,8 @@ pub fn record_user_cancelled() {
 pub enum TodoGateKind {
     /// End-to-end ownership was too low to complete a goal.
     Ownership,
-    /// Hill-climbability was too low; the goal needs a measurable objective.
-    HillClimbability,
+    /// Closed feedback loop was too low; the goal needs a measurable objective.
+    ClosedFeedbackLoop,
     /// Plan-level alignment with the user's intention was too low.
     Alignment,
     /// Plan-level understanding of the user's intent was too low.
@@ -2025,7 +2025,7 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         observe_session_concurrency(state);
         let counter = match kind {
             TodoGateKind::Ownership => &mut state.todo_gate_ownership_count,
-            TodoGateKind::HillClimbability => &mut state.todo_gate_hill_count,
+            TodoGateKind::ClosedFeedbackLoop => &mut state.todo_gate_feedback_loop_count,
             TodoGateKind::Alignment => &mut state.todo_gate_alignment_count,
             TodoGateKind::IntentUnderstanding => &mut state.todo_gate_intent_count,
             TodoGateKind::Completion => &mut state.todo_gate_completion_count,
@@ -2035,7 +2035,7 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         if let Some(turn) = state.current_turn.as_mut() {
             let counter = match kind {
                 TodoGateKind::Ownership => &mut turn.todo_gate_ownership_count,
-                TodoGateKind::HillClimbability => &mut turn.todo_gate_hill_count,
+                TodoGateKind::ClosedFeedbackLoop => &mut turn.todo_gate_feedback_loop_count,
                 TodoGateKind::Alignment => &mut turn.todo_gate_alignment_count,
                 TodoGateKind::IntentUnderstanding => &mut turn.todo_gate_intent_count,
                 TodoGateKind::Completion => &mut turn.todo_gate_completion_count,
