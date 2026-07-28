@@ -28,6 +28,7 @@ impl App {
             self.push_display_message(DisplayMessage::system(message).with_title(title));
         }
         self.interleave_message = None;
+        self.interleave_images.clear();
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
         self.observe_page_markdown = restored.observe_page_markdown;
@@ -642,6 +643,7 @@ impl App {
             experimental_feature_warnings_seen: HashSet::new(),
             active_experimental_feature_notice: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
             autoreview_after_current_turn: false,
@@ -1077,6 +1079,7 @@ impl App {
             experimental_feature_warnings_seen: HashSet::new(),
             active_experimental_feature_notice: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
             autoreview_after_current_turn: false,
