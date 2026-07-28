@@ -379,11 +379,10 @@ class KeystrokeObservation:
     # not show it", which are completely different bugs.
     app_input: str | None = None
     composer_on_screen: str | None = None
-    # When the app's own input buffer first contained the keystroke. Comparing
-    # this with `first_seen_ms` says whether the delay is the client failing to
-    # *receive* the key or failing to *draw* it, which are different bugs with
-    # different fixes.
-    app_had_it_ms: float | None = None
+    # Cost of one trivial debug round-trip, i.e. how long the run loop took to
+    # service a request that does no work. A slow value here means the loop itself
+    # is not turning over promptly.
+    loop_round_trip_ms: float | None = None
 
 
 def observe_keystroke(client: EmulatedClient, ch: str, expect: str,
@@ -399,21 +398,24 @@ def observe_keystroke(client: EmulatedClient, ch: str, expect: str,
     t0 = time.monotonic()
     client.send_bytes(ch.encode())
 
-    # Poll the app's input buffer over the debug channel (which does not touch
-    # the screen lock) so we learn when the key arrived, independently of when it
-    # was painted.
-    app_had_it_ms: float | None = None
-    deadline = t0 + watch_s
-    while time.monotonic() < deadline:
-        if app_had_it_ms is None and cmd_path is not None and resp_path is not None:
-            try:
-                raw = client_cmd(cmd_path, resp_path, "input", timeout_s=1.0)
-            except Exception:
-                raw = ""
-            if f'"{expect}' in raw:
-                app_had_it_ms = (time.monotonic() - t0) * 1000.0
-        else:
-            time.sleep(0.01)
+    # Measure the debug channel's own round-trip cost once. Polling it to learn
+    # "when did the app receive the key" is useless: the channel is a file
+    # handshake serviced by the run loop, and it measured ~300ms per call, exactly
+    # matching the "arrival" times it produced. That is the probe's latency, not
+    # input delivery, so reporting it as arrival would indict the wrong subsystem.
+    # It is still worth recording, because a run loop that needs 300ms to answer a
+    # trivial request is itself evidence about responsiveness.
+    probe_overhead_ms: float | None = None
+    if cmd_path is not None and resp_path is not None:
+        probe_start = time.monotonic()
+        try:
+            client_cmd(cmd_path, resp_path, "input", timeout_s=2.0)
+            probe_overhead_ms = (time.monotonic() - probe_start) * 1000.0
+        except Exception:
+            probe_overhead_ms = None
+    remaining = (t0 + watch_s) - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining)
 
     timeline = [
         (round((at - t0) * 1000.0, 1), value)
@@ -435,8 +437,8 @@ def observe_keystroke(client: EmulatedClient, ch: str, expect: str,
 
     if verbose:
         steps = " -> ".join(f"{at}ms:{value!r}" for at, value in timeline) or "(no change)"
-        arrival = "?" if app_had_it_ms is None else f"{app_had_it_ms:.0f}ms"
-        print(f"      typed {expect!r}: app@{arrival} screen: {steps}")
+        probe = "?" if probe_overhead_ms is None else f"{probe_overhead_ms:.0f}ms"
+        print(f"      typed {expect!r}: screen {steps}  (loop round-trip {probe})")
 
     app_input = None
     if cmd_path is not None and resp_path is not None:
@@ -454,7 +456,8 @@ def observe_keystroke(client: EmulatedClient, ch: str, expect: str,
         lost_after_ms=None if lost_after_ms is None else round(lost_after_ms, 1),
         app_input=app_input,
         composer_on_screen=composer_text(client),
-        app_had_it_ms=None if app_had_it_ms is None else round(app_had_it_ms, 1),
+        loop_round_trip_ms=(None if probe_overhead_ms is None
+                            else round(probe_overhead_ms, 1)),
     )
 
 
@@ -628,8 +631,25 @@ def main() -> int:
                         print(f"     {o.typed!r}: NEVER APPEARED")
                     else:
                         print(f"     {o.typed!r}: ok (shown at {o.first_seen_ms}ms)")
-                    print(f"        app input={o.app_input}  "
+                    print(f"        loop round-trip={o.loop_round_trip_ms}ms  "
                           f"screen={o.composer_on_screen!r}")
+
+            # Ask this client why its frames were slow *before* stopping it, so a
+            # long paint delay is attributed to a render stage instead of guessed.
+            try:
+                payload = json.loads(
+                    client_cmd(rc_cmd, rc_resp, "draw-stats 16", timeout_s=5.0))
+                run_result["draw_summary"] = payload.get("summary")
+                run_result["redraw_schedule"] = payload.get("redraw_schedule")
+                if not args.json:
+                    print(f"     draw: {json.dumps(payload.get('summary'))}")
+                    sched = payload.get("redraw_schedule") or {}
+                    print(f"     sched: interval={sched.get('interval_ms')}ms "
+                          f"reason={sched.get('current_full_frame_reason')} "
+                          f"anim={sched.get('idle_animation_active')}")
+            except Exception as e:  # noqa: BLE001
+                if not args.json:
+                    print(f"     (draw-stats unavailable: {e})")
 
             client.shutdown()
 
