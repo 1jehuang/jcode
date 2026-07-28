@@ -804,6 +804,51 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
 }
 
 #[test]
+fn test_duplicate_available_models_updated_event_is_a_no_op() {
+    // Temp home: handling the event persists the remote catalog cache, which
+    // must not leak into other tests that hydrate from a shared test home.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        let event = || crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("claude-opus-4.6".to_string()),
+            available_models: vec!["claude-opus-4.6".to_string()],
+            available_model_routes: vec![crate::provider::ModelRoute {
+                model: "claude-opus-4.6".to_string(),
+                provider: "Copilot".to_string(),
+                api_method: "copilot".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            }],
+        };
+
+        let first_redraw = app.handle_server_event(event(), &mut remote);
+        assert!(first_redraw, "first catalog update should request a redraw");
+        let generation_after_first = app.remote_model_catalog_generation;
+
+        // Shared-server bus chatter redelivers identical catalog snapshots to
+        // every connected client. A byte-identical follow-up must not
+        // invalidate caches, bump the generation, or request a redraw (that
+        // starved the input line).
+        let second_redraw = app.handle_server_event(event(), &mut remote);
+        assert!(
+            !second_redraw,
+            "duplicate catalog update must not request a redraw"
+        );
+        assert_eq!(
+            app.remote_model_catalog_generation, generation_after_first,
+            "duplicate catalog update must not bump the catalog generation"
+        );
+    });
+}
+
+#[test]
 fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
