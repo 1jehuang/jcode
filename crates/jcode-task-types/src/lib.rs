@@ -289,9 +289,9 @@ pub struct TodoGoal {
     /// Group label this goal describes. `None` covers the ungrouped list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// How closed this goal's feedback loop is, from 0-100: does every
-    /// requirement have an observation that reports back whether the work
-    /// satisfies or violates it, so progress can be measured and iterated on?
+    /// How closed `feedback_loop` is, from 0-100: how much of the goal reports
+    /// back on its own whether the work is right, rather than needing
+    /// inspection or the user.
     #[serde(
         default,
         alias = "hill_climbability",
