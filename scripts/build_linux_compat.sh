@@ -77,6 +77,10 @@ docker run --rm \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
   -e JCODE_BUILD_METADATA_FILE=/jcode-build-meta \
+  -e JCODE_BUILD_GIT_HASH="$git_hash" \
+  -e JCODE_BUILD_GIT_DATE="$git_date" \
+  -e JCODE_BUILD_GIT_TAG="$git_tag" \
+  -e JCODE_BUILD_GIT_DIRTY="$git_dirty" \
   -e JCODE_COMPAT_PROFILE="$profile" \
   -e JCODE_COMPAT_TARGET="$target" \
   -e HOST_UID="$host_uid" \
@@ -203,5 +207,35 @@ WRAPPER
 		    chown "$HOST_UID:$HOST_GID" "${chown_inputs[@]}" 2>/dev/null || true
 		  '
 
+# The docker invocation above is the last command in the script, so without an
+# explicit check a failed build still exits 0: the in-container `bash -lc` can
+# fail (daemon down, compile error) while this script reports success and leaves
+# a stale or empty out_dir behind. Benchmark launchers pin artifact SHA-256s and
+# would happily bank a previous build's binary, so verify the outputs exist
+# before claiming success.
+for required in "$out_dir/$artifact" "$out_dir/$artifact.bin" "$out_dir/$artifact.tar.gz"; do
+  if [[ ! -s "$required" ]]; then
+    echo "error: build did not produce $required" >&2
+    exit 1
+  fi
+done
+
 echo "Built artifacts:"
 ls -lh "$out_dir/$artifact" "$out_dir/$artifact.tar.gz"
+
+# Fail closed when the embedded hash does not match the tree that was built.
+# `jcode-build-meta`'s build script deliberately does not watch .git/HEAD, so a
+# cached build dir can silently embed a previous commit's hash (observed: an
+# artifact built at 268913473 reporting c9ccb4f01). Provenance that is wrong is
+# worse than provenance that is missing.
+if [[ -n "$git_hash" ]]; then
+  # `version` prints e.g. "version\tv0.61.2 (268913473)", so take the whole
+  # value rather than just the first whitespace-separated field.
+  embedded="$("$out_dir/$artifact.bin" --no-update --no-selfdev version 2>/dev/null \
+    | awk -F'\t' '$1 == "version" { print $2; exit }')"
+  if [[ -n "$embedded" && "$embedded" != *"$git_hash"* ]]; then
+    echo "error: embedded build metadata reports '$embedded' but the tree is at '$git_hash'" >&2
+    echo "       (stale build cache; re-run after 'cargo clean' or bump JCODE_BUILD_GIT_HASH)" >&2
+    exit 1
+  fi
+fi
