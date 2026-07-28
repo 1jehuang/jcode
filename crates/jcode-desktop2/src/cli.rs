@@ -121,18 +121,74 @@ fn run_profile_states(args: &[String]) -> Result<()> {
 /// end without a compositor, which synthetic-input tools make unreliable.
 ///
 ///   jcode-desktop2 --script 'type:alpha beta' ctrl+a shift+right shift+right
+///
+/// The gesture verbs drive the same handlers the window does, so the held-Super
+/// overview is checkable without a compositor:
+///
+///   jcode-desktop2 --script 'sessions:a=jcode,b=jcode,c=site' super-down \
+///       'settle' super+h super-up
 fn run_script(steps: &[String]) -> Result<()> {
     let mut app = App::default();
     app.model.session_id = Some("session_script".into());
+    let mut clock = std::time::Instant::now();
     for step in steps {
         if let Some(text) = step.strip_prefix("type:") {
             app.apply(keymap::Action::Insert, Some(text));
             continue;
         }
+        // `sessions:id=project,...` seeds the strip, because the overview has
+        // nothing to lay out for a lone session and the interesting failures
+        // are all about moving between them.
+        if let Some(spec) = step.strip_prefix("sessions:") {
+            let entries: Vec<crate::strip::Entry> = spec
+                .split(',')
+                .filter(|part| !part.is_empty())
+                .enumerate()
+                .map(|(index, part)| {
+                    let (id, project) = part.split_once('=').unwrap_or((part, "project"));
+                    crate::strip::Entry {
+                        session_id: id.to_string(),
+                        working_dir: Some(format!("/w/{project}")),
+                        busy: false,
+                        weight: 1_000.0 * (index as f64 + 1.0),
+                    }
+                })
+                .collect();
+            let first = entries.first().map(|entry| entry.session_id.clone());
+            app.model.session_id = first.clone();
+            app.model.strip = crate::strip::Strip::build(entries, first.as_deref());
+            continue;
+        }
+        match step.as_str() {
+            "super-down" => {
+                app.modifiers |= winit::keyboard::ModifiersState::SUPER;
+                app.on_super_changed(true, clock);
+                continue;
+            }
+            "super-up" => {
+                app.modifiers -= winit::keyboard::ModifiersState::SUPER;
+                app.on_super_changed(false, clock);
+                continue;
+            }
+            // Run the zoom to rest and move the clock past the tap window, so
+            // a release afterwards is a deliberate gesture rather than a tap.
+            "settle" => {
+                for tick in 1..=40u32 {
+                    app.tick_overview(
+                        clock + std::time::Duration::from_millis(u64::from(tick) * 16),
+                    );
+                }
+                clock += std::time::Duration::from_millis(640);
+                continue;
+            }
+            _ => {}
+        }
         let (key, mods) =
             keymap::parse_chord(step).ok_or_else(|| anyhow::anyhow!("unknown chord '{step}'"))?;
-        let action = keymap::resolve(&key, mods).unwrap_or(keymap::Action::Insert);
-        if !app.apply(action, None) {
+        // Chords go through the window's own dispatch, so the field's claim on
+        // the keyboard is exercised rather than bypassed.
+        app.modifiers = mods;
+        if !app.key_pressed(&key, None) {
             println!("quit");
             return Ok(());
         }
@@ -144,6 +200,9 @@ fn run_script(steps: &[String]) -> Result<()> {
         Some(selected) => println!("selected: {selected:?}"),
         None => println!("selected: none"),
     }
+    println!("session: {:?}", app.model.session_id);
+    println!("overview_open: {}", app.model.overview.is_open());
+    println!("overview_focus: {:?}", app.model.overview.focus());
     if let Some(notice) = &app.model.notice {
         println!("notice: {notice}");
     }
