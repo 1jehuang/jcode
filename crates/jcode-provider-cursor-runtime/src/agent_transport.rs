@@ -74,7 +74,7 @@ fn normalize_agent_host(raw: &str) -> Option<String> {
     // Drop any explicit port. Connections are always made on 443, so a port in
     // the cached or overridden value is noise that would otherwise land inside
     // the DNS name and the TLS SNI value.
-    let host = host.split(':').next().unwrap_or_default().trim();
+    let host = host.split(':').next().unwrap_or(host).trim();
     if host.is_empty() {
         None
     } else {
