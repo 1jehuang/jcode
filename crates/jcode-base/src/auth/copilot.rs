@@ -594,6 +594,10 @@ fn normalize_github_host_key(host: &str) -> Option<String> {
         .unwrap_or(host)
         .trim_end_matches('/');
     let host = host.split('/').next().unwrap_or_default().trim();
+    // GitHub's `apps.json` keys carry a client-id suffix
+    // (`github.com:Iv1.b507a08c87ecfe98`), so the host must also be split on
+    // ':' or valid credentials are silently discarded (issue #641).
+    let host = host.split(':').next().unwrap_or_default().trim();
     let host = host.to_ascii_lowercase();
 
     if host == "github.com" || host == "api.github.com" || host.ends_with(".github.com") {
