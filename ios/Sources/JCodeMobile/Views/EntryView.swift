@@ -2,7 +2,18 @@ import JCodeKit
 import SwiftUI
 
 /// Friendly placeholder for a fresh session, centered in the canvas.
+///
+/// Beyond the affordance text, it offers one-tap starter prompts so the first
+/// interaction costs a single tap instead of composing from scratch.
 struct EmptyTranscript: View {
+    var onSuggestion: ((String) -> Void)? = nil
+
+    private static let suggestions = [
+        "What's the state of this repo?",
+        "Run the tests",
+        "Summarize recent changes",
+    ]
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "terminal")
@@ -15,6 +26,27 @@ struct EmptyTranscript: View {
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
+            if let onSuggestion {
+                VStack(spacing: 8) {
+                    ForEach(Self.suggestions, id: \.self) { suggestion in
+                        Button {
+                            onSuggestion(suggestion)
+                        } label: {
+                            Text(suggestion)
+                                .font(.subheadline)
+                                .foregroundStyle(Theme.textPrimary)
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: 44)
+                                .background(Theme.surface)
+                                .clipShape(Capsule())
+                                .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Fills the composer with this prompt")
+                    }
+                }
+                .padding(.top, 8)
+            }
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,12 +82,7 @@ struct EntryView: View {
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
                 if !entry.reasoning.isEmpty {
-                    Text(entry.reasoning)
-                        .font(Theme.mono(12))
-                        .italic()
-                        .foregroundStyle(Theme.textTertiary)
-                        .lineLimit(4)
-                        .copyContextMenu(entry.reasoning)
+                    ReasoningDisclosure(text: entry.reasoning)
                 }
                 ForEach(entry.toolCalls) { call in
                     ToolCallCard(call: call)
@@ -85,5 +112,47 @@ extension View {
                 Label("Copy", systemImage: "doc.on.doc")
             }
         }
+    }
+}
+
+/// Reasoning stream shown as a one-line summary that expands on tap.
+///
+/// Reasoning is ambient context, not primary content; a fixed 4-line block
+/// of italic text taxed every assistant turn. Collapsed it costs one line.
+struct ReasoningDisclosure: View {
+    let text: String
+    @State private var expanded = false
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                expanded.toggle()
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 4) {
+                Image(systemName: "brain")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.top, 4)
+                    .accessibilityHidden(true)
+                Text(expanded ? text : firstLine)
+                    .font(Theme.mono(12))
+                    .italic()
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(expanded ? nil : 1)
+                    .multilineTextAlignment(.leading)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .copyContextMenu(text)
+        .accessibilityLabel("Reasoning")
+        .accessibilityValue(firstLine)
+        .accessibilityHint(expanded ? "Collapses the reasoning" : "Expands the full reasoning")
+    }
+
+    private var firstLine: String {
+        text.split(separator: "\n", omittingEmptySubsequences: true)
+            .first.map(String.init) ?? text
     }
 }
