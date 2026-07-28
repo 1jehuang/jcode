@@ -1210,7 +1210,7 @@ fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'stat
     };
     let mut spans = Vec::new();
     for (label, score) in [
-        ("Hill climbability", goal.hill_climbability),
+        ("Closed feedback loop", goal.closed_feedback_loop),
         ("Ownership", goal.end_to_end_ownership),
     ] {
         let Some(score) = score else {
@@ -1426,13 +1426,13 @@ fn push_todo_goal_details(
     let scores = todo_goal_score_spans(Some(goal));
     if !scores.is_empty() {
         let score_width = Line::from(scores.clone()).width();
-        let score_count = [goal.hill_climbability, goal.end_to_end_ownership]
+        let score_count = [goal.closed_feedback_loop, goal.end_to_end_ownership]
             .into_iter()
             .flatten()
             .count();
         if score_width > inner_width.saturating_sub(2) && score_count > 1 {
             for (label, score) in [
-                ("Hill climbability", goal.hill_climbability),
+                ("Closed feedback loop", goal.closed_feedback_loop),
                 ("Ownership", goal.end_to_end_ownership),
             ] {
                 let Some(score) = score else {
@@ -1573,17 +1573,17 @@ fn render_todo_goal_updates(
 
         for field in &update.fields {
             match field {
-                crate::todo::TodoGoalField::HillClimbability => push_todo_score_update(
+                crate::todo::TodoGoalField::ClosedFeedbackLoop => push_todo_score_update(
                     &mut lines,
-                    "Hill climbability",
+                    "Closed feedback loop",
                     update
                         .before
                         .as_ref()
-                        .and_then(|goal| goal.hill_climbability),
+                        .and_then(|goal| goal.closed_feedback_loop),
                     update
                         .after
                         .as_ref()
-                        .and_then(|goal| goal.hill_climbability),
+                        .and_then(|goal| goal.closed_feedback_loop),
                     base_indent,
                     inner_width,
                 ),

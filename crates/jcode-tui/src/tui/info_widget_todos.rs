@@ -117,13 +117,13 @@ fn goal_for_group<'a>(
     })
 }
 
-/// Color for a hill-climbability score: green when progress has a credible
+/// Color for a closed feedback loop score: green when progress has a credible
 /// metric to iterate against, red when it is low (below the reframe-nudge
 /// threshold), amber in between.
-fn hill_style(score: u8) -> Style {
-    let color = if score >= crate::todo::LOW_HILL_CLIMBABILITY {
+fn loop_style(score: u8) -> Style {
+    let color = if score >= crate::todo::LOW_CLOSED_FEEDBACK_LOOP {
         rgb(100, 180, 100)
-    } else if score >= crate::todo::LOW_HILL_CLIMBABILITY.saturating_sub(20) {
+    } else if score >= crate::todo::LOW_CLOSED_FEEDBACK_LOOP.saturating_sub(20) {
         rgb(220, 190, 100)
     } else {
         rgb(220, 120, 100)
@@ -131,24 +131,24 @@ fn hill_style(score: u8) -> Style {
     Style::default().fg(color)
 }
 
-/// Append a " · hill N%" suffix describing a goal's hill-climbability.
-fn push_goal_hill_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::TodoGoal) {
-    let Some(score) = goal.hill_climbability else {
+/// Append a " · hill N%" suffix describing a goal's closed feedback loop.
+fn push_goal_loop_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::TodoGoal) {
+    let Some(score) = goal.closed_feedback_loop else {
         return;
     };
     spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
     spans.push(Span::styled(
-        "hill ",
+        "loop ",
         Style::default().fg(rgb(140, 140, 150)),
     ));
-    spans.push(Span::styled(format!("{}%", score), hill_style(score)));
+    spans.push(Span::styled(format!("{}%", score), loop_style(score)));
 }
 
-/// Display width of the suffix `push_goal_hill_suffix` would render for this
+/// Display width of the suffix `push_goal_loop_suffix` would render for this
 /// goal (0 when it renders nothing), so header truncation can reserve room.
-fn goal_hill_suffix_width(goal: &crate::todo::TodoGoal) -> u16 {
-    match goal.hill_climbability {
-        Some(score) => 3 + "hill ".len() as u16 + format!("{}%", score).len() as u16,
+fn goal_loop_suffix_width(goal: &crate::todo::TodoGoal) -> u16 {
+    match goal.closed_feedback_loop {
+        Some(score) => 3 + "loop ".len() as u16 + format!("{}%", score).len() as u16,
         None => 0,
     }
 }
@@ -328,10 +328,10 @@ fn push_group_header(
     let counter = format!(" {}/{}", completed, total);
     let confidence = aggregate_todo_confidence(items.iter().copied());
     let confidence_width = aggregate_confidence_suffix_width(confidence);
-    let hill_width = goal.map(goal_hill_suffix_width).unwrap_or(0);
+    let loop_width = goal.map(goal_loop_suffix_width).unwrap_or(0);
     let max_name = inner
         .width
-        .saturating_sub(counter.len() as u16 + confidence_width + hill_width)
+        .saturating_sub(counter.len() as u16 + confidence_width + loop_width)
         .max(4) as usize;
     let highlight = items.iter().any(|t| t.status == "in_progress");
     let name_style = if highlight {
@@ -345,7 +345,7 @@ fn push_group_header(
     ];
     push_aggregate_confidence_suffix(&mut spans, confidence);
     if let Some(goal) = goal {
-        push_goal_hill_suffix(&mut spans, goal);
+        push_goal_loop_suffix(&mut spans, goal);
     }
     lines.push(Line::from(spans));
 }
@@ -522,10 +522,10 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         return lines;
     }
 
-    // Flat list: the whole list is one implicit goal, so its hill score
+    // Flat list: the whole list is one implicit goal, so its feedback-loop score
     // (if recorded) lives on the header line.
     if let Some(goal) = goal_for_group(&data.todo_goals, None) {
-        push_goal_hill_suffix(&mut header, goal);
+        push_goal_loop_suffix(&mut header, goal);
     }
     lines.push(Line::from(header));
 
@@ -602,10 +602,10 @@ pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<L
         return lines;
     }
 
-    // Flat list: the whole list is one implicit goal, so its hill score
+    // Flat list: the whole list is one implicit goal, so its feedback-loop score
     // (if recorded) lives on the header line.
     if let Some(goal) = goal_for_group(&data.todo_goals, None) {
-        push_goal_hill_suffix(&mut header, goal);
+        push_goal_loop_suffix(&mut header, goal);
     }
     lines.push(Line::from(header));
 
@@ -676,7 +676,7 @@ pub(super) fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<L
     ];
     push_aggregate_confidence_suffix(&mut summary, aggregate_todo_confidence(&data.todos));
     if let Some(goal) = goal_for_group(&data.todo_goals, None) {
-        push_goal_hill_suffix(&mut summary, goal);
+        push_goal_loop_suffix(&mut summary, goal);
     }
 
     vec![
