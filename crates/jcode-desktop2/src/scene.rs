@@ -654,6 +654,24 @@ fn draw_transcript(
             let inset_x = block.inset;
             // Selection bands go under the glyphs, so highlighted text stays
             // legible on the band rather than being painted over by it.
+            // Inline code sits under both: it is a property of the text, so a
+            // selection must read as drawn *over* the code span rather than
+            // being hidden by it.
+            for wash in &block.washes {
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    Affine::scale(scale),
+                    theme.code_wash,
+                    None,
+                    &RoundedRect::new(
+                        text_left + inset_x + wash.x0,
+                        block_top + inset_y + wash.y0,
+                        text_left + inset_x + wash.x1,
+                        block_top + inset_y + wash.y1,
+                        crate::transcript::INLINE_CODE_RADIUS,
+                    ),
+                );
+            }
             if let Some(selection) = model.selection.as_ref()
                 && let Some(range) =
                     selection.range_in(placed.index, block_index, block.source.len())

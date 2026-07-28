@@ -258,6 +258,8 @@ fn draw_glyph_run(
     // Batches of glyphs that share a ramp step, flushed when the step changes.
     let mut batch: Vec<vello::Glyph> = Vec::new();
     let mut batch_step: Option<u8> = None;
+    // How far right the glyphs actually reached, so a decoration matches them.
+    let mut drawn_to = x;
 
     let flush = |scene: &mut Scene, batch: &mut Vec<vello::Glyph>, step: Option<u8>| {
         let Some(step) = step else { return };
@@ -283,6 +285,10 @@ fn draw_glyph_run(
             break;
         };
         ordinal += 1.0;
+        // The trailing edge of what is actually on screen, so a decoration under
+        // a half-revealed run stops with the glyphs instead of running ahead of
+        // them to the end of the run.
+        drawn_to = x;
         // Quantise so settled text collapses into one batch and the ramp is
         // still smooth: the eye cannot resolve 1/24 of an alpha step.
         let step = (alpha * f32::from(RAMP_STEPS)).round().clamp(0.0, 255.0) as u8;
@@ -297,7 +303,124 @@ fn draw_glyph_run(
         });
     }
     flush(scene, &mut batch, batch_step);
+    draw_decorations(scene, glyph_run, origin, drawn_to);
     ordinal
+}
+
+/// Draw a run's underline and strikethrough rules.
+///
+/// Parley *resolves* both decorations, including the font's own offset and
+/// thickness, but it has nothing to draw them with: a Vello glyph batch is
+/// glyphs and nothing else. So a `~~strikethrough~~` or a link's underline was
+/// resolved and then silently dropped, and the desktop had no way to mark a
+/// link except by spending a colour the print theme does not have.
+///
+/// The rule takes the decoration's own brush when it has one, so it can be
+/// dimmer than the text, and the run's font metrics otherwise, so it sits where
+/// the typeface says it should rather than at a guessed fraction of the size.
+fn draw_decorations(
+    scene: &mut Scene,
+    glyph_run: &GlyphRun<'_, Brush>,
+    origin: (f64, f64),
+    end_x: f32,
+) {
+    for (rect, brush) in decoration_rules(glyph_run, end_x) {
+        scene.fill(
+            Fill::NonZero,
+            Affine::translate(origin),
+            &brush,
+            None,
+            &rect,
+        );
+    }
+}
+
+/// The rule rectangles a run's decorations contribute, in the run's own
+/// coordinate space, paired with the brush each is drawn with.
+///
+/// Split out from the drawing so a test can assert *where* a rule lands rather
+/// than only that some geometry was emitted: the bug this guards against, a
+/// rule running the full width of a half-revealed run, is invisible to a
+/// "something was drawn" check.
+fn decoration_rules(
+    glyph_run: &GlyphRun<'_, Brush>,
+    end_x: f32,
+) -> Vec<(vello::kurbo::Rect, Brush)> {
+    let style = glyph_run.style();
+    if style.underline.is_none() && style.strikethrough.is_none() {
+        return Vec::new();
+    }
+    let start_x = f64::from(glyph_run.offset());
+    let end_x = f64::from(end_x);
+    if end_x <= start_x {
+        return Vec::new();
+    }
+    let metrics = glyph_run.run().metrics();
+    let baseline = f64::from(glyph_run.baseline());
+    let rule = |decoration: &parley::Decoration<Brush>, offset: f32, size: f32| {
+        // A zero or negative thickness would draw nothing (or an inverted
+        // rect); fall back to a hairline so a decoration is never silently
+        // dropped by a font with missing metrics.
+        let size = f64::from(decoration.size.unwrap_or(size)).max(1.0);
+        let offset = f64::from(decoration.offset.unwrap_or(offset));
+        // Parley's offsets are measured up from the baseline, while the scene's
+        // y grows downward.
+        let top = baseline - offset - size;
+        (
+            vello::kurbo::Rect::new(start_x, top, end_x, top + size),
+            decoration.brush.clone(),
+        )
+    };
+    let mut rules = Vec::new();
+    if let Some(underline) = style.underline.as_ref() {
+        rules.push(rule(
+            underline,
+            metrics.underline_offset,
+            metrics.underline_size,
+        ));
+    }
+    if let Some(strikethrough) = style.strikethrough.as_ref() {
+        rules.push(rule(
+            strikethrough,
+            metrics.strikethrough_offset,
+            metrics.strikethrough_size,
+        ));
+    }
+    rules
+}
+
+/// Every decoration rule in a layout, in layout coordinates. Test-facing view
+/// of what [`draw_decorations`] paints.
+#[cfg(test)]
+fn layout_decoration_rules(layout: &Layout<Brush>, revealed: f64) -> Vec<vello::kurbo::Rect> {
+    let mut rules = Vec::new();
+    let mut ordinal = 0.0;
+    for line in layout.lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            if revealed.is_finite() && ordinal >= revealed {
+                return rules;
+            }
+            let mut drawn_to = glyph_run.offset();
+            let mut x = glyph_run.offset();
+            for glyph in glyph_run.glyphs() {
+                x += glyph.advance;
+                if crate::stream::glyph_alpha(ordinal, revealed).is_none() {
+                    break;
+                }
+                ordinal += 1.0;
+                drawn_to = x;
+            }
+            rules.extend(
+                decoration_rules(&glyph_run, drawn_to)
+                    .into_iter()
+                    .map(|(rect, _)| rect),
+            );
+        }
+    }
+    rules
 }
 
 /// Total glyphs in a layout. The reveal needs this to turn "how far through
@@ -424,5 +547,60 @@ mod tests {
         let mut text = TextSystem::default();
         let layout = text.layout_paragraph("", 400.0, style(), 1.75);
         assert!(layout.len() <= 1, "empty text produced several lines");
+    }
+
+    /// Parley resolves underline and strikethrough but has nothing to draw them
+    /// with: a Vello glyph batch is glyphs only. So both were resolved and then
+    /// silently dropped, and a link or a `~~deletion~~` looked exactly like the
+    /// prose around it. The scene must gain geometry beyond the glyphs.
+    #[test]
+    fn decorations_reach_the_scene() {
+        let mut text = TextSystem::default();
+        let sample = "underlined";
+        let plain = {
+            let mut scene = Scene::new();
+            let layout = text.layout_paragraph(sample, 400.0, style(), 1.0);
+            TextSystem::draw_layout(&mut scene, &layout, (0.0, 0.0), 1.0);
+            scene.encoding().n_path_segments
+        };
+        for property in [
+            StyleProperty::Underline(true),
+            StyleProperty::Strikethrough(true),
+        ] {
+            let mut scene = Scene::new();
+            let layout = text.layout_rich(sample, 400.0, style(), 1.0, &mut |builder| {
+                builder.push(property.clone(), 0..sample.len());
+            });
+            TextSystem::draw_layout(&mut scene, &layout, (0.0, 0.0), 1.0);
+            assert!(
+                scene.encoding().n_path_segments > plain,
+                "{property:?} drew no rule, so it is invisible"
+            );
+        }
+    }
+
+    /// A decoration under streaming text must stop where the glyphs stop. A rule
+    /// running ahead of the reveal would announce the rest of the word before it
+    /// arrives.
+    #[test]
+    fn a_decoration_stops_with_the_reveal() {
+        let mut text = TextSystem::default();
+        let sample = "a fairly long underlined stretch of text";
+        let layout = text.layout_rich(sample, 400.0, style(), 1.0, &mut |builder| {
+            builder.push(StyleProperty::Underline(true), 0..sample.len());
+        });
+        let width = |revealed: f64| {
+            layout_decoration_rules(&layout, revealed)
+                .iter()
+                .map(vello::kurbo::Rect::width)
+                .sum::<f64>()
+        };
+        let partial = width(4.0);
+        let whole = width(f64::INFINITY);
+        assert!(partial > 0.0, "a partly revealed run drew no rule at all");
+        assert!(
+            partial < whole,
+            "the rule was drawn full width under a partly revealed run"
+        );
     }
 }
