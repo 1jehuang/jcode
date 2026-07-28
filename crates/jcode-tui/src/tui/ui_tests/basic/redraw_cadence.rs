@@ -129,7 +129,7 @@ fn active_typing_backs_the_decorative_animation_off() {
     let typing = TestState {
         input: "hel".to_string(),
         cursor_pos: 3,
-        time_since_activity: Some(Duration::from_millis(30)),
+        time_since_user_interaction: Some(Duration::from_millis(30)),
         ..Default::default()
     };
     let interval = crate::tui::redraw_interval_with_policy(&typing, &policy);
@@ -148,7 +148,7 @@ fn a_paused_draft_lets_the_animation_recover() {
     let paused = TestState {
         input: "a draft i walked away from".to_string(),
         cursor_pos: 5,
-        time_since_activity: Some(Duration::from_secs(3)),
+        time_since_user_interaction: Some(Duration::from_secs(3)),
         ..Default::default()
     };
     assert_eq!(

@@ -280,7 +280,7 @@ const COMPOSING_ANIMATION_BACKOFF: Duration = Duration::from_millis(600);
 fn actively_composing(state: &dyn TuiState) -> bool {
     !state.input().is_empty()
         && state
-            .time_since_activity()
+            .time_since_user_interaction()
             .is_some_and(|since| since < COMPOSING_ANIMATION_BACKOFF)
 }
 
