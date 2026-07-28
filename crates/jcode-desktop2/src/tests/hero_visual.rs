@@ -54,7 +54,7 @@ fn the_wordmark_sits_above_the_donut_and_the_tagline_below_it() {
     // animation pose. So the wordmark is measured in its own line box, and
     // the donut in the disc band, rather than either scan absorbing the
     // other's ink.
-    let bleed = hero.donut.width() * (1.0 - crate::layout::DONUT_INK_FRACTION) / 2.0;
+    let bleed = crate::layout::donut_bleed(hero.donut.width());
     let disc_top = hero.donut.y0 + bleed;
     let disc_bottom = hero.donut.y1 - bleed;
     let wordmark_height =
