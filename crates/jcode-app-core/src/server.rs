@@ -1,3 +1,4 @@
+mod available_models_dedup;
 mod await_members_state;
 mod background_tasks;
 mod client_actions;
