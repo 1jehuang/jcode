@@ -49,7 +49,11 @@ struct RootView: View {
     }
 }
 
-/// Connection status pill shown in the chat header.
+/// Connection status shown in the chat header.
+///
+/// Connected is the steady state, so it renders as a single calm mint dot;
+/// any degraded phase gets a labeled pill so the words appear exactly when
+/// they carry information.
 struct StatusPill: View {
     let phase: ConnectionPhase
 
@@ -59,15 +63,20 @@ struct StatusPill: View {
                 .fill(color)
                 .frame(width: 8, height: 8)
                 .accessibilityHidden(true)
-            Text(label)
-                .font(Theme.mono(12))
-                .foregroundStyle(Theme.textSecondary)
+            if phase != .connected {
+                Text(label)
+                    .font(Theme.mono(12))
+                    .foregroundStyle(Theme.textSecondary)
+            }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, phase == .connected ? 0 : 12)
         .padding(.vertical, 4)
-        .background(Theme.surface)
+        .background(phase == .connected ? .clear : Theme.surface)
         .clipShape(Capsule())
-        .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+        .overlay(
+            Capsule().stroke(
+                phase == .connected ? .clear : Theme.border, lineWidth: 1)
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Connection")
         .accessibilityValue(label)

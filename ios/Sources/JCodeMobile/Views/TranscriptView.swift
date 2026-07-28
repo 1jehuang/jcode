@@ -11,6 +11,7 @@ import SwiftUI
 struct TranscriptView: View {
     let entries: [TranscriptEntry]
     let isReasoning: Bool
+    var onSuggestion: ((String) -> Void)? = nil
 
     /// True while the viewport is at (or near) the bottom of the content.
     @State private var isPinnedToBottom = true
@@ -20,7 +21,7 @@ struct TranscriptView: View {
 
     var body: some View {
         if entries.isEmpty && !isReasoning {
-            EmptyTranscript()
+            EmptyTranscript(onSuggestion: onSuggestion)
         } else {
             GeometryReader { viewport in
                 scroller(viewportHeight: viewport.size.height)
@@ -31,10 +32,9 @@ struct TranscriptView: View {
     private func scroller(viewportHeight: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // A flexible top spacer pushes short content to the bottom of
-                // the viewport; it collapses to zero once content overflows.
+                // Content reads top-down like a document; autoscroll keeps
+                // the latest entry visible once content overflows.
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    Spacer(minLength: 0)
                     ForEach(entries) { entry in
                         EntryView(entry: entry)
                             .id(entry.id)
@@ -44,7 +44,7 @@ struct TranscriptView: View {
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
-                .frame(minHeight: max(0, viewportHeight - 16), alignment: .bottom)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(
@@ -101,7 +101,6 @@ struct TranscriptView: View {
                 .font(Theme.mono(12))
                 .foregroundStyle(Theme.textTertiary)
         }
-        .padding(.leading, 4)
     }
 }
 
