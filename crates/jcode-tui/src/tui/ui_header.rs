@@ -1447,7 +1447,15 @@ mod tests {
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
         let both = AuthStatus {
             anthropic: ProviderAuth {
+                // `state` is the overall verdict the auth *inventory* filters
+                // on: `build_auth_status_lines` hides anything still
+                // `NotConfigured`. Leaving it at its default made this fixture
+                // describe a provider with credentials but no configured state,
+                // which cannot occur in practice, and the rendered assertion
+                // below then saw an empty list.
+                state: AuthState::Available,
                 has_oauth: true,
+                oauth_state: AuthState::Available,
                 has_api_key: true,
                 ..Default::default()
             },
