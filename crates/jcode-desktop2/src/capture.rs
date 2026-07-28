@@ -31,8 +31,15 @@ pub fn capture_scene_to_rgba(scene: &Scene, width: u32, height: u32) -> Result<V
     let device = &device_handle.device;
     let queue = &device_handle.queue;
 
-    let mut renderer = Renderer::new(device, RendererOptions::default())
-        .map_err(|error| anyhow!("create renderer: {error}"))?;
+    // Only Area AA is rendered below, so only its pipelines are compiled.
+    let mut renderer = Renderer::new(
+        device,
+        RendererOptions {
+            antialiasing_support: vello::AaSupport::area_only(),
+            ..RendererOptions::default()
+        },
+    )
+    .map_err(|error| anyhow!("create renderer: {error}"))?;
 
     let target = device.create_texture(&TextureDescriptor {
         label: Some("capture target"),
