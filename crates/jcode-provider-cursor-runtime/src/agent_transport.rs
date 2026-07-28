@@ -57,6 +57,10 @@ fn cli_client_version() -> String {
 
 /// Extract a bare host from a value that may be a full URL, a host with a
 /// scheme, or a host with trailing path/port noise.
+///
+/// The result is used directly as a DNS name (`TcpStream::connect`) and as the
+/// TLS `ServerName`, so it has to be a bare host: a leftover `:443` suffix or a
+/// trailing path makes both of those fail.
 fn normalize_agent_host(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -67,6 +71,10 @@ fn normalize_agent_host(raw: &str) -> Option<String> {
         .or_else(|| raw.strip_prefix("http://"))
         .unwrap_or(raw);
     let host = raw.split('/').next().unwrap_or_default().trim();
+    // Drop any explicit port. Connections are always made on 443, so a port in
+    // the cached or overridden value is noise that would otherwise land inside
+    // the DNS name and the TLS SNI value.
+    let host = host.split(':').next().unwrap_or_default().trim();
     if host.is_empty() {
         None
     } else {
@@ -154,9 +162,11 @@ fn agent_host_from_cursor_cli_config() -> Option<String> {
 fn agent_host() -> String {
     for var in ["JCODE_CURSOR_AGENT_HOST", "CURSOR_AGENT_HOST"] {
         if let Ok(raw) = std::env::var(var) {
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
+            // Normalize overrides too. These get copied straight out of
+            // `cli-config.json` or a browser, so `https://host/path` and
+            // `host:443` are both likely spellings and both have to work.
+            if let Some(host) = normalize_agent_host(&raw) {
+                return host;
             }
         }
     }
@@ -633,6 +643,52 @@ mod tests {
         assert_eq!(normalize_agent_host(""), None);
         assert_eq!(normalize_agent_host("   "), None);
         assert_eq!(normalize_agent_host("https://"), None);
+    }
+
+    /// The normalized host is used as both the DNS name and the TLS
+    /// `ServerName`, so an explicit port must be stripped rather than carried
+    /// into either. Raised in review of the #637 fix.
+    #[test]
+    fn normalize_agent_host_strips_explicit_ports() {
+        assert_eq!(
+            normalize_agent_host("https://agentn.us.api5.cursor.sh:443/agent.v1.AgentService/Run"),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        assert_eq!(
+            normalize_agent_host("agentn.us.api5.cursor.sh:443"),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        // A bare port with no host is not a usable host.
+        assert_eq!(normalize_agent_host(":443"), None);
+    }
+
+    /// `agent_host()` must normalize env overrides the same way it normalizes
+    /// the cached CLI value: people copy these out of `cli-config.json` or a
+    /// browser, so the full-URL spelling has to work. Raised in review of #637.
+    #[test]
+    fn agent_host_normalizes_env_overrides() {
+        // Serialized against other env-mutating tests in this module by the
+        // shared lock in jcode-base.
+        let _guard = jcode_base::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_CURSOR_AGENT_HOST");
+
+        jcode_base::env::set_var(
+            "JCODE_CURSOR_AGENT_HOST",
+            "https://agentn.us.api5.cursor.sh/agent.v1.AgentService/Run",
+        );
+        assert_eq!(agent_host(), "agentn.us.api5.cursor.sh");
+
+        jcode_base::env::set_var("JCODE_CURSOR_AGENT_HOST", "agentn.eu.api5.cursor.sh:443");
+        assert_eq!(agent_host(), "agentn.eu.api5.cursor.sh");
+
+        // A blank override must not win; it falls through to the next source.
+        jcode_base::env::set_var("JCODE_CURSOR_AGENT_HOST", "   ");
+        assert_ne!(agent_host(), "   ");
+
+        match prev {
+            Some(value) => jcode_base::env::set_var("JCODE_CURSOR_AGENT_HOST", value),
+            None => jcode_base::env::remove_var("JCODE_CURSOR_AGENT_HOST"),
+        }
     }
 
     #[test]
