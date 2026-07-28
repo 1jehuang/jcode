@@ -1065,6 +1065,16 @@ impl App {
             Action::ExtendWordRight => self.model.editor.extend_word_right(),
             Action::ExtendHome => self.model.editor.extend_home(),
             Action::ExtendEnd => self.model.editor.extend_end(),
+            Action::ExtendLineUp => {
+                self.model.editor.extend_line(-1);
+            }
+            Action::ExtendLineDown => {
+                self.model.editor.extend_line(1);
+            }
+            Action::MoveDocStart => self.model.editor.move_to_start(),
+            Action::MoveDocEnd => self.model.editor.move_to_end(),
+            Action::ExtendDocStart => self.model.editor.extend_to_start(),
+            Action::ExtendDocEnd => self.model.editor.extend_to_end(),
             Action::SelectAll => self.model.editor.select_all(),
 
             Action::DeleteBack => self.model.editor.delete_back(),
@@ -1092,6 +1102,22 @@ impl App {
                 if !self.model.editor.undo() {
                     self.model.set_notice("nothing to undo");
                 }
+            }
+            Action::Redo => {
+                if !self.model.editor.redo() {
+                    self.model.set_notice("nothing to redo");
+                }
+            }
+            // Web Ctrl+C: copying is what the user meant whenever there is
+            // anything selected. Only a completely unselected Ctrl+C is allowed
+            // to interrupt, so the chord can never eat a copy.
+            Action::CopyOrInterrupt => {
+                let has_selection =
+                    self.model.selection.is_some() || self.model.editor.selection().is_some();
+                if has_selection {
+                    return self.apply(Action::Copy, None);
+                }
+                return self.apply(Action::InterruptOrQuit, None);
             }
             Action::Copy => {
                 // A transcript highlight wins: it is the visible selection, and

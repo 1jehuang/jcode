@@ -15,11 +15,33 @@ impl App {
         while let Ok(update) = updates.try_recv() {
             match update {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
+                // A failure goes into the conversation, not only the status
+                // line: the status line is suppressed once a session is
+                // attached, which is exactly when a failed turn happens, so a
+                // status-only report was invisible. The turn also ends, so the
+                // spinner stops claiming work.
+                harness::HarnessUpdate::Failed(message) => {
+                    self.model.status = message.clone();
+                    self.model.failure = Some(message.clone());
+                    self.model.transcript.push_notice(&message);
+                    self.model.busy = false;
+                    self.model.activity.finish();
+                    // The notice appears whole, so nothing is being revealed;
+                    // leaving a reveal in flight would fade the failure in
+                    // behind an animation that has nothing left to animate.
+                    self.model.stream.reveal_all();
+                }
                 harness::HarnessUpdate::Attached {
                     session_id,
                     working_dir,
                 } => {
                     self.model.status = format!("attached: {session_id}");
+                    // A successful attach is the proof the failure is over: a
+                    // reconnected window must not keep reporting the outage it
+                    // just recovered from.
+                    self.model.failure = None;
+                    // A reconnect re-attaches the same session; the transcript
+                    // on screen is the one that was being read, so it stays.
                     self.model.strip.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
                     self.model.working_dir = working_dir;
