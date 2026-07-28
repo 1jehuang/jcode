@@ -559,7 +559,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry(
         "Trailing \\ then Enter",
-        "Insert newline (works on terminals that cannot report Shift+Enter)",
+        "Insert newline (fallback; run /terminal-setup to fix Shift+Enter)",
     ));
     lines.push(key_entry(
         "Ctrl+Enter / Cmd+Enter",
