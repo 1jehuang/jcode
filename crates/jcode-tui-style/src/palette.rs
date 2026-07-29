@@ -1,0 +1,524 @@
+//! Fully user-configurable TUI colors.
+//!
+//! The TUI's colors come from two places:
+//!
+//! 1. Named semantic roles ([`Role`]) used by `theme.rs` accessors
+//!    (`user_color()`, `ai_color()`, ...).
+//! 2. Hundreds of ad hoc `rgb(r, g, b)` literals scattered across widgets.
+//!
+//! Both funnel through this module. Roles resolve against the active
+//! [`Palette`], and every literal passes through [`remap_literal`], which
+//! snaps a literal onto the nearest configured role color when the user has
+//! overridden it. That makes *every* color in the TUI configurable without
+//! touching each of the ~250 distinct literal call sites, while an unconfigured
+//! palette is byte-identical to the historical hard-coded look.
+//!
+//! Configuration lives in `~/.jcode/config.toml`:
+//!
+//! ```toml
+//! [display.colors]
+//! user = "#8ab4f8"
+//! ai = "#81c784"
+//! accent = "#ba8bff"
+//! ```
+
+use ratatui::style::Color;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// A semantic color slot in the TUI.
+///
+/// Every role has a built-in default equal to the historical hard-coded value,
+/// so adding a role never changes the default look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Role {
+    /// User message text accent.
+    User,
+    /// Assistant message accent.
+    Ai,
+    /// Tool row label color.
+    Tool,
+    /// Clickable file paths.
+    FileLink,
+    /// Low-emphasis text (hints, separators).
+    Dim,
+    /// Primary brand accent (headers, highlights).
+    Accent,
+    /// System / harness notices.
+    System,
+    /// Queued-prompt indicator.
+    Queued,
+    /// ASAP-priority indicator.
+    Asap,
+    /// Pending / not-yet-run indicator.
+    Pending,
+    /// User message foreground text.
+    UserText,
+    /// User message panel background.
+    UserBg,
+    /// Assistant message foreground text.
+    AiText,
+    /// Header session icon.
+    HeaderIcon,
+    /// Header model/agent name.
+    HeaderName,
+    /// Header session id.
+    HeaderSession,
+    /// Success / additions.
+    Success,
+    /// Warnings.
+    Warning,
+    /// Errors / deletions.
+    Error,
+    /// Informational highlights.
+    Info,
+    /// Borders and rules.
+    Border,
+    /// Selected row background.
+    SelectionBg,
+}
+
+/// All roles, in declaration order. Used by `/colors` listings and harmony
+/// analysis so a new role is automatically covered by both.
+pub const ALL_ROLES: &[Role] = &[
+    Role::User,
+    Role::Ai,
+    Role::Tool,
+    Role::FileLink,
+    Role::Dim,
+    Role::Accent,
+    Role::System,
+    Role::Queued,
+    Role::Asap,
+    Role::Pending,
+    Role::UserText,
+    Role::UserBg,
+    Role::AiText,
+    Role::HeaderIcon,
+    Role::HeaderName,
+    Role::HeaderSession,
+    Role::Success,
+    Role::Warning,
+    Role::Error,
+    Role::Info,
+    Role::Border,
+    Role::SelectionBg,
+];
+
+impl Role {
+    /// Stable config key (also the `/colors` name).
+    pub const fn key(self) -> &'static str {
+        match self {
+            Role::User => "user",
+            Role::Ai => "ai",
+            Role::Tool => "tool",
+            Role::FileLink => "file_link",
+            Role::Dim => "dim",
+            Role::Accent => "accent",
+            Role::System => "system",
+            Role::Queued => "queued",
+            Role::Asap => "asap",
+            Role::Pending => "pending",
+            Role::UserText => "user_text",
+            Role::UserBg => "user_bg",
+            Role::AiText => "ai_text",
+            Role::HeaderIcon => "header_icon",
+            Role::HeaderName => "header_name",
+            Role::HeaderSession => "header_session",
+            Role::Success => "success",
+            Role::Warning => "warning",
+            Role::Error => "error",
+            Role::Info => "info",
+            Role::Border => "border",
+            Role::SelectionBg => "selection_bg",
+        }
+    }
+
+    /// Look up a role by its config key (case/separator insensitive).
+    pub fn from_key(key: &str) -> Option<Role> {
+        let normalized = key.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        ALL_ROLES
+            .iter()
+            .copied()
+            .find(|role| role.key() == normalized)
+    }
+
+    /// Built-in default RGB, matching jcode's historical hard-coded palette.
+    pub const fn default_rgb(self) -> (u8, u8, u8) {
+        match self {
+            Role::User => (138, 180, 248),
+            Role::Ai => (129, 199, 132),
+            Role::Tool => (120, 120, 120),
+            Role::FileLink => (180, 200, 255),
+            Role::Dim => (80, 80, 80),
+            Role::Accent => (186, 139, 255),
+            Role::System => (255, 170, 220),
+            Role::Queued => (255, 193, 7),
+            Role::Asap => (110, 210, 255),
+            Role::Pending => (140, 140, 140),
+            Role::UserText => (245, 245, 255),
+            Role::UserBg => (35, 40, 50),
+            Role::AiText => (220, 220, 215),
+            Role::HeaderIcon => (120, 210, 230),
+            Role::HeaderName => (190, 210, 235),
+            Role::HeaderSession => (255, 255, 255),
+            Role::Success => (100, 200, 100),
+            Role::Warning => (255, 200, 100),
+            Role::Error => (255, 100, 100),
+            Role::Info => (140, 180, 255),
+            Role::Border => (100, 100, 110),
+            Role::SelectionBg => (60, 60, 80),
+        }
+    }
+
+    /// Whether this role is used as a background. Backgrounds are graded on
+    /// different harmony criteria than foreground text.
+    pub const fn is_background(self) -> bool {
+        matches!(self, Role::UserBg | Role::SelectionBg)
+    }
+}
+
+/// A complete set of role colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    entries: [(u8, u8, u8); ALL_ROLES.len()],
+    /// Which roles the user explicitly configured. Only overridden roles
+    /// participate in literal remapping, so a default palette is a no-op.
+    overridden: [bool; ALL_ROLES.len()],
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        let mut entries = [(0, 0, 0); ALL_ROLES.len()];
+        for (slot, role) in entries.iter_mut().zip(ALL_ROLES) {
+            *slot = role.default_rgb();
+        }
+        Self {
+            entries,
+            overridden: [false; ALL_ROLES.len()],
+        }
+    }
+}
+
+fn index_of(role: Role) -> usize {
+    ALL_ROLES
+        .iter()
+        .position(|candidate| *candidate == role)
+        .expect("every Role is listed in ALL_ROLES")
+}
+
+impl Palette {
+    /// RGB for `role`.
+    pub fn rgb(&self, role: Role) -> (u8, u8, u8) {
+        self.entries[index_of(role)]
+    }
+
+    /// Ratatui color for `role`, quantized for 256-color terminals.
+    pub fn color(&self, role: Role) -> Color {
+        let (r, g, b) = self.rgb(role);
+        crate::color::rgb(r, g, b)
+    }
+
+    /// Whether the user explicitly set `role`.
+    pub fn is_overridden(&self, role: Role) -> bool {
+        self.overridden[index_of(role)]
+    }
+
+    /// Override `role`.
+    pub fn set(&mut self, role: Role, rgb: (u8, u8, u8)) {
+        let index = index_of(role);
+        self.entries[index] = rgb;
+        self.overridden[index] = true;
+    }
+
+    /// Whether any role is overridden (fast path guard for remapping).
+    pub fn has_overrides(&self) -> bool {
+        self.overridden.iter().any(|flag| *flag)
+    }
+
+    /// Build a palette from `key = "#rrggbb"` pairs, returning per-entry
+    /// errors instead of failing the whole palette so one typo cannot make the
+    /// TUI unstyled.
+    pub fn from_pairs<'a, I>(pairs: I) -> (Self, Vec<String>)
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
+        let mut palette = Self::default();
+        let mut errors = Vec::new();
+        for (key, value) in pairs {
+            match (Role::from_key(key), parse_hex(value)) {
+                (Some(role), Some(rgb)) => palette.set(role, rgb),
+                (None, _) => errors.push(format!("unknown color role '{key}'")),
+                (Some(role), None) => errors.push(format!(
+                    "invalid color '{value}' for '{}' (expected #rrggbb)",
+                    role.key()
+                )),
+            }
+        }
+        (palette, errors)
+    }
+}
+
+/// Parse `#rrggbb`, `#rgb`, or a bare `rrggbb` hex string.
+pub fn parse_hex(text: &str) -> Option<(u8, u8, u8)> {
+    let hex = text.trim().trim_start_matches('#');
+    let byte = |slice: &str| u8::from_str_radix(slice, 16).ok();
+    match hex.len() {
+        3 => {
+            let mut chars = hex.chars();
+            let mut next = || {
+                let c = chars.next()?;
+                byte(&format!("{c}{c}"))
+            };
+            Some((next()?, next()?, next()?))
+        }
+        6 => Some((byte(&hex[0..2])?, byte(&hex[2..4])?, byte(&hex[4..6])?)),
+        _ => None,
+    }
+}
+
+/// Format an RGB triple as `#rrggbb`.
+pub fn to_hex((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+static ACTIVE: RwLock<Option<Palette>> = RwLock::new(None);
+
+/// Lock-free fast path for `remap_literal`, which sits on the per-cell render
+/// hot path. Palettes without overrides (the default) must not pay a lock.
+static HAS_OVERRIDES: AtomicBool = AtomicBool::new(false);
+
+/// Install the active palette. Called once at startup from config, and again
+/// when the user changes colors at runtime.
+pub fn set_palette(palette: Palette) {
+    if let Ok(mut active) = ACTIVE.write() {
+        *active = Some(palette);
+    }
+    HAS_OVERRIDES.store(palette.has_overrides(), Ordering::Relaxed);
+}
+
+/// The active palette (defaults until configured).
+pub fn palette() -> Palette {
+    ACTIVE
+        .read()
+        .ok()
+        .and_then(|active| *active)
+        .unwrap_or_default()
+}
+
+/// Resolve a role to a renderable color.
+///
+/// This deliberately returns the role's *default* color, not the configured
+/// one: substitution happens once per frame in
+/// [`adapt_buffer_for_palette`]. Returning the configured color here would let
+/// the same cell be remapped twice (once by the accessor, once by the buffer
+/// pass), which compounds the hue/lightness offsets.
+pub fn role_color(role: Role) -> Color {
+    let (r, g, b) = role.default_rgb();
+    crate::color::rgb(r, g, b)
+}
+
+/// Apply the configured palette to a fully rendered frame buffer.
+///
+/// Every color in the TUI reaches the terminal through a buffer cell, so
+/// rewriting cells here makes *all* colors configurable, including the
+/// hundreds of ad hoc `rgb(...)` literals and ratatui's named colors, without
+/// editing each call site. No-op when nothing is configured.
+pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
+    if !HAS_OVERRIDES.load(Ordering::Relaxed) {
+        return;
+    }
+    let palette = palette();
+    // A frame holds few distinct colors; memoize the substitution per color.
+    let mut cache: std::collections::HashMap<Color, Color> = std::collections::HashMap::new();
+    let mut adapt = |color: Color| -> Color {
+        if color == Color::Reset {
+            return color;
+        }
+        *cache
+            .entry(color)
+            .or_insert_with(|| adapt_color(&palette, color))
+    };
+    for cell in buf.content.iter_mut() {
+        cell.fg = adapt(cell.fg);
+        cell.bg = adapt(cell.bg);
+        cell.underline_color = adapt(cell.underline_color);
+    }
+}
+
+/// Substitute one rendered color using `palette`.
+pub fn adapt_color(palette: &Palette, color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let (r, g, b) = remap_literal_with(palette, (r, g, b));
+            crate::color::rgb(r, g, b)
+        }
+        Color::Indexed(index) => {
+            // 256-color terminals: map through the same logic in RGB space.
+            let (r, g, b) = remap_literal_with(palette, crate::color::indexed_to_rgb(index));
+            crate::color::rgb(r, g, b)
+        }
+        named => remap_named_with(palette, named),
+    }
+}
+
+/// Remap an ad hoc literal color onto the configured palette.
+///
+/// Widgets call `rgb(...)` with hundreds of one-off shades. When the user
+/// overrides a role, any literal that sits perceptually near that role's
+/// *default* is re-expressed relative to the new role color, preserving the
+/// literal's own lightness offset (so a "dimmer variant of the warning color"
+/// stays a dimmer variant). Literals far from every overridden role are left
+/// untouched.
+///
+/// With no overrides this is the identity function.
+#[inline]
+pub fn remap_literal(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    if !HAS_OVERRIDES.load(Ordering::Relaxed) {
+        return rgb;
+    }
+    remap_literal_with(&palette(), rgb)
+}
+
+/// Map a terminal-named color (`Color::White`, `Color::Red`, ...) onto the
+/// configured palette.
+///
+/// Widgets also use ratatui's named colors, which carry no RGB literal for
+/// `remap_literal` to catch. Named colors are mapped to the semantic role they
+/// conventionally stand for, and left untouched when that role is not
+/// configured, so default behavior is unchanged.
+pub fn remap_named_with(palette: &Palette, color: Color) -> Color {
+    let role = match color {
+        Color::Red | Color::LightRed => Role::Error,
+        Color::Green | Color::LightGreen => Role::Success,
+        Color::Yellow | Color::LightYellow => Role::Warning,
+        Color::Blue | Color::LightBlue => Role::Info,
+        Color::Magenta | Color::LightMagenta => Role::Accent,
+        Color::Cyan | Color::LightCyan => Role::HeaderIcon,
+        Color::White => Role::AiText,
+        Color::Gray | Color::DarkGray => Role::Dim,
+        _ => return color,
+    };
+    if !palette.is_overridden(role) {
+        return color;
+    }
+    let (r, g, b) = palette.rgb(role);
+    crate::color::rgb(r, g, b)
+}
+
+/// Maximum perceptual distance (in oklab units) at which a literal is
+/// considered "an instance of" a role color. Roughly a same-hue family match;
+/// beyond this the literal is a genuinely different color and is left alone.
+const FAMILY_RADIUS: f32 = 0.16;
+
+/// Palette-explicit variant of [`remap_literal`], for tests and tooling.
+pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    let source = crate::harmony::Oklab::from_rgb(rgb);
+    let mut best: Option<(f32, Role)> = None;
+    for role in ALL_ROLES.iter().copied() {
+        if !palette.is_overridden(role) {
+            continue;
+        }
+        let default = crate::harmony::Oklab::from_rgb(role.default_rgb());
+        let distance = source.distance(default);
+        if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
+            best = Some((distance, role));
+        }
+    }
+
+    let Some((_, role)) = best else {
+        return rgb;
+    };
+
+    // Re-express the literal relative to the new role color, keeping its
+    // lightness/chroma offset from the role default.
+    let default = crate::harmony::Oklab::from_rgb(role.default_rgb());
+    let target = crate::harmony::Oklab::from_rgb(palette.rgb(role));
+    crate::harmony::Oklab {
+        l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
+        a: target.a + (source.a - default.a),
+        b: target.b + (source.b - default.b),
+    }
+    .to_rgb()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_role_has_a_unique_key_and_roundtrips() {
+        let mut keys = std::collections::HashSet::new();
+        for role in ALL_ROLES.iter().copied() {
+            assert!(keys.insert(role.key()), "duplicate key {}", role.key());
+            assert_eq!(Role::from_key(role.key()), Some(role));
+            // Accept the friendlier dashed/uppercase spellings too.
+            assert_eq!(Role::from_key(&role.key().replace('_', "-")), Some(role));
+        }
+    }
+
+    #[test]
+    fn parses_hex_in_common_spellings() {
+        assert_eq!(parse_hex("#8ab4f8"), Some((138, 180, 248)));
+        assert_eq!(parse_hex("8AB4F8"), Some((138, 180, 248)));
+        assert_eq!(parse_hex("#fff"), Some((255, 255, 255)));
+        assert_eq!(parse_hex("#12345"), None);
+        assert_eq!(parse_hex("nope"), None);
+    }
+
+    #[test]
+    fn default_palette_matches_historical_values() {
+        let palette = Palette::default();
+        assert_eq!(palette.rgb(Role::User), (138, 180, 248));
+        assert!(!palette.has_overrides());
+    }
+
+    #[test]
+    fn unconfigured_palette_leaves_literals_untouched() {
+        let palette = Palette::default();
+        for literal in [(255, 200, 100), (35, 40, 50), (7, 7, 7)] {
+            assert_eq!(remap_literal_with(&palette, literal), literal);
+        }
+    }
+
+    #[test]
+    fn overriding_a_role_retargets_nearby_literals() {
+        let mut palette = Palette::default();
+        // Make the warning role green instead of amber.
+        palette.set(Role::Warning, (80, 220, 120));
+        // A literal that *is* the warning default should land on the new color.
+        let remapped = remap_literal_with(&palette, Role::Warning.default_rgb());
+        assert_eq!(remapped, (80, 220, 120));
+
+        // A near-variant of amber should also move toward green, keeping its
+        // relative darkness.
+        let variant = (200, 150, 70);
+        let moved = remap_literal_with(&palette, variant);
+        assert_ne!(moved, variant, "amber variant should follow the role");
+        assert!(
+            moved.1 > moved.0,
+            "retargeted variant should be green-dominant, got {moved:?}"
+        );
+    }
+
+    #[test]
+    fn distant_literals_are_not_captured_by_an_override() {
+        let mut palette = Palette::default();
+        palette.set(Role::Warning, (80, 220, 120));
+        // A blue is nowhere near amber and must be left alone.
+        let blue = (60, 90, 220);
+        assert_eq!(remap_literal_with(&palette, blue), blue);
+    }
+
+    #[test]
+    fn from_pairs_reports_errors_without_dropping_valid_entries() {
+        let (palette, errors) = Palette::from_pairs([
+            ("accent", "#ff0000"),
+            ("bogus", "#00ff00"),
+            ("ai", "not-a-color"),
+        ]);
+        assert_eq!(palette.rgb(Role::Accent), (255, 0, 0));
+        assert_eq!(palette.rgb(Role::Ai), Role::Ai.default_rgb());
+        assert_eq!(errors.len(), 2);
+    }
+}

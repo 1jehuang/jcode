@@ -121,6 +121,13 @@ pub fn clear_buf(area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// Build a renderable color from an RGB literal, quantizing for 256-color
+/// terminals.
+///
+/// User color configuration is *not* applied here. It is applied once per
+/// frame at the buffer level (`palette::adapt_buffer_for_palette`) so a color
+/// can never be remapped twice. See `palette` for why that choke point is the
+/// single place colors are substituted.
 #[inline]
 pub fn rgb(r: u8, g: u8, b: u8) -> Color {
     if has_truecolor() {

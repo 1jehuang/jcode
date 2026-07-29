@@ -1,8 +1,12 @@
 pub mod color;
+pub mod harmony;
+pub mod palette;
 pub mod theme;
 pub mod theme_mode;
 
 pub use color::{ColorCapability, clear_buf, color_capability, has_truecolor, indexed_to_rgb, rgb};
+pub use harmony::{Criterion, HarmonyReport, Oklab, analyze as analyze_harmony, analyze_active};
+pub use palette::{ALL_ROLES, Palette, Role, palette, role_color, set_palette};
 pub use theme_mode::{
     ThemeMode, adapt_buffer, adapt_buffer_for_theme, adapt_color_for_theme, is_light_theme,
     set_theme_mode, theme_mode,
