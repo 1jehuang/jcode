@@ -294,7 +294,10 @@ impl McpConfig {
                     let count = config.servers.len();
                     if count > 0 {
                         sources.push(format!("{} from Claude Code (legacy)", count));
-                        imported.servers.extend(config.servers);
+                        Self::merge_servers_preferring_runnable(
+                            &mut imported.servers,
+                            config.servers,
+                        );
                     }
                 }
             }
@@ -307,8 +310,13 @@ impl McpConfig {
                     let count = config.servers.len();
                     if count > 0 {
                         sources.push(format!("{} from Codex CLI", count));
-                        // Codex overrides Claude for same-named servers
-                        imported.servers.extend(config.servers);
+                        // Codex overrides Claude for same-named servers, except
+                        // that a transport jcode cannot run must not displace a
+                        // working stdio definition (issue #653).
+                        Self::merge_servers_preferring_runnable(
+                            &mut imported.servers,
+                            config.servers,
+                        );
                     }
                 }
             }
@@ -422,7 +430,7 @@ impl McpConfig {
                     std::collections::HashMap<String, McpServerConfig>,
                 >(map.clone())
             {
-                config.servers.extend(servers);
+                Self::merge_servers_preferring_runnable(&mut config.servers, servers);
             }
         }
 
