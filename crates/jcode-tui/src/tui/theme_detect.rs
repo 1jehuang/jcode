@@ -62,6 +62,7 @@ pub fn init_theme_mode() -> ThemeMode {
         None => *DETECTED.get_or_init(resolve_theme_mode),
     };
     jcode_tui_style::set_theme_mode(mode);
+    init_palette();
     mode
 }
 
@@ -87,7 +88,26 @@ pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
             .unwrap_or_else(resolve_theme_mode_without_terminal_query)
     });
     jcode_tui_style::set_theme_mode(mode);
+    init_palette();
     mode
+}
+
+/// Install the user's configured color palette from `[display.colors]`.
+///
+/// Invalid entries are logged and skipped rather than failing the palette, so
+/// one typo can never leave the TUI unstyled. Safe to call repeatedly; the TUI
+/// calls it again after `/colors` edits so changes apply without a restart.
+pub fn init_palette() {
+    let configured = &crate::config::config().display.colors;
+    let (palette, errors) = jcode_tui_style::Palette::from_pairs(
+        configured
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    for error in errors {
+        crate::logging::warn(&format!("display.colors: {error}"));
+    }
+    jcode_tui_style::set_palette(palette);
 }
 
 pub fn current_theme_label() -> &'static str {

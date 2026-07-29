@@ -1037,6 +1037,10 @@ pub struct DisplayConfig {
     pub latex_rendering: LatexRenderingMode,
     /// Pin read images to side pane (default: true)
     pub pin_images: bool,
+    /// Pin the full session todo list to the top of the chat transcript while
+    /// it scrolls, like the sticky previous-prompt preview (default: false)
+    #[serde(default)]
+    pub pin_todos: bool,
     /// Show idle animation before first prompt (default: true)
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
@@ -1080,6 +1084,12 @@ pub struct DisplayConfig {
     /// adapts jcode's palette for light backgrounds. Default: auto.
     #[serde(default)]
     pub theme: String,
+    /// Per-role color overrides, e.g. `user = "#8ab4f8"`. Any TUI color can be
+    /// configured: the named roles are substituted directly, and ad hoc shades
+    /// used by widgets follow the role they belong to. Run `/colors` to list
+    /// roles and `/colors harmony` to score the result.
+    #[serde(default)]
+    pub colors: std::collections::BTreeMap<String, String>,
     /// Opt-in active sessions manager: pressing Left arrow on an empty input
     /// opens a picker scoped to live (open) sessions, showing which are still
     /// working and which are ready for input (default: false). The `/active`
@@ -1098,6 +1108,7 @@ impl Default for DisplayConfig {
             diff_mode: DiffDisplayMode::default(),
             show_diffs: None,
             pin_images: true,
+            pin_todos: false,
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,
@@ -1124,6 +1135,7 @@ impl Default for DisplayConfig {
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
             theme: String::new(),
+            colors: std::collections::BTreeMap::new(),
             active_sessions_manager: false,
             overscroll_status: OverscrollStatusMode::default(),
         }
