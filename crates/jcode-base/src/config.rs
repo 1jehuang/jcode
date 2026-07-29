@@ -130,6 +130,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_PRESERVE_REASONING_CONTEXT",
     "JCODE_PERFORMANCE",
     "JCODE_PIN_IMAGES",
+    "JCODE_PIN_TODOS",
     "JCODE_PREVENT_SLEEP_WHILE_STREAMING",
     "JCODE_PROVIDER",
     "JCODE_PROMPT_ENTRY_ANIMATION",
@@ -705,6 +706,10 @@ mod env_overrides;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_color_tests.rs"]
+mod color_tests;
 
 /// Whether partner discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.
