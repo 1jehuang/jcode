@@ -77,6 +77,55 @@ fn has_started_conversation(state: &dyn TuiState) -> bool {
         .any(|m| matches!(m.role.as_str(), "user" | "assistant" | "tool" | "reasoning"))
 }
 
+/// Whether the decorative animation is actually *on screen*, which is what the
+/// redraw cadence must be paced by.
+///
+/// [`idle_donut_active`] answers a different question: "does this screen want a
+/// donut?". The renderer uses that to lay out donut rows, and the two answers
+/// can differ, because layout can drop the animation after the fact:
+///
+/// * `ui::draw_inner` returns early for full-screen overlays (`/resume` picker,
+///   help, changelog, model status, login/account pickers) long before the donut
+///   chunk is laid out.
+/// * The donut reservation shrinks as the composer grows, and on a short
+///   terminal it reaches zero rows.
+///
+/// In both cases nothing animates, yet the loop still ticked at `animation_fps`.
+/// Because no animated rectangle was published, the cheap animation-only repaint
+/// stood down (`no_animation_area`) and *every* tick became a full frame.
+/// Measured on a live client freshly spawned onto the `/resume` picker: 63 full
+/// `terminal.draw` calls per second, each changing 0 of 7680 cells, on a screen
+/// a terminal emulator confirmed was completely static. Keystrokes competed with
+/// 60 useless full frames a second, which is the reported lag.
+///
+/// `animation_on_screen` is passed in rather than read from the renderer's
+/// global slot so this stays a pure function of stated inputs: the callers that
+/// pace the live loop supply [`ui::last_idle_animation_area`], while tests can
+/// state the premise directly. Deriving it from what the renderer actually
+/// published (rather than re-deriving layout rules here) means a new overlay or
+/// layout tweak cannot reintroduce the wasted loop.
+///
+/// The renderer must never consult this when deciding whether to draw the donut:
+/// that would be self-referential, and "nothing published last frame" would
+/// prevent a donut forever.
+fn idle_donut_paces_redraws(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+    animation_on_screen: bool,
+) -> bool {
+    animation_on_screen && idle_donut_active_with_policy(state, policy)
+}
+
+/// Whether the renderer published animated rows on its last frame.
+///
+/// The live default for `animation_on_screen`. A brand-new client has published
+/// nothing yet, and its first frame is drawn on demand rather than on the
+/// animation cadence, so starting from `false` costs at most one tick of
+/// smoothness and never blocks the animation from starting.
+fn animation_on_screen_now() -> bool {
+    ui::last_idle_animation_area().is_some()
+}
+
 /// Last reason a periodic tick demanded a full frame instead of the cheap
 /// animation-only repaint, surfaced through `draw-stats`.
 ///
@@ -284,9 +333,18 @@ fn actively_composing(state: &dyn TuiState) -> bool {
             .is_some_and(|since| since < COMPOSING_ANIMATION_BACKOFF)
 }
 
-pub(crate) fn redraw_interval_with_policy(
+/// Tick cadence for the current state, with both the performance policy and
+/// "is the decorative animation actually on screen" stated explicitly.
+///
+/// `animation_on_screen` exists because the renderer can drop the animation
+/// after the scheduler has decided the screen wants one (full-screen overlay, or
+/// a terminal too short to reserve donut rows). Pacing the loop at animation FPS
+/// in that case costs a full frame per tick and paints nothing; see
+/// [`idle_donut_paces_redraws`].
+pub(crate) fn redraw_interval_with_policy_and_animation(
     state: &dyn TuiState,
     policy: &crate::perf::TuiPerfPolicy,
+    animation_on_screen: bool,
 ) -> Duration {
     let animation_interval = fps_to_duration(policy.animation_fps);
     let fast_interval = fps_to_duration(policy.redraw_fps);
@@ -353,7 +411,7 @@ pub(crate) fn redraw_interval_with_policy(
         return REDRAW_DEEP_IDLE;
     }
 
-    if idle_donut_active_with_policy(state, policy) {
+    if idle_donut_paces_redraws(state, policy, animation_on_screen) {
         // While the user is actively typing, the input line matters and the
         // decoration does not. A 60fps donut means a keystroke can land behind an
         // in-flight animation frame, so typing into a fresh session felt sluggish
@@ -437,9 +495,27 @@ pub(crate) fn redraw_interval_with_policy(
     }
 }
 
+/// Policy-only cadence: what the schedule would be if the decorative animation
+/// were on screen.
+///
+/// This is the right entry point for reasoning about (and testing) the cadence
+/// *policy* without depending on renderer state. The live loop must use
+/// [`redraw_interval`], which additionally accounts for the animation having
+/// been dropped by layout.
+///
+/// Only tests call this today (the run loop needs the live variant), hence the
+/// allow: it documents the policy/liveness split rather than being dead weight.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn redraw_interval_with_policy(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+) -> Duration {
+    redraw_interval_with_policy_and_animation(state, policy, true)
+}
+
 pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
     let policy = crate::perf::tui_policy();
-    redraw_interval_with_policy(state, &policy)
+    redraw_interval_with_policy_and_animation(state, &policy, animation_on_screen_now())
 }
 
 pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
@@ -480,7 +556,9 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
         return false;
     }
 
-    if include_idle_animation && idle_donut_active_with_policy(state, &policy) {
+    let animation_paces_redraws =
+        idle_donut_paces_redraws(state, &policy, animation_on_screen_now());
+    if include_idle_animation && animation_paces_redraws {
         return true;
     }
 
