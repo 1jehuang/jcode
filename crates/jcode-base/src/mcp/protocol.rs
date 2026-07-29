@@ -440,7 +440,7 @@ impl McpConfig {
             if path.exists()
                 && let Ok(config) = Self::load_from_file(&path)
             {
-                merged.servers.extend(config.servers);
+                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
             }
         }
         merged
@@ -486,15 +486,16 @@ impl McpConfig {
             if claude_json.exists() {
                 let cwd = project_dir.map(std::path::Path::to_path_buf);
                 let config = Self::load_claude_json(&claude_json, cwd.as_deref());
-                merged.servers.extend(config.servers);
+                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
             }
         }
 
         // Project-local config files, resolved against the project directory.
         if let Some(project_root) = project_dir {
-            merged
-                .servers
-                .extend(Self::load_project_locals(project_root).servers);
+            Self::merge_servers_preferring_runnable(
+                &mut merged.servers,
+                Self::load_project_locals(project_root).servers,
+            );
         }
 
         // jcode only supports stdio servers today. Drop HTTP/SSE entries (common
@@ -513,6 +514,32 @@ impl McpConfig {
         });
 
         merged
+    }
+
+    /// Merge `incoming` over `existing`, except that an entry jcode cannot run
+    /// (HTTP/SSE) never displaces a working stdio entry for the same name.
+    ///
+    /// Without this, a `type: http` entry in `~/.claude.json` would overwrite a
+    /// working stdio server from `~/.jcode/mcp.json` and then be dropped by the
+    /// non-stdio filter, silently losing the server (issue #653).
+    fn merge_servers_preferring_runnable(
+        existing: &mut std::collections::HashMap<String, McpServerConfig>,
+        incoming: std::collections::HashMap<String, McpServerConfig>,
+    ) {
+        for (name, cfg) in incoming {
+            if let Some(current) = existing.get(&name)
+                && current.is_stdio()
+                && !cfg.is_stdio()
+            {
+                crate::logging::info(&format!(
+                    "MCP: Keeping existing stdio server '{}'; ignoring {} definition from a lower-precedence config",
+                    name,
+                    cfg.transport.as_deref().unwrap_or("http")
+                ));
+                continue;
+            }
+            existing.insert(name, cfg);
+        }
     }
 }
 

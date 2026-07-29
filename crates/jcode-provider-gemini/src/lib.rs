@@ -481,10 +481,37 @@ fn gemini_compatible_schema(schema: &Value) -> Value {
                     out.insert(key.clone(), gemini_compatible_schema(value));
                 }
             }
+            prune_dangling_required(&mut out);
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(gemini_compatible_schema).collect()),
         _ => schema.clone(),
+    }
+}
+
+/// Drop `required` entries that name a property the same object does not define.
+///
+/// Gemini validates this and rejects the whole request with HTTP 400
+/// ("required fields ['label'] are not defined in the schema properties"), while
+/// OpenAI-compatible providers accept it. Multi-action tools legitimately write
+/// `anyOf` branches that only constrain a discriminator and require a property
+/// declared in the parent schema, which is what tripped this (issue #655).
+///
+/// Objects without a `properties` map are left alone: there `required` cannot be
+/// checked locally and Gemini does not reject it.
+fn prune_dangling_required(out: &mut serde_json::Map<String, Value>) {
+    let Some(Value::Object(properties)) = out.get("properties") else {
+        return;
+    };
+    let defined: Vec<String> = properties.keys().cloned().collect();
+    if let Some(Value::Array(required)) = out.get_mut("required") {
+        required.retain(|name| match name.as_str() {
+            Some(name) => defined.iter().any(|known| known == name),
+            None => false,
+        });
+        if required.is_empty() {
+            out.remove("required");
+        }
     }
 }
 
