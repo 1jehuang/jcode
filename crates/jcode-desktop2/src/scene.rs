@@ -174,78 +174,77 @@ fn draw_hero(
     );
 }
 
-/// Draw the session strip: a row of bars at the top of the window, one per
-/// live session, grouped by working directory.
+/// Draw the session strip: a row of small rectangles at the top of the window,
+/// one per live session, enclosed in an outlined rectangle per working
+/// directory.
 ///
 /// Deliberately the same visual language as the author's waybar
 /// `niri-workspaces` module, because it is the language he already reads
-/// without thinking: a dim group label, then thin ticks for the sessions in
-/// it, with the focused one a wide solid block.
+/// without thinking: thin ticks for the sessions in a place, with the focused
+/// one a wide solid block.
+///
+/// Purely geometric: the group's name used to be spelled out beside its bars,
+/// which turned the chrome row into a line of prose that had to be *read*
+/// (`jcode-website jcode jcode-desktop2 ...`) and grew with every checkout.
+/// The enclosure carries the same information as shape, so the row is scanned
+/// rather than read, and stays the same width whatever the directories are
+/// called. Which place is which is answered by the overview, where there is
+/// room to name them.
 fn draw_strip(
     scene: &mut Scene,
-    text: &mut text::TextSystem,
     model: &Model,
     band: (f64, f64),
     frame: &layout::Frame,
     scale: f64,
 ) {
     let (top, bottom) = band;
-    let label_style = ParagraphStyle {
-        font_size: layout::STRIP_LABEL_SIZE,
-        color: model.theme.faint,
-        letter_spacing_em: 0.08,
-        line_height: 1.0,
-        ..Default::default()
-    };
-    // Measure labels through the same text system that draws them, so the bars
-    // sit where the label really ends rather than at an estimate. Measured up
-    // front because layout needs them all and the text system is exclusive.
-    let widths: Vec<(String, f64)> = model
-        .strip
-        .groups()
-        .iter()
-        .map(|group| {
-            (
-                group.label.clone(),
-                text.measure_width(&group.label, label_style, scale),
-            )
-        })
-        .collect();
-    let items = crate::strip::layout_items(&model.strip, frame.left, frame.right, |label| {
-        widths
-            .iter()
-            .find(|(name, _)| name == label)
-            .map(|(_, width)| *width)
-            .unwrap_or(0.0)
-    });
+    let items = crate::strip::layout_items(&model.strip, frame.left, frame.right);
 
-    // Bars are centred in the band; the label sits on the same row.
-    let bar_top = top + (bottom - top - layout::STRIP_BAR_HEIGHT) / 2.0;
-    let label_top = top + (bottom - top - f64::from(layout::STRIP_LABEL_SIZE)) / 2.0;
+    // Blocks are centred in the band; the enclosure adds its padding around
+    // them, so both are derived from the same centre line.
+    let block_top = top + (bottom - top - layout::STRIP_BAR_HEIGHT) / 2.0;
+    let block_bottom = block_top + layout::STRIP_BAR_HEIGHT;
+    let pad = layout::STRIP_FRAME_PAD;
 
     for item in items {
         match item {
-            crate::strip::Item::Label { group, x } => {
-                let Some(group) = model.strip.groups().get(group) else {
-                    continue;
+            crate::strip::Item::Frame {
+                x,
+                width,
+                focused,
+                group: _,
+            } => {
+                // The enclosure is a hairline so it frames without competing
+                // with the blocks inside it. The focused group's outline is
+                // full-weight rule ink; the others are faint, so the row shows
+                // where you are before you count anything.
+                let color = if focused {
+                    model.theme.muted
+                } else {
+                    model.theme.rule
                 };
-                text.draw_paragraph_scaled(
-                    scene,
-                    &group.label,
-                    (x, label_top),
-                    frame.column() as f32,
-                    label_style,
-                    scale,
+                scene.stroke(
+                    &vello::kurbo::Stroke::new(frame.hairline().max(1.0 / scale)),
+                    Affine::scale(scale),
+                    color,
+                    None,
+                    &RoundedRect::new(
+                        x,
+                        block_top - pad,
+                        x + width,
+                        block_bottom + pad,
+                        layout::STRIP_FRAME_RADIUS,
+                    ),
                 );
             }
-            crate::strip::Item::Bar {
+            crate::strip::Item::Block {
                 x,
                 width,
                 focused,
                 group,
                 index,
             } => {
-                // Unfocused bars are dim so the focused one reads instantly;
+                // Unfocused blocks are dim so the focused one reads instantly;
                 // a busy session is drawn at full ink even when unfocused, so
                 // work happening off-screen is visible rather than silent.
                 let busy = model
@@ -267,13 +266,7 @@ fn draw_strip(
                     Affine::scale(scale),
                     color,
                     None,
-                    &RoundedRect::new(
-                        x,
-                        bar_top,
-                        x + width,
-                        bar_top + layout::STRIP_BAR_HEIGHT,
-                        1.0,
-                    ),
+                    &RoundedRect::new(x, block_top, x + width, block_bottom, 1.0),
                 );
             }
         }
@@ -705,7 +698,7 @@ pub fn build_scene(
 
     // Top chrome row: the session strip.
     if let Some(band) = frame.strip() {
-        draw_strip(scene, text, model, band, &frame, scale);
+        draw_strip(scene, model, band, &frame, scale);
     }
 
     // Composer: a real input field. Paper fill plus a hairline border, rather

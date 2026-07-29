@@ -25,21 +25,12 @@ fn the_strip_reads_like_the_waybar_module() {
         .strip()
         .expect("the strip node did not get a strip band");
 
-    let items = crate::strip::layout_items(
-        &model.strip,
-        rendered.frame.left,
-        rendered.frame.right,
-        |label| {
-            // The exact label width does not matter here: the bars' own
-            // rectangles are re-derived from the same layout the renderer used.
-            f64::from(label.len() as f32) * f64::from(crate::layout::STRIP_LABEL_SIZE) * 0.62
-        },
-    );
+    let items = crate::strip::layout_items(&model.strip, rendered.frame.left, rendered.frame.right);
 
     let mut focused_ink = None;
     let mut unfocused_ink = Vec::new();
     for item in &items {
-        if let crate::strip::Item::Bar {
+        if let crate::strip::Item::Block {
             x, width, focused, ..
         } = item
         {
