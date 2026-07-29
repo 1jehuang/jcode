@@ -888,6 +888,14 @@ async fn run_default_command(args: Args) -> Result<()> {
     }
 
     startup_profile::mark("client_mode_start");
+    // The terminal background (OSC 11) query is a blocking round trip that used
+    // to sit directly in front of TUI init. Start it here so it overlaps the
+    // server check/spawn below. Safe only because nothing has entered raw mode
+    // or started reading stdin yet, and it is skipped for exec handoffs where
+    // the inherited terminal is already live.
+    if std::env::var_os("JCODE_RESUMING").is_none() {
+        crate::tui::theme_detect::prewarm_theme_mode();
+    }
     let mut server_running = if args.fresh_spawn {
         true
     } else {
