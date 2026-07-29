@@ -71,6 +71,24 @@ Three consequences worth knowing:
 An unconfigured palette is a byte-identical no-op, guarded by tests, so existing
 users see no change.
 
+### Is it really *every* color?
+
+That claim is checked rather than asserted. `palette_literals.rs` holds every
+distinct `rgb(...)` literal the TUI crates render (222 of them), and a test
+requires **all** of them to be reachable from some role: an unclaimed literal is
+a color a user cannot change. A second test requires every one of the 22 roles to
+claim at least one real literal (so no role is dead weight in `/colors`) and none
+to claim more than half (so the family radius still tells roles apart). The
+current spread runs from 2 literals (`header_session`) to 28 (`warning`).
+
+Ratatui's named colors are covered separately, since they carry no RGB for
+literal matching to work with. A test enumerates every named color the TUI
+actually uses and requires each to map to a role. `Color::Black` was unreachable
+until that test existed. `Color::Reset` is deliberately never substituted: it is
+how the terminal's own background shows through.
+
+Regenerate `palette_literals.rs` when adding widgets that introduce new shades.
+
 ## Measuring harmony
 
 `/colors harmony` scores a palette 0-100 across five criteria and reports the
