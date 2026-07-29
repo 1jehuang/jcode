@@ -1315,14 +1315,6 @@ pub struct App {
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
-    /// JSON payload for the pinned todo band (display.pin_todos). `None` when
-    /// the feature is off or the session has no todos. Refreshed on tick.
-    pinned_todos_payload: Option<String>,
-    /// Hash of the todo payload behind `pinned_todos_payload`, used to skip
-    /// re-serializing when nothing changed between ticks.
-    pinned_todos_rendered_hash: u64,
-    /// Last time the pinned todo band re-read todos from disk (1s throttle).
-    pinned_todos_checked_at: Option<Instant>,
     last_side_panel_refresh: Option<Instant>,
     // Most recently persisted focus target for dictation routing.
     last_client_focus_recorded_at: Option<Instant>,

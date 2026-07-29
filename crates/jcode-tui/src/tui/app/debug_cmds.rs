@@ -1146,6 +1146,10 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
                 .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
             "client_focused": crate::tui::TuiState::client_focused(app),
             "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
+            // The sticky `idle_animation.last_full_frame_reason` keeps naming a
+            // notice that expired minutes ago, so pair it with the reason that
+            // holds *right now* to explain an ongoing full-frame repaint.
+            "full_frame_reason": crate::tui::current_full_frame_redraw_reason(app),
             // Latency the user actually feels: key read -> frame flushed.
             "key_to_paint": crate::tui::ui::key_to_paint_debug_json(),
         }),
