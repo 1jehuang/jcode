@@ -269,6 +269,9 @@ impl Palette {
 /// Parse `#rrggbb`, `#rgb`, or a bare `rrggbb` hex string.
 pub fn parse_hex(text: &str) -> Option<(u8, u8, u8)> {
     let hex = text.trim().trim_start_matches('#');
+    // `from_str_radix` failing here just means "not a hex color", which callers
+    // surface to the user as an invalid-color message, so the error value itself
+    // carries nothing extra.
     let byte = |slice: &str| u8::from_str_radix(slice, 16).ok();
     match hex.len() {
         3 => {
@@ -309,8 +312,15 @@ pub fn set_palette(palette: Palette) {
     HAS_OVERRIDES.store(palette.has_overrides(), Ordering::Relaxed);
 }
 
-/// The active palette (defaults until configured).
+/// The active palette.
+///
+/// Before configuration is loaded this is the built-in palette, which is what
+/// every historical call site rendered, so an unconfigured session looks exactly
+/// as it always has.
 pub fn palette() -> Palette {
+    // `unwrap_or_default` here is the built-in palette, not a swallowed error:
+    // `None` means "config has not been loaded yet", and the default palette is
+    // exactly what every historical call site rendered.
     (*ACTIVE
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner()))

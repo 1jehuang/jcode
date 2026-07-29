@@ -478,11 +478,27 @@ fn hue_harmony(palette: &Palette) -> (Criterion, &'static str) {
         }
     }
 
-    let Fit {
+    // `SCHEMES` is non-empty so a fit is always found, but express that as a
+    // fallback rather than an assertion: this runs while rendering a user's
+    // palette, and no scoring detail is worth risking a panic there. A missing
+    // fit degrades to "no hue structure detected".
+    let Some(Fit {
         mean_deviation,
         scheme,
         deviations,
-    } = best.expect("at least one scheme is evaluated");
+    }) = best
+    else {
+        return (
+            Criterion {
+                name: "hue harmony",
+                score: 100,
+                weight: 2.0,
+                findings: Vec::new(),
+                critical: false,
+            },
+            "unknown",
+        );
+    };
     // A 45 degree mean deviation is where hues stop reading as related at all;
     // real palettes routinely sit 15-25 degrees off a textbook scheme.
     let score = 1.0 - (mean_deviation / 45.0).clamp(0.0, 1.0);
