@@ -149,6 +149,11 @@ fn idle_animation_is_excluded_from_the_full_frame_redraw_signal() {
     clear_flicker_frame_history_for_tests();
 
     let idle = idle_animation_state(1.0);
+    // The animation only paces the loop when it is actually on screen, so put it
+    // there first by drawing a frame. Asserting the cadence without this would
+    // describe a state the run loop never reaches: nothing published means
+    // nothing to animate, and ticking for it is the wasted-frame bug.
+    let _ = render_full(&idle, 100, 40);
     assert!(
         crate::tui::periodic_redraw_required(&idle),
         "the animation must keep the redraw loop ticking"
@@ -225,4 +230,160 @@ fn published_rectangle_round_trips_through_the_shared_slot() {
 
     crate::tui::ui::record_idle_animation_area(None);
     assert_eq!(crate::tui::ui::last_idle_animation_area(), None);
+}
+
+/// The bug this pins, reproduced from a live client: on a freshly spawned
+/// session the `/resume` session picker is up, and the redraw loop ran at
+/// animation cadence (60fps) while the animation-only partial repaint was
+/// unavailable, so every tick became a full frame.
+///
+/// Measured before the fix with `scripts/count_idle_draws.py` against the real
+/// binary: 63 full `terminal.draw` calls per second, each changing **0 of 7680
+/// cells**, on a screen that `scripts/dump_fresh_spawn_screen.py` (a real
+/// terminal emulator) confirmed was completely static. `draw-stats` reported
+/// `no_animation_area` x365 over the same window, and an instrumented build
+/// named the state: `session_picker=true`.
+///
+/// The mechanism is a disagreement between two halves of the render loop:
+/// `ui::draw_inner` returns early for full-screen overlays, *before* the donut
+/// chunk that publishes the animated rectangle, while the redraw scheduler was
+/// pacing the loop off "does this screen want a donut?" and never noticed.
+///
+/// This asserts the *cadence*, which is the thing that costs CPU, rather than
+/// the renderer's own decision, so any reconciliation that stops the waste
+/// passes.
+#[test]
+fn a_full_screen_overlay_stops_the_decorative_animation_cadence() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+
+    // Baseline: this screen really is an animating idle screen once drawn, so a
+    // pass below cannot come from the animation being off for other reasons.
+    let idle = idle_animation_state(1.0);
+    let _ = render_full(&idle, 160, 48);
+    let animation_interval = crate::tui::redraw_interval(&idle);
+    assert!(
+        animation_interval < crate::tui::REDRAW_IDLE,
+        "baseline idle screen should tick faster than the idle cadence, got \
+         {animation_interval:?}"
+    );
+
+    let overlays: Vec<(&str, TestState)> = vec![
+        (
+            "changelog",
+            TestState {
+                changelog_scroll: Some(0),
+                ..idle_animation_state(1.0)
+            },
+        ),
+        (
+            "help",
+            TestState {
+                help_scroll: Some(0),
+                ..idle_animation_state(1.0)
+            },
+        ),
+    ];
+
+    for (name, state) in overlays {
+        // Render the overlay: this is the frame that (correctly) publishes no
+        // animated rows, because the overlay covers the screen.
+        let _ = render_full(&state, 160, 48);
+        assert_eq!(
+            crate::tui::ui::last_idle_animation_area(),
+            None,
+            "the {name} overlay must not publish animated rows"
+        );
+
+        let interval = crate::tui::redraw_interval(&state);
+        assert!(
+            interval >= crate::tui::REDRAW_IDLE,
+            "with the {name} overlay up there is no visible animation, so the \
+             loop must not run at animation cadence; got {interval:?}"
+        );
+        assert!(
+            !crate::tui::periodic_redraw_required(&state),
+            "with the {name} overlay up a periodic tick must not demand a frame \
+             for an animation nobody can see"
+        );
+    }
+}
+
+/// The invariant behind the fix: whenever the loop is paced at animation
+/// cadence, the renderer must have published animated rows for the cheap partial
+/// repaint to patch. Otherwise every tick is a full frame that changes nothing.
+///
+/// Checked across terminal sizes and both idle screens, which is how the second
+/// instance of this bug was found: on a short terminal the onboarding donut
+/// shrinks to zero rows, so nothing animates there either.
+#[test]
+fn animation_cadence_implies_the_renderer_published_animated_rows() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+
+    let screens: Vec<(&str, TestState)> = vec![
+        ("idle", idle_animation_state(1.0)),
+        (
+            "onboarding",
+            TestState {
+                onboarding_preview: true,
+                suggestions: vec![
+                    ("Log in to get started".to_string(), "/login".to_string()),
+                    ("Build a CLI".to_string(), "build a CLI".to_string()),
+                ],
+                anim_elapsed: 1.0,
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (name, state) in screens {
+        for (width, height) in [(160u16, 48u16), (100, 40), (80, 24), (60, 12), (40, 8)] {
+            let _ = render_full(&state, width, height);
+            let published = crate::tui::ui::last_idle_animation_area().is_some();
+            let paces_animation = crate::tui::redraw_interval(&state) < crate::tui::REDRAW_IDLE;
+            assert!(
+                !paces_animation || published,
+                "{name} at {width}x{height}: the loop is paced at animation \
+                 cadence but no animated rows were published, so every tick \
+                 becomes a full-frame render that changes nothing"
+            );
+        }
+    }
+}
+
+/// The cadence is derived from what the renderer last published, so the obvious
+/// hazard is a deadlock: "no donut on screen" must not be able to prevent a
+/// donut from ever appearing.
+///
+/// It cannot, because the renderer decides independently (`ui::draw` consults
+/// `idle_donut_active`, never the on-screen variant), and the first frame after
+/// any state change is drawn on demand rather than on this cadence. This pins
+/// that bootstrap: from "nothing published", one ordinary frame is enough to get
+/// the animation on screen and the loop back to animation cadence.
+#[test]
+fn the_animation_can_still_start_from_a_state_with_nothing_published() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+
+    // Simulate "an overlay was up, so nothing is published".
+    crate::tui::ui::record_idle_animation_area(None);
+
+    let idle = idle_animation_state(1.0);
+    assert!(
+        crate::tui::idle_donut_active(&idle),
+        "the renderer's own decision must not depend on what was last published, \
+         otherwise the animation could never start"
+    );
+
+    // One on-demand frame is enough to publish the rows again.
+    let _ = render_full(&idle, 160, 48);
+    assert!(
+        crate::tui::ui::last_idle_animation_area().is_some(),
+        "a single frame must be able to bring the animation back on screen"
+    );
+    assert!(
+        crate::tui::periodic_redraw_required(&idle),
+        "with the animation on screen again the loop must resume animation ticks"
+    );
 }
