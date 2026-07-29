@@ -356,6 +356,9 @@ fn test_remote_ctrl_c_still_arms_quit_when_idle() {
 #[test]
 fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
     let _render_lock = scroll_render_test_lock();
+    // Route the copy into the in-process sink so this passes on a headless
+    // runner instead of hitting the real OS clipboard.
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_copy_test_app();
 
     render_and_snap(&app, &mut terminal);
@@ -363,6 +366,11 @@ fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();
 
+    let copied = clipboard.text().expect("code block should reach the clipboard");
+    assert!(
+        copied.contains("println!(\"hello\");"),
+        "clipboard should carry the code block: {copied:?}"
+    );
     let notice = app.status_notice().unwrap_or_default();
     assert!(
         notice == "Copied rust",
@@ -381,6 +389,7 @@ fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
 #[test]
 fn test_remote_copy_badge_shortcut_supported() {
     let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_copy_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -391,6 +400,11 @@ fn test_remote_copy_badge_shortcut_supported() {
     rt.block_on(app.handle_remote_key(KeyCode::Char('S'), KeyModifiers::ALT, &mut remote))
         .unwrap();
 
+    let copied = clipboard.text().expect("code block should reach the clipboard");
+    assert!(
+        copied.contains("println!(\"hello\");"),
+        "clipboard should carry the code block: {copied:?}"
+    );
     let notice = app.status_notice().unwrap_or_default();
     assert!(
         notice == "Copied rust",
