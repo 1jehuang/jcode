@@ -1146,6 +1146,8 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
                 .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
             "client_focused": crate::tui::TuiState::client_focused(app),
             "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
+            // Latency the user actually feels: key read -> frame flushed.
+            "key_to_paint": crate::tui::ui::key_to_paint_debug_json(),
         }),
     );
 }
