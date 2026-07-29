@@ -380,6 +380,10 @@ async fn apply_terminal_event(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
+            // Start the key-to-paint clock where the key is read: the only point
+            // that corresponds to the user's press. A spawned client runs this
+            // loop, so without it the metric reports nothing for real sessions.
+            crate::tui::ui::note_key_event_read();
             input_attribution.event = Some(format!("key:{:?}:{:?}", key.code, key.kind));
             input_attribution.scroll_delta = key_scroll_delta(&key);
             app.note_client_interaction();
