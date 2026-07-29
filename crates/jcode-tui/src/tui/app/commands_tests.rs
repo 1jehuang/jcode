@@ -171,9 +171,15 @@ mod colors {
     use crate::tui::app::commands_dispatch::dispatch_local_command;
     use crate::tui::app::tests::create_test_app;
 
-    /// These tests share one config file and the process-global palette, so
-    /// they must not run concurrently with each other.
-    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// These tests write the config file and mutate the process-global palette,
+    /// so they must serialize against *every* test touching shared config or
+    /// env state, not merely against each other. A module-private lock would
+    /// still let them swap the config out from under another module's test
+    /// mid-assertion, which is the race class that makes unrelated provider and
+    /// header tests fail intermittently.
+    fn lock_shared_state() -> std::sync::MutexGuard<'static, ()> {
+        crate::storage::lock_test_env()
+    }
 
     /// Take the shared lock and leave the config and palette clean afterwards,
     /// even if the test body panics.
@@ -187,7 +193,7 @@ mod colors {
                 jcode_tui_style::set_palette(jcode_tui_style::Palette::default());
             }
         }
-        let _lock = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = lock_shared_state();
         let _restore = Restore;
         {
             let mut config = crate::config::Config::load();
