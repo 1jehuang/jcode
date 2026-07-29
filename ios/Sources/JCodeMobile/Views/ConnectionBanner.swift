@@ -10,34 +10,17 @@ struct ConnectionBanner: View {
     let onRetry: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wifi.slash")
-                .font(.footnote)
-                .foregroundStyle(Theme.warning)
-                .accessibilityHidden(true)
-            Text(label)
-                .font(.footnote)
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(2)
-            Spacer(minLength: 0)
-            Button(action: onRetry) {
-                Text("Retry")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Theme.mint)
-                    .frame(minWidth: 44, minHeight: 44)
-            }
-            .accessibilityLabel("Retry connection")
-            .accessibilityHint("Reconnects to the server now")
+        BannerStrip(
+            icon: "wifi.slash",
+            tint: Theme.warning,
+            message: label,
+            lineLimit: 2
+        ) {
+            InlineActionButton(title: "Retry", tint: Theme.mint, action: onRetry)
+                .accessibilityLabel("Retry connection")
+                .accessibilityHint("Reconnects to the server now")
         }
-        .padding(.horizontal, 12)
-        .background(Theme.warning.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Theme.warning.opacity(0.35), lineWidth: 1)
-        )
-        .padding(.horizontal)
-        .accessibilityElement(children: .combine)
+        .padding(.horizontal, 16)
     }
 
     private var label: String {
@@ -59,32 +42,35 @@ struct QueuedInterruptChip: View {
     let onCancel: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "clock")
-                .font(.footnote)
-                .foregroundStyle(Theme.mint)
-                .accessibilityHidden(true)
-            Text(count == 1 ? "1 message queued" : "\(count) messages queued")
-                .font(.footnote)
-                .foregroundStyle(Theme.textPrimary)
-            Spacer(minLength: 0)
-            Button(action: onCancel) {
-                Text("Cancel")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Theme.error)
-                    .frame(minWidth: 44, minHeight: 44)
-            }
-            .accessibilityLabel("Cancel queued messages")
-            .accessibilityHint("Removes messages waiting to interrupt the response")
+        BannerStrip(
+            icon: "clock",
+            tint: Theme.mint,
+            message: count == 1 ? "1 message queued" : "\(count) messages queued",
+            lineLimit: 1
+        ) {
+            InlineActionButton(title: "Cancel", tint: Theme.error, action: onCancel)
+                .accessibilityLabel("Cancel queued messages")
+                .accessibilityHint("Removes messages waiting to interrupt the response")
         }
-        .padding(.horizontal, 12)
-        .background(Theme.mintTint)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Theme.mint.opacity(0.35), lineWidth: 1)
-        )
-        .padding(.horizontal)
-        .accessibilityElement(children: .combine)
+        .padding(.horizontal, 16)
+    }
+}
+
+/// Text action sized for touch, used inside inline banners.
+struct InlineActionButton: View {
+    let title: String
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 12)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableButtonStyle(scale: 0.96))
     }
 }
