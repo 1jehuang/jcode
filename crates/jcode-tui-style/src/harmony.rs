@@ -1062,7 +1062,16 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
     // Keep the seed's character but pull extreme saturation into the readable
     // band, so a neon seed still yields a usable palette.
     let chroma = seed_lab.chroma().clamp(0.06, 0.14);
-    let hue = seed_lab.hue_degrees();
+    // A near-neutral seed (black, white, gray) carries no meaningful hue: its
+    // `a`/`b` are numerical noise, and using it would place every role at an
+    // arbitrary angle. Fall back to jcode's own blue so a gray seed yields a
+    // deliberate palette rather than a random one.
+    const NEUTRAL_SEED_CHROMA: f32 = 0.02;
+    let hue = if seed_lab.chroma() < NEUTRAL_SEED_CHROMA {
+        Oklab::from_rgb(Role::User.default_rgb()).hue_degrees()
+    } else {
+        seed_lab.hue_degrees()
+    };
 
     // Foreground lightness that contrasts with the background, and background
     // lightness that stays close to it.
@@ -1082,6 +1091,15 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
     let band = if light_background { fg_l } else { 1.0 - fg_l };
     let step = |fraction: f32| (fg_l + fraction * band * 0.85).clamp(0.06, 0.97);
 
+    // Widen the lightness spread for roles whose *partner* in a
+    // must-distinguish pair shares a similar hue under red-green color vision
+    // deficiency. Hue alone cannot separate them there, so these use the full
+    // usable band rather than a fraction of it.
+    let wide = |fraction: f32| {
+        let extent = if light_background { fg_l } else { 1.0 - fg_l };
+        (fg_l + fraction * extent).clamp(0.10, 0.97)
+    };
+
     let at = |hue_offset: f32, lightness: f32, chroma_scale: f32| -> (u8, u8, u8) {
         let radians = (hue + hue_offset).to_radians();
         let chroma = chroma * chroma_scale;
@@ -1093,30 +1111,31 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
         .to_rgb()
     };
 
-    // A split-complementary layout: enough hue separation for roles to be
-    // distinguishable without scattering them arbitrarily around the wheel.
+    // A tetradic layout (0/90/180/270 from the seed): enough hue separation for
+    // roles to be distinguishable, while staying on a recognized scheme grid so
+    // the palette reads as designed rather than scattered.
     // Offsets are also spread far enough that the must-distinguish pairs stay
     // apart under red-green color vision deficiency, where hues collapse toward
     // a blue-yellow axis and small separations vanish.
     let mut palette = Palette::default();
     for (role, rgb) in [
         (Role::User, at(0.0, fg_l, 1.0)),
-        (Role::Ai, at(150.0, fg_l, 1.0)),
+        (Role::Ai, at(180.0, fg_l, 1.0)),
         // Accent/system and info/success are must-distinguish pairs, so give
         // them large hue *and* lightness separation rather than hue alone.
         // Under red-green color vision deficiency hue separation largely
         // collapses onto a blue-yellow axis, so the must-distinguish pairs are
         // separated by *lightness* as well. Lightness survives every CVD type,
         // which is why accessible palettes lean on it rather than hue alone.
-        (Role::Accent, at(-45.0, step(0.5), 1.2)),
-        (Role::System, at(225.0, step(-0.9), 1.1)),
-        (Role::Info, at(-15.0, step(-0.65), 0.9)),
+        (Role::Accent, at(270.0, wide(0.6), 1.2)),
+        (Role::System, at(90.0, wide(-0.65), 1.15)),
+        (Role::Info, at(0.0, wide(-0.5), 0.9)),
         (Role::FileLink, at(0.0, step(0.35), 0.7)),
         (Role::HeaderIcon, at(180.0, fg_l, 0.9)),
         (Role::HeaderName, at(0.0, fg_l, 0.5)),
         (Role::HeaderSession, at(0.0, step(0.75), 0.15)),
-        (Role::Asap, at(190.0, step(0.35), 1.0)),
-        (Role::Queued, at(95.0, step(-0.6), 1.0)),
+        (Role::Asap, at(180.0, wide(0.7), 0.9)),
+        (Role::Queued, at(90.0, wide(-0.55), 1.15)),
         // Neutrals: near-achromatic, so they never fight the accents.
         (Role::AiText, at(0.0, step(0.5), 0.12)),
         (Role::UserText, at(0.0, step(0.7), 0.1)),
@@ -1129,9 +1148,9 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
         // Conventional semantic hues, tinted toward the seed's chroma level.
         // Same reasoning: success/warning/error are the pair set users most
         // need to tell apart, and red/green hue alone does not survive CVD.
-        (Role::Success, at_hue(145.0, step(0.4), chroma)),
-        (Role::Warning, at_hue(80.0, step(-0.35), chroma * 1.1)),
-        (Role::Error, at_hue(25.0, step(-0.8), chroma * 1.2)),
+        (Role::Success, at_hue(145.0, wide(0.75), chroma * 0.9)),
+        (Role::Warning, at_hue(80.0, wide(0.05), chroma * 1.25)),
+        (Role::Error, at_hue(25.0, wide(-0.7), chroma * 1.3)),
     ] {
         palette.set(role, rgb);
     }
@@ -1175,12 +1194,56 @@ mod generation {
                 let palette = generate_from_seed(seed, background);
                 let report = analyze(&palette, background);
                 assert!(
-                    report.score >= 70,
+                    report.score >= 78,
                     "seed {seed:?} on bg {background:?} scored {} ({:?})",
                     report.score,
                     report.top_findings(3)
                 );
             }
+        }
+    }
+
+    /// Generated palettes must beat every hand-made palette we calibrate
+    /// against. If a human-curated classic outscores the generator, the
+    /// generator is not worth recommending.
+    #[test]
+    fn generated_palettes_beat_hand_made_classics() {
+        let best_hand_made = [
+            super::calibration::solarized_dark(),
+            super::calibration::gruvbox_dark(),
+            super::calibration::dracula(),
+            super::calibration::nord(),
+        ]
+        .iter()
+        .map(|palette| analyze(palette, DARK_BG).score)
+        .max()
+        .expect("non-empty");
+
+        let generated = analyze(&generate_from_seed((138, 180, 248), DARK_BG), DARK_BG).score;
+        assert!(
+            generated >= best_hand_made,
+            "generated {generated} should at least match the best hand-made palette \
+             ({best_hand_made})"
+        );
+    }
+
+    /// Colorblind safety is the criterion the generator exists to get right,
+    /// since it is the one users cannot self-diagnose.
+    #[test]
+    fn generated_palettes_are_reasonably_colorblind_safe() {
+        for seed in [(138, 180, 248), (255, 0, 0), (0, 255, 0), (128, 128, 128)] {
+            let report = analyze(&generate_from_seed(seed, DARK_BG), DARK_BG);
+            let safety = report
+                .criteria
+                .iter()
+                .find(|criterion| criterion.name == "colorblind safety")
+                .expect("colorblind criterion");
+            assert!(
+                safety.score >= 60,
+                "seed {seed:?} scored {} for colorblind safety ({:?})",
+                safety.score,
+                safety.findings
+            );
         }
     }
 
