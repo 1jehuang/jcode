@@ -430,7 +430,15 @@ mod tests {
     }
 
     /// Environment-mutating tests must not run concurrently with each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// These tests mutate the process-global `JCODE_HOME`, so they must
+    /// serialize against *every* other test that does, not just against each
+    /// other. A module-private lock only excluded the three tests below, which
+    /// left them racing the config and provider suites: a test here would swap
+    /// `JCODE_HOME` out from under a provider test mid-assertion, failing it
+    /// intermittently whenever the two modules happened to interleave.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        crate::storage::lock_test_env()
+    }
 
     struct HomeGuard {
         previous: Option<std::ffi::OsString>,
@@ -470,7 +478,7 @@ mod tests {
     /// value survives the round trip.
     #[test]
     fn enabling_the_gateway_preserves_unrelated_config() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = lock_env();
         let home = HomeGuard::new(
             "[gateway]\nenabled = false\nport = 7643\nbind_addr = \"0.0.0.0\"\n\n\
              [compaction]\nlookahead_turns = 9\n",
@@ -496,7 +504,7 @@ mod tests {
     /// A no-op toggle should not claim a restart is needed.
     #[test]
     fn toggling_to_the_current_value_reports_unchanged() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = lock_env();
         let _home = HomeGuard::new("[gateway]\nenabled = false\nport = 7643\n");
 
         assert_eq!(
@@ -508,7 +516,7 @@ mod tests {
     /// Revoking must remove only the requested device and persist the result.
     #[test]
     fn revoke_removes_only_the_named_device() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = lock_env();
         let _home = HomeGuard::new("[gateway]\nenabled = true\n");
 
         registry(vec![
