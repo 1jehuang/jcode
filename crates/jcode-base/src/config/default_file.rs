@@ -10,7 +10,16 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
 
-        let default_content = r#"# jcode configuration file
+        std::fs::write(&path, Self::default_config_file_contents())?;
+        Ok(path)
+    }
+
+    /// The commented config template written by [`Self::create_default_config_file`].
+    ///
+    /// Exposed separately so tests can check that the template we ship actually
+    /// parses and documents the options it claims to.
+    pub fn default_config_file_contents() -> String {
+        let default_content = r##"# jcode configuration file
 # Location: ~/.jcode/config.toml
 #
 # Environment variables override these settings.
@@ -121,6 +130,10 @@ centered = false
 # Pin read images to a side pane (default: true)
 pin_images = true
 
+# Pin the full session todo list to the top of the chat transcript while it
+# scrolls, like the sticky previous-prompt preview (default: false)
+# pin_todos = false
+
 # Wrap long lines in the pinned diff pane (default: true)
 # Set to false for horizontal scrolling instead of wrapping
 diff_line_wrap = true
@@ -221,6 +234,26 @@ prompt_entry_animation = true
 # Label shown for the Alt/Option modifier in copy badges.
 # Empty = auto ("⌥" on macOS, "Alt" elsewhere). Examples: "Option", "Alt", "⌥".
 # copy_badge_alt_label = ""
+
+# Color theme: "auto" (query the terminal background), "dark", or "light".
+# theme = "auto"
+
+# Per-role color overrides. Every color the TUI renders is configurable: the
+# named roles below are substituted directly, and the ad hoc shades individual
+# widgets use follow whichever role they belong to.
+#
+# Easiest path: run `/colors generate #8ab4f8` to derive a whole harmonious
+# palette from one color you like, then `/colors harmony` to score it and see
+# exactly what to fix. `/colors` lists every role, and `/colors export` prints
+# this section for you.
+#
+# [display.colors]
+# user = "#8ab4f8"
+# ai = "#81c784"
+# accent = "#ba8bff"
+# success = "#64c864"
+# warning = "#ffc864"
+# error = "#ff6464"
 
 [features]
 # Memory: retrieval + extraction sidecar features
@@ -623,7 +656,7 @@ desktop_notifications = true
 # See https://jcode.sh/discovery-tools
 # enabled = true
 # endpoint = "https://api.jcode.sh/v1/discovery"
-	"#;
+	"##;
 
         // Substitute platform-specific defaults from the keybinding registry.
         let p = jcode_config_types::KeybindingPlatform::current();
@@ -631,11 +664,72 @@ desktop_notifications = true
             jcode_config_types::default_binding("effort_increase", p).unwrap_or("alt+right");
         let effort_decrease =
             jcode_config_types::default_binding("effort_decrease", p).unwrap_or("alt+left");
-        let default_content = default_content
+        default_content
             .replace("@EFFORT_INCREASE@", effort_increase)
-            .replace("@EFFORT_DECREASE@", effort_decrease);
+            .replace("@EFFORT_DECREASE@", effort_decrease)
+    }
+}
 
-        std::fs::write(&path, default_content)?;
-        Ok(path)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped template is a hand-maintained string, so a typo in it ships
+    /// a config file that jcode itself cannot read. Parse it here.
+    #[test]
+    fn default_config_template_parses() {
+        let template = Config::default_config_file_contents();
+        toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+    }
+
+    /// Colors are only discoverable if the template mentions them, since most
+    /// users read the generated config rather than the docs.
+    #[test]
+    fn default_config_template_documents_colors() {
+        let template = Config::default_config_file_contents();
+        assert!(
+            template.contains("[display.colors]"),
+            "the template should show how to configure colors"
+        );
+        assert!(
+            template.contains("/colors"),
+            "the template should point at the /colors command"
+        );
+    }
+
+    /// Uncommenting the documented color example must actually work, which is
+    /// the thing a user will literally do.
+    #[test]
+    fn documented_color_example_is_valid_when_uncommented() {
+        let template = Config::default_config_file_contents();
+        let start = template
+            .find("# [display.colors]")
+            .expect("template documents a colors section");
+        let example: String = template[start..]
+            .lines()
+            .take_while(|line| line.starts_with("# ") || line == &"#")
+            .map(|line| {
+                format!(
+                    "{}\n",
+                    line.trim_start_matches("# ").trim_start_matches('#')
+                )
+            })
+            .collect();
+
+        let parsed: Config = toml::from_str(&example).expect("uncommented example must parse");
+        assert!(
+            !parsed.display.colors.is_empty(),
+            "the example should set some colors, got {:?}",
+            parsed.display.colors
+        );
+        for (role, value) in &parsed.display.colors {
+            assert!(
+                jcode_config_types::DisplayConfig::default()
+                    .colors
+                    .is_empty(),
+                "colors should default to empty"
+            );
+            assert_eq!(value.len(), 7, "{role} example should be #rrggbb: {value}");
+        }
     }
 }
