@@ -43,6 +43,12 @@ pub enum Role {
     /// last message, and it clears when the turn ends: a live status line
     /// pinned to the bottom of the conversation, not a log of past calls.
     Tool,
+    /// A file edit the agent made: the intent it wrote, the file it touched,
+    /// and the added and removed lines. Unlike [`Role::Tool`] this *stays* in
+    /// the transcript, because an edit is not transient status: it changed the
+    /// user's files, and "what did it change" is the one thing a reader has to
+    /// be able to scroll back to.
+    Edit,
     /// Something went wrong: a turn that failed, a provider that could not be
     /// reached, a connection that dropped. Rendered in the conversation
     /// rather than only in the footnote, because the footnote is hidden once a
@@ -62,14 +68,30 @@ pub struct Message {
     /// Kept so a streamed `intent` can replace the tool's bare name in place
     /// rather than appending a second line for the same call.
     pub call_id: Option<String>,
+    /// How far this message has got towards the agent, when `role` is
+    /// [`Role::User`]. `None` for everything the app did not send: a reply,
+    /// a thought, or a user message replayed from history is not in flight,
+    /// and marking it "sent" would be a claim about a past this app never saw.
+    pub delivery: Option<crate::ack::Delivery>,
 }
 
 impl Message {
+    /// A user message replayed from history or built in a test: on the page,
+    /// but not in flight, so it carries no delivery mark.
     pub fn user(source: impl Into<String>) -> Self {
         Self {
             role: Role::User,
             source: source.into(),
             call_id: None,
+            delivery: None,
+        }
+    }
+
+    /// A user message this app has just handed to the connection.
+    pub fn sent(source: impl Into<String>) -> Self {
+        Self {
+            delivery: Some(crate::ack::Delivery::Sent),
+            ..Self::user(source)
         }
     }
 
@@ -78,6 +100,7 @@ impl Message {
             role: Role::Assistant,
             source: source.into(),
             call_id: None,
+            delivery: None,
         }
     }
 
@@ -86,6 +109,7 @@ impl Message {
             role: Role::Reasoning,
             source: source.into(),
             call_id: None,
+            delivery: None,
         }
     }
 
@@ -94,6 +118,17 @@ impl Message {
             role: Role::Tool,
             source: label.into(),
             call_id: Some(call_id.into()),
+            delivery: None,
+        }
+    }
+
+    /// An edit card, rendered from a finished edit tool call.
+    pub fn edit(card: &crate::edits::EditCard) -> Self {
+        Self {
+            role: Role::Edit,
+            source: edit_source(card),
+            call_id: None,
+            delivery: None,
         }
     }
 
@@ -103,19 +138,78 @@ impl Message {
             role: Role::Notice,
             source: source.into(),
             call_id: None,
+            delivery: None,
         }
     }
+}
+
+/// Markdown for an edit card: what changed and why, then the diff itself.
+///
+/// Built as markdown rather than as a bespoke block type so the card goes
+/// through exactly the same parse, layout, selection, and copy path as
+/// everything else in the transcript; the only special-casing downstream is the
+/// per-line ink the diff body gets.
+fn edit_source(card: &crate::edits::EditCard) -> String {
+    let mut source = String::new();
+    if let Some(intent) = card
+        .intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|intent| !intent.is_empty())
+    {
+        source.push_str(intent);
+        // A blank line, or markdown folds the intent and the file line into one
+        // paragraph and the sentence runs straight into the path.
+        source.push_str("\n\n");
+    }
+    let files = card
+        .files
+        .iter()
+        .map(|file| format!("`{file}`"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Counts, always: a truncated diff still has to say how big the change was.
+    source.push_str(&format!("{files} +{} -{}\n", card.added, card.removed));
+    source.push_str("```\n");
+    source.push_str(card.diff.trim_end());
+    source.push_str("\n```\n");
+    source
 }
 
 /// The conversation. Streaming appends to the trailing assistant message
 /// rather than pushing a new one per delta, so a reply is one block however
 /// many chunks it arrived in.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transcript {
     messages: Vec<Message>,
+    /// How much thinking this transcript keeps. `Full` is the structural
+    /// default so a transcript built in a test or from replayed history is
+    /// exactly the messages it was given; the app sets the user's mode from
+    /// [`crate::reasoning::ReasoningMode::from_env`] at startup, whose own
+    /// default is `Current`.
+    reasoning: crate::reasoning::ReasoningMode,
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            reasoning: crate::reasoning::ReasoningMode::Full,
+        }
+    }
 }
 
 impl Transcript {
+    /// Choose what happens to streamed reasoning. See
+    /// [`crate::reasoning::ReasoningMode`].
+    pub fn set_reasoning_mode(&mut self, mode: crate::reasoning::ReasoningMode) {
+        self.reasoning = mode;
+    }
+
+    pub fn reasoning_mode(&self) -> crate::reasoning::ReasoningMode {
+        self.reasoning
+    }
+
     pub fn is_empty(&self) -> bool {
         self.messages
             .iter()
@@ -130,6 +224,32 @@ impl Transcript {
         self.messages.push(message);
     }
 
+    /// Mark the oldest still-pending user message as acknowledged.
+    ///
+    /// Oldest first because the queue is a queue: acks arrive in the order the
+    /// messages were sent, so the first unacked card is the one this ack
+    /// belongs to. Returns whether anything changed, so the caller can skip a
+    /// redraw for an ack that answers a message this window did not send (a
+    /// second client on the same session, or a replayed history).
+    pub fn acknowledge_oldest_pending(&mut self, at: std::time::Instant) -> bool {
+        let pending = self
+            .messages
+            .iter_mut()
+            .find(|message| message.delivery == Some(crate::ack::Delivery::Sent));
+        match pending {
+            Some(message) => {
+                message.delivery = Some(crate::ack::Delivery::Acked { at });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every delivery mark currently on the page, for animation scheduling.
+    pub fn deliveries(&self) -> impl Iterator<Item = crate::ack::Delivery> + '_ {
+        self.messages.iter().filter_map(|message| message.delivery)
+    }
+
     /// Append streamed assistant text, continuing the current reply when there
     /// is one. Without this a reply would be split into one block per network
     /// chunk, and markdown spanning a chunk boundary would never parse.
@@ -137,6 +257,10 @@ impl Transcript {
     /// Text lands *above* a live tool card: the card is pinned to the tail,
     /// so the reply grows over it rather than pushing it up mid-transcript.
     pub fn append_assistant(&mut self, text: &str) {
+        // The answer supersedes the thinking that produced it: in `current`
+        // mode the live thought leaves the page here, which is what keeps a
+        // long turn from reading as a wall of superseded reasoning.
+        self.retire_live_reasoning();
         let at = self.text_tail();
         match at.checked_sub(1).map(|index| &mut self.messages[index]) {
             Some(last) if last.role == Role::Assistant => last.source.push_str(text),
@@ -148,11 +272,63 @@ impl Transcript {
     /// arrives in the same delta-sized chunks as the reply, so it coalesces
     /// the same way; a new assistant message ends the thought, which is what
     /// makes "thought, then answered" read in order.
+    ///
+    /// In `off` mode nothing lands (the delta still proved the model is alive,
+    /// which is the status line's job). In `current` mode only the paragraph
+    /// being written right now is kept: a blank line means the model moved on,
+    /// and the finished paragraph is dropped rather than accumulated.
     pub fn append_reasoning(&mut self, text: &str) {
+        use crate::reasoning::ReasoningMode;
+        if self.reasoning == ReasoningMode::Off {
+            return;
+        }
         let at = self.text_tail();
         match at.checked_sub(1).map(|index| &mut self.messages[index]) {
             Some(last) if last.role == Role::Reasoning => last.source.push_str(text),
             _ => self.messages.insert(at, Message::reasoning(text)),
+        }
+        if self.reasoning == ReasoningMode::Current {
+            self.trim_live_reasoning_to_current_paragraph();
+        }
+    }
+
+    /// Keep only the paragraph the model is writing now, in `current` mode.
+    ///
+    /// Split on a blank line, which is how prose marks "that point is
+    /// finished". A chunk can carry several breaks at once, so the *last* one
+    /// wins rather than the first.
+    fn trim_live_reasoning_to_current_paragraph(&mut self) {
+        let Some(live) = self.live_reasoning_index() else {
+            return;
+        };
+        let message = &mut self.messages[live];
+        if let Some(break_at) = message.source.rfind("\n\n") {
+            let tail = message.source[break_at + 2..].trim_start().to_string();
+            message.source = tail;
+        }
+    }
+
+    /// The live thought's index: the trailing reasoning message, looking past
+    /// the live tool card that is pinned to the tail.
+    fn live_reasoning_index(&self) -> Option<usize> {
+        let mut index = self.messages.len().checked_sub(1)?;
+        if self.messages[index].role == Role::Tool {
+            index = index.checked_sub(1)?;
+        }
+        (self.messages[index].role == Role::Reasoning).then_some(index)
+    }
+
+    /// Drop the live thought once it has been superseded, in `current` mode.
+    ///
+    /// A committed answer or an opening tool call is the proof the model
+    /// stopped thinking and started doing; in `full` mode the thought stays as
+    /// history instead.
+    fn retire_live_reasoning(&mut self) {
+        if self.reasoning != crate::reasoning::ReasoningMode::Current {
+            return;
+        }
+        if let Some(live) = self.live_reasoning_index() {
+            self.messages.remove(live);
         }
     }
 
@@ -183,6 +359,9 @@ impl Transcript {
         if label.is_empty() {
             return;
         }
+        // A call opening is the thought ending: the model is doing, not
+        // thinking. (No-op outside `current` mode.)
+        self.retire_live_reasoning();
         // Refine the card in place, whichever call it belongs to now: the
         // card is a slot, not a log entry.
         if let Some(last) = self.messages.last_mut()
@@ -202,6 +381,17 @@ impl Transcript {
     /// behind would claim work is still happening after it stopped.
     pub fn clear_live_tool(&mut self) {
         self.messages.retain(|message| message.role != Role::Tool);
+    }
+
+    /// Record a completed edit in the conversation.
+    ///
+    /// Placed above the live tool card, like streamed text: the card is pinned
+    /// to the tail, and the edit belongs to the history that has already
+    /// happened. It is never cleared, because it is the record of a change to
+    /// the user's files.
+    pub fn push_edit(&mut self, card: &crate::edits::EditCard) {
+        let at = self.text_tail();
+        self.messages.insert(at, Message::edit(card));
     }
 
     /// Record a failure in the conversation.
@@ -264,6 +454,7 @@ impl From<&[Message]> for Transcript {
     fn from(messages: &[Message]) -> Self {
         Self {
             messages: messages.to_vec(),
+            ..Self::default()
         }
     }
 }
@@ -276,6 +467,12 @@ impl From<&[Message]> for Transcript {
 /// therefore carries its own offset within the message.
 pub struct LaidMessage {
     pub role: Role,
+    /// The delivery mark to draw beside this message, when it is one the app
+    /// sent. Not part of the layout cache's key: an ack changes a dot and an
+    /// offset, never a wrap, so re-laying the message for it would be work for
+    /// nothing (see [`crate::paint::TranscriptCache`], which refreshes this
+    /// field on every frame instead).
+    pub delivery: Option<crate::ack::Delivery>,
     /// Laid-out blocks, in order, with their vertical offset from the top of
     /// the message and the kind that produced them.
     pub blocks: Vec<LaidBlock>,
@@ -296,6 +493,9 @@ impl LaidMessage {
             // A notice is a card too: it has to be visibly an interjection
             // from the app rather than a line the model wrote.
             Role::Tool | Role::Notice => TOOL_PAD_Y,
+            // An edit card is a card too: the diff sits on a wash that must
+            // not crop the first line of it.
+            Role::Edit => TOOL_PAD_Y,
             Role::Assistant | Role::Reasoning => 0.0,
         }
     }
@@ -505,6 +705,10 @@ pub fn lay_out_message_reusing(
         ),
         None => match notice {
             Some(color) => (ParagraphStyle { color, ..base }, NOTICE_INSET),
+            // An edit card is indented to clear the rule down its left edge,
+            // the same as a notice: the rule is what marks it, so the text must
+            // not sit on top of it.
+            None if message.role == Role::Edit => (base, NOTICE_INSET),
             None => (base, 0.0),
         },
     };
@@ -539,6 +743,16 @@ pub fn lay_out_message_reusing(
         } else {
             flatten(&lines)
         };
+        // An edit card's code block is a diff, so each of its lines takes the
+        // ink of the side it is on. Applied here, over the flattened block,
+        // because "which side" is a property of the whole line and markdown has
+        // no span for it.
+        let spans =
+            if message.role == Role::Edit && matches!(block.kind, BlockKind::CodeBlock { .. }) {
+                diff_spans(&source, theme)
+            } else {
+                spans
+            };
         if !is_rule && source.trim().is_empty() {
             continue;
         }
@@ -608,17 +822,48 @@ pub fn lay_out_message_reusing(
         // The user card and the tool card both reserve their padding, so the
         // tint can never crop the text it wraps.
         Role::User => USER_PAD_Y * 2.0,
-        Role::Tool | Role::Notice => TOOL_PAD_Y * 2.0,
+        Role::Tool | Role::Notice | Role::Edit => TOOL_PAD_Y * 2.0,
         Role::Assistant | Role::Reasoning => 0.0,
     };
     (
         LaidMessage {
             role: message.role,
+            delivery: message.delivery,
             blocks,
             height,
         },
         fresh,
     )
+}
+
+/// Per-line ink for a diff body: added lines green, removed lines red, and
+/// anything else (a `...` truncation marker) left in the block's own colour.
+///
+/// Byte ranges over the flattened block, so a wrapped long line keeps its ink
+/// across the wrap: the colour belongs to the text, not to the screen row.
+fn diff_spans(source: &str, theme: &Theme) -> Vec<SpanStyle> {
+    let mut spans = Vec::new();
+    let mut at = 0usize;
+    for line in source.split_inclusive('\n') {
+        let range = at..at + line.trim_end_matches('\n').len();
+        at += line.len();
+        let color = match crate::edits::classify(line) {
+            Some(crate::edits::Change::Added) => theme.added,
+            Some(crate::edits::Change::Removed) => theme.removed,
+            None => continue,
+        };
+        spans.push(SpanStyle {
+            range,
+            role: StyleRole::Code,
+            fill: FillRole::None,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
+            color: Some(color),
+        });
+    }
+    spans
 }
 
 /// Horizontal inset for a block kind, relative to the message's text column.
@@ -840,6 +1085,10 @@ pub struct SpanStyle {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    /// Explicit ink, overriding both the span's role colour and the message's
+    /// tint. Only diff lines use it: an added line is green and a removed one
+    /// red regardless of the role the markdown gave the text.
+    pub color: Option<Color>,
 }
 
 /// Flatten styled lines into one string plus byte-ranged styling. Parley wants
@@ -863,6 +1112,7 @@ pub fn flatten(lines: &[StyledLine]) -> (String, Vec<SpanStyle>) {
                 italic: span.attrs.italic,
                 underline: span.attrs.underline || role_is_underlined(span.role),
                 strikethrough: span.attrs.strikethrough,
+                color: None,
             });
         }
     }
@@ -907,7 +1157,7 @@ pub fn layout_rich(
             if span.range.is_empty() {
                 continue;
             }
-            let color = palette.color(span.role);
+            let color = span.color.unwrap_or_else(|| palette.color(span.role));
             builder.push(
                 StyleProperty::Brush(Brush::Solid(color)),
                 span.range.clone(),
@@ -1165,6 +1415,69 @@ mod tests {
         assert_eq!(transcript.streaming_len(), 0);
     }
 
+    /// An edit is the one tool result that survives the turn: the live card is
+    /// cleared when the turn ends, the edit card is not, because it records a
+    /// change to the user's files.
+    #[test]
+    fn an_edit_card_outlives_the_turn() {
+        let card = crate::edits::EditCard {
+            intent: Some("rename the field".into()),
+            files: vec!["src/lib.rs".into()],
+            diff: "10- old\n10+ new\n".into(),
+            added: 1,
+            removed: 1,
+        };
+        let mut transcript = Transcript::default();
+        transcript.set_live_tool("call_1", "rename the field");
+        transcript.push_edit(&card);
+        transcript.clear_live_tool();
+        let roles: Vec<Role> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::Edit]);
+        let source = &transcript.messages()[0].source;
+        assert!(
+            source.contains("rename the field"),
+            "intent missing: {source}"
+        );
+        assert!(source.contains("src/lib.rs"), "file missing: {source}");
+        assert!(source.contains("+1 -1"), "counts missing: {source}");
+        assert!(source.contains("10+ new"), "diff missing: {source}");
+    }
+
+    /// The live tool card stays pinned to the tail when an edit lands, so the
+    /// "what is running now" line does not end up buried above the history.
+    #[test]
+    fn an_edit_card_lands_above_the_live_tool_card() {
+        let card = crate::edits::EditCard {
+            intent: None,
+            files: vec!["a.rs".into()],
+            diff: "1+ fn main() {}\n".into(),
+            added: 1,
+            removed: 0,
+        };
+        let mut transcript = Transcript::default();
+        transcript.set_live_tool("call_1", "write the file");
+        transcript.push_edit(&card);
+        transcript.set_live_tool("call_2", "run the tests");
+        let roles: Vec<Role> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::Edit, Role::Tool]);
+    }
+
+    /// Added and removed lines take their own ink, so a diff is read by
+    /// scanning colour rather than by inspecting the first character of every
+    /// line. Ink is checked at the span level, since that is what the layout
+    /// hands to Parley.
+    #[test]
+    fn diff_lines_take_their_side_s_ink() {
+        let theme = theme();
+        let spans = super::diff_spans("10- old\n10+ new\n...\n", &theme);
+        let inks: Vec<Color> = spans.iter().map(|span| span.color.expect("ink")).collect();
+        assert_eq!(
+            inks,
+            vec![theme.removed, theme.added],
+            "a truncation marker must not be coloured as a change"
+        );
+    }
+
     /// The card is a slot, not a log: the next call takes it over, and text
     /// arriving between calls is inserted *above* it, so the card is always
     /// the transcript's last message. At most one tool message exists.
@@ -1278,6 +1591,87 @@ mod tests {
         let roles: Vec<_> = transcript.messages().iter().map(|m| m.role).collect();
         assert_eq!(roles, vec![Role::Reasoning, Role::Assistant]);
         assert_eq!(transcript.messages()[0].source, "first thought");
+    }
+
+    /// `current` mode is the point of the feature: only the thought being
+    /// written right now is on screen, and only its current paragraph. Without
+    /// the paragraph trim a long think still grows without bound, which is
+    /// exactly the wall of text the mode exists to prevent.
+    #[test]
+    fn current_mode_keeps_only_the_paragraph_being_written() {
+        let mut transcript = Transcript::default();
+        transcript.set_reasoning_mode(crate::reasoning::ReasoningMode::Current);
+        transcript.append_reasoning("first point, now settled.\n\n");
+        transcript.append_reasoning("second point, still being");
+        assert_eq!(
+            transcript.plain_text(),
+            "second point, still being",
+            "a finished paragraph was kept in current mode"
+        );
+    }
+
+    /// A committed answer and an opening tool call are both proof the model
+    /// stopped thinking: in `current` mode the thought leaves with them.
+    #[test]
+    fn current_mode_retires_the_thought_when_the_model_acts() {
+        let mut answered = Transcript::default();
+        answered.set_reasoning_mode(crate::reasoning::ReasoningMode::Current);
+        answered.append_reasoning("thinking");
+        answered.append_assistant("the answer");
+        assert_eq!(
+            answered.messages().iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![Role::Assistant]
+        );
+
+        let mut called = Transcript::default();
+        called.set_reasoning_mode(crate::reasoning::ReasoningMode::Current);
+        called.append_reasoning("thinking");
+        called.set_live_tool("call_1", "running tests");
+        assert_eq!(
+            called.messages().iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![Role::Tool]
+        );
+    }
+
+    /// The next thought after a tool call is shown: `current` means "the live
+    /// one", not "only the first one".
+    #[test]
+    fn current_mode_shows_the_next_thought() {
+        let mut transcript = Transcript::default();
+        transcript.set_reasoning_mode(crate::reasoning::ReasoningMode::Current);
+        transcript.append_reasoning("first thought");
+        transcript.set_live_tool("call_1", "reading the file");
+        transcript.append_reasoning("second thought");
+        assert!(transcript.plain_text().contains("second thought"));
+        assert!(
+            !transcript.plain_text().contains("first thought"),
+            "a superseded thought came back"
+        );
+    }
+
+    /// `full` keeps history, which is the classic behavior and must not be
+    /// changed by the trimming that `current` does.
+    #[test]
+    fn full_mode_keeps_every_thought() {
+        let mut transcript = Transcript::default();
+        transcript.set_reasoning_mode(crate::reasoning::ReasoningMode::Full);
+        transcript.append_reasoning("first point.\n\nsecond point");
+        transcript.append_assistant("the answer");
+        assert!(transcript.plain_text().contains("first point."));
+        assert_eq!(
+            transcript.messages().iter().map(|m| m.role).collect::<Vec<_>>(),
+            vec![Role::Reasoning, Role::Assistant]
+        );
+    }
+
+    /// `off` means no thinking reaches the transcript at all; the delta still
+    /// drove the status line, which is a separate concern.
+    #[test]
+    fn off_mode_drops_reasoning_entirely() {
+        let mut transcript = Transcript::default();
+        transcript.set_reasoning_mode(crate::reasoning::ReasoningMode::Off);
+        transcript.append_reasoning("thinking hard");
+        assert!(transcript.is_empty());
     }
 
     /// Reasoning must read as subordinate by ink and size alone: dimmer than

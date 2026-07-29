@@ -112,6 +112,11 @@ pub enum Action {
     OverviewCommit,
     /// Close the field without switching.
     OverviewCancel,
+
+    /// Ctrl+Shift+R: cycle how much of the model's thinking the transcript
+    /// keeps (`current` -> `full` -> `off`). A view choice, so it is a
+    /// keypress rather than a config edit and a restart.
+    CycleReasoningDisplay,
 }
 
 impl Action {
@@ -685,6 +690,10 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     'j' => return Some(Action::ScrollDown),
                     'c' => return Some(Action::Copy),
                     'a' => return Some(Action::SelectAll),
+                    // Ctrl+Shift+R: how much thinking is shown. Shifted so it
+                    // cannot collide with a future plain Ctrl+R (recovery in
+                    // the TUI), and grouped with the other view chords.
+                    'r' => return Some(Action::CycleReasoningDisplay),
                     _ => {}
                 }
             }

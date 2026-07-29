@@ -34,6 +34,7 @@ mod scene;
 mod scene_overview;
 mod scroll;
 mod scroll_bench;
+mod scroll_profile;
 mod select;
 mod states;
 mod stream;
