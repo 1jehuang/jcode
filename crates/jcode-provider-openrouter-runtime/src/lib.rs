@@ -2790,6 +2790,10 @@ mod tests;
 mod openrouter_catalog_merge_tests;
 
 #[cfg(test)]
+#[path = "openrouter_pricing_deadlock_tests.rs"]
+mod openrouter_pricing_deadlock_tests;
+
+#[cfg(test)]
 mod profile_catalog_backoff_tests {
     use super::{MODEL_CATALOG_REFRESH_RETRY_SECS, profile_catalog_retry_delay_secs};
 
