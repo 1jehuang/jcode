@@ -8,6 +8,7 @@
 //! `docs/DESKTOP2_VISUAL_CHECKLIST.md` for the rules enforced.
 
 mod actions;
+mod delivery;
 mod failures;
 mod hero_visual;
 mod overview_gesture;
