@@ -492,38 +492,45 @@ fn anchored_trace_never_moves_and_clears_on_next_prompt() {
 
 #[test]
 fn remote_reasoning_delta_burst_is_paced_not_dumped() {
-    // A large provider reasoning burst must reveal over multiple paced frames
-    // (via the segment-aware StreamBuffer), not pop in all at once. This is the
-    // regression test for "reasoning mode feels choppy".
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.is_processing = true;
-    app.status = ProcessingStatus::Streaming;
+    // Pacing only happens when reasoning is actually displayed. The global
+    // default is `Off` (166e4444f), under which the delta is dropped and
+    // nothing is ever buffered, so this must pin `Current` like its sibling
+    // tests do.
+    with_reasoning_current_home(|| {
 
-    let burst = "x".repeat(400);
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ReasoningDelta { text: burst },
-        &mut remote,
-    );
+        // A large provider reasoning burst must reveal over multiple paced frames
+        // (via the segment-aware StreamBuffer), not pop in all at once. This is the
+        // regression test for "reasoning mode feels choppy".
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
 
-    // Only a small paced slice should be visible immediately; the rest stays
-    // buffered and drains on subsequent redraw frames.
-    let visible = app.streaming_text().matches('x').count();
-    assert!(
-        visible < 400,
-        "reasoning burst must not dump in one frame, revealed {visible} chars"
-    );
-    assert!(
-        !app.stream_buffer.is_empty(),
-        "remainder must stay buffered for paced reveal"
-    );
+        let burst = "x".repeat(400);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta { text: burst },
+            &mut remote,
+        );
 
-    // Draining the buffer (as the redraw tick does) eventually reveals it all.
-    let ops = app.stream_buffer.flush();
-    app.apply_stream_ops(ops);
-    assert_eq!(app.streaming_text().matches('x').count(), 400);
+        // Only a small paced slice should be visible immediately; the rest stays
+        // buffered and drains on subsequent redraw frames.
+        let visible = app.streaming_text().matches('x').count();
+        assert!(
+            visible < 400,
+            "reasoning burst must not dump in one frame, revealed {visible} chars"
+        );
+        assert!(
+            !app.stream_buffer.is_empty(),
+            "remainder must stay buffered for paced reveal"
+        );
+
+        // Draining the buffer (as the redraw tick does) eventually reveals it all.
+        let ops = app.stream_buffer.flush();
+        app.apply_stream_ops(ops);
+        assert_eq!(app.streaming_text().matches('x').count(), 400);
+    });
 }
 
 #[test]
