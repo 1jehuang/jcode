@@ -162,6 +162,11 @@ impl Config {
         {
             self.display.pin_images = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_PIN_TODOS")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.display.pin_todos = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_DISPLAY_CENTERED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.centered = parsed;

@@ -435,14 +435,6 @@ else
 
   _have() { command -v "$1" >/dev/null 2>&1; }
 
-  # If the install dir is already on the live PATH (the user configured it
-  # themselves, e.g. in a dotfile we would not detect by grepping), do not
-  # touch any rc files at all.
-  case ":$PATH:" in
-    *":$INSTALL_DIR:"*) already_on_path=true ;;
-    *) already_on_path=false ;;
-  esac
-
   # Append the POSIX (bash/zsh/sh) PATH line to an rc file, idempotently.
   #   ensure_posix_rc <rc-file> <create:yes|no>
   # With create=yes the file (and parent dir) is created if missing; with
@@ -480,34 +472,30 @@ else
     fi
   }
 
-  if [ "$already_on_path" = true ]; then
-    info "$INSTALL_DIR is already on PATH; leaving shell startup files untouched."
-  else
-    # zsh: ~/.zshenv is read for every zsh invocation (login, interactive and
-    # scripts), so it is the most reliable single place to export PATH.
-    if _have zsh || [ "$(uname -s)" = "Darwin" ] || [ -f "$HOME/.zshenv" ] || [ -f "$HOME/.zshrc" ]; then
-      ensure_posix_rc "$HOME/.zshenv" yes
-    fi
-
-    # bash: ~/.bashrc for interactive shells, ~/.profile for login shells (macOS
-    # Terminal, ssh, etc.). We only create ~/.profile, never ~/.bash_profile, so
-    # we don't override an existing login-file lookup order.
-    if _have bash || [ -f "$HOME/.bashrc" ] || [ -f "$HOME/.bash_profile" ]; then
-      ensure_posix_rc "$HOME/.bashrc" yes
-    fi
-    ensure_posix_rc "$HOME/.profile" yes
-
-    # fish: only set it up when fish is installed or already configured.
-    if _have fish || [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ]; then
-      ensure_fish_rc yes
-    fi
-
-    # Also patch other common startup files when they already exist, so we cover
-    # users with custom login-shell setups without creating new files.
-    for rc in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile"; do
-      ensure_posix_rc "$rc" no
-    done
+  # zsh: ~/.zshenv is read for every zsh invocation (login, interactive and
+  # scripts), so it is the most reliable single place to export PATH.
+  if _have zsh || [ "$(uname -s)" = "Darwin" ] || [ -f "$HOME/.zshenv" ] || [ -f "$HOME/.zshrc" ]; then
+    ensure_posix_rc "$HOME/.zshenv" yes
   fi
+
+  # bash: ~/.bashrc for interactive shells, ~/.profile for login shells (macOS
+  # Terminal, ssh, etc.). We only create ~/.profile, never ~/.bash_profile, so
+  # we don't override an existing login-file lookup order.
+  if _have bash || [ -f "$HOME/.bashrc" ] || [ -f "$HOME/.bash_profile" ]; then
+    ensure_posix_rc "$HOME/.bashrc" yes
+  fi
+  ensure_posix_rc "$HOME/.profile" yes
+
+  # fish: only set it up when fish is installed or already configured.
+  if _have fish || [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ]; then
+    ensure_fish_rc yes
+  fi
+
+  # Also patch other common startup files when they already exist, so we cover
+  # users with custom login-shell setups without creating new files.
+  for rc in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile"; do
+    ensure_posix_rc "$rc" no
+  done
 
   if [ -n "$added_to" ]; then
     info "Added $INSTALL_DIR to PATH in:$added_to"

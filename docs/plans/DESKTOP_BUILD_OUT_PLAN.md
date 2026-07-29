@@ -1,5 +1,7 @@
 # Jcode Desktop Build-Out Plan
 
+> Historical: this document describes the removed legacy `crates/jcode-desktop` app. The current desktop app is `crates/jcode-desktop2`.
+
 Status: Active planning note
 Updated: 2026-05-25
 

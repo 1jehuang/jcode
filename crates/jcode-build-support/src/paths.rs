@@ -177,14 +177,9 @@ pub fn selfdev_build_command_for_target(
     };
     let specs = match target {
         SelfDevBuildTarget::Tui => vec![("jcode", "jcode")],
-        SelfDevBuildTarget::Desktop => vec![("jcode-desktop", "jcode-desktop")],
         SelfDevBuildTarget::Desktop2 => vec![("jcode-desktop2", "jcode-desktop2")],
         SelfDevBuildTarget::All | SelfDevBuildTarget::Auto => {
-            vec![
-                ("jcode", "jcode"),
-                ("jcode-desktop", "jcode-desktop"),
-                ("jcode-desktop2", "jcode-desktop2"),
-            ]
+            vec![("jcode", "jcode"), ("jcode-desktop2", "jcode-desktop2")]
         }
     };
     let wrapper = repo_dir.join("scripts").join("dev_cargo.sh");
@@ -260,7 +255,6 @@ fn porcelain_path(line: &str) -> String {
 /// routing is testable: getting this wrong means `selfdev build` silently
 /// builds the wrong binary and a reload appears to do nothing.
 fn build_target_for_paths<'a>(paths: impl Iterator<Item = &'a str>) -> SelfDevBuildTarget {
-    let mut desktop = false;
     let mut desktop2 = false;
     let mut other = false;
     for path in paths {
@@ -270,22 +264,17 @@ fn build_target_for_paths<'a>(paths: impl Iterator<Item = &'a str>) -> SelfDevBu
         }
         if path == "Cargo.toml" || path == "Cargo.lock" || path.starts_with(".cargo/") {
             // Workspace-wide changes can affect every binary.
-            desktop = true;
             desktop2 = true;
             other = true;
         } else if path.starts_with("crates/jcode-desktop2/") {
-            // Checked before jcode-desktop/ so desktop2 is not misattributed.
             desktop2 = true;
-        } else if path.starts_with("crates/jcode-desktop/") {
-            desktop = true;
         } else {
             other = true;
         }
     }
-    match (desktop, desktop2, other) {
-        (true, false, false) => SelfDevBuildTarget::Desktop,
-        (false, true, false) => SelfDevBuildTarget::Desktop2,
-        (false, false, _) => SelfDevBuildTarget::Tui,
+    match (desktop2, other) {
+        (true, false) => SelfDevBuildTarget::Desktop2,
+        (false, _) => SelfDevBuildTarget::Tui,
         _ => SelfDevBuildTarget::All,
     }
 }
@@ -648,11 +637,10 @@ mod tests {
         let repo = repo_fixture(false);
         let cases = [
             (SelfDevBuildTarget::Tui, vec!["-p jcode "]),
-            (SelfDevBuildTarget::Desktop, vec!["-p jcode-desktop "]),
             (SelfDevBuildTarget::Desktop2, vec!["-p jcode-desktop2 "]),
             (
                 SelfDevBuildTarget::All,
-                vec!["-p jcode ", "-p jcode-desktop ", "-p jcode-desktop2 "],
+                vec!["-p jcode ", "-p jcode-desktop2 "],
             ),
         ];
         for (target, expected) in cases {
@@ -677,7 +665,6 @@ mod tests {
         assert!(!tui.display.contains("jcode-desktop"));
         let desktop2 = selfdev_build_command_for_target(repo.path(), SelfDevBuildTarget::Desktop2);
         assert!(!desktop2.display.contains("-p jcode "));
-        assert!(!desktop2.display.contains("-p jcode-desktop "));
     }
 
     /// `auto` must route a change to the binary that contains it. Before
@@ -689,22 +676,11 @@ mod tests {
             (vec!["src/main.rs"], SelfDevBuildTarget::Tui),
             (vec!["crates/jcode-tui/src/lib.rs"], SelfDevBuildTarget::Tui),
             (
-                vec!["crates/jcode-desktop/src/main.rs"],
-                SelfDevBuildTarget::Desktop,
-            ),
-            (
                 vec!["crates/jcode-desktop2/src/main.rs"],
                 SelfDevBuildTarget::Desktop2,
             ),
             (
                 vec!["crates/jcode-desktop2/src/editor.rs", "src/main.rs"],
-                SelfDevBuildTarget::All,
-            ),
-            (
-                vec![
-                    "crates/jcode-desktop/src/main.rs",
-                    "crates/jcode-desktop2/src/main.rs",
-                ],
                 SelfDevBuildTarget::All,
             ),
             // Workspace manifests can affect everything.
@@ -737,8 +713,7 @@ mod tests {
     fn build_targets_parse_from_their_names() {
         for (name, expected) in [
             ("tui", SelfDevBuildTarget::Tui),
-            ("desktop", SelfDevBuildTarget::Desktop),
-            ("jcode-desktop", SelfDevBuildTarget::Desktop),
+            ("desktop", SelfDevBuildTarget::Desktop2),
             ("desktop2", SelfDevBuildTarget::Desktop2),
             ("jcode-desktop2", SelfDevBuildTarget::Desktop2),
             ("all", SelfDevBuildTarget::All),
