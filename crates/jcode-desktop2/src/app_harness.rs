@@ -88,6 +88,25 @@ impl App {
                         std::time::Instant::now(),
                     );
                 }
+                harness::HarnessUpdate::Edit(card) => {
+                    // The one tool result that stays: an edit changed the
+                    // user's files, so the transcript keeps its intent and its
+                    // diff where the user can scroll back to them.
+                    self.model.transcript.push_edit(&card);
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
+                harness::HarnessUpdate::MessageAccepted => {
+                    // The agent has the oldest message still in flight. Marking
+                    // it here rather than on the first token is the point of
+                    // the whole mechanism: "received" and "answered" are
+                    // different facts, and the user is owed the first one now.
+                    self.model
+                        .transcript
+                        .acknowledge_oldest_pending(std::time::Instant::now());
+                }
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
                     self.model.activity.finish();
@@ -129,7 +148,12 @@ impl App {
         if self.model.session_id.as_deref() == Some(target.as_str()) {
             return;
         }
+        // Switching sessions changes the conversation, not the user's view
+        // preferences: the thinking-display mode is carried across so a new
+        // session does not silently revert to the structural default.
+        let reasoning = self.model.transcript.reasoning_mode();
         self.model.transcript = transcript::Transcript::default();
+        self.model.transcript.set_reasoning_mode(reasoning);
         self.model.stream.reveal_all();
         self.model.busy = false;
         self.model.activity.finish();
