@@ -62,10 +62,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/btw", "Ask a side question in the side panel"),
     RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
     RegisteredCommand::public("/git", "Show git status for the session working directory"),
-    RegisteredCommand::public(
-        "/colors",
-        "List, configure, and score every TUI color",
-    ),
+    RegisteredCommand::public("/colors", "List, configure, and score every TUI color"),
     RegisteredCommand::hidden("/color", "Alias for /colors"),
     RegisteredCommand::public("/hotkeys", "List hotkeys with your personal usage"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
@@ -693,6 +690,32 @@ impl App {
                 .map(|(cmd, help)| (format!("{} {}", base, cmd.trim_start_matches('/')), help))
                 .collect();
             return self.rank_suggestions(input, topics);
+        }
+
+        if prefix.starts_with("/colors ") || prefix.starts_with("/color ") {
+            let base = if prefix.starts_with("/color ") {
+                "/color"
+            } else {
+                "/colors"
+            };
+            let mut suggestions: Vec<(String, &'static str)> = vec![
+                (
+                    format!("{base} harmony"),
+                    "Score the palette and list fixes",
+                ),
+                (
+                    format!("{base} generate #8ab4f8"),
+                    "Build a harmonious palette from one seed color",
+                ),
+                (format!("{base} reset"), "Reset every color to its default"),
+                (format!("{base} export"), "Print the palette as config TOML"),
+            ];
+            suggestions.extend(
+                jcode_tui_style::ALL_ROLES
+                    .iter()
+                    .map(|role| (format!("{base} {} #", role.key()), "Set this color role")),
+            );
+            return self.rank_suggestions(input, suggestions);
         }
 
         if prefix.starts_with("/git ") {

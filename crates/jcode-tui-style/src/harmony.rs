@@ -1044,3 +1044,209 @@ mod calibration {
         );
     }
 }
+
+/// Generate a palette from a single seed color.
+///
+/// This is the practical payoff of having a harmony metric: instead of asking a
+/// user to hand-tune 22 colors and hope, we derive a full palette from one
+/// color they like, then let the scorer verify it. Roles are placed on the seed
+/// hue's scheme wheel, held inside the comfortable chroma band, and given
+/// lightness that reads against `background`. Semantic roles (success, warning,
+/// error) keep their conventional hues, because recoloring "error" away from red
+/// would break a convention users rely on more than they value novelty.
+pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palette {
+    let seed_lab = Oklab::from_rgb(seed);
+    let bg = Oklab::from_rgb(background);
+    let light_background = bg.l > 0.5;
+
+    // Keep the seed's character but pull extreme saturation into the readable
+    // band, so a neon seed still yields a usable palette.
+    let chroma = seed_lab.chroma().clamp(0.06, 0.14);
+    let hue = seed_lab.hue_degrees();
+
+    // Foreground lightness that contrasts with the background, and background
+    // lightness that stays close to it.
+    let fg_l = if light_background { 0.42 } else { 0.78 };
+    let dim_l = if light_background { 0.62 } else { 0.50 };
+    let panel_l = if light_background {
+        (bg.l - 0.06).max(0.0)
+    } else {
+        (bg.l + 0.06).min(1.0)
+    };
+
+    // Lightness offsets are expressed as fractions of the *available* range
+    // between the background and the far end of the scale. On a light
+    // background the usable band is compressed toward dark, so a fixed +/-0.1
+    // offset would collapse there; scaling keeps the separations that make
+    // roles distinguishable under color vision deficiency intact on both.
+    let band = if light_background { fg_l } else { 1.0 - fg_l };
+    let step = |fraction: f32| (fg_l + fraction * band * 0.85).clamp(0.06, 0.97);
+
+    let at = |hue_offset: f32, lightness: f32, chroma_scale: f32| -> (u8, u8, u8) {
+        let radians = (hue + hue_offset).to_radians();
+        let chroma = chroma * chroma_scale;
+        Oklab {
+            l: lightness,
+            a: chroma * radians.cos(),
+            b: chroma * radians.sin(),
+        }
+        .to_rgb()
+    };
+
+    // A split-complementary layout: enough hue separation for roles to be
+    // distinguishable without scattering them arbitrarily around the wheel.
+    // Offsets are also spread far enough that the must-distinguish pairs stay
+    // apart under red-green color vision deficiency, where hues collapse toward
+    // a blue-yellow axis and small separations vanish.
+    let mut palette = Palette::default();
+    for (role, rgb) in [
+        (Role::User, at(0.0, fg_l, 1.0)),
+        (Role::Ai, at(150.0, fg_l, 1.0)),
+        // Accent/system and info/success are must-distinguish pairs, so give
+        // them large hue *and* lightness separation rather than hue alone.
+        // Under red-green color vision deficiency hue separation largely
+        // collapses onto a blue-yellow axis, so the must-distinguish pairs are
+        // separated by *lightness* as well. Lightness survives every CVD type,
+        // which is why accessible palettes lean on it rather than hue alone.
+        (Role::Accent, at(-45.0, step(0.5), 1.2)),
+        (Role::System, at(225.0, step(-0.9), 1.1)),
+        (Role::Info, at(-15.0, step(-0.65), 0.9)),
+        (Role::FileLink, at(0.0, step(0.35), 0.7)),
+        (Role::HeaderIcon, at(180.0, fg_l, 0.9)),
+        (Role::HeaderName, at(0.0, fg_l, 0.5)),
+        (Role::HeaderSession, at(0.0, step(0.75), 0.15)),
+        (Role::Asap, at(190.0, step(0.35), 1.0)),
+        (Role::Queued, at(95.0, step(-0.6), 1.0)),
+        // Neutrals: near-achromatic, so they never fight the accents.
+        (Role::AiText, at(0.0, step(0.5), 0.12)),
+        (Role::UserText, at(0.0, step(0.7), 0.1)),
+        (Role::Tool, at(0.0, dim_l, 0.15)),
+        (Role::Pending, at(0.0, dim_l, 0.15)),
+        (Role::Dim, at(0.0, dim_l - 0.06, 0.12)),
+        (Role::Border, at(0.0, dim_l - 0.02, 0.2)),
+        (Role::UserBg, at(0.0, panel_l, 0.25)),
+        (Role::SelectionBg, at(0.0, panel_l, 0.45)),
+        // Conventional semantic hues, tinted toward the seed's chroma level.
+        // Same reasoning: success/warning/error are the pair set users most
+        // need to tell apart, and red/green hue alone does not survive CVD.
+        (Role::Success, at_hue(145.0, step(0.4), chroma)),
+        (Role::Warning, at_hue(80.0, step(-0.35), chroma * 1.1)),
+        (Role::Error, at_hue(25.0, step(-0.8), chroma * 1.2)),
+    ] {
+        palette.set(role, rgb);
+    }
+    palette
+}
+
+/// A color at an absolute hue, used for roles whose hue is conventional.
+fn at_hue(hue: f32, lightness: f32, chroma: f32) -> (u8, u8, u8) {
+    let radians = hue.to_radians();
+    Oklab {
+        l: lightness,
+        a: chroma * radians.cos(),
+        b: chroma * radians.sin(),
+    }
+    .to_rgb()
+}
+
+#[cfg(test)]
+mod generation {
+    use super::*;
+
+    const DARK_BG: (u8, u8, u8) = (18, 18, 18);
+    const LIGHT_BG: (u8, u8, u8) = (250, 250, 250);
+
+    /// The generator's whole justification is that it beats hand-guessing, so
+    /// hold it to the metric: generated palettes must score well from *any*
+    /// seed, including deliberately awkward ones.
+    #[test]
+    fn generated_palettes_score_well_from_any_seed() {
+        let seeds = [
+            (138, 180, 248), // jcode blue
+            (255, 0, 0),     // pure red
+            (0, 255, 0),     // pure green
+            (10, 10, 10),    // near black
+            (250, 250, 250), // near white
+            (128, 128, 128), // pure gray
+            (255, 0, 255),   // magenta
+        ];
+        for background in [DARK_BG, LIGHT_BG] {
+            for seed in seeds {
+                let palette = generate_from_seed(seed, background);
+                let report = analyze(&palette, background);
+                assert!(
+                    report.score >= 70,
+                    "seed {seed:?} on bg {background:?} scored {} ({:?})",
+                    report.score,
+                    report.top_findings(3)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generated_palettes_beat_the_seed_used_naively_everywhere() {
+        // The naive thing a user does by hand: set everything to shades of one
+        // color. The generator must beat that decisively.
+        let seed = (138, 180, 248);
+        let mut naive = Palette::default();
+        for role in ALL_ROLES.iter().copied() {
+            naive.set(role, seed);
+        }
+        let generated = analyze(&generate_from_seed(seed, DARK_BG), DARK_BG).score;
+        let naive_score = analyze(&naive, DARK_BG).score;
+        assert!(
+            generated > naive_score + 20,
+            "generated {generated} should clearly beat naive {naive_score}"
+        );
+    }
+
+    #[test]
+    fn generation_respects_the_background_it_targets() {
+        let seed = (138, 180, 248);
+        let for_dark = generate_from_seed(seed, DARK_BG);
+        let for_light = generate_from_seed(seed, LIGHT_BG);
+        // Text generated for a light background must be darker than text
+        // generated for a dark one.
+        let text_l = |palette: &Palette| Oklab::from_rgb(palette.rgb(Role::AiText)).l;
+        assert!(
+            text_l(&for_light) < text_l(&for_dark),
+            "light-bg text {} should be darker than dark-bg text {}",
+            text_l(&for_light),
+            text_l(&for_dark)
+        );
+        // And each must beat the other on its own background.
+        assert!(
+            analyze(&for_light, LIGHT_BG).score > analyze(&for_dark, LIGHT_BG).score,
+            "the light-targeted palette should win on a light background"
+        );
+    }
+
+    #[test]
+    fn semantic_roles_keep_their_conventional_hues() {
+        // Whatever the seed, error must stay red-ish and success green-ish, or
+        // the palette silently breaks a convention users depend on.
+        for seed in [(138, 180, 248), (255, 0, 255), (0, 255, 0)] {
+            let palette = generate_from_seed(seed, DARK_BG);
+            let error = palette.rgb(Role::Error);
+            let success = palette.rgb(Role::Success);
+            assert!(
+                error.0 > error.2,
+                "error should stay warm/red for seed {seed:?}, got {error:?}"
+            );
+            assert!(
+                success.1 > success.0,
+                "success should stay green for seed {seed:?}, got {success:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_is_deterministic() {
+        let seed = (200, 120, 40);
+        assert_eq!(
+            generate_from_seed(seed, DARK_BG),
+            generate_from_seed(seed, DARK_BG)
+        );
+    }
+}
