@@ -84,7 +84,21 @@ pub(crate) fn draw_spinner(
     }
 }
 
-fn draw_donut(scene: &mut Scene, field: &donut::Donut, box_: Rect, ink: Color, scale: f64) {
+/// `grow` scales the whole halftone screen about the box's centre, which is how
+/// the boot reveal brings the donut in: scaling the *box* instead would keep the
+/// fixed dot pitch and simply show fewer dots, i.e. a coarsening blob rather
+/// than a donut arriving.
+fn draw_donut(
+    scene: &mut Scene,
+    field: &donut::Donut,
+    box_: Rect,
+    ink: Color,
+    scale: f64,
+    grow: f64,
+) {
+    if grow <= 0.0 || ink.components[3] <= 0.0 {
+        return;
+    }
     let side = box_.width().min(box_.height());
     if side < layout::DONUT_MIN_SIDE {
         return;
@@ -118,19 +132,22 @@ fn draw_donut(scene: &mut Scene, field: &donut::Donut, box_: Rect, ink: Color, s
             dots.extend(Circle::new((px, py), radius).path_elements(CIRCLE_TOLERANCE));
         }
     }
-    scene.fill(
-        vello::peniko::Fill::NonZero,
-        Affine::scale(scale),
-        ink,
-        None,
-        &dots,
-    );
+    let centre = vello::kurbo::Vec2::new(cx, cy);
+    let transform = Affine::scale(scale)
+        * Affine::translate(centre)
+        * Affine::scale(grow)
+        * Affine::translate(-centre);
+    scene.fill(vello::peniko::Fill::NonZero, transform, ink, None, &dots);
 }
 
-/// Draw the hero block shown on an empty session: the wordmark, the halftone
-/// donut, and one line of invitation, stacked and centred exactly like the
-/// website's landing section.
-fn draw_hero(
+/// Draw the hero's text: the wordmark over the donut and the one line of
+/// invitation under it, stacked and centred exactly like the website's landing
+/// section.
+///
+/// The donut itself is drawn by the caller, outside the chrome reveal layer:
+/// during boot the torus arrives *first* and the words after it, so the two
+/// cannot share one draw.
+fn draw_hero_text(
     scene: &mut Scene,
     text: &mut text::TextSystem,
     model: &Model,
@@ -155,9 +172,6 @@ fn draw_hero(
         },
         scale,
     );
-    if let Some(field) = model.donut.as_ref() {
-        draw_donut(scene, field, hero.donut, model.theme.text, scale);
-    }
     text.draw_paragraph_scaled(
         scene,
         HERO_TAGLINE,
@@ -402,13 +416,21 @@ fn draw_transcript(
     // `Transcript::streaming_len` counts, or the two would disagree).
     let streaming_index = laid
         .iter()
-        .rposition(|message| !matches!(message.role, Role::Tool | Role::Notice))
+        .rposition(|message| !matches!(message.role, Role::Tool | Role::Notice | Role::Edit))
         .filter(|_| model.stream.is_revealing())
         .filter(|index| laid[*index].role != Role::User);
 
+    let now = std::time::Instant::now();
     for placed in &view.visible {
         let message_top = frame.body_top + placed.top;
         let is_user = placed.message.role == Role::User;
+        // The acknowledgement nod. Applied to the card *and* its text, so the
+        // message moves as one object; it decays to zero, so nothing here can
+        // leave the transcript permanently off its column.
+        let wiggle = placed
+            .message
+            .delivery
+            .map_or(0.0, |delivery| delivery.wiggle(now));
         // The user's card: the same fill and radius as the composer, so the
         // message and the field it came from are visibly one object.
         if is_user {
@@ -418,15 +440,32 @@ fn draw_transcript(
                 theme.wash,
                 None,
                 &RoundedRect::new(
-                    frame.left,
+                    frame.left + wiggle,
                     message_top,
-                    frame.right,
+                    frame.right + wiggle,
                     message_top + placed.message.height,
                     USER_RADIUS,
                 ),
             );
+            // The delivery mark: hollow while the message is only *sent*,
+            // solid once the agent has it. The dot is the state the wiggle
+            // announces, and it stays after the motion is over, so a user who
+            // looked away can still tell what landed.
+            if let Some(delivery) = placed.message.delivery {
+                draw_delivery_dot(
+                    scene,
+                    delivery,
+                    (
+                        frame.right + wiggle - USER_PAD_X - crate::ack::DOT_RADIUS,
+                        message_top + placed.message.height - USER_PAD_Y
+                            + crate::ack::DOT_GAP,
+                    ),
+                    theme,
+                    scale,
+                );
+            }
         }
-        let text_left = frame.left + USER_PAD_X;
+        let text_left = frame.left + USER_PAD_X + wiggle;
         let text_top = message_top + placed.message.top_padding();
 
         // A thought carries no rule and no indent: it is set apart by being
@@ -469,6 +508,26 @@ fn draw_transcript(
                     std::time::Instant::now(),
                 );
             }
+        }
+
+        // An edit card: the change itself, kept in the transcript. Marked by a
+        // rule down its left edge rather than a wash, because the diff's own
+        // code block already carries one and a card inside a card reads as two
+        // nested quotes. The rule is body ink: the edit is something that
+        // happened to the user's files, not an aside.
+        if placed.message.role == Role::Edit {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.rule,
+                None,
+                &Rect::new(
+                    frame.left + USER_PAD_X,
+                    message_top,
+                    frame.left + USER_PAD_X + frame.hairline() * 2.0,
+                    message_top + placed.message.height,
+                ),
+            );
         }
 
         // A failure notice: a rule down its left edge, no wash. A washed card
@@ -689,11 +748,44 @@ pub fn build_scene(
         );
     };
 
-    // Paper.
-    fill(
-        scene,
-        theme.background,
-        &Rect::new(0.0, 0.0, frame.width, frame.height),
+    // Paper. Black on the opening frames of the boot reveal, then the theme's
+    // own background: the window fades up from nothing rather than snapping
+    // into existence fully drawn.
+    let page = Rect::new(0.0, 0.0, frame.width, frame.height);
+    fill(scene, model.boot.paper_color(theme.background), &page);
+
+    // The hero donut, drawn before (and outside) the chrome reveal: during boot
+    // the torus arrives first and everything else is created around it.
+    let placeholder = model.transcript.is_empty();
+    let hero = frame.hero().filter(|_| placeholder);
+    if let (Some(hero), Some(field)) = (hero, model.donut.as_ref()) {
+        draw_donut(
+            scene,
+            field,
+            hero.donut,
+            model.boot.donut_ink(theme.text, theme.background),
+            scale,
+            model.boot.donut(),
+        );
+    }
+
+    // Everything that is not the donut fades in as one group, so the composer,
+    // the wordmark, and the chrome read as one thing being created rather than
+    // as several arrivals.
+    match model.boot.chrome_layer() {
+        crate::boot::ChromeReveal::Hidden => return,
+        crate::boot::ChromeReveal::Fading(alpha) => scene.push_layer(
+            vello::peniko::Fill::NonZero,
+            vello::peniko::Mix::Normal,
+            alpha,
+            Affine::scale(scale),
+            &page,
+        ),
+        crate::boot::ChromeReveal::Solid => {}
+    }
+    let revealing = matches!(
+        model.boot.chrome_layer(),
+        crate::boot::ChromeReveal::Fading(_)
     );
 
     // Top chrome row: the session strip.
@@ -728,14 +820,13 @@ pub fn build_scene(
 
     // Transcript: ink on paper, bottom-aligned against the composer so new
     // lines rise from the well rather than dangling from the masthead.
-    let placeholder = model.transcript.is_empty();
-
-    // On an empty session the transcript region is dead space, so the hero
-    // donut from the website lives there: the same halftone torus, and
-    // draggable in the same way. It stands down the moment there is real
-    // content, so it can never compete with the transcript.
-    if let Some(hero) = frame.hero().filter(|_| placeholder) {
-        draw_hero(scene, text, model, hero, &frame, scale);
+    //
+    // On an empty session the transcript region is dead space, so the hero from
+    // the website lives there: the wordmark and tagline around the halftone
+    // torus drawn above. It stands down the moment there is real content, so it
+    // can never compete with the transcript.
+    if let Some(hero) = hero {
+        draw_hero_text(scene, text, model, hero, &frame, scale);
     }
 
     // On an empty session the hero says everything, so there is no filler
@@ -938,6 +1029,10 @@ pub fn build_scene(
             scale,
             std::time::Instant::now(),
         );
+    }
+
+    if revealing {
+        scene.pop_layer();
     }
 }
 

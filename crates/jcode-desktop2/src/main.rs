@@ -4,16 +4,19 @@
 //! Vello vector rendering, Parley text layout, and a live harness API
 //! connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
+mod ack;
 mod activity;
 mod app_harness;
 mod app_overview;
 mod app_selection;
+mod boot;
 mod capture;
 mod caret;
 mod cli;
 mod clipboard;
 mod donut;
 mod editor;
+mod edits;
 mod harness;
 mod hints;
 mod input;
@@ -25,6 +28,7 @@ mod overview;
 mod paint;
 mod place;
 mod profile;
+mod reasoning;
 mod render;
 mod scene;
 mod scene_overview;
@@ -80,6 +84,18 @@ struct App {
     /// opens on the keydown; this is what lets a tap shorter than
     /// [`SUPER_TAP`] take it straight back off screen.
     super_held_since: Option<std::time::Instant>,
+    /// A Super release that has not been acted on yet, as `(when, was_tap)`.
+    ///
+    /// Key remappers (keyd's `[meta] h = left`, and every "Super+hjkl becomes
+    /// arrows" variant) implement the rewrite by *lifting* Super, sending the
+    /// arrow, and pressing Super again. The compositor forwards that faithfully,
+    /// so a held Super arrives here as a burst of release/press pairs. Acting on
+    /// the release immediately committed and reopened the field on every motion
+    /// key, which is the flicker that made held-Super hjkl look broken. Holding
+    /// the release for [`SUPER_BOUNCE`] lets a re-press inside that window
+    /// cancel it, so a synthetic lift is invisible and a real one still
+    /// resolves a frame or two later.
+    pending_super_release: Option<(std::time::Instant, bool)>,
     /// Whether holding Super opens the card-strip overview. On by default:
     /// the compositor muscle memory this app lives inside (niri, GNOME) puts
     /// "zoom out to everything" on the Super key. The flag stays so the
@@ -130,6 +146,7 @@ impl Default for App {
             harness: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             super_held_since: None,
+            pending_super_release: None,
             super_overview: true,
             clipboard: clipboard::Clipboard::default(),
             pointer: (0.0, 0.0),
@@ -167,6 +184,13 @@ const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// Neither costs the user anything they had, and a deliberate hold shows the
 /// field immediately.
 const SUPER_TAP: std::time::Duration = std::time::Duration::from_millis(180);
+
+/// How long a Super release is held before it is acted on, so a remapper's
+/// synthetic lift-and-press around a rewritten key does not read as the user
+/// letting go. Long enough to cover the release/press pair (which arrive in the
+/// same input batch, microseconds apart) and short enough that a real release
+/// still commits within a frame or two.
+const SUPER_BOUNCE: std::time::Duration = std::time::Duration::from_millis(90);
 
 /// Frame interval while the overview zooms (~60fps).
 const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
@@ -278,6 +302,10 @@ pub struct Model {
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
     pub model: Option<ModelId>,
+    /// The boot-up reveal: black paper, the donut growing in, then the rest of
+    /// the window. Default is *finished*, so captures and tests see the settled
+    /// frame; the real window replaces it on the first paint.
+    pub boot: boot::Boot,
     /// Live RAM readout for this window and the daemon, drawn on the trailing
     /// end of the top chrome row. `None` until the first sample, and always
     /// `None` in pinned captures, so frames stay deterministic.
@@ -314,7 +342,14 @@ impl Default for Model {
             meta: meta::Meta::detect(),
             status: "starting...".into(),
             session_id: None,
-            transcript: transcript::Transcript::default(),
+            transcript: {
+                // The user's thinking-display choice is theirs, so it is read
+                // once here rather than consulted per delta: a mid-turn config
+                // edit must not change what the transcript on screen means.
+                let mut transcript = transcript::Transcript::default();
+                transcript.set_reasoning_mode(reasoning::ReasoningMode::from_env());
+                transcript
+            },
             editor: editor::Editor::default(),
             caret: caret::Caret::default(),
             busy: false,
@@ -334,6 +369,7 @@ impl Default for Model {
             peeks: overview::Peeks::default(),
             working_dir: None,
             model: None,
+            boot: boot::Boot::default(),
             mem: None,
         }
     }
@@ -462,7 +498,17 @@ impl Model {
         if self.scroll > 0.0 {
             return Some("scrolled back".to_string());
         }
-        self.status_footnote().or_else(|| self.meta.alert())
+        self.status_footnote()
+            .or_else(|| self.meta.alert())
+            // Nothing to report: on an empty page say which build this is.
+            // The version is the one question a user cannot answer from the
+            // window, and an idle transcript is the only place with room for
+            // it, so it never competes with an actionable message.
+            .or_else(|| {
+                self.transcript
+                    .is_empty()
+                    .then(|| self.meta.version.clone())
+            })
     }
 }
 
@@ -481,7 +527,7 @@ impl App {
         self.model.hint = self.model.hint.wrapping_add(1);
         self.model
             .transcript
-            .push(transcript::Message::user(content.clone()));
+            .push(transcript::Message::sent(content.clone()));
         // The user's own message was typed, not streamed: revealing it would
         // animate text they are already looking at.
         self.model.stream.reveal_all();
@@ -871,6 +917,12 @@ impl App {
             .overview
             .is_animating()
             .then(|| now + OVERVIEW_FRAME);
+        // A held Super release waiting out the remapper bounce needs a frame to
+        // resolve on, or a gesture ended by letting go with nothing else moving
+        // on screen would sit open until the next unrelated event.
+        let bounce = self
+            .pending_super_release
+            .map(|(at, _)| at + crate::SUPER_BOUNCE);
         if !self.model.focused {
             // An unfocused window drops the decorative motion (the caret, the
             // donut) but not the informative kind: the spinner is the proof a
@@ -896,11 +948,17 @@ impl App {
                 .smooth
                 .next_frame_at(now)
                 .map(|_| now + BACKGROUND_FRAME);
-            return [overview, spinner, stream, smooth]
+            // The reveal keeps running unfocused: a window opened behind the
+            // pointer's focus must not be stuck on a black frame.
+            let boot = self.model.boot.next_frame_at(now);
+            return [overview, bounce, spinner, stream, smooth, boot]
                 .into_iter()
                 .flatten()
                 .min();
         }
+        // The boot reveal outranks everything: it is the first thing on screen
+        // and it must not be paced by whatever else happens to be animating.
+        let boot = self.model.boot.next_frame_at(now);
         let caret = (!self.model.busy)
             .then(|| self.model.caret.next_toggle_at(now))
             .flatten();
@@ -915,10 +973,20 @@ impl App {
         // Scroll smoothing and the scrollbar fade both need frames, and both
         // stop themselves once the view has landed and the bar is gone.
         let smooth = self.model.smooth.next_frame_at(now);
-        [caret, donut, spinner, stream, smooth, overview]
-            .into_iter()
-            .flatten()
-            .min()
+        // The delivery wiggle: short, and it stops itself, so an idle window
+        // with every message acknowledged still sleeps.
+        let ack = self
+            .model
+            .transcript
+            .deliveries()
+            .filter_map(|delivery| delivery.next_frame_at(now))
+            .min();
+        [
+            caret, donut, spinner, stream, smooth, overview, bounce, boot, ack,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Whether the frame just drawn should be followed immediately by another:
@@ -1049,6 +1117,15 @@ impl App {
             Action::OverviewPrev => self.cycle_overview(-1),
             Action::OverviewCommit => self.close_overview(true),
             Action::OverviewCancel => self.close_overview(false),
+
+            // A view choice, applied live: the notice is the only feedback the
+            // user gets when the mode change has no immediate visible effect
+            // (nothing is thinking right now).
+            Action::CycleReasoningDisplay => {
+                let next = self.model.transcript.reasoning_mode().cycle();
+                self.model.transcript.set_reasoning_mode(next);
+                self.model.set_notice(format!("thinking: {}", next.label()));
+            }
 
             Action::InsertNewline => self.model.editor.insert_char('\n'),
 
@@ -1242,6 +1319,10 @@ impl ApplicationHandler for App {
         self.harness = Some(harness::spawn(move || redraw_window.request_redraw()));
         let state = pollster::block_on(render::RenderState::new(window)).expect("init gpu");
         self.state = Some(state);
+        // Start the reveal at the moment the surface exists, not at process
+        // start: GPU init takes long enough that timing it from `main` would
+        // spend the whole sequence before the first frame is presented.
+        self.model.boot = boot::Boot::start(std::time::Instant::now());
     }
 
     fn window_event(
@@ -1284,6 +1365,10 @@ impl ApplicationHandler for App {
                     .map(|state| state.scale_factor())
                     .unwrap_or(1.0);
                 self.pointer = (position.x / scale, position.y / scale);
+                // A keystroke ends the reveal at once: an animation that eats
+                // the user's first character, or makes them watch it finish, is
+                // worse than no animation.
+                self.model.boot = boot::Boot::default();
                 if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
                     eprintln!(
                         "[input] move to ({:.1}, {:.1}) logical",
@@ -1381,6 +1466,7 @@ impl ApplicationHandler for App {
                     // than leaving it stuck open under a window the user
                     // has already left.
                     self.super_held_since = None;
+                    self.pending_super_release = None;
                     if self.model.overview.is_visible() {
                         self.model.overview.abort();
                     }
@@ -1430,8 +1516,10 @@ impl ApplicationHandler for App {
                 if let Some(readout) = self.mem_sampler.sample(std::time::Instant::now()) {
                     self.model.mem = Some(readout);
                 }
+                self.settle_super_release(std::time::Instant::now());
                 self.tick_overview(std::time::Instant::now());
                 self.animate_donut();
+                self.model.boot.advance(std::time::Instant::now());
                 self.model.stream.advance(std::time::Instant::now());
                 self.model.smooth.advance(std::time::Instant::now());
                 // A fling coasts on the frame clock, not on event arrival, so

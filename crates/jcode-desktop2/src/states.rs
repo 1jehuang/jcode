@@ -13,6 +13,9 @@ type NodeBuilder = fn() -> Model;
 pub const NODES: &[(&str, NodeBuilder)] = &[
     ("connecting", connecting),
     ("attached_empty", attached_empty),
+    ("boot_opening", boot_opening),
+    ("boot_donut", boot_donut),
+    ("boot_chrome", boot_chrome),
     ("donut_dragged", donut_dragged),
     ("donut_off", donut_off),
     ("mid_input", mid_input),
@@ -31,6 +34,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("reasoning_streaming", reasoning_streaming),
     ("reasoning_paragraphs", reasoning_paragraphs),
     ("tool_progress", tool_progress),
+    ("edit_card", edit_card),
+    ("edit_cards_many", edit_cards_many),
     ("working", working),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
@@ -133,6 +138,33 @@ fn connecting() -> Model {
         // Pinned off: a live RAM figure would make every capture depend on
         // the machine and moment it ran on.
         mem: None,
+        // Settled: a node renders the window after the boot reveal, so every
+        // existing capture is unchanged by it. The reveal has its own nodes.
+        boot: crate::boot::Boot::default(),
+    }
+}
+
+/// Three frames of the boot reveal: the black opening, the donut half grown,
+/// and the chrome fading in over it. Pinned times, so each phase is a
+/// deterministic capture rather than something only visible at launch.
+fn boot_opening() -> Model {
+    Model {
+        boot: crate::boot::Boot::pinned(0.02),
+        ..attached_empty()
+    }
+}
+
+fn boot_donut() -> Model {
+    Model {
+        boot: crate::boot::Boot::pinned(0.16),
+        ..attached_empty()
+    }
+}
+
+fn boot_chrome() -> Model {
+    Model {
+        boot: crate::boot::Boot::pinned(0.36),
+        ..attached_empty()
     }
 }
 
@@ -217,6 +249,9 @@ fn attached_empty() -> Model {
         // Pinned off: a live RAM figure would make every capture depend on
         // the machine and moment it ran on.
         mem: None,
+        // Settled: a node renders the window after the boot reveal, so every
+        // existing capture is unchanged by it. The reveal has its own nodes.
+        boot: crate::boot::Boot::default(),
     }
 }
 
@@ -724,6 +759,70 @@ fn tool_progress() -> Model {
             4,
             std::time::Duration::from_secs(23),
             Some("run the desktop2 scroll tests"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// A finished edit, kept in the transcript. This is the state the live tool
+/// card cannot express: the call is over, but what it *did* to the user's files
+/// has to stay readable, so the intent, the file, and the changed lines stand as
+/// their own card between the turns.
+fn edit_card() -> Model {
+    use crate::edits::EditCard;
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("make the fade decay instead of snapping"));
+    transcript.push_edit(&EditCard {
+        intent: Some("decay the scrollbar fade instead of clearing it".into()),
+        files: vec!["crates/jcode-desktop2/src/scroll.rs".into()],
+        diff: "118- self.fade = 0.0;\n118+ self.fade = (self.fade - dt / FADE_SECONDS).max(0.0);\n"
+            .into(),
+        added: 1,
+        removed: 1,
+    });
+    transcript.push(Message::assistant(
+        "The bar now eases out over `FADE_SECONDS` rather than disappearing on \
+         the frame the wheel stops.",
+    ));
+    Model {
+        transcript,
+        ..attached_empty()
+    }
+}
+
+/// Several edits in one turn, with the next call still running. The cards
+/// accumulate (each is a change that happened) while the live tool card stays
+/// pinned to the tail: the two must not fight over the bottom of the page.
+fn edit_cards_many() -> Model {
+    use crate::edits::EditCard;
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("rename `alpha` to `fade` everywhere"));
+    for (file, line) in [
+        ("crates/jcode-desktop2/src/scroll.rs", 118usize),
+        ("crates/jcode-desktop2/src/scene.rs", 402),
+        ("crates/jcode-desktop2/src/layout.rs", 77),
+    ] {
+        transcript.push_edit(&EditCard {
+            intent: Some(format!(
+                "rename the field in {}",
+                file.rsplit('/').next().unwrap()
+            )),
+            files: vec![file.into()],
+            diff: format!("{line}- let alpha = self.alpha;\n{line}+ let fade = self.fade;\n"),
+            added: 1,
+            removed: 1,
+        });
+    }
+    transcript.set_live_tool("call_9", "run the desktop2 tests");
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            4,
+            std::time::Duration::from_secs(31),
+            Some("run the desktop2 tests"),
         ),
         ..attached_empty()
     }
