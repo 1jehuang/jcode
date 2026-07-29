@@ -1619,7 +1619,11 @@ mod tests {
         answered.append_reasoning("thinking");
         answered.append_assistant("the answer");
         assert_eq!(
-            answered.messages().iter().map(|m| m.role).collect::<Vec<_>>(),
+            answered
+                .messages()
+                .iter()
+                .map(|m| m.role)
+                .collect::<Vec<_>>(),
             vec![Role::Assistant]
         );
 
@@ -1659,7 +1663,11 @@ mod tests {
         transcript.append_assistant("the answer");
         assert!(transcript.plain_text().contains("first point."));
         assert_eq!(
-            transcript.messages().iter().map(|m| m.role).collect::<Vec<_>>(),
+            transcript
+                .messages()
+                .iter()
+                .map(|m| m.role)
+                .collect::<Vec<_>>(),
             vec![Role::Reasoning, Role::Assistant]
         );
     }

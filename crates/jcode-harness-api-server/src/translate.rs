@@ -104,6 +104,17 @@ impl BridgeState {
                     "id": id,
                     "working_dir": working_dir,
                 });
+                // Sessions rooted inside a jcode checkout are self-dev
+                // sessions: the daemon only enables the self-dev tools and
+                // prompt when the subscribe says so, and a client that opens
+                // the repo without saying so gets an agent that cannot build
+                // the very app it is running in.
+                if working_dir
+                    .as_deref()
+                    .is_some_and(Self::path_is_inside_jcode_repo)
+                {
+                    subscribe["selfdev"] = json!(true);
+                }
                 if req == "attach_session"
                     && let Some(target) = request["session_id"].as_str()
                 {
@@ -397,6 +408,15 @@ impl BridgeState {
             }
             "ack" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                // The daemon acking the in-flight `message` is the proof the
+                // agent has the text: report it as its own event so a client
+                // can move a message from "sent" to "acknowledged" without
+                // waiting for the first token of the reply.
+                if self.pending_message_id == Some(id) {
+                    return vec![ServerFrame::event(ApiEvent::MessageAccepted {
+                        session_id: session(self),
+                    })];
+                }
                 self.take_simple(id, SimpleKind::Ok)
                     .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Ok)])
                     .unwrap_or_default()
@@ -404,6 +424,13 @@ impl BridgeState {
             "error" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let message = event["message"].as_str().unwrap_or("").to_string();
+                // A turn that fails ends with `error` *instead of* `done`, so
+                // the turn is over: forget the pending message, or a later
+                // unrelated `done` carrying the same id would be reported as
+                // this turn finishing.
+                if self.pending_message_id == Some(id) {
+                    self.pending_message_id = None;
+                }
                 // Route to a pending request when possible, else stream it.
                 let reply_to = self
                     .pending_simple
@@ -436,6 +463,21 @@ impl BridgeState {
         }
     }
 
+    /// True when `path`, or any ancestor, looks like a jcode source checkout.
+    ///
+    /// Matched by content (a workspace manifest next to the crates directory)
+    /// rather than by name, so a clone in any directory is recognised.
+    fn path_is_inside_jcode_repo(path: &str) -> bool {
+        let mut current = Some(std::path::Path::new(path));
+        while let Some(dir) = current {
+            if dir.join("Cargo.toml").is_file() && dir.join("crates/jcode-base").is_dir() {
+                return true;
+            }
+            current = dir.parent();
+        }
+        false
+    }
+
     /// Working directory of a session, read from its persisted record.
     ///
     /// The legacy `history` event lists session *ids* only, but the strip
@@ -449,6 +491,9 @@ impl BridgeState {
             .join(".jcode")
             .join("sessions")
             .join(format!("{session_id}.json"));
+        // A missing or malformed record is expected (a session may predate the
+        // field, or be mid-write), and the only cost is an ungrouped bar, so
+        // this degrades rather than failing the whole session list.
         let text = std::fs::read_to_string(path).ok()?;
         let value: Value = serde_json::from_str(&text).ok()?;
         value["working_dir"].as_str().map(str::to_string)

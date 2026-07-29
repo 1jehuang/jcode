@@ -75,6 +75,47 @@ fn send_message_then_done_becomes_turn_done() {
     ));
 }
 
+/// The daemon acking the in-flight message is the only signal that the agent
+/// took delivery, so it must surface as its own event rather than being
+/// swallowed as a bookkeeping ack. A client that shows "sent" until the first
+/// token of the reply is showing a lie for as long as the model thinks.
+#[test]
+fn acking_the_pending_message_reports_acceptance() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(
+        &json!({"req": "send_message", "id": 2, "session_id": "s1", "content": "hi"}),
+    );
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    let legacy_id = message["id"].as_u64().unwrap();
+
+    let accepted = state.legacy_event_to_api(&json!({"type": "ack", "id": legacy_id}));
+    assert!(matches!(
+        &accepted[0].event,
+        ApiEvent::MessageAccepted { session_id } if session_id == "s1"
+    ));
+    // The turn must still end normally: the acceptance event must not consume
+    // the pending id the `done` boundary depends on.
+    let done = state.legacy_event_to_api(&json!({"type": "done", "id": legacy_id}));
+    assert!(matches!(&done[0].event, ApiEvent::TurnDone { .. }));
+}
+
+/// An ack for anything else (a ping, a clear) is still a plain request reply:
+/// promoting those to acceptance would wiggle a message that nobody sent.
+#[test]
+fn acking_an_unrelated_request_stays_a_reply() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req": "clear", "id": 9, "session_id": "s1"}));
+    let Outbound::Legacy(clear) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    let legacy_id = clear["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": legacy_id}));
+    assert_eq!(frames[0].reply_to, Some(9));
+    assert!(matches!(&frames[0].event, ApiEvent::Ok));
+}
+
 #[test]
 fn ping_pong_roundtrip() {
     let mut state = state_with_session();
@@ -256,4 +297,74 @@ fn an_available_models_push_updates_the_model() {
         }
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+#[test]
+fn create_session_in_a_jcode_checkout_requests_selfdev() {
+    // Regression: desktop2 opens its own crate, and without the `selfdev`
+    // flag the daemon hands back an agent with no self-dev tools or prompt.
+    let mut state = BridgeState::default();
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .join("crates/jcode-desktop2");
+    let out = state.api_request_to_legacy(&json!({
+        "req": "create_session",
+        "id": 1,
+        "working_dir": repo.display().to_string(),
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["selfdev"], json!(true));
+}
+
+#[test]
+fn create_session_outside_a_checkout_leaves_selfdev_unset() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "create_session",
+        "id": 1,
+        "working_dir": "/",
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(value.get("selfdev").is_none(), "got {value}");
+}
+
+/// A turn that fails ends with `error` instead of `done`. The bridge must let
+/// go of the pending message, or a later unrelated `done` reusing that legacy
+/// id would be reported to the client as this turn finally finishing, and a
+/// client that trusts `turn_done` would unblock on a turn that never ran.
+#[test]
+fn a_failed_turn_clears_the_pending_message() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 11, "content": "hi",
+    }));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected a legacy message");
+    };
+    let legacy_id = message["id"].as_u64().expect("a legacy id");
+
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "error", "id": legacy_id, "message": "dns error",
+    }));
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame.event, ApiEvent::Error { .. })),
+        "the failure was not forwarded"
+    );
+
+    // The same id arriving as `done` afterwards is no longer this turn.
+    let frames = state.legacy_event_to_api(&json!({"type": "done", "id": legacy_id}));
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, ApiEvent::TurnDone { .. })),
+        "a failed turn reported a second, phantom completion"
+    );
 }

@@ -88,6 +88,16 @@ pub enum ApiEvent {
     /// The turn finished; the agent is idle.
     TurnDone { session_id: String },
 
+    /// The agent accepted a user message: it is in the session's queue and
+    /// will be processed. Sent once per `SendMessage` that the daemon acks.
+    ///
+    /// Distinct from the request-level `Ok`: `Ok` only says the bridge parsed
+    /// the frame, while this says the agent itself has the message. A client
+    /// that shows "sent" versus "acknowledged" needs the second fact, and
+    /// without it the only proof a message landed is the reply, which can be
+    /// minutes away.
+    MessageAccepted { session_id: String },
+
     /// The harness needs a permission decision from the user.
     PermissionRequest {
         session_id: String,

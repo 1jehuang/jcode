@@ -17,6 +17,7 @@ mod clipboard;
 mod donut;
 mod editor;
 mod edits;
+mod frame_meter;
 mod harness;
 mod hints;
 mod input;
@@ -136,6 +137,10 @@ struct App {
     /// here rather than by the model so a frame stays a pure function of the
     /// model.
     mem_sampler: mem::Sampler,
+    /// Live per-frame timing, off unless `JCODE_DESKTOP2_FRAME_METER` is set.
+    /// Lives on the app rather than the render state so the CPU-side build span
+    /// can be timed around `build_scene`, which the render state never sees.
+    frame_meter: frame_meter::FrameMeter,
 }
 
 impl Default for App {
@@ -164,6 +169,7 @@ impl Default for App {
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
             mem_sampler: mem::Sampler::default(),
+            frame_meter: frame_meter::FrameMeter::from_env(),
         }
     }
 }
@@ -1530,6 +1536,7 @@ impl ApplicationHandler for App {
                     self.model.apply_momentum(max);
                 }
                 let mut scene = Scene::new();
+                self.frame_meter.start();
                 if let Some(state) = self.state.as_mut() {
                     let scale = state.scale_factor();
                     let size = state.size();
@@ -1552,7 +1559,8 @@ impl ApplicationHandler for App {
                     let scale = state.scale_factor();
                     let size = state.size();
                     build_scene(&mut scene, &mut self.painter, &self.model, size, scale);
-                    if let Err(error) = state.render(&scene) {
+                    self.frame_meter.end_build();
+                    if let Err(error) = state.render(&scene, &mut self.frame_meter) {
                         eprintln!("render error: {error:#}");
                     }
                 }
@@ -1566,6 +1574,12 @@ impl ApplicationHandler for App {
                 // keep the timer path, so an idle window still sleeps.
                 if self.wants_display_paced_frame(std::time::Instant::now()) {
                     self.request_redraw();
+                } else {
+                    // No continuous frame is coming, so the next interval will
+                    // be however long the user waits before doing something.
+                    // Reporting that as a frame time would make every idle
+                    // window look like it dropped hundreds of frames.
+                    self.frame_meter.note_idle();
                 }
             }
             _ => {}
