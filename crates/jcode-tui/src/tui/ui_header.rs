@@ -1449,6 +1449,12 @@ mod tests {
             anthropic: ProviderAuth {
                 has_oauth: true,
                 has_api_key: true,
+                // `state` drives whether the inventory line shows a method suffix
+                // at all: the `NotConfigured` default renders a bare "anthropic",
+                // so leaving it defaulted made this test assert on a string the
+                // code cannot produce for these inputs.
+                state: AuthState::Available,
+                oauth_state: AuthState::Available,
                 ..Default::default()
             },
             ..AuthStatus::default()
