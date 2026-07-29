@@ -443,6 +443,10 @@ pub fn remap_named_with(palette: &Palette, color: Color) -> Color {
         Color::Cyan | Color::LightCyan => Role::HeaderIcon,
         Color::White => Role::AiText,
         Color::Gray | Color::DarkGray => Role::Dim,
+        // Used as a panel/inverse background rather than as text.
+        Color::Black => Role::UserBg,
+        // `Reset` is the terminal's own default and must stay untouched, which
+        // is what lets the user's real background show through.
         _ => return color,
     };
     if !palette.is_overridden(role) {
@@ -740,5 +744,148 @@ mod light_theme_interaction {
             rendered, chosen,
             "the user's configured color must reach the terminal unmodified"
         );
+    }
+}
+
+#[cfg(test)]
+mod coverage {
+    use super::*;
+
+    /// Every distinct `rgb(...)` literal the TUI renders, extracted from the
+    /// source at the time this test was written.
+    ///
+    /// The claim this feature makes is "every color is configurable", and that
+    /// claim is only true if each literal is actually claimed by some role.
+    /// Sampling the real literal set is the only way to check that: an
+    /// implementation can look complete while leaving whole families of shades
+    /// unreachable, and no other test in this crate would notice.
+    const TUI_LITERALS: &[(u8, u8, u8)] = &include!("palette_literals.rs");
+
+    /// Which role, if any, claims `literal` when every role is overridden.
+    fn claiming_role(literal: (u8, u8, u8)) -> Option<Role> {
+        let source = crate::harmony::Oklab::from_rgb(literal);
+        let mut best: Option<(f32, Role)> = None;
+        for role in ALL_ROLES.iter().copied() {
+            let distance = source.distance(crate::harmony::Oklab::from_rgb(role.default_rgb()));
+            if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
+                best = Some((distance, role));
+            }
+        }
+        best.map(|(_, role)| role)
+    }
+
+    #[test]
+    fn most_tui_literals_are_reachable_from_some_role() {
+        let unclaimed: Vec<(u8, u8, u8)> = TUI_LITERALS
+            .iter()
+            .copied()
+            .filter(|literal| claiming_role(*literal).is_none())
+            .collect();
+
+        let claimed = TUI_LITERALS.len() - unclaimed.len();
+        let ratio = claimed as f32 / TUI_LITERALS.len() as f32;
+        // Measured at 222/222 when written. Held at 100% rather than a softer
+        // ratio because "every color is configurable" is the literal claim: any
+        // unclaimed literal is a color a user cannot change.
+        assert!(
+            ratio >= 1.0,
+            "only {claimed}/{} literals ({:.0}%) are reachable from a role; unclaimed: {:?}",
+            TUI_LITERALS.len(),
+            ratio * 100.0,
+            unclaimed
+        );
+    }
+
+    /// Report which roles do the work, so a role that claims nothing (dead
+    /// weight) or claims everything (too coarse) is visible.
+    /// Every role must claim at least one literal the TUI really renders, and
+    /// none may claim most of them. A role that claims nothing is dead weight in
+    /// the `/colors` listing; a role that claims everything means the family
+    /// radius is too coarse to tell roles apart.
+    #[test]
+    fn no_single_role_dominates_the_literal_space() {
+        let mut counts = std::collections::BTreeMap::new();
+        for literal in TUI_LITERALS.iter().copied() {
+            if let Some(role) = claiming_role(literal) {
+                *counts.entry(role.key()).or_insert(0usize) += 1;
+            }
+        }
+        let total: usize = counts.values().sum();
+        for role in ALL_ROLES.iter().copied() {
+            assert!(
+                counts.contains_key(role.key()),
+                "{} claims no literal the TUI renders; either it is unused or its \
+                 default does not match the shades its call sites use",
+                role.key()
+            );
+        }
+        for (role, count) in &counts {
+            assert!(
+                *count * 2 <= total,
+                "{role} claims {count}/{total} literals, which means the family radius is too \
+                 coarse to distinguish roles"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod named_colors {
+    use super::*;
+
+    /// Every ratatui named color the TUI actually uses must map to a role,
+    /// except `Reset`.
+    ///
+    /// Named colors carry no RGB for literal matching to work with, so an
+    /// unmapped one is a color the user simply cannot change. `Color::Black`
+    /// was exactly that until this test existed.
+    #[test]
+    fn every_named_color_used_by_the_tui_is_configurable() {
+        let used = [
+            Color::White,
+            Color::Black,
+            Color::Gray,
+            Color::DarkGray,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+        ];
+
+        // Override every role so the only reason a color stays put is that it
+        // has no mapping at all.
+        let mut palette = Palette::default();
+        for role in ALL_ROLES.iter().copied() {
+            let (r, g, b) = role.default_rgb();
+            palette.set(role, (r.wrapping_add(40), g, b));
+        }
+
+        for color in used {
+            assert_ne!(
+                remap_named_with(&palette, color),
+                color,
+                "{color:?} is used by the TUI but maps to no role, so a user cannot change it"
+            );
+        }
+    }
+
+    /// `Reset` must survive: it is how the terminal's own background shows
+    /// through, on both light and dark themes.
+    #[test]
+    fn reset_is_never_substituted() {
+        let mut palette = Palette::default();
+        for role in ALL_ROLES.iter().copied() {
+            palette.set(role, (1, 2, 3));
+        }
+        assert_eq!(remap_named_with(&palette, Color::Reset), Color::Reset);
+        assert_eq!(adapt_color(&palette, Color::Reset), Color::Reset);
     }
 }
