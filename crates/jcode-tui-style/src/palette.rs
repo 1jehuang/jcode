@@ -522,3 +522,105 @@ mod tests {
         assert_eq!(errors.len(), 2);
     }
 }
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    /// The active palette is process-global, so palette tests must not run
+    /// concurrently with each other.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Install `palette` for the duration of `body`, always restoring the
+    /// default so a failure cannot leak state into another test.
+    fn with_palette(palette: Palette, body: impl FnOnce()) {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                set_palette(Palette::default());
+            }
+        }
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = Restore;
+        set_palette(palette);
+        body();
+    }
+
+    fn buffer_with(colors: &[Color]) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, colors.len() as u16, 1));
+        for (cell, color) in buf.content.iter_mut().zip(colors) {
+            cell.fg = *color;
+        }
+        buf
+    }
+
+    // The default palette must render byte-identically to the historical
+    // hard-coded look. This is the regression that would silently recolor
+    // every existing user's terminal.
+    #[test]
+    fn default_palette_leaves_the_frame_untouched() {
+        with_palette(Palette::default(), || {
+            let original = buffer_with(&[
+                Color::Rgb(255, 200, 100),
+                Color::White,
+                Color::Indexed(42),
+                Color::Reset,
+            ]);
+            let mut adapted = original.clone();
+            adapt_buffer_for_palette(&mut adapted);
+            assert_eq!(adapted, original);
+        });
+    }
+
+    #[test]
+    fn configured_role_recolors_matching_cells_and_named_colors() {
+        let mut palette = Palette::default();
+        palette.set(Role::Error, (10, 80, 240));
+        with_palette(palette, || {
+            let mut buf = buffer_with(&[
+                Color::Rgb(255, 100, 100), // the error default
+                Color::Red,                // the named stand-in for error
+                Color::Rgb(40, 200, 90),   // unrelated green
+                Color::Reset,
+            ]);
+            adapt_buffer_for_palette(&mut buf);
+
+            let as_rgb = |color: Color| match color {
+                Color::Rgb(r, g, b) => (r, g, b),
+                Color::Indexed(index) => crate::color::indexed_to_rgb(index),
+                other => panic!("expected a concrete color, got {other:?}"),
+            };
+            let literal = as_rgb(buf.content[0].fg);
+            assert!(
+                literal.2 > literal.0,
+                "error literal should become blue-dominant, got {literal:?}"
+            );
+            let named = as_rgb(buf.content[1].fg);
+            assert!(
+                named.2 > named.0,
+                "Color::Red should follow the error role, got {named:?}"
+            );
+            assert_eq!(buf.content[3].fg, Color::Reset, "Reset must be preserved");
+        });
+    }
+
+    // Applying the pass twice must be a no-op beyond the first, otherwise a
+    // double-render path would compound hue shifts.
+    #[test]
+    fn palette_substitution_is_idempotent() {
+        let mut palette = Palette::default();
+        palette.set(Role::Warning, (90, 220, 130));
+        with_palette(palette, || {
+            let mut once = buffer_with(&[Color::Rgb(255, 200, 100)]);
+            adapt_buffer_for_palette(&mut once);
+            let mut twice = once.clone();
+            adapt_buffer_for_palette(&mut twice);
+            assert_eq!(
+                once, twice,
+                "a second palette pass must not shift colors again"
+            );
+        });
+    }
+}
