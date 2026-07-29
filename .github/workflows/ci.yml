@@ -228,8 +228,10 @@ jobs:
         # as 2 (`TH_STATE_STOPPED`) rather than 3, which silently disabled
         # macOS stdin forwarding entirely until #651.
         #
-        # Deliberately not Linux-gated: running this on every platform is the
-        # whole point.
+        # Deliberately not Linux-gated: running this on both Unix platforms is
+        # the whole point. Windows is a separate job and is not covered here,
+        # because these tests drive `head -n1`, which stock Windows does not
+        # provide; the Windows detector still has no test coverage.
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
