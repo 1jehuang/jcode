@@ -39,20 +39,29 @@ struct PairingView: View {
                 }
 
                 Button(action: pair) {
-                    HStack {
+                    HStack(spacing: 8) {
                         if isPairing && !reduceMotion {
-                            ProgressView().tint(.black)
+                            ProgressView().tint(.black).controlSize(.small)
                         }
                         Text(isPairing ? "Pairing..." : "Pair")
                             .font(.headline)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .background(canPair ? Theme.mint : Theme.surfaceElevated)
-                    .foregroundStyle(canPair ? .black : Theme.textTertiary)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .background {
+                        if canPair {
+                            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                                .fill(Theme.mintGradient)
+                        } else {
+                            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                                .fill(Theme.surfaceElevated)
+                        }
+                    }
+                    .foregroundStyle(canPair ? Color.black : Theme.textTertiary)
                 }
+                .buttonStyle(PressableButtonStyle(scale: 0.98))
                 .disabled(!canPair || isPairing)
+                .animation(.easeOut(duration: 0.15), value: canPair)
                 .accessibilityLabel("Pair")
                 .accessibilityHint("Connects using the host, port, and code above")
 
@@ -62,15 +71,18 @@ struct PairingView: View {
                     Label("Scan QR from `jcode pair`", systemImage: "qrcode.viewfinder")
                         .font(.subheadline)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                        .padding(.vertical, 14)
                         .background(Theme.surface)
                         .foregroundStyle(Theme.textPrimary)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                        )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 14)
+                            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
                                 .stroke(Theme.border, lineWidth: 1)
                         )
                 }
+                .buttonStyle(PressableButtonStyle(scale: 0.98))
                 .accessibilityLabel("Scan QR code")
                 .accessibilityHint("Opens the camera to scan a pairing code")
 
@@ -98,15 +110,29 @@ struct PairingView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("jcode")
-                .font(Theme.mono(34, weight: .bold))
-                .foregroundStyle(Theme.textPrimary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "terminal.fill")
+                    .font(Theme.icon(20, weight: .semibold))
+                    .foregroundStyle(Theme.mint)
+                    .frame(width: 40, height: 40)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+                    .accessibilityHidden(true)
+                Text("jcode")
+                    .font(Theme.mono(32, weight: .bold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
             Text("Pair with a server on your tailnet")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
         }
-        .padding(.top, 32)
+        .padding(.top, 28)
+        .padding(.bottom, 4)
     }
 
     private var canPair: Bool {
@@ -115,16 +141,25 @@ struct PairingView: View {
     }
 
     private func field(_ label: String, text: Binding<String>, placeholder: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(label)
-                .font(.caption)
+                .font(.caption.weight(.medium))
                 .foregroundStyle(Theme.textTertiary)
+                .textCase(.uppercase)
+                .tracking(0.5)
             TextField(placeholder, text: text)
                 .font(Theme.mono(16))
                 .foregroundStyle(Theme.textPrimary)
+                .tint(Theme.mint)
                 .padding(12)
                 .background(Theme.surfaceElevated)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(
+                    RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous)
+                        .stroke(Theme.border, lineWidth: 1)
+                )
                 .accessibilityLabel(label)
         }
     }

@@ -6,6 +6,7 @@ enum Theme {
     static let surface = Color(hex: 0x1A1A1F)
     static let surfaceElevated = Color(hex: 0x242429)
     static let border = Color.white.opacity(0.08)
+    static let borderStrong = Color.white.opacity(0.14)
     static let mint = Color(hex: 0x4DD9A6)
     static let mintTint = Color(hex: 0x4DD9A6).opacity(0.15)
     static let textPrimary = Color.white.opacity(0.92)
@@ -13,6 +14,35 @@ enum Theme {
     static let textTertiary = Color.white.opacity(0.35)
     static let warning = Color(hex: 0xF59E0B)
     static let error = Color(hex: 0xD94D59)
+
+    /// Accent fill for primary actions; a touch of depth without a rainbow.
+    static let mintGradient = LinearGradient(
+        colors: [Color(hex: 0x5FE3B3), Color(hex: 0x36C08D)],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    /// Fill for the user's own message bubbles.
+    static let userBubble = LinearGradient(
+        colors: [Color(hex: 0x4DD9A6).opacity(0.22), Color(hex: 0x4DD9A6).opacity(0.12)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
+    /// Very subtle top-lit sheen for chrome surfaces (header, composer).
+    static let chrome = LinearGradient(
+        colors: [Color.white.opacity(0.05), Color.white.opacity(0.0)],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    /// Corner radius scale.
+    enum Radius {
+        static let small: CGFloat = 10
+        static let medium: CGFloat = 14
+        static let large: CGFloat = 18
+        static let bubble: CGFloat = 20
+    }
 
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
@@ -65,13 +95,95 @@ struct Card<Content: View>: View {
 
     var body: some View {
         content
-            .padding(14)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
                     .stroke(Theme.border, lineWidth: 1)
             )
+    }
+}
+
+/// Hairline rule used to separate chrome from content.
+struct Hairline: View {
+    var body: some View {
+        Rectangle()
+            .fill(Theme.border)
+            .frame(height: 1)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Shared chrome for the inline banner/notice family (error, offline, notices).
+///
+/// Keeps every inline strip on the same radius, padding, tint math, and
+/// dismiss/action affordance so the stack reads as one system.
+struct BannerStrip<Trailing: View>: View {
+    let icon: String
+    let tint: Color
+    let message: String
+    var lineLimit: Int = 3
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(lineLimit)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            trailing
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+        .padding(.vertical, 2)
+        .frame(minHeight: 48)
+        .background(tint.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                .stroke(tint.opacity(0.32), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Compact circular dismiss control sized for touch.
+struct DismissButton: View {
+    let label: String
+    let hint: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityHint(hint)
+    }
+}
+
+/// Scales and dims slightly on press: makes taps feel connected on iOS.
+struct PressableButtonStyle: ButtonStyle {
+    var scale: CGFloat = 0.94
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }

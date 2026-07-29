@@ -7,7 +7,7 @@ struct ToolCallCard: View {
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     expanded.toggle()
@@ -15,15 +15,23 @@ struct ToolCallCard: View {
             } label: {
                 HStack(spacing: 8) {
                     statusIcon
+                        .frame(width: 16, height: 16)
                     Text(call.name)
                         .font(Theme.mono(13, weight: .medium))
                         .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
                     Spacer()
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(Theme.textTertiary)
+                        .rotationEffect(.degrees(expanded ? 180 : 0))
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Tool \(call.name)")
+            .accessibilityValue(statusLabel)
+            .accessibilityHint(expanded ? "Collapses details" : "Expands input and output")
             if expanded {
                 if !call.input.isEmpty {
                     codeBlock(call.input)
@@ -38,9 +46,32 @@ struct ToolCallCard: View {
                 }
             }
         }
-        .padding(8)
-        .background(Theme.surfaceElevated)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                .stroke(accent, lineWidth: 1)
+        )
+    }
+
+    /// Border tint hints at status without shouting.
+    private var accent: Color {
+        switch call.status {
+        case .streamingInput, .running: Theme.mint.opacity(0.3)
+        case .failed: Theme.error.opacity(0.3)
+        case .succeeded: Theme.border
+        }
+    }
+
+    private var statusLabel: String {
+        switch call.status {
+        case .streamingInput: "Preparing"
+        case .running: "Running"
+        case .succeeded: "Succeeded"
+        case .failed: "Failed"
+        }
     }
 
     @ViewBuilder
@@ -66,9 +97,11 @@ struct ToolCallCard: View {
             Text(text)
                 .font(Theme.mono(11))
                 .foregroundStyle(Theme.textSecondary)
-                .padding(8)
+                .padding(10)
+                .textSelection(.enabled)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.background)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
     }
 }

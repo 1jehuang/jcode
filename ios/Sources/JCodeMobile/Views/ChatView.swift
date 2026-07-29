@@ -89,37 +89,50 @@ struct ChatView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(model.session.sessionTitle ?? model.activeServer?.serverName ?? "jcode")
-                    .font(Theme.mono(16, weight: .semibold))
+                    .font(Theme.mono(15, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 if let modelName = model.session.modelName {
                     Text(modelName)
-                        .font(Theme.mono(11))
+                        .font(Theme.mono(10.5))
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
-            Spacer()
+            Spacer(minLength: 8)
             StatusPill(phase: model.session.phase)
             Button {
                 showSettings = true
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.body.weight(.semibold))
+                    .font(.subheadline.weight(.bold))
                     .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Theme.surfaceElevated)
+                    .frame(width: 36, height: 36)
+                    .background(Theme.surface)
                     .clipShape(Circle())
                     .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
+            .buttonStyle(PressableButtonStyle())
             .accessibilityLabel("Settings")
             .accessibilityHint("Sessions, model, and servers")
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .padding(.top, edgePads.top)
+        .background(alignment: .bottom) {
+            ZStack(alignment: .bottom) {
+                Theme.background
+                Theme.chrome
+                Hairline()
+            }
+            .ignoresSafeArea(edges: .top)
+        }
     }
 }

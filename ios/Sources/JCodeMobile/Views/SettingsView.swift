@@ -25,6 +25,8 @@ struct SettingsView: View {
             }
             .scrollContentBackground(.hidden)
             .background(Theme.background)
+            .listStyle(.insetGrouped)
+            .listRowSeparatorTint(Theme.border)
             .dynamicTypeSize(.large ... .accessibility3)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
