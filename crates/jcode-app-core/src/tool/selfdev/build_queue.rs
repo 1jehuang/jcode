@@ -468,9 +468,8 @@ export -f cargo
     /// Which desktop binary this build produced, or `None` when it is not a
     /// desktop-only build.
     ///
-    /// Derived from the command rather than assumed, because `jcode-desktop`
-    /// and `jcode-desktop2` are different binaries: validating a desktop2
-    /// build against `jcode-desktop` reads a stale artefact from some earlier
+    /// Derived from the command rather than assumed: validating a desktop2
+    /// build against another package's binary reads a stale artefact from some earlier
     /// build and fails a build that actually succeeded.
     fn desktop_binary_name(command: &SelfDevBuildCommand) -> Option<&'static str> {
         if command.display.contains("-p jcode ") {
@@ -481,13 +480,6 @@ export -f cargo
                 "jcode-desktop2.exe"
             } else {
                 "jcode-desktop2"
-            });
-        }
-        if command.display.contains("-p jcode-desktop") {
-            return Some(if cfg!(windows) {
-                "jcode-desktop.exe"
-            } else {
-                "jcode-desktop"
             });
         }
         None
@@ -1152,10 +1144,8 @@ mod desktop_binary_tests {
         }
     }
 
-    /// The bug this guards: a desktop2 build was validated against the
-    /// `jcode-desktop` artefact, so it read whatever some earlier build had
-    /// left there and failed a build that had actually succeeded. The two are
-    /// different binaries and must be matched exactly.
+    /// The bug this guards: a desktop build must be validated against its own
+    /// artefact, not whatever some earlier build left in `target/`.
     #[test]
     fn each_desktop_build_validates_its_own_binary() {
         let desktop2 = SelfDevTool::desktop_binary_name(&command(
@@ -1164,16 +1154,6 @@ mod desktop_binary_tests {
         assert!(
             desktop2.is_some_and(|name| name.starts_with("jcode-desktop2")),
             "desktop2 build resolved to {desktop2:?}"
-        );
-
-        let desktop = SelfDevTool::desktop_binary_name(&command(
-            "scripts/dev_cargo.sh build --profile selfdev -p jcode-desktop --bin jcode-desktop",
-        ));
-        assert!(
-            desktop.is_some_and(
-                |name| name.starts_with("jcode-desktop") && !name.starts_with("jcode-desktop2")
-            ),
-            "desktop build resolved to {desktop:?}"
         );
     }
 

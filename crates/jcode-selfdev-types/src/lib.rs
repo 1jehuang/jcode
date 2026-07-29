@@ -34,8 +34,7 @@ pub struct SelfDevBuildCommand {
 pub enum SelfDevBuildTarget {
     Auto,
     Tui,
-    Desktop,
-    /// The greenfield desktop app (`jcode-desktop2`).
+    /// The desktop app (`jcode-desktop2`).
     Desktop2,
     All,
 }
@@ -45,11 +44,10 @@ impl SelfDevBuildTarget {
         match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
             "" | "auto" => Ok(Self::Auto),
             "tui" | "jcode" => Ok(Self::Tui),
-            "desktop" | "jcode-desktop" => Ok(Self::Desktop),
-            "desktop2" | "jcode-desktop2" => Ok(Self::Desktop2),
+            "desktop" | "desktop2" | "jcode-desktop2" => Ok(Self::Desktop2),
             "all" | "both" => Ok(Self::All),
             other => anyhow::bail!(
-                "invalid selfdev build target `{}`; expected auto, tui, desktop, desktop2, or all",
+                "invalid selfdev build target `{}`; expected auto, tui, desktop2, or all",
                 other
             ),
         }

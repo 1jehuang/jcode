@@ -18,13 +18,6 @@ jcode_configure_path() {
   _jcp_path_line="export PATH=\"$_jcp_install_dir:\$PATH\""
   _jcp_added=""
 
-  # If the install dir is already on the live PATH (the user configured it
-  # themselves, e.g. in a dotfile we would not detect by grepping), do not
-  # touch any rc files at all.
-  case ":$PATH:" in
-    *":$_jcp_install_dir:"*) return 0 ;;
-  esac
-
   _jcp_have() { command -v "$1" >/dev/null 2>&1; }
 
   # Append the POSIX (bash/zsh/sh) PATH line to an rc file, idempotently.

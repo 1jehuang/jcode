@@ -304,10 +304,10 @@ fn test_selfdev_prompt_uses_full_selfdev_instructions() {
 
 #[test]
 fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
-    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop/src");
+    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
     let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop_dir));
-    assert!(prompt.contains("launched from the desktop app context"));
-    assert!(prompt.contains("selfdev build target=desktop"));
+    assert!(prompt.contains("launched from the jcode-desktop2"));
+    assert!(prompt.contains("selfdev build target=desktop2"));
     assert!(!prompt.contains("launched from the TUI/root jcode context"));
 }
 
@@ -417,4 +417,13 @@ fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
     assert!(EffortKind::SwarmLight.is_swarm_mode());
     assert!(EffortKind::SwarmDeep.is_swarm_mode());
     assert!(!EffortKind::Reasoning.is_swarm_mode());
+}
+
+#[test]
+fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
+    let desktop2_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
+    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop2_dir));
+    assert!(prompt.contains("launched from the jcode-desktop2"));
+    assert!(prompt.contains("selfdev build target=desktop2"));
+    assert!(!prompt.contains("launched from the TUI/root jcode context"));
 }

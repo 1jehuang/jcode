@@ -1,3 +1,0 @@
-## Product Focus
-
-This self-dev session was launched from the desktop app context. By default, assume the user is asking about the desktop application unless they explicitly mention the TUI/CLI. Prefer desktop targets and commands (`selfdev build target=desktop`, package `jcode-desktop`, binary `jcode-desktop`) for builds, reloads, tests, and UI debugging.

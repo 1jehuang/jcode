@@ -47,7 +47,7 @@ struct SelfDevInput {
     /// Why this build is needed; shown to other queued/blocked agents.
     #[serde(default)]
     reason: Option<String>,
-    /// Build target for selfdev build: auto, tui, desktop, or all.
+    /// Build target for selfdev build: auto, tui, desktop2, or all.
     #[serde(default)]
     target: Option<String>,
     /// Shell command for selfdev test/check action.
@@ -527,8 +527,8 @@ impl SelfDevTool {
                     "reason": { "type": "string" },
                     "target": {
                         "type": "string",
-                        "enum": ["auto", "tui", "desktop", "desktop2", "all"],
-                        "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; desktop2 builds jcode-desktop2; all builds every binary."
+                        "enum": ["auto", "tui", "desktop2", "all"],
+                        "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop2 builds jcode-desktop2; all builds every binary."
                     },
                     "command": {
                         "type": "string",
