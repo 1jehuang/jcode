@@ -43,6 +43,43 @@ const CIRCLE_TOLERANCE: f64 = 0.05;
 /// bolted next to it.
 pub(crate) const SPINNER_SIZE: f64 = 13.0;
 
+/// The delivery mark beside a user's message: a small dot, hollow while the
+/// message is only on its way and solid once the agent has acknowledged it.
+///
+/// A dot rather than a word ("sent", "delivered") because the transcript is
+/// prose: a label would be read as something someone said. Hollow-to-solid is
+/// the same grammar as the app's halftone dots elsewhere, so it needs no key.
+fn draw_delivery_dot(
+    scene: &mut Scene,
+    delivery: crate::ack::Delivery,
+    center: (f64, f64),
+    theme: &crate::theme::Theme,
+    scale: f64,
+) {
+    use crate::ack::DOT_RADIUS;
+    let circle = vello::kurbo::Circle::new((center.0, center.1), DOT_RADIUS);
+    if delivery.is_acked() {
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            Affine::scale(scale),
+            theme.muted,
+            None,
+            &circle,
+        );
+        return;
+    }
+    // Pending: a ring, so the mark is present from the moment the message is
+    // sent. An absent mark would be indistinguishable from a message the app
+    // never tried to send.
+    scene.stroke(
+        &vello::kurbo::Stroke::new(1.2),
+        Affine::scale(scale),
+        theme.faint,
+        None,
+        &circle,
+    );
+}
+
 /// The activity spinner: a ring of halftone dots with a bright head that walks
 /// around it. Same visual language as the hero donut, so "the agent is working"
 /// looks like part of the app rather than a stock throbber.
@@ -388,7 +425,7 @@ fn draw_transcript(
     frame: &layout::Frame,
     scale: f64,
 ) {
-    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_RADIUS};
+    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_PAD_Y, USER_RADIUS};
     use jcode_render_core::BlockKind;
 
     let theme = &model.theme;
@@ -456,9 +493,8 @@ fn draw_transcript(
                     scene,
                     delivery,
                     (
-                        frame.right + wiggle - USER_PAD_X - crate::ack::DOT_RADIUS,
-                        message_top + placed.message.height - USER_PAD_Y
-                            + crate::ack::DOT_GAP,
+                        frame.right + wiggle - USER_PAD_X + crate::ack::DOT_GAP,
+                        message_top + placed.message.height - USER_PAD_Y,
                     ),
                     theme,
                     scale,

@@ -7,7 +7,7 @@
 
 use crate::{
     App, DONUT_GRID, Model, ModelId, build_scene, capture, donut, harness, keymap, layout, paint,
-    profile, scroll_bench, states, transcript,
+    profile, scroll_bench, scroll_profile, states, transcript,
 };
 use anyhow::Result;
 use vello::Scene;
@@ -33,6 +33,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--profile-states") => Some(run_profile_states(&args[1..])),
         Some("--bench-stream") => Some(bench_stream(&args[1..])),
         Some("--bench-scroll") => Some(bench_scroll()),
+        Some("--profile-scroll") => Some(profile_scroll()),
         Some("--bench-donut") => Some(bench_donut()),
         Some("--capture") => Some(run_capture(&args[1..])),
         Some("--check-primary-selection") => Some(check_primary_selection()),
@@ -171,6 +172,28 @@ fn run_script(steps: &[String]) -> Result<()> {
             "super-up" => {
                 app.modifiers -= winit::keyboard::ModifiersState::SUPER;
                 app.on_super_changed(false, clock);
+                // The debounce window that absorbs a remapper's synthetic
+                // Super lift also has to expire before the release resolves,
+                // and a script has no frames of its own to expire it on.
+                clock += crate::SUPER_BOUNCE;
+                app.settle_super_release(clock);
+                continue;
+            }
+            // `super-bounce:<chord>` replays exactly what keyd and friends
+            // emit for a rewritten Super chord: Super up, the substituted key,
+            // Super back down. Without this verb the flicker it used to cause
+            // was only reproducible on a machine with a remapper installed.
+            other if other.starts_with("super-bounce:") => {
+                let inner = other.trim_start_matches("super-bounce:");
+                let (key, _) = keymap::parse_chord(inner)
+                    .ok_or_else(|| anyhow::anyhow!("unknown chord '{inner}'"))?;
+                app.modifiers -= winit::keyboard::ModifiersState::SUPER;
+                app.on_super_changed(false, clock);
+                app.key_pressed(&key, None);
+                clock += std::time::Duration::from_millis(1);
+                app.modifiers |= winit::keyboard::ModifiersState::SUPER;
+                app.on_super_changed(true, clock);
+                app.settle_super_release(clock);
                 continue;
             }
             // Run the zoom to rest and move the clock past the tap window, so
@@ -314,7 +337,16 @@ fn run_e2e(message: &str) -> Result<()> {
                 println!("[e2e] tool: {label}");
                 model.transcript.set_live_tool(&call_id, &label);
             }
+            harness::HarnessUpdate::Edit(card) => {
+                println!("[e2e] edit: +{} -{}", card.added, card.removed);
+                model.transcript.push_edit(&card);
+            }
             harness::HarnessUpdate::Sessions(_) => {}
+            // The probe asserts on the reply, so delivery of the prompt is a
+            // log line rather than a state change.
+            harness::HarnessUpdate::MessageAccepted => {
+                println!("[e2e] message accepted");
+            }
         }
     }
     anyhow::bail!("e2e timed out")
@@ -602,6 +634,20 @@ fn bench_scroll() -> Result<()> {
     let reports = scroll_bench::sweep();
     if !scroll_bench::report(&reports) {
         anyhow::bail!("the scroll misbehaved on one or more gestures");
+    }
+    Ok(())
+}
+
+/// `--profile-scroll`: attribute a scroll frame's cost to its phases, swept
+/// over history length.
+///
+/// Separate from `--bench-scroll` because the two answer different questions:
+/// that one says whether the motion is right, this one says where the frame's
+/// time went and whether any of it grows with how long the session is.
+fn profile_scroll() -> Result<()> {
+    let costs = scroll_profile::sweep();
+    if !scroll_profile::report(&costs) {
+        anyhow::bail!("scroll frames are re-laying text or scale with history length");
     }
     Ok(())
 }

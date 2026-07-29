@@ -56,6 +56,13 @@ pub struct Theme {
     /// tuned to contrast with paper nearly vanishes on a wash, and a
     /// highlight you cannot see is the same as no highlight.
     pub selection_on_wash: Color,
+    /// Ink for an added line of a diff, and for a removed one. The one place
+    /// the print theme spends hue: a diff is read by scanning for which side a
+    /// line is on, and `+`/`-` alone makes that a character-by-character job.
+    /// Kept desaturated so a card full of them still reads as a document
+    /// rather than as a terminal.
+    pub added: Color,
+    pub removed: Color,
 }
 
 impl Theme {
@@ -76,6 +83,8 @@ impl Theme {
             error: Color::from_rgb8(0x11, 0x11, 0x11),
             selection: Color::from_rgb8(0xd8, 0xd8, 0xd8),
             selection_on_wash: Color::from_rgb8(0xc4, 0xc4, 0xc4),
+            added: Color::from_rgb8(0x1a, 0x6b, 0x3a),
+            removed: Color::from_rgb8(0x9b, 0x22, 0x26),
         }
     }
 
@@ -96,6 +105,8 @@ impl Theme {
             error: Color::from_rgb8(0xee, 0xee, 0xee),
             selection: Color::from_rgb8(0x3a, 0x3a, 0x3a),
             selection_on_wash: Color::from_rgb8(0x4c, 0x4c, 0x4c),
+            added: Color::from_rgb8(0x6d, 0xd4, 0x92),
+            removed: Color::from_rgb8(0xf0, 0x8b, 0x8b),
         }
     }
 
