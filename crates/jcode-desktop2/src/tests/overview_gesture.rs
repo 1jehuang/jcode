@@ -496,27 +496,27 @@ fn super_hjkl_reaches_other_sessions() {
 }
 
 /// Everything in one project is the common case in this repo, and it used to
-/// make j/k dead: `neighbor` refuses to leave the row. A motion key that does
-/// nothing reads as a broken binding, so every direction must move.
+/// make j/k dead: `neighbor` refuses to leave the row. A motion key whose axis
+/// could never work reads as a broken binding, so a dead axis falls back to
+/// the reading-order step. But the *edge* of a live axis is a wall: h at the
+/// start of the row stays put rather than wrapping to the far end.
 #[test]
-fn no_direction_is_dead_in_a_single_row_field() {
-    for dir in [
-        crate::overview::Dir::Up,
-        crate::overview::Dir::Down,
-        crate::overview::Dir::Left,
-        crate::overview::Dir::Right,
-    ] {
-        let entries = (0..4)
+fn dead_axes_move_but_live_edges_clamp() {
+    let entries = || {
+        (0..4)
             .map(|i| Entry {
                 session_id: format!("session_{i}"),
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 1_000.0 * f64::from(i + 1),
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    };
+    // Up and down could never move in a single-row field, so they cycle.
+    for dir in [crate::overview::Dir::Up, crate::overview::Dir::Down] {
         let mut app = App::default();
         app.model.session_id = Some("session_0".into());
-        app.model.strip = Strip::build(entries, Some("session_0"));
+        app.model.strip = Strip::build(entries(), Some("session_0"));
         let opened = hold_super(&mut app);
         settle(&mut app, opened);
         app.move_overview(dir);
@@ -526,6 +526,26 @@ fn no_direction_is_dead_in_a_single_row_field() {
             "{dir:?} went nowhere in a single-row field"
         );
     }
+    // Left at the start of the row is an edge of a live axis: it clamps
+    // instead of wrapping to the far end.
+    let mut app = App::default();
+    app.model.session_id = Some("session_0".into());
+    app.model.strip = Strip::build(entries(), Some("session_0"));
+    let opened = hold_super(&mut app);
+    settle(&mut app, opened);
+    app.move_overview(crate::overview::Dir::Left);
+    assert_eq!(
+        app.model.overview.focus(),
+        Some("session_0"),
+        "left at the row's start wrapped around"
+    );
+    // While right, with room to move, moves.
+    app.move_overview(crate::overview::Dir::Right);
+    assert_eq!(
+        app.model.overview.focus(),
+        Some("session_1"),
+        "right did not walk the row"
+    );
 }
 
 /// keyd (`[meta] h = left`) and every other Super+hjkl remapper rewrites the
