@@ -101,7 +101,7 @@ purpose. Current scores on a dark background:
 | Nord | 69 |
 | Gruvbox Dark | 67 |
 | Neon chaos (hostile) | 56 |
-| Unreadable mud (hostile) | 36 |
+| Unreadable mud (hostile) | 38 |
 
 If a scoring change inverts any of these orderings, the metric has drifted away
 from what people mean by "harmonious" and the change is wrong. Calibrating
@@ -124,7 +124,23 @@ reports the resulting score.
 - Must-distinguish pairs are separated by **lightness as well as hue**. Under
   red-green color vision deficiency, hue separation largely collapses onto a
   blue-yellow axis while lightness survives every type, which is why accessible
-  palettes lean on lightness.
+  palettes lean on lightness. `success`, `warning`, and `error` are placed on
+  three distinct lightness levels for exactly this reason: green, amber, and red
+  all project toward yellow under deuteranopia, so hue cannot separate them at
+  all there.
+- A **repair pass** then fixes any pair still confusable, scoring candidate moves
+  by the palette's *global* weakest pair. This matters more than it sounds: the
+  constraints are coupled (success, warning, and error form a triangle), so
+  greedy pairwise repair provably cycles, and a trace confirmed it did, fixing
+  one edge by breaking another until the iteration budget ran out. Candidates are
+  bounded to keep contrast, chroma, and the conventional hues intact, so the pass
+  can never buy distinctness by making a role unreadable or colorless.
+
+Both limits are honest ones. Within the readable lightness band and the hue
+budget that keeps red meaning error, an amber warning and a red error cannot be
+pushed past ~0.7 of the distinctness target under protanopia. Going further would
+require giving up either contrast or the semantic convention, and both cost the
+user more than the extra margin buys.
 
 Tests hold the generator to the metric itself: every seed, including pure red,
 pure gray, and near-black, must score at least 70 on both light and dark
