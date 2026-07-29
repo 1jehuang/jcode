@@ -1445,11 +1445,16 @@ mod tests {
         // here. The app's authoritative resolution must win, otherwise the
         // header claims OAuth while the info widget reports an API key.
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        // `state` is the best of the available methods, so a probe that finds
+        // both an OAuth session and an API key can never report
+        // `NotConfigured`. Leaving it at the default would make
+        // `build_auth_status_lines` render the nothing-configured fallback.
         let both = AuthStatus {
             anthropic: ProviderAuth {
+                state: AuthState::Available,
                 has_oauth: true,
+                oauth_state: AuthState::Available,
                 has_api_key: true,
-                ..Default::default()
             },
             ..AuthStatus::default()
         };
