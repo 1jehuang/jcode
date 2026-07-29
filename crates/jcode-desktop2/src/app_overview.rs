@@ -99,11 +99,15 @@ impl App {
             self.request_redraw();
             return;
         }
-        // No neighbour that way: one project row makes j/k dead, and a row of
-        // one makes h/l dead. A motion key that does nothing reads as broken,
-        // so fall back to the reading-order step in the same sense. Every
-        // direction then always goes somewhere as long as there is somewhere
-        // to go.
+        // Nothing that way. If the axis could never move here (one project
+        // row makes j/k dead, a row of one makes h/l dead), a motion key that
+        // does nothing reads as broken, so fall back to the reading-order
+        // step in the same sense. But an *edge* of a live axis is a wall the
+        // highlight should stop at: wrapping there made the key look like a
+        // teleport, so stay put instead.
+        if !field.axis_is_dead(&from, dir) {
+            return;
+        }
         let step = match dir {
             overview::Dir::Left | overview::Dir::Up => -1,
             overview::Dir::Right | overview::Dir::Down => 1,
