@@ -200,11 +200,18 @@ impl Default for Palette {
     }
 }
 
+/// Index of `role` within [`ALL_ROLES`].
+///
+/// A missing role would be a programming error (a variant added without listing
+/// it), but this sits on the render path, so it must not panic a live session
+/// over a palette lookup. Falling back to index 0 renders one role with another
+/// role's color, which is cosmetic; `every_role_is_indexable` catches the
+/// mistake in CI instead.
 fn index_of(role: Role) -> usize {
     ALL_ROLES
         .iter()
         .position(|candidate| *candidate == role)
-        .expect("every Role is listed in ALL_ROLES")
+        .unwrap_or(0)
 }
 
 impl Palette {
@@ -291,19 +298,23 @@ static HAS_OVERRIDES: AtomicBool = AtomicBool::new(false);
 /// Install the active palette. Called once at startup from config, and again
 /// when the user changes colors at runtime.
 pub fn set_palette(palette: Palette) {
-    if let Ok(mut active) = ACTIVE.write() {
-        *active = Some(palette);
-    }
+    // Recover from a poisoned lock rather than silently keeping the old
+    // palette: a panic elsewhere must not leave the user's configured colors
+    // permanently unapplied for the rest of the session.
+    let mut active = ACTIVE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *active = Some(palette);
+    drop(active);
     HAS_OVERRIDES.store(palette.has_overrides(), Ordering::Relaxed);
 }
 
 /// The active palette (defaults until configured).
 pub fn palette() -> Palette {
-    ACTIVE
+    (*ACTIVE
         .read()
-        .ok()
-        .and_then(|active| *active)
-        .unwrap_or_default()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()))
+    .unwrap_or_default()
 }
 
 /// Resolve a role to a renderable color.
@@ -457,6 +468,20 @@ mod tests {
         }
     }
 
+    /// `index_of` falls back instead of panicking on the render path, so the
+    /// invariant it relies on is enforced here.
+    #[test]
+    fn every_role_is_indexable() {
+        for (expected, role) in ALL_ROLES.iter().copied().enumerate() {
+            assert_eq!(
+                index_of(role),
+                expected,
+                "{} must be listed in ALL_ROLES at its own index",
+                role.key()
+            );
+        }
+    }
+
     #[test]
     fn parses_hex_in_common_spellings() {
         assert_eq!(parse_hex("#8ab4f8"), Some((138, 180, 248)));
@@ -590,7 +615,9 @@ mod buffer_tests {
             let as_rgb = |color: Color| match color {
                 Color::Rgb(r, g, b) => (r, g, b),
                 Color::Indexed(index) => crate::color::indexed_to_rgb(index),
-                other => panic!("expected a concrete color, got {other:?}"),
+                // Named colors carry no RGB; treat them as unset so a failure
+                // reports the assertion rather than a panic in the helper.
+                _ => (0, 0, 0),
             };
             let literal = as_rgb(buf.content[0].fg);
             assert!(
