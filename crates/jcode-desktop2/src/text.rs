@@ -123,6 +123,7 @@ impl TextSystem {
     /// Width of a single unwrapped line in logical units. Used where an
     /// element must sit immediately after some text (the strip's bars after
     /// their group label), so the gap is the real one rather than a guess.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn measure_width(&mut self, text: &str, style: ParagraphStyle, scale: f64) -> f64 {
         let layout = self.layout_paragraph(text, f32::MAX, style, scale);
         f64::from(layout.width()) / scale

@@ -43,18 +43,22 @@ pub const FOOTNOTE_GAP: f64 = 6.0;
 pub const STRIP_HEIGHT: f64 = 14.0;
 /// Gap between the strip and the transcript below it.
 pub const STRIP_GAP: f64 = 10.0;
-/// Caption size for the strip's group labels.
-pub const STRIP_LABEL_SIZE: f32 = 10.0;
-/// Width of one session bar, and the gap between bars in a group. Tuned to
+/// Width of one session block, and the gap between blocks in a group. Tuned to
 /// read as the `|` ticks of the waybar module rather than as buttons.
 pub const STRIP_BAR_WIDTH: f64 = 2.0;
-/// The focused bar is drawn wider, standing in for the module's `█` glyph.
+/// The focused block is drawn wider, standing in for the module's `█` glyph.
 pub const STRIP_BAR_FOCUS_WIDTH: f64 = 6.0;
 pub const STRIP_BAR_GAP: f64 = 3.0;
-/// Height of a bar within the strip row.
-pub const STRIP_BAR_HEIGHT: f64 = 10.0;
-/// Gap between a group's label and its first bar.
-pub const STRIP_LABEL_GAP: f64 = 6.0;
+/// Height of a block within the strip row.
+pub const STRIP_BAR_HEIGHT: f64 = 8.0;
+/// Padding between a group's outline and the blocks inside it. The outline is
+/// what names the group now that no text does, so it needs enough air to read
+/// as an enclosure rather than as a border on the first block. Blocks plus this
+/// padding on both sides must stay inside `STRIP_HEIGHT`, or the enclosure
+/// bleeds into the transcript's gap; `strip_owns_its_band` pins that.
+pub const STRIP_FRAME_PAD: f64 = 2.0;
+/// Corner radius of a group outline.
+pub const STRIP_FRAME_RADIUS: f64 = 2.0;
 /// Gap between one group and the next.
 pub const STRIP_GROUP_GAP: f64 = 16.0;
 /// The hero donut's side, in logical units. Matches the website's 360px hero

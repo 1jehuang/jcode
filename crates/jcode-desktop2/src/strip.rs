@@ -221,17 +221,30 @@ impl Strip {
     }
 }
 
-/// One drawable item in the strip: either a group's label or a session bar.
+/// One drawable item in the strip: a group's frame or a session block.
 ///
-/// Laying the strip out as data rather than drawing directly means the bar
+/// Laying the strip out as data rather than drawing directly means the
 /// positions can be asserted without a GPU, and the pixel tests can check the
 /// *rendering* of a layout that is already known to be correct.
+///
+/// There is no text here on purpose: the strip is a diagram, not a caption.
+/// A group is an outlined rectangle and each session in it is a block inside
+/// that rectangle, so the shape alone answers "how many places, how many
+/// sessions, which one am I in".
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Item {
-    /// A group label, at this x. Which group it is indexes `groups()`.
-    Label { group: usize, x: f64 },
-    /// A session bar. `focused` selects the wide solid form.
-    Bar {
+    /// The outline enclosing one group's blocks. Which group it is indexes
+    /// `groups()`.
+    Frame {
+        group: usize,
+        x: f64,
+        width: f64,
+        /// Whether focus currently sits inside this group, so the enclosing
+        /// rectangle can be drawn at full ink while the others stay faint.
+        focused: bool,
+    },
+    /// A session block. `focused` selects the wide solid form.
+    Block {
         group: usize,
         index: usize,
         x: f64,
@@ -242,48 +255,50 @@ pub enum Item {
 
 /// Lay the strip out from `left`, in logical units.
 ///
-/// Groups run left to right on one row, exactly like the waybar module: a
-/// label, then that group's bars, then a wider gap before the next group.
-/// Items past `right` are dropped rather than squeezed, because a strip that
-/// reflows or shrinks its bars stops being scannable at a glance.
-pub fn layout_items(
-    strip: &Strip,
-    left: f64,
-    right: f64,
-    label_width: impl Fn(&str) -> f64,
-) -> Vec<Item> {
+/// Groups run left to right on one row: an outlined rectangle per working
+/// directory, holding one block per session, then a wider gap before the next
+/// group. Groups past `right` are dropped whole rather than squeezed, because a
+/// strip that reflows or shrinks its blocks stops being scannable at a glance.
+pub fn layout_items(strip: &Strip, left: f64, right: f64) -> Vec<Item> {
+    let pad = crate::layout::STRIP_FRAME_PAD;
     let mut items = Vec::new();
     let mut x = left;
     for (g, group) in strip.groups().iter().enumerate() {
-        let label_w = label_width(&group.label);
-        let bars_w: f64 = group
+        let blocks_w: f64 = group
             .entries
             .iter()
             .enumerate()
-            .map(|(i, _)| bar_width(strip, g, i) + crate::layout::STRIP_BAR_GAP)
-            .sum();
-        if x + label_w + crate::layout::STRIP_LABEL_GAP + bars_w > right {
+            .map(|(i, _)| block_width(strip, g, i))
+            .sum::<f64>()
+            + group.entries.len().saturating_sub(1) as f64 * crate::layout::STRIP_BAR_GAP;
+        let frame_w = blocks_w + pad * 2.0;
+        if x + frame_w > right {
             break;
         }
-        items.push(Item::Label { group: g, x });
-        x += label_w + crate::layout::STRIP_LABEL_GAP;
+        items.push(Item::Frame {
+            group: g,
+            x,
+            width: frame_w,
+            focused: strip.group_index() == g,
+        });
+        let mut bx = x + pad;
         for (i, _) in group.entries.iter().enumerate() {
-            let width = bar_width(strip, g, i);
-            items.push(Item::Bar {
+            let width = block_width(strip, g, i);
+            items.push(Item::Block {
                 group: g,
                 index: i,
-                x,
+                x: bx,
                 width,
                 focused: strip.group_index() == g && strip.index() == i,
             });
-            x += width + crate::layout::STRIP_BAR_GAP;
+            bx += width + crate::layout::STRIP_BAR_GAP;
         }
-        x += crate::layout::STRIP_GROUP_GAP;
+        x += frame_w + crate::layout::STRIP_GROUP_GAP;
     }
     items
 }
 
-fn bar_width(strip: &Strip, group: usize, index: usize) -> f64 {
+fn block_width(strip: &Strip, group: usize, index: usize) -> f64 {
     if strip.group_index() == group && strip.index() == index {
         crate::layout::STRIP_BAR_FOCUS_WIDTH
     } else {
@@ -427,31 +442,31 @@ mod layout_tests {
         )
     }
 
-    /// One bar per session, one label per group, in reading order.
+    /// One block per session, one enclosing frame per group, in reading order.
     #[test]
-    fn every_session_gets_exactly_one_bar() {
-        let items = layout_items(&strip(), 0.0, 400.0, |_| 20.0);
-        let bars = items
+    fn every_session_gets_exactly_one_block() {
+        let items = layout_items(&strip(), 0.0, 400.0);
+        let blocks = items
             .iter()
-            .filter(|item| matches!(item, Item::Bar { .. }))
+            .filter(|item| matches!(item, Item::Block { .. }))
             .count();
-        let labels = items
+        let frames = items
             .iter()
-            .filter(|item| matches!(item, Item::Label { .. }))
+            .filter(|item| matches!(item, Item::Frame { .. }))
             .count();
-        assert_eq!(bars, 3, "bars did not match the session count");
-        assert_eq!(labels, 2, "labels did not match the group count");
+        assert_eq!(blocks, 3, "blocks did not match the session count");
+        assert_eq!(frames, 2, "frames did not match the group count");
     }
 
-    /// The focused bar is the wide one, and it is the only wide one: that is
+    /// The focused block is the wide one, and it is the only wide one: that is
     /// the whole visual signal the strip carries.
     #[test]
-    fn exactly_one_bar_is_drawn_focused() {
-        let items = layout_items(&strip(), 0.0, 400.0, |_| 20.0);
-        let focused: Vec<_> = items
+    fn exactly_one_block_is_drawn_focused() {
+        let items = layout_items(&strip(), 0.0, 400.0);
+        let focused: Vec<(usize, f64)> = items
             .iter()
             .filter_map(|item| match item {
-                Item::Bar {
+                Item::Block {
                     focused: true,
                     width,
                     index,
@@ -461,25 +476,88 @@ mod layout_tests {
             })
             .collect();
         assert_eq!(focused.len(), 1);
-        assert_eq!(focused[0].0, 1, "the wrong bar was focused");
+        assert_eq!(focused[0].0, 1, "the wrong block was focused");
         assert!(
             focused[0].1 > crate::layout::STRIP_BAR_WIDTH,
-            "the focused bar was not wider than a tick"
+            "the focused block was not wider than a tick"
         );
     }
 
-    /// Items must advance strictly left to right and never overlap, or the
-    /// bars smear into one another.
+    /// Exactly one group frame reads as focused, and it is the group focus is
+    /// really in: the frame is what says "this is the place you are in".
     #[test]
-    fn items_advance_left_to_right_without_overlapping() {
-        let items = layout_items(&strip(), 10.0, 400.0, |_| 20.0);
+    fn exactly_one_group_frame_is_focused() {
+        let items = layout_items(&strip(), 0.0, 400.0);
+        let focused: Vec<usize> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Frame {
+                    group,
+                    focused: true,
+                    ..
+                } => Some(*group),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(focused, vec![0]);
+    }
+
+    /// Every block must sit inside its group's rectangle, or the diagram lies
+    /// about which sessions belong to which place.
+    #[test]
+    fn blocks_sit_inside_their_group_frame() {
+        let items = layout_items(&strip(), 10.0, 400.0);
+        for item in &items {
+            let Item::Block {
+                group, x, width, ..
+            } = item
+            else {
+                continue;
+            };
+            let frame = items
+                .iter()
+                .find_map(|other| match other {
+                    Item::Frame {
+                        group: g,
+                        x: fx,
+                        width: fw,
+                        ..
+                    } if g == group => Some((*fx, *fw)),
+                    _ => None,
+                })
+                .expect("a block was laid out without its group frame");
+            assert!(
+                *x >= frame.0 && x + width <= frame.0 + frame.1,
+                "block at {x} escaped its frame {frame:?}"
+            );
+        }
+    }
+
+    /// Blocks must advance strictly left to right and never overlap, or they
+    /// smear into one another.
+    #[test]
+    fn blocks_advance_left_to_right_without_overlapping() {
+        let items = layout_items(&strip(), 10.0, 400.0);
         let mut cursor = 10.0f64;
         for item in &items {
-            let (x, width) = match item {
-                Item::Label { x, .. } => (*x, 20.0),
-                Item::Bar { x, width, .. } => (*x, *width),
+            let Item::Block { x, width, .. } = item else {
+                continue;
             };
-            assert!(x >= cursor - 1e-9, "item at {x} overlapped {cursor}");
+            assert!(*x >= cursor - 1e-9, "block at {x} overlapped {cursor}");
+            cursor = x + width;
+        }
+    }
+
+    /// Group frames never overlap each other either.
+    #[test]
+    fn group_frames_do_not_overlap() {
+        let items = layout_items(&strip(), 0.0, 400.0);
+        let mut cursor = 0.0f64;
+        for item in &items {
+            let Item::Frame { x, width, .. } = item else {
+                continue;
+            };
+            assert!(*x >= cursor - 1e-9, "frame at {x} overlapped {cursor}");
             cursor = x + width;
         }
     }
@@ -488,18 +566,19 @@ mod layout_tests {
     /// letting the strip run off the page.
     #[test]
     fn groups_that_do_not_fit_are_dropped_whole() {
-        let items = layout_items(&strip(), 0.0, 60.0, |_| 20.0);
+        let items = layout_items(&strip(), 0.0, 30.0);
         let groups: std::collections::BTreeSet<usize> = items
             .iter()
             .map(|item| match item {
-                Item::Label { group, .. } | Item::Bar { group, .. } => *group,
+                Item::Frame { group, .. } | Item::Block { group, .. } => *group,
             })
             .collect();
         assert!(groups.len() < 2, "a group was drawn past the right edge");
         for item in &items {
-            if let Item::Bar { x, width, .. } = item {
-                assert!(x + width <= 60.0, "a bar ran off the page");
-            }
+            let (x, width) = match item {
+                Item::Frame { x, width, .. } | Item::Block { x, width, .. } => (*x, *width),
+            };
+            assert!(x + width <= 30.0, "an item ran off the page");
         }
     }
 }
