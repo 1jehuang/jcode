@@ -120,6 +120,12 @@ pub struct Criterion {
     pub weight: f32,
     /// Specific problems found, best-first. Empty means nothing to fix.
     pub findings: Vec<String>,
+    /// Whether this criterion is a hard usability requirement rather than a
+    /// matter of taste. Only critical criteria can single-handedly drag the
+    /// overall score down: unreadable text is a defect, while an unusual hue
+    /// scheme is a legitimate style choice (Solarized breaks textbook hue
+    /// rules on purpose and is still widely loved).
+    pub critical: bool,
 }
 
 /// A full harmony report for a palette.
@@ -170,8 +176,11 @@ const MUST_DISTINGUISH: &[(Role, Role)] = &[
     (Role::Accent, Role::System),
     (Role::Info, Role::Success),
     (Role::Queued, Role::Asap),
-    (Role::Dim, Role::Tool),
 ];
+
+// Note on omissions: `dim`/`tool` are intentionally *both* low-emphasis grays
+// in nearly every real palette (Solarized, Nord), so demanding they differ
+// would penalize good palettes for doing the right thing.
 
 /// Minimum acceptable oklab distance for a must-distinguish pair.
 const DISTINCT_TARGET: f32 = 0.20;
@@ -224,14 +233,22 @@ pub fn analyze(palette: &Palette, background: (u8, u8, u8)) -> HarmonyReport {
         .iter()
         .map(|criterion| criterion.score as f32 * criterion.weight)
         .sum();
-    let worst = criteria
+    // Only hard usability failures pull the overall score toward the worst
+    // dimension. Taste criteria (hue scheme, chroma spread) contribute through
+    // the weighted mean only, so a deliberately unconventional but perfectly
+    // usable palette still scores well.
+    let worst_critical = criteria
         .iter()
+        .filter(|criterion| criterion.critical)
         .map(|criterion| criterion.score as f32)
         .fold(f32::MAX, f32::min);
     let score = if total_weight > 0.0 {
-        // Same reasoning as `aggregate`: a palette with one broken dimension is
-        // not a good palette, however strong the others are.
-        (0.7 * (weighted / total_weight) + 0.3 * worst).round() as u8
+        let mean = weighted / total_weight;
+        if worst_critical.is_finite() {
+            (0.75 * mean + 0.25 * worst_critical).round() as u8
+        } else {
+            mean.round() as u8
+        }
     } else {
         0
     };
@@ -305,6 +322,7 @@ fn readability(palette: &Palette, background: (u8, u8, u8)) -> Criterion {
         score: as_percent(mean),
         weight: 3.0,
         findings,
+        critical: true,
     }
 }
 
@@ -334,6 +352,7 @@ fn distinctness(palette: &Palette) -> Criterion {
         score: as_percent(mean),
         weight: 2.0,
         findings,
+        critical: true,
     }
 }
 
@@ -369,15 +388,24 @@ fn hue_harmony(palette: &Palette) -> (Criterion, &'static str) {
             Criterion {
                 name: "hue harmony",
                 score: 100,
-                weight: 1.5,
+                weight: 2.0,
                 findings: Vec::new(),
+                critical: false,
             },
             "monochromatic",
         );
     }
 
     // Try every scheme anchored on every present hue, and keep the best fit.
-    let mut best: Option<(f32, &'static str, Vec<(Role, f32)>)> = None;
+    /// Best scheme fit so far: mean hue deviation, scheme name, and each
+    /// chromatic role's deviation from its nearest scheme target.
+    struct Fit {
+        mean_deviation: f32,
+        scheme: &'static str,
+        deviations: Vec<(Role, f32)>,
+    }
+
+    let mut best: Option<Fit> = None;
     for (name, offsets) in SCHEMES.iter().copied() {
         for (_, anchor) in hues.iter().copied() {
             let targets: Vec<f32> = offsets
@@ -399,19 +427,28 @@ fn hue_harmony(palette: &Palette) -> (Criterion, &'static str) {
                 / deviations.len() as f32;
             if best
                 .as_ref()
-                .is_none_or(|(previous, _, _)| mean < *previous)
+                .is_none_or(|previous| mean < previous.mean_deviation)
             {
-                best = Some((mean, name, deviations));
+                best = Some(Fit {
+                    mean_deviation: mean,
+                    scheme: name,
+                    deviations,
+                });
             }
         }
     }
 
-    let (mean_deviation, scheme, deviations) = best.expect("at least one scheme is evaluated");
-    // A 30 degree mean deviation is the point where hues read as unrelated.
-    let score = 1.0 - (mean_deviation / 30.0).clamp(0.0, 1.0);
+    let Fit {
+        mean_deviation,
+        scheme,
+        deviations,
+    } = best.expect("at least one scheme is evaluated");
+    // A 45 degree mean deviation is where hues stop reading as related at all;
+    // real palettes routinely sit 15-25 degrees off a textbook scheme.
+    let score = 1.0 - (mean_deviation / 45.0).clamp(0.0, 1.0);
     let mut outliers: Vec<(Role, f32)> = deviations
         .into_iter()
-        .filter(|(_, deviation)| *deviation > 25.0)
+        .filter(|(_, deviation)| *deviation > 35.0)
         .collect();
     outliers.sort_by(|left, right| right.1.total_cmp(&left.1));
     let findings = outliers
@@ -431,24 +468,30 @@ fn hue_harmony(palette: &Palette) -> (Criterion, &'static str) {
             score: as_percent(score),
             weight: 1.5,
             findings,
+            critical: false,
         },
         scheme,
     )
 }
 
 fn chroma_coherence(palette: &Palette) -> Criterion {
+    // Grade the palette's *accent* colors. Text and background roles are
+    // near-neutral by design, and including them would dilute an oversaturated
+    // accent set behind a wall of grays.
     let chromas: Vec<(Role, f32)> = ALL_ROLES
         .iter()
         .copied()
+        .filter(|role| !role.is_background())
         .map(|role| (role, Oklab::from_rgb(palette.rgb(role)).chroma()))
-        .filter(|(_, chroma)| *chroma >= 0.02)
+        .filter(|(_, chroma)| *chroma >= 0.04)
         .collect();
     if chromas.len() < 2 {
         return Criterion {
             name: "chroma coherence",
             score: 100,
-            weight: 1.0,
+            weight: 1.5,
             findings: Vec::new(),
+            critical: false,
         };
     }
 
@@ -459,12 +502,57 @@ fn chroma_coherence(palette: &Palette) -> Criterion {
         .sum::<f32>()
         / chromas.len() as f32;
     let deviation = variance.sqrt();
-    // A standard deviation above ~0.06 means neon and pastel are mixed.
-    let score = 1.0 - (deviation / 0.06).clamp(0.0, 1.0);
+    // Judge the spread *relative* to the palette's own saturation level: a
+    // vivid palette is allowed vivid variation, while a pastel palette should
+    // stay pastel. An absolute threshold mislabeled saturated-but-coherent
+    // palettes (Gruvbox, Dracula) as incoherent.
+    let relative = if mean > 0.0 { deviation / mean } else { 0.0 };
+    let spread_score = 1.0 - (relative / 1.4).clamp(0.0, 1.0);
+
+    // Intensity matters as much as consistency. Terminal palettes live in a
+    // comfortable chroma band: below it everything is washed-out gray, above it
+    // (fully saturated neon) long reading sessions are fatiguing and the colors
+    // stop reading as a designed set. Every palette people actually adopt sits
+    // inside this band, so grading it catches "technically distinct but
+    // unbearable" palettes that spread alone rates highly.
+    // Bounds calibrated against palettes people actually adopt: Nord and
+    // Solarized sit near the low end, Dracula and Gruvbox near the high end,
+    // and fully saturated sRGB primaries (chroma ~0.25+) fall outside.
+    const COMFORTABLE_CHROMA: std::ops::RangeInclusive<f32> = 0.045..=0.20;
+    let intensity_of = |chroma: f32| {
+        if COMFORTABLE_CHROMA.contains(&chroma) {
+            1.0
+        } else if chroma < *COMFORTABLE_CHROMA.start() {
+            (chroma / COMFORTABLE_CHROMA.start()).clamp(0.0, 1.0)
+        } else {
+            (1.0 - (chroma - COMFORTABLE_CHROMA.end()) / 0.05).clamp(0.0, 1.0)
+        }
+    };
+    // Score intensity per role, not on the mean: a handful of screaming neon
+    // roles must not be averaged away by the well-behaved ones they sit next to.
+    let intensities: Vec<f32> = chromas
+        .iter()
+        .map(|(_, chroma)| intensity_of(*chroma))
+        .collect();
+    let intensity_score = aggregate(&intensities);
+    let score = spread_score.min(intensity_score);
 
     let mut findings = Vec::new();
+    if intensity_score < 0.85 {
+        findings.push(if mean >= *COMFORTABLE_CHROMA.end() {
+            format!(
+                "the palette is oversaturated overall (mean chroma {mean:.2}); fully saturated \
+                 colors are fatiguing to read for long stretches"
+            )
+        } else {
+            format!(
+                "the palette is washed out overall (mean chroma {mean:.2}); colors barely read as \
+                 colors"
+            )
+        });
+    }
     for (role, chroma) in chromas {
-        if (chroma - mean).abs() > 0.09 {
+        if mean > 0.0 && (chroma - mean).abs() / mean > 1.1 {
             let direction = if chroma > mean {
                 "much more saturated"
             } else {
@@ -481,8 +569,12 @@ fn chroma_coherence(palette: &Palette) -> Criterion {
     Criterion {
         name: "chroma coherence",
         score: as_percent(score),
-        weight: 1.0,
+        weight: 1.5,
         findings,
+        // Critical: a palette far outside the comfortable saturation band is
+        // physically tiring to read for hours, which is a usability defect
+        // rather than a style preference.
+        critical: true,
     }
 }
 
@@ -533,8 +625,13 @@ fn colorblind_safety(palette: &Palette) -> Criterion {
     Criterion {
         name: "colorblind safety",
         score: as_percent(mean),
-        weight: 1.5,
+        // Advisory rather than critical: red/green semantics are a terminal-wide
+        // convention that essentially every established palette follows, so
+        // treating it as a hard defect would mark all of them broken. The
+        // findings still tell a user exactly which pairs to fix.
+        weight: 1.0,
         findings,
+        critical: false,
     }
 }
 
@@ -734,6 +831,216 @@ mod tests {
             "dark {} should beat light {}",
             score_of(&dark),
             score_of(&light)
+        );
+    }
+}
+
+/// Calibration against real, widely-used terminal palettes.
+///
+/// A harmony score is only useful if it agrees with human judgement. These
+/// tests pin that agreement: palettes that thousands of developers chose on
+/// purpose (Solarized, Gruvbox, Dracula, Nord) must all score well, and
+/// deliberately hostile palettes must score badly. If a scoring tweak inverts
+/// any of these, the metric has drifted away from what people actually mean by
+/// "harmonious" and the tweak is wrong.
+#[cfg(test)]
+mod calibration {
+    use super::*;
+    use crate::palette::parse_hex;
+
+    const DARK_BG: (u8, u8, u8) = (18, 18, 18);
+
+    fn build(pairs: &[(Role, &str)]) -> Palette {
+        let mut palette = Palette::default();
+        for (role, hex) in pairs {
+            palette.set(*role, parse_hex(hex).expect("test palettes use valid hex"));
+        }
+        palette
+    }
+
+    pub(super) fn solarized_dark() -> Palette {
+        build(&[
+            (Role::User, "#268bd2"),
+            (Role::Ai, "#859900"),
+            (Role::Accent, "#6c71c4"),
+            (Role::System, "#d33682"),
+            (Role::Info, "#2aa198"),
+            (Role::Success, "#859900"),
+            (Role::Warning, "#b58900"),
+            (Role::Error, "#dc322f"),
+            (Role::AiText, "#93a1a1"),
+            (Role::UserText, "#eee8d5"),
+            (Role::Dim, "#586e75"),
+            (Role::UserBg, "#073642"),
+            (Role::SelectionBg, "#073642"),
+        ])
+    }
+
+    pub(super) fn gruvbox_dark() -> Palette {
+        build(&[
+            (Role::User, "#83a598"),
+            (Role::Ai, "#b8bb26"),
+            (Role::Accent, "#d3869b"),
+            (Role::System, "#fe8019"),
+            (Role::Info, "#8ec07c"),
+            (Role::Success, "#b8bb26"),
+            (Role::Warning, "#fabd2f"),
+            (Role::Error, "#fb4934"),
+            (Role::AiText, "#ebdbb2"),
+            (Role::UserText, "#fbf1c7"),
+            (Role::Dim, "#665c54"),
+            (Role::UserBg, "#3c3836"),
+            (Role::SelectionBg, "#504945"),
+        ])
+    }
+
+    pub(super) fn dracula() -> Palette {
+        build(&[
+            (Role::User, "#8be9fd"),
+            (Role::Ai, "#50fa7b"),
+            (Role::Accent, "#bd93f9"),
+            (Role::System, "#ff79c6"),
+            (Role::Info, "#8be9fd"),
+            (Role::Success, "#50fa7b"),
+            (Role::Warning, "#f1fa8c"),
+            (Role::Error, "#ff5555"),
+            (Role::AiText, "#f8f8f2"),
+            (Role::UserText, "#f8f8f2"),
+            (Role::Dim, "#6272a4"),
+            (Role::UserBg, "#282a36"),
+            (Role::SelectionBg, "#44475a"),
+        ])
+    }
+
+    pub(super) fn nord() -> Palette {
+        build(&[
+            (Role::User, "#81a1c1"),
+            (Role::Ai, "#a3be8c"),
+            (Role::Accent, "#b48ead"),
+            (Role::System, "#d08770"),
+            (Role::Info, "#88c0d0"),
+            (Role::Success, "#a3be8c"),
+            (Role::Warning, "#ebcb8b"),
+            (Role::Error, "#bf616a"),
+            (Role::AiText, "#eceff4"),
+            (Role::UserText, "#e5e9f0"),
+            (Role::Dim, "#4c566a"),
+            (Role::UserBg, "#3b4252"),
+            (Role::SelectionBg, "#434c5e"),
+        ])
+    }
+
+    /// Every role a barely-different shade of mud: unreadable and indistinct.
+    pub(super) fn all_mud() -> Palette {
+        build(&[
+            (Role::User, "#4a4438"),
+            (Role::Ai, "#4b4536"),
+            (Role::Accent, "#494339"),
+            (Role::System, "#484338"),
+            (Role::Info, "#484237"),
+            (Role::Success, "#4a4539"),
+            (Role::Warning, "#4b4437"),
+            (Role::Error, "#494338"),
+            (Role::AiText, "#4a4438"),
+            (Role::UserText, "#4a4539"),
+        ])
+    }
+
+    /// Maximum-saturation colors at scattered hues: readable but jarring.
+    pub(super) fn neon_chaos() -> Palette {
+        build(&[
+            (Role::User, "#ff00ff"),
+            (Role::Ai, "#00ff00"),
+            (Role::Accent, "#ffff00"),
+            (Role::System, "#00ffff"),
+            (Role::Info, "#ff8000"),
+            (Role::Success, "#0000ff"),
+            (Role::Warning, "#ff0080"),
+            (Role::Error, "#80ff00"),
+        ])
+    }
+
+    fn score(palette: &Palette) -> u8 {
+        analyze(palette, DARK_BG).score
+    }
+
+    #[test]
+    fn respected_community_palettes_all_score_well() {
+        for (name, palette) in [
+            ("solarized dark", solarized_dark()),
+            ("gruvbox dark", gruvbox_dark()),
+            ("dracula", dracula()),
+            ("nord", nord()),
+        ] {
+            let report = analyze(&palette, DARK_BG);
+            assert!(
+                report.score >= 60,
+                "{name} is a widely loved palette but scored {} ({:?})",
+                report.score,
+                report.top_findings(3)
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_palettes_score_far_below_good_ones() {
+        let worst_good = [
+            score(&solarized_dark()),
+            score(&gruvbox_dark()),
+            score(&dracula()),
+            score(&nord()),
+        ]
+        .into_iter()
+        .min()
+        .expect("non-empty");
+
+        for (name, palette) in [("all mud", all_mud()), ("neon chaos", neon_chaos())] {
+            let bad = score(&palette);
+            assert!(
+                bad + 10 <= worst_good,
+                "{name} scored {bad}, too close to the worst good palette ({worst_good})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_palette_is_ranked_below_a_merely_garish_one() {
+        // Ordering matters more than absolute numbers: text you cannot read is
+        // a worse failure than text that clashes.
+        assert!(
+            score(&all_mud()) < score(&neon_chaos()),
+            "unreadable ({}) should rank below garish ({})",
+            score(&all_mud()),
+            score(&neon_chaos())
+        );
+    }
+
+    #[test]
+    fn every_role_is_covered_by_at_least_one_criterion() {
+        // A role nobody scores is a role users can silently break. Each role
+        // must appear in readability (all roles) and, if semantic, in the
+        // must-distinguish pairs.
+        let mut broken = Palette::default();
+        for role in ALL_ROLES.iter().copied() {
+            // Make this role maximally wrong and confirm the score notices.
+            let mut palette = Palette::default();
+            palette.set(
+                role,
+                if role.is_background() {
+                    (255, 0, 255)
+                } else {
+                    (19, 19, 19)
+                },
+            );
+            let degraded = analyze(&palette, DARK_BG).score;
+            let baseline = analyze(&Palette::default(), DARK_BG).score;
+            if degraded >= baseline {
+                broken.set(role, (0, 0, 0));
+            }
+        }
+        assert!(
+            !broken.has_overrides(),
+            "some roles can be broken without lowering the score"
         );
     }
 }
