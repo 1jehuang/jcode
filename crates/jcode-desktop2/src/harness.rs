@@ -45,7 +45,15 @@ pub enum HarnessUpdate {
         call_id: String,
         label: String,
     },
+    /// A finished file edit: its intent, the file, and the diff. Sent only for
+    /// tools that write to disk, and kept separate from `Tool` because an edit
+    /// earns a permanent transcript card while a call's status line does not.
+    Edit(crate::edits::EditCard),
     TurnDone,
+    /// The agent took delivery of the user's message. The proof a send landed,
+    /// separate from the reply: a turn can think for minutes before its first
+    /// token, and until this arrives the app only knows it *wrote* to a socket.
+    MessageAccepted,
     /// Something failed: a turn that could not run, a provider that could not
     /// be reached, the runtime going away. Distinct from `Status` because a
     /// status line is hidden once a session is attached, which is exactly when
@@ -458,7 +466,27 @@ fn run(
                     None => send(HarnessUpdate::Activity(name)),
                 }
             }
-            ApiEvent::ToolDone { call_id, .. } => {
+            ApiEvent::ToolDone {
+                call_id,
+                name,
+                output,
+                error,
+                ..
+            } => {
+                // An edit that changed lines becomes a permanent card in the
+                // transcript: the intent that motivated it and the lines it
+                // added and removed. Read from the call's own arguments and
+                // output, so what is shown is what the agent actually did.
+                // A failed call is skipped: it changed nothing.
+                if error.is_none()
+                    && let Some(card) = crate::edits::parse(
+                        &name,
+                        tool_input.get(&call_id).map(String::as_str),
+                        &output,
+                    )
+                {
+                    send(HarnessUpdate::Edit(card));
+                }
                 tool_input.remove(&call_id);
                 send(HarnessUpdate::Activity("thinking".into()));
             }
@@ -507,6 +535,7 @@ fn run(
                     transcript,
                 });
             }
+            ApiEvent::MessageAccepted { .. } => send(HarnessUpdate::MessageAccepted),
             ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
             ApiEvent::Error { message, .. } => {
                 // A failed request is also the end of the turn it belonged to:
