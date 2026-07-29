@@ -341,6 +341,7 @@ impl StatusSpinnerRenderer {
         terminal.swap_buffers();
         terminal.backend_mut().flush()?;
         self.last_frame = Some(next_frame);
+        crate::tui::ui::note_frame_painted();
         // Without this the animation-only path was invisible in `draw-stats`:
         // `partial_repaints` stayed at 0 while this path served ~60 repaints a
         // second, which reads as "the cheap path never runs" and sends anyone
@@ -482,6 +483,7 @@ impl StatusSpinnerRenderer {
         terminal.swap_buffers();
         terminal.backend_mut().flush()?;
         self.last_frame = Some(next_frame);
+        crate::tui::ui::note_frame_painted();
         crate::tui::ui::note_idle_animation_partial_repaint();
         Ok(true)
     }
