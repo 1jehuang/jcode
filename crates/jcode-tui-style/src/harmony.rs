@@ -1250,3 +1250,25 @@ mod generation {
         );
     }
 }
+
+#[cfg(test)]
+mod score_probe {
+    use super::*;
+    /// Prints the calibration scores documented in
+    /// `docs/TUI_COLOR_CONFIGURATION.md`. Run with `--ignored` when updating
+    /// that table so the docs cannot drift from the implementation.
+    #[test]
+    #[ignore = "reporting helper for the docs table"]
+    fn print_documented_scores() {
+        for (name, palette) in [
+            ("Dracula", super::calibration::dracula()),
+            ("Solarized Dark", super::calibration::solarized_dark()),
+            ("Nord", super::calibration::nord()),
+            ("Gruvbox Dark", super::calibration::gruvbox_dark()),
+            ("Neon chaos", super::calibration::neon_chaos()),
+            ("Unreadable mud", super::calibration::all_mud()),
+        ] {
+            println!("| {name} | {} |", analyze(&palette, (18, 18, 18)).score);
+        }
+    }
+}
