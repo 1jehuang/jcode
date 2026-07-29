@@ -39,6 +39,13 @@ jobs:
           key: quality-ubuntu
           cache-all-crates: "true"
 
+      - name: Install system dependencies
+        # jcode-desktop2 pulls yeslogic-fontconfig-sys, whose build script hard
+        # fails without fontconfig.pc. Without this the "Enforce desktop2 frame
+        # budget" step cannot even build, and `cargo check --all-targets
+        # --all-features` above is affected the same way.
+        run: sudo apt-get update && sudo apt-get install -y -qq libfontconfig1-dev
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
