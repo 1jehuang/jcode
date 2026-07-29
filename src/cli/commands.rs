@@ -2100,6 +2100,12 @@ pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<(
 
     let mut client = crate::server::Client::connect().await?;
 
+    // The server requires `Subscribe` as the first frame and rejects any other
+    // opening request with "Client must Subscribe with a working_dir before
+    // sending stateful requests", so `reload` alone always failed (issue #648).
+    // `subscribe()` defaults `working_dir` to the current directory.
+    client.subscribe().await?;
+
     // Before asking the (possibly older) daemon to reload, repair a stale
     // `shared-server` channel from the client side. The running server resolves
     // its reload target from that channel; if it still points at the server's

@@ -321,3 +321,74 @@ fn test_initialize_result() {
     assert_eq!(result.protocol_version, "2024-11-05");
     assert!(result.server_info.is_some());
 }
+
+#[test]
+fn http_entry_does_not_displace_a_working_stdio_server_of_the_same_name() {
+    // A `type: http` entry from a lower-precedence config used to overwrite the
+    // stdio definition and then get dropped by the non-stdio filter, silently
+    // losing a working server (issue #653).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"type":"stdio","command":"npx","args":["-y","mcp-remote"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    let github = config
+        .servers
+        .get("github")
+        .expect("stdio github server must survive the http entry");
+    assert_eq!(github.command, "npx");
+    assert!(github.is_stdio());
+}
+
+#[test]
+fn stdio_entry_still_overrides_an_existing_http_entry() {
+    // The precedence guard is one-directional: a runnable stdio definition must
+    // still win over a non-runnable http one from an earlier config.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"type":"http","url":"https://example.invalid/mcp/"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"type":"stdio","command":"npx"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    assert_eq!(config.servers.get("github").unwrap().command, "npx");
+}
+
+#[test]
+fn stdio_entry_of_same_transport_still_overrides_by_precedence() {
+    // Same-transport collisions keep the existing last-writer-wins behavior.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"command":"old-bin"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"command":"new-bin"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    assert_eq!(config.servers.get("github").unwrap().command, "new-bin");
+}

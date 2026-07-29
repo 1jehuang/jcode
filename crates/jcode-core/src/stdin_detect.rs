@@ -261,7 +261,10 @@ mod macos {
         pth_name: [u8; 64],
     }
 
-    const TH_STATE_WAITING: i32 = 2;
+    // From Apple's `mach/thread_info.h`: RUNNING=1, STOPPED=2, WAITING=3.
+    // Comparing against 2 matched TH_STATE_STOPPED, so a thread blocked on
+    // `read(0)` never registered and stdin forwarding never fired (issue #651).
+    const TH_STATE_WAITING: i32 = 3;
 
     pub fn check(pid: u32) -> StdinState {
         // Check if fd 0 (stdin) is a pipe or pty
