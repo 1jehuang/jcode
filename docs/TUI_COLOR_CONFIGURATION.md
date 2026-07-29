@@ -40,12 +40,20 @@ to reach the terminal: the rendered frame buffer.
 ```mermaid
 flowchart TD
     A["Widgets: rgb() literals,<br/>role accessors, named colors"] --> B["Rendered frame buffer"]
-    B --> C["adapt_buffer_for_palette<br/>(user color config)"]
-    C --> D["adapt_buffer_for_theme<br/>(light/dark adaptation)"]
+    B --> C["adapt_buffer_for_theme<br/>(light/dark adaptation)"]
+    C --> D["adapt_buffer_for_palette<br/>(user color config)"]
     D --> E[Terminal]
 ```
 
-Two consequences worth knowing:
+The order matters. The light/dark pass exists because jcode's *built-in* palette
+is designed for dark terminals, so it flips luminance to make those colors work
+on light ones. A color the user configured is already the color they want, so it
+runs last and is never flipped: otherwise a deliberately dark red for errors on a
+white terminal would come out an unreadable pale pink. Because incoming literals
+have already been flipped by then, role defaults are pre-flipped the same way
+before matching.
+
+Three consequences worth knowing:
 
 - **Role accessors return defaults.** `theme::user_color()` deliberately returns
   the role's *default* color, not the configured one. If it returned the
@@ -56,6 +64,9 @@ Two consequences worth knowing:
   preserving its own lightness and chroma offset. So a "slightly dimmer variant
   of the warning color" stays a slightly dimmer variant after you recolor
   `warning`. Literals far from every configured role are left alone.
+
+- **Configured colors are used exactly as given**, on light and dark terminals
+  alike, so what you put in the config is what the terminal receives.
 
 An unconfigured palette is a byte-identical no-op, guarded by tests, so existing
 users see no change.

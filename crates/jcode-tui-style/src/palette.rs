@@ -345,6 +345,17 @@ pub fn role_color(role: Role) -> Color {
 /// rewriting cells here makes *all* colors configurable, including the
 /// hundreds of ad hoc `rgb(...)` literals and ratatui's named colors, without
 /// editing each call site. No-op when nothing is configured.
+///
+/// # Ordering with the light-theme pass
+///
+/// This must run **after** [`crate::theme_mode::adapt_buffer_for_theme`]. That
+/// pass exists because jcode's *built-in* palette is designed for dark
+/// terminals, so it flips luminance to make the built-in colors work on light
+/// ones. A color the user configured is already the color they want, so letting
+/// the flip touch it turns a deliberately dark red into an unreadable pale one.
+///
+/// Running last means an incoming literal has already been flipped, so role
+/// defaults are pre-flipped the same way before comparison. See `match_target`.
 pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
     if !HAS_OVERRIDES.load(Ordering::Relaxed) {
         return;
@@ -364,6 +375,20 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
         cell.fg = adapt(cell.fg);
         cell.bg = adapt(cell.bg);
         cell.underline_color = adapt(cell.underline_color);
+    }
+}
+
+/// The RGB a role's default renders as in the *current* theme.
+///
+/// Literals arriving at substitution have already been through the light-theme
+/// flip, so they must be matched against equally flipped defaults. On dark
+/// themes this is the identity.
+fn match_target(role: Role) -> (u8, u8, u8) {
+    let (r, g, b) = role.default_rgb();
+    match crate::theme_mode::adapt_color_for_theme(Color::Rgb(r, g, b)) {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => crate::color::indexed_to_rgb(index),
+        _ => (r, g, b),
     }
 }
 
@@ -440,7 +465,7 @@ pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) 
         if !palette.is_overridden(role) {
             continue;
         }
-        let default = crate::harmony::Oklab::from_rgb(role.default_rgb());
+        let default = crate::harmony::Oklab::from_rgb(match_target(role));
         let distance = source.distance(default);
         if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
             best = Some((distance, role));
@@ -452,8 +477,10 @@ pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) 
     };
 
     // Re-express the literal relative to the new role color, keeping its
-    // lightness/chroma offset from the role default.
-    let default = crate::harmony::Oklab::from_rgb(role.default_rgb());
+    // lightness/chroma offset from the role default. The configured color is
+    // used exactly as given: the user picked it for their own terminal, so it
+    // must not be luminance-flipped.
+    let default = crate::harmony::Oklab::from_rgb(match_target(role));
     let target = crate::harmony::Oklab::from_rgb(palette.rgb(role));
     crate::harmony::Oklab {
         l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
@@ -659,5 +686,59 @@ mod buffer_tests {
                 "a second palette pass must not shift colors again"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod light_theme_interaction {
+    use super::*;
+    use crate::theme_mode::{ThemeMode, adapt_buffer};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    /// A user on a light terminal who configures a dark, readable color must get
+    /// that color, not its inverse.
+    ///
+    /// The light adapter exists because jcode's *built-in* palette is designed
+    /// for dark backgrounds, so it flips luminance to make that palette work on
+    /// light terminals. A color the user chose explicitly is already the color
+    /// they want, so flipping it turns a readable dark red into an unreadable
+    /// pale one. This is the ordering bug that pipeline is prone to, so pin the
+    /// behavior.
+    #[test]
+    fn configured_colors_survive_the_light_theme_pass() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                set_palette(Palette::default());
+                crate::theme_mode::set_theme_mode(ThemeMode::Dark);
+            }
+        }
+        let _restore = Restore;
+        // `match_target` reads the global theme mode, so set it to match the
+        // buffer pass being exercised.
+        crate::theme_mode::set_theme_mode(ThemeMode::Light);
+
+        // A dark red: exactly what a user would pick for errors on white.
+        let chosen = (171, 60, 58);
+        let mut palette = Palette::default();
+        palette.set(Role::Error, chosen);
+        set_palette(palette);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf.content[0].fg = Color::Rgb(255, 100, 100); // the error default
+        // Same order as `ui::draw`: theme adaptation first, palette last.
+        adapt_buffer(&mut buf, ThemeMode::Light);
+        adapt_buffer_for_palette(&mut buf);
+
+        let rendered = match buf.content[0].fg {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Indexed(index) => crate::color::indexed_to_rgb(index),
+            other => panic!("expected a concrete color, got {other:?}"),
+        };
+        assert_eq!(
+            rendered, chosen,
+            "the user's configured color must reach the terminal unmodified"
+        );
     }
 }
