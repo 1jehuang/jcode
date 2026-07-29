@@ -306,11 +306,17 @@ mod footnote {
     use crate::Model;
 
     fn attached() -> Model {
-        Model {
+        let mut model = Model {
             session_id: Some("session_test".into()),
             status: "attached: session_test".into(),
             ..Model::default()
-        }
+        };
+        // A conversation in progress: the empty page is its own case, since it
+        // is where the build version is shown.
+        model
+            .transcript
+            .push(crate::transcript::Message::user("hello"));
+        model
     }
 
     /// The steady state must be silent. This is the whole reason the masthead
@@ -328,6 +334,21 @@ mod footnote {
             None,
             "an idle healthy session still drew a footnote"
         );
+    }
+
+    /// The version is the one fact about the client the window cannot
+    /// otherwise answer, so an empty page carries it. It yields to every
+    /// actionable message, and disappears as soon as there is a conversation.
+    #[test]
+    fn an_empty_page_shows_the_client_version() {
+        let mut model = attached();
+        model.transcript = crate::transcript::Transcript::default();
+        model.meta = crate::meta::Meta {
+            version: "v1.2.3".into(),
+            update: crate::meta::UpdateState::Current,
+            account: Some("someone@example.dev (anthropic)".into()),
+        };
+        assert_eq!(model.footnote().as_deref(), Some("v1.2.3"));
     }
 
     /// A failure to connect must be visible, or a dead runtime is
