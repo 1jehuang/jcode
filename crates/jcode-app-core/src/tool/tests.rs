@@ -459,6 +459,27 @@ fn collect_schema_errors(schema: &Value, path: &str, errors: &mut Vec<String>) {
                 errors.push(format!("{path}: array schema missing items"));
             }
 
+            // Gemini validates `required` against the same object's `properties`
+            // and rejects the entire request when a name is missing, which broke
+            // every tool-enabled Gemini call (issue #655). Objects without a
+            // local `properties` map are exempt: there is nothing to check
+            // against, and Gemini accepts those.
+            if let (Some(Value::Array(required)), Some(Value::Object(properties))) =
+                (map.get("required"), map.get("properties"))
+            {
+                for name in required {
+                    let Some(name) = name.as_str() else {
+                        errors.push(format!("{path}.required: entries must be strings"));
+                        continue;
+                    };
+                    if !properties.contains_key(name) {
+                        errors.push(format!(
+                            "{path}.required: '{name}' is not defined in the same object's properties"
+                        ));
+                    }
+                }
+            }
+
             for keyword in ["anyOf", "oneOf", "allOf"] {
                 let Some(branches) = map.get(keyword) else {
                     continue;
