@@ -5,6 +5,33 @@ fn test_simple_markdown() {
 }
 
 #[test]
+fn test_h1_h2_headings_render_bold_and_underlined() {
+    let lines = render_markdown("# Title\n\n## Section\n\n### Sub\n\nbody");
+    let heading_mods = |needle: &str| {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains(needle))
+            .map(|s| s.style.add_modifier)
+            .unwrap_or_else(|| panic!("missing heading span {needle}"))
+    };
+    for needle in ["Title", "Section"] {
+        let mods = heading_mods(needle);
+        assert!(mods.contains(Modifier::BOLD), "{needle} should be bold");
+        assert!(
+            mods.contains(Modifier::UNDERLINED),
+            "{needle} should be underlined"
+        );
+    }
+    let sub = heading_mods("Sub");
+    assert!(sub.contains(Modifier::BOLD), "h3 stays bold");
+    assert!(
+        !sub.contains(Modifier::UNDERLINED),
+        "h3 should not be underlined"
+    );
+}
+
+#[test]
 fn test_latex_none_mode_helpers_preserve_source_and_delimiters() {
     assert_eq!(
         line_to_string(&Line::from(raw_math_inline_span(r"x^2 + \alpha"))),
