@@ -103,20 +103,30 @@ fn a_status_notice_still_requires_periodic_frames() {
     );
 }
 
-/// A fresh empty session shows the decorative donut and legitimately animates at
-/// the fast cadence; there is no input to be responsive about yet.
+/// A fresh empty session shows the decorative donut and legitimately animates,
+/// not at the idle cadence; there is no input to be responsive about yet.
+///
+/// The exact rate is the decoration's own capped cadence rather than the full
+/// configured `animation_fps`: measured on a real session, 60fps cost 0.224 CPU
+/// cores versus 0.104 at 30fps for motion a terminal cannot render any smoother.
+/// The cap itself is pinned by
+/// `the_decorative_animation_is_capped_below_the_configured_animation_rate`;
+/// here we only require that the donut still animates.
 #[test]
 fn an_idle_empty_session_still_animates_smoothly() {
     let policy = full_tier_policy();
-    let fast = Duration::from_millis(1000 / u64::from(policy.animation_fps.max(1)));
     let idle = TestState {
         time_since_activity: Some(Duration::from_millis(200)),
         ..Default::default()
     };
-    assert_eq!(
-        crate::tui::redraw_interval_with_policy(&idle, &policy),
-        fast,
-        "an empty idle screen should keep the donut smooth"
+    let interval = crate::tui::redraw_interval_with_policy(&idle, &policy);
+    assert!(
+        interval < crate::tui::REDRAW_IDLE,
+        "an empty idle screen should animate faster than the idle cadence (got {interval:?})"
+    );
+    assert!(
+        interval <= Duration::from_millis(40),
+        "the donut must still read as motion (got {interval:?})"
     );
 }
 
@@ -144,16 +154,65 @@ fn active_typing_backs_the_decorative_animation_off() {
 #[test]
 fn a_paused_draft_lets_the_animation_recover() {
     let policy = full_tier_policy();
-    let fast = Duration::from_millis(1000 / u64::from(policy.animation_fps.max(1)));
     let paused = TestState {
         input: "a draft i walked away from".to_string(),
         cursor_pos: 5,
         time_since_user_interaction: Some(Duration::from_secs(3)),
         ..Default::default()
     };
+    let interval = crate::tui::redraw_interval_with_policy(&paused, &policy);
+    assert!(
+        interval < crate::tui::REDRAW_IDLE && interval <= Duration::from_millis(40),
+        "the animation must recover once typing stops (got {interval:?})"
+    );
+}
+
+/// The decorative idle animation must be capped below the configured animation
+/// rate, because its cost is linear in frame rate while its perceived smoothness
+/// is not.
+///
+/// Measured on a real session with `scripts/sweep_animation_fps.py`: 60fps costs
+/// 0.224 CPU cores over an idle baseline, 30fps costs 0.104, and keystroke
+/// latency is identical at both. Spending a fifth of a core to animate a
+/// decoration is the difference the user felt as "spawning a new one still lags".
+#[test]
+fn the_decorative_animation_is_capped_below_the_configured_animation_rate() {
+    let policy = full_tier_policy();
     assert_eq!(
-        crate::tui::redraw_interval_with_policy(&paused, &policy),
-        fast,
-        "the animation must recover once typing stops"
+        policy.animation_fps, 60,
+        "this test assumes the 60fps default it is protecting against"
+    );
+    let configured = Duration::from_millis(1000 / u64::from(policy.animation_fps));
+
+    let idle = TestState {
+        time_since_activity: Some(Duration::from_millis(200)),
+        ..Default::default()
+    };
+    let interval = crate::tui::redraw_interval_with_policy(&idle, &policy);
+    assert!(
+        interval > configured,
+        "the decoration must not run at the full configured rate (got {interval:?})"
+    );
+    // Still smooth enough to read as motion rather than stepping.
+    assert!(
+        interval <= Duration::from_millis(40),
+        "the decoration must still look like motion (got {interval:?})"
+    );
+}
+
+/// A user who configures a *lower* animation rate must keep it: the cap is a
+/// ceiling, not an override.
+#[test]
+fn a_lower_configured_animation_rate_is_respected() {
+    let mut policy = full_tier_policy();
+    policy.animation_fps = 10;
+    let idle = TestState {
+        time_since_activity: Some(Duration::from_millis(200)),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::tui::redraw_interval_with_policy(&idle, &policy),
+        Duration::from_millis(100),
+        "a configured 10fps must not be raised by the decorative cap"
     );
 }
