@@ -369,7 +369,7 @@ impl App {
         }
     }
 
-    /// View-only clear (Cmd+K, `/cls`): wipe the rendered transcript while
+    /// View-only clear (Ctrl+L, `/cls`): wipe the rendered transcript while
     /// keeping provider context, queued messages, and the input draft intact,
     /// so the model still remembers everything. Contrast with `/clear`
     /// (`reset_current_session`), which discards context too.

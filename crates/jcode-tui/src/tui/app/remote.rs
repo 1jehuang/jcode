@@ -1834,8 +1834,7 @@ fn handle_disconnected_key_internal(
                 return Ok(());
             }
             KeyCode::Char('l') if !app.diff_pane_visible() => {
-                app.clear_display_messages();
-                app.queued_messages.clear();
+                app.clear_view_keep_context();
                 return Ok(());
             }
             _ => {
@@ -1881,12 +1880,6 @@ fn handle_disconnected_key_internal(
             }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
-                return Ok(());
-            }
-            // Cmd+K: view-only clear (context kept), mirroring the connected
-            // and local handlers.
-            KeyCode::Char('k') if input::is_clear_view_key(app, code, modifiers) => {
-                app.clear_view_keep_context();
                 return Ok(());
             }
             _ => {}

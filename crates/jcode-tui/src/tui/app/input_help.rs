@@ -23,7 +23,7 @@ impl App {
                 "/clear\nClear current conversation, queue, and display; starts a fresh session."
             }
             "cls" | "clear-view" => {
-                "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. Also on Cmd+K."
+                "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. Also on Ctrl+L."
             }
             "model" => {
                 "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."

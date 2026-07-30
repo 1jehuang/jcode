@@ -640,32 +640,13 @@ fn test_diagram_focus_toggle_and_pan() {
     crate::tui::mermaid::clear_active_diagrams();
 }
 
+/// Ctrl+L is the view-only clear: display messages go away, but provider
+/// context, the input draft, and queued messages all survive so the model
+/// still remembers the conversation. (It used to be a deliberate no-op.)
 #[test]
-fn test_ctrl_l_without_focusable_pane_does_not_clear_session() {
+fn test_ctrl_l_clears_view_but_keeps_context() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Off;
-    app.input = "draft message".to_string();
-    app.cursor_pos = app.input.len();
-    app.display_messages = vec![DisplayMessage::system("keep chat".to_string())];
-    app.bump_display_messages_version();
-
-    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
-        .unwrap();
-
-    assert_eq!(app.input(), "draft message");
-    assert_eq!(app.cursor_pos(), "draft message".len());
-    assert_eq!(app.display_messages().len(), 1);
-    assert_eq!(app.display_messages()[0].content, "keep chat");
-    assert!(!app.diagram_focus);
-    assert!(!app.diff_pane_focus);
-}
-
-/// Cmd+K is the view-only clear: display messages go away, but provider
-/// context, the input draft, and queued messages all survive so the model
-/// still remembers the conversation.
-#[test]
-fn test_cmd_k_clears_view_but_keeps_context() {
-    let mut app = create_test_app();
     app.input = "draft message".to_string();
     app.cursor_pos = app.input.len();
     app.session.add_message(
@@ -680,8 +661,9 @@ fn test_cmd_k_clears_view_but_keeps_context() {
     app.bump_display_messages_version();
     let session_messages_before = app.session.messages.len();
     let provider_view_before = app.materialized_provider_messages().len();
+    let session_id_before = app.session.id.clone();
 
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::SUPER)
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
         .unwrap();
 
     assert!(app.display_messages().is_empty(), "view should be cleared");
@@ -698,26 +680,17 @@ fn test_cmd_k_clears_view_but_keeps_context() {
         "materialized provider view must survive"
     );
     assert_eq!(app.input(), "draft message", "input draft must survive");
+    assert_eq!(app.cursor_pos(), "draft message".len());
     assert_eq!(app.queued_messages.len(), 1, "queue must survive");
+    assert_eq!(
+        app.session.id, session_id_before,
+        "Ctrl+L must not start a fresh session (that is /clear)"
+    );
+    assert!(!app.diagram_focus);
+    assert!(!app.diff_pane_focus);
 }
 
-/// Cmd+Shift+K stays reserved for line scrolling and must not clear the view.
-#[test]
-fn test_cmd_shift_k_does_not_clear_view() {
-    let mut app = create_test_app();
-    app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
-    app.bump_display_messages_version();
-
-    app.handle_key(
-        KeyCode::Char('k'),
-        KeyModifiers::SUPER | KeyModifiers::SHIFT,
-    )
-    .unwrap();
-
-    assert_eq!(app.display_messages().len(), 1);
-}
-
-/// `/cls` is the slash-command form of the Cmd+K view-only clear.
+/// `/cls` is the slash-command form of the Ctrl+L view-only clear.
 #[test]
 fn test_cls_command_clears_view_but_keeps_context() {
     let mut app = create_test_app();
