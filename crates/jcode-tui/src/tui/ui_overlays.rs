@@ -567,7 +567,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
-    lines.push(key_entry("Ctrl+R", "Recover from missing tool outputs"));
+    lines.push(key_entry(
+        "Ctrl+R",
+        "Search prompt history (across sessions)",
+    ));
     lines.push(key_entry(
         &format!("Ctrl+V / {}", alt("V")),
         "Paste clipboard (text or image)",

@@ -289,6 +289,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.prompt_history_search.is_some() {
+        app.handle_prompt_history_search_key(code, modifiers);
+        return Ok(());
+    }
+
     if app.changelog_scroll.is_some() {
         return app.handle_changelog_key(code);
     }
@@ -620,7 +625,7 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('r') => {
-                app.recover_session_without_tools();
+                app.open_prompt_history_search();
                 return Ok(());
             }
             KeyCode::Char('l') => {

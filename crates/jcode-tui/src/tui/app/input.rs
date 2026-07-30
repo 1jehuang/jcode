@@ -1090,13 +1090,8 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     true
 }
 
-fn visible_prompt_history(app: &App) -> Vec<String> {
-    app.display_messages
-        .iter()
-        .filter(|message| message.role == "user")
-        .map(|message| message.content.trim().to_string())
-        .filter(|content| !content.is_empty())
-        .collect()
+fn visible_prompt_history(app: &mut App) -> Vec<String> {
+    app.merged_prompt_history()
 }
 
 fn byte_offset_for_line_column(
@@ -2337,6 +2332,11 @@ pub(super) fn handle_modal_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    if app.prompt_history_search.is_some() {
+        app.handle_prompt_history_search_key(code, modifiers);
+        return Ok(true);
+    }
+
     if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
         return Ok(true);
@@ -2436,7 +2436,7 @@ pub(super) fn handle_global_control_shortcuts(
             true
         }
         KeyCode::Char('r') => {
-            app.recover_session_without_tools();
+            app.open_prompt_history_search();
             true
         }
         KeyCode::Char('a') if app.input.is_empty() => {
@@ -2580,6 +2580,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let raw_input = std::mem::take(&mut app.input);
+    app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
     app.pasted_contents.clear();
     let images = std::mem::take(&mut app.pending_images);
@@ -3579,6 +3580,9 @@ impl App {
         }
 
         let raw_input = std::mem::take(&mut self.input);
+        // Persist to cross-session prompt history (no-op for slash/shell
+        // commands, secret-intercept inputs, and oversized pastes).
+        self.record_prompt_history(&raw_input);
         let mut input = self.expand_paste_placeholders(&raw_input);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;

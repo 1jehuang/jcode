@@ -50,6 +50,7 @@ include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
+include!("tests/prompt_history_cross_session.rs");
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
