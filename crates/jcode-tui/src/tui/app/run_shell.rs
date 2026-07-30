@@ -1085,11 +1085,12 @@ mod tests {
     /// frame to have drawn, which is only visible across frames over time.
     #[test]
     fn the_animation_only_path_refuses_to_run_when_the_composer_changed() {
-        let mut renderer = StatusSpinnerRenderer::default();
         // Pretend a full frame drew an empty composer.
-        renderer.last_frame = Some(Buffer::empty(Rect::new(0, 0, 10, 3)));
-        renderer.last_full_frame_at = Some(Instant::now());
-        renderer.last_full_frame_input = String::new();
+        // Struct update so a new renderer field cannot break this test.
+        let renderer = StatusSpinnerRenderer {
+            last_frame: Some(Buffer::empty(Rect::new(0, 0, 10, 3))),
+            ..Default::default()
+        };
 
         // Same input: the guard must not object (other predicates may still
         // block, which is why this asserts the reason rather than the outcome).
@@ -1109,8 +1110,10 @@ mod tests {
     /// the animation-only path run against a frame that no longer exists.
     #[test]
     fn invalidating_the_renderer_forgets_the_drawn_composer() {
-        let mut renderer = StatusSpinnerRenderer::default();
-        renderer.last_full_frame_input = "draft".to_string();
+        let mut renderer = StatusSpinnerRenderer {
+            last_full_frame_input: "draft".to_string(),
+            ..Default::default()
+        };
         renderer.invalidate();
         assert!(
             renderer.composer_changed_since_last_full_frame("draft"),

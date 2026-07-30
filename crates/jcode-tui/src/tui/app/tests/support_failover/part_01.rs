@@ -361,6 +361,9 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
+    // The config cache is keyed by content, not by home, so a config written
+    // under the previous home would otherwise be read inside this one.
+    crate::config::invalidate_config_cache();
     clear_persisted_test_ui_state();
 
     let result = f();
@@ -374,6 +377,9 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+    // Drop any config loaded from the temp home so it cannot leak into the next
+    // test, which is process-global state shared across this suite.
+    crate::config::invalidate_config_cache();
     result
 }
 
@@ -499,6 +505,48 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(
             last.content
                 .contains("cross_provider_failover = \"manual\"")
+        );
+    });
+}
+
+/// A new session must start with auto-poke off when the config says so, and
+/// `/poke on` must still be able to turn it back on for that session (#664).
+///
+/// The point of the feature is that the setting survives a restart, so
+/// asserting only the config value would miss the actual bug: the session
+/// default was a hardcoded `true` that ignored config entirely.
+#[test]
+fn auto_poke_config_sets_the_session_default_and_poke_on_still_overrides() {
+    with_temp_jcode_home(|| {
+        let mut cfg = crate::config::Config::load();
+        cfg.features.auto_poke = false;
+        cfg.save().expect("save auto_poke = false");
+        crate::config::invalidate_config_cache();
+
+        let mut app = create_test_app();
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "a new session must honour features.auto_poke = false"
+        );
+
+        // The session-scoped override must still win.
+        super::commands::activate_auto_poke_local(&mut app);
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "/poke on must still re-enable auto-poke for the running session"
+        );
+    });
+}
+
+/// The default is unchanged for everyone who does not opt out.
+#[test]
+fn auto_poke_defaults_on_when_config_does_not_disable_it() {
+    with_temp_jcode_home(|| {
+        crate::config::invalidate_config_cache();
+        let app = create_test_app();
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "auto-poke must stay on by default"
         );
     });
 }
