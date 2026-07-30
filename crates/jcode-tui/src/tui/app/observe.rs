@@ -204,7 +204,8 @@ fn todo_gate_notice(name: &str, output: &str, is_error: bool) -> Option<&'static
         Some(
             "🛑 The agent tried to finish without owning the full outcome. We asked it to follow through.",
         )
-    } else if !is_error && output.contains(crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
+    } else if !is_error
+        && output.contains(crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
     {
         Some(
             "👉 The agent's plan has no clear way to measure progress. We asked it for a stronger feedback loop.",
