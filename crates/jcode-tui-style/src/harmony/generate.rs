@@ -8,13 +8,15 @@
 use super::{CONTRAST_TARGET, DISTINCT_TARGET, MUST_DISTINGUISH, Oklab, hue_delta, simulate_cvd};
 use crate::palette::{Palette, Role};
 
-/// Lightness range in which an sRGB color can still carry visible chroma.
+/// Lightness range in which an sRGB color reads as a color rather than a smudge.
 ///
-/// Outside it, gamut mapping strips the color: a "very dark green" becomes
-/// black and a "very light blue" becomes white. Both generation and repair
-/// clamp here so a role always reads as its own color, on light backgrounds as
-/// well as dark ones.
-const COLORFUL_L_MIN: f32 = 0.32;
+/// Outside it, gamut mapping strips the chroma: a "very dark green" becomes
+/// near-black and a "very light blue" becomes near-white. The floor is 0.40
+/// rather than the ~0.25 where chroma technically survives, because a role at
+/// 0.32 is still a dark smear on screen even though its numbers look acceptable.
+/// Inspecting real output is what moved it: five accent roles were piling up on
+/// the old floor on light backgrounds.
+const COLORFUL_L_MIN: f32 = 0.36;
 const COLORFUL_L_MAX: f32 = 0.94;
 
 /// Generate a palette from a single seed color.
@@ -116,6 +118,16 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
         (fg_l + away * fraction * extent).clamp(COLORFUL_L_MIN, COLORFUL_L_MAX)
     };
 
+    // A pure gray at a given lightness, for the high-area structural roles.
+    let neutral = |lightness: f32| -> (u8, u8, u8) {
+        Oklab {
+            l: lightness.clamp(COLORFUL_L_MIN, COLORFUL_L_MAX),
+            a: 0.0,
+            b: 0.0,
+        }
+        .to_rgb()
+    };
+
     let at = |hue_offset: f32, lightness: f32, chroma_scale: f32| -> (u8, u8, u8) {
         let radians = (hue + hue_offset).to_radians();
         let chroma = chroma * chroma_scale;
@@ -153,17 +165,25 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
         (Role::Info, at(45.0, wide(-0.5), 0.9)),
         (Role::FileLink, at(0.0, step(0.35), 0.7)),
         (Role::HeaderIcon, at(180.0, fg_l, 0.9)),
-        (Role::HeaderName, at(0.0, fg_l, 0.5)),
+        // 11% of the screen: keep only a whisper of the seed so the header reads
+        // as related without joining the wash.
+        (Role::HeaderName, at(0.0, fg_l, 0.22)),
         (Role::HeaderSession, at(0.0, step(0.75), 0.15)),
         (Role::Asap, at(180.0, wide(0.5), 0.9)),
         (Role::Queued, at(90.0, wide(-0.75), 1.2)),
         // Neutrals: near-achromatic, so they never fight the accents.
         (Role::AiText, at(0.0, step(0.5), 0.12)),
         (Role::UserText, at(0.0, step(0.7), 0.1)),
-        (Role::Tool, at(0.0, dim_l, 0.15)),
-        (Role::Pending, at(0.0, dim_l, 0.15)),
-        (Role::Dim, at(0.0, dim_l - 0.06, 0.12)),
-        (Role::Border, at(0.0, dim_l - 0.02, 0.2)),
+        // Truly neutral, not a tint of the seed. These roles cover most of the
+        // screen (`dim` alone is 77% of painted cells), so giving them even a
+        // slight seed tint makes the whole UI read as one washed-out hue. That
+        // was the actual defect behind a generated palette that scored well and
+        // still looked like a brown-olive smear. A gray of the right lightness
+        // carries no hue to be monotone about.
+        (Role::Tool, neutral(dim_l)),
+        (Role::Pending, neutral(dim_l)),
+        (Role::Dim, neutral(dim_l - 0.06)),
+        (Role::Border, neutral(dim_l - 0.02)),
         (Role::UserBg, at(0.0, panel_l, 0.25)),
         (Role::SelectionBg, at(0.0, panel_l, 0.45)),
         // Conventional semantic hues, tinted toward the seed's chroma level.
