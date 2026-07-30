@@ -1013,10 +1013,10 @@ mod tests {
     #[test]
     fn the_animation_only_path_refuses_to_run_when_the_composer_changed() {
         // Pretend a full frame drew an empty composer.
+        // Struct update so a new renderer field cannot break this test.
         let renderer = StatusSpinnerRenderer {
             last_frame: Some(Buffer::empty(Rect::new(0, 0, 10, 3))),
-            last_full_frame_at: Some(Instant::now()),
-            last_full_frame_input: String::new(),
+            ..Default::default()
         };
 
         // Same input: the guard must not object (other predicates may still
