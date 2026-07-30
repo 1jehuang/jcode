@@ -1197,3 +1197,14 @@ fn default_sponsors_section_is_not_written_back() {
         "default discovery settings must not be baked into config.toml"
     );
 }
+
+#[test]
+fn config_reload_generation_increments_on_cache_invalidation() {
+    let before = crate::config::config_reload_generation();
+    crate::config::invalidate_config_cache();
+    let after = crate::config::config_reload_generation();
+    assert!(
+        after > before,
+        "invalidate_config_cache must bump the reload generation ({before} -> {after})"
+    );
+}

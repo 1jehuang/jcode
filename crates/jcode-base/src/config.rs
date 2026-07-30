@@ -407,6 +407,7 @@ pub fn invalidate_config_cache() {
 }
 
 fn notify_config_reloaded() {
+    CONFIG_RELOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     for listener in CONFIG_RELOAD_LISTENERS
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -414,6 +415,20 @@ fn notify_config_reloaded() {
     {
         listener();
     }
+}
+
+/// Monotonic counter bumped every time the config cache reloads.
+///
+/// Callers that snapshot config-derived state (e.g. the TUI's parsed
+/// keybindings) can poll this cheaply and re-derive their snapshot when the
+/// generation changes, giving instant hot-reload of config edits without a
+/// restart.
+static CONFIG_RELOAD_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Current config reload generation. Increments after every cache reload.
+pub fn config_reload_generation() -> u64 {
+    CONFIG_RELOAD_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Listeners invoked after the config cache reloads.
