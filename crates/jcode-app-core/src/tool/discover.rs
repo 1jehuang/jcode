@@ -2100,7 +2100,10 @@ mod tests {
                 .contains("recommendations must be based only on fit")
         );
         let title = output.title.unwrap();
-        assert!(title.contains("(integration discovery disclosure)"), "{title}");
+        assert!(
+            title.contains("(integration discovery disclosure)"),
+            "{title}"
+        );
         let meta = output.metadata.unwrap();
         assert_eq!(meta["sponsored_discovery"], true);
 

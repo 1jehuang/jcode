@@ -377,9 +377,7 @@ impl Transcript {
     /// ones still waiting.
     fn queued_tail_start(&self) -> usize {
         let mut index = self.messages.len();
-        while index > 0
-            && self.messages[index - 1].delivery == Some(crate::ack::Delivery::Queued)
-        {
+        while index > 0 && self.messages[index - 1].delivery == Some(crate::ack::Delivery::Queued) {
             index -= 1;
         }
         index
@@ -496,7 +494,11 @@ impl Transcript {
     /// animates the text arriving above them (the same message `text_tail`
     /// puts that text in, or the two would disagree).
     pub fn streaming_len(&self) -> usize {
-        match self.text_tail().checked_sub(1).map(|index| &self.messages[index]) {
+        match self
+            .text_tail()
+            .checked_sub(1)
+            .map(|index| &self.messages[index])
+        {
             // A notice is a status line, not prose arriving: it appears whole,
             // so it must not put the reveal back into a streaming state (which
             // would leave the failure fading in with nothing behind it).
