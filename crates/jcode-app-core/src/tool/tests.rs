@@ -169,8 +169,8 @@ async fn first_party_tool_definitions_require_intent_with_display_only_docs() {
             schema["properties"]["intent"]["description"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("display only"),
-            "{} intent description should say it is display-only",
+                .contains("shown in the UI"),
+            "{} intent description should say it is UI-display-only",
             def.name
         );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
@@ -440,6 +440,113 @@ async fn print_tool_definition_token_report() {
             def.description_token_estimate()
         );
     }
+}
+
+/// Tool descriptions are always-on prompt cost, so they are capped at ~20
+/// estimated tokens. Behavioral guidance belongs in parameter descriptions.
+/// Exemptions must be justified inline.
+#[tokio::test]
+async fn tool_descriptions_stay_under_token_cap() {
+    const DESCRIPTION_TOKEN_CAP: usize = 20;
+    // discover_tools keeps a deliberate second sentence disclosing that catalog
+    // entries are vetted/partnered integrations.
+    // swarm appends the user-tunable swarm-prompt.md by design.
+    const EXEMPT: &[&str] = &["discover_tools", "swarm"];
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let over_cap: Vec<String> = registry
+        .definitions(None)
+        .await
+        .into_iter()
+        .filter(|def| !EXEMPT.contains(&def.name.as_str()))
+        .filter(|def| def.description_token_estimate() > DESCRIPTION_TOKEN_CAP)
+        .map(|def| {
+            format!(
+                "{} (~{} tokens): {}",
+                def.name,
+                def.description_token_estimate(),
+                def.description
+            )
+        })
+        .collect();
+    assert!(
+        over_cap.is_empty(),
+        "tool descriptions over the {DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        over_cap.join("\n")
+    );
+}
+
+fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String, String)>) {
+    match schema {
+        Value::Object(map) => {
+            if path != "$"
+                && let Some(Value::String(description)) = map.get("description")
+            {
+                out.push((path.to_string(), description.clone()));
+            }
+            for (key, value) in map {
+                if key == "description" {
+                    continue;
+                }
+                collect_param_descriptions(value, &format!("{path}.{key}"), out);
+            }
+        }
+        Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                collect_param_descriptions(item, &format!("{path}[{idx}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Parameter descriptions inside tool schemas are also always-on prompt cost,
+/// so each is capped. Longer guidance belongs in runtime error messages, docs,
+/// or the system prompt. Exemptions must be justified inline.
+#[tokio::test]
+async fn tool_parameter_descriptions_stay_under_token_cap() {
+    const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    // todo's calibration fields are deliberately detailed handwritten
+    // self-assessment rubrics (see the SECURITY/EVAL note in todo.rs); the
+    // gate quality depends on them, so they stay above the cap.
+    const EXEMPT_PATHS: &[(&str, &str)] = &[
+        (
+            "todo",
+            "$.properties.plan.properties.understands_user_intent",
+        ),
+        ("todo", "$.properties.goals.items.properties.feedback_loop"),
+        (
+            "todo",
+            "$.properties.goals.items.properties.end_to_end_ownership",
+        ),
+    ];
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let mut over_cap: Vec<String> = Vec::new();
+    for def in registry.definitions(None).await {
+        let mut descriptions = Vec::new();
+        collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
+        for (path, description) in descriptions {
+            if EXEMPT_PATHS.contains(&(def.name.as_str(), path.as_str())) {
+                continue;
+            }
+            let tokens = crate::util::estimate_tokens(&description);
+            if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
+                over_cap.push(format!(
+                    "{} {} (~{} tokens): {}",
+                    def.name, path, tokens, description
+                ));
+            }
+        }
+    }
+    assert!(
+        over_cap.is_empty(),
+        "{} parameter descriptions over the {PARAM_DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        over_cap.len(),
+        over_cap.join("\n")
+    );
 }
 
 fn schema_type_includes(schema: &Value, expected: &str) -> bool {

@@ -154,17 +154,71 @@ impl Agent {
             ));
         }
         // Empty visible output with a non-guardrail stop reason: still surface,
-        // since the user otherwise sees nothing at all.
+        // since the user otherwise sees nothing at all. Do not assert a content
+        // filter here: in practice this is usually a transient upstream failure
+        // (a dropped or empty stream), not a provider guardrail (issue #672).
         let reasoning_hint = if had_reasoning {
             " after producing only internal reasoning"
         } else {
             ""
         };
         Some(format!(
-            "The model ended its turn without any visible output{} (stop_reason: {}). This is usually a provider-side guardrail or filter silently dropping the response. Rephrasing the request may help.",
+            "The model ended its turn without any visible output{} (stop_reason: {}). The provider returned an empty response; this is usually a transient upstream failure rather than a content filter. Retrying the request may help.",
             reasoning_hint, reason_label
         ))
     }
+
+    /// Log-event label for an empty final turn: real guardrail stops keep the
+    /// `PROVIDER_GUARDRAIL` name, transient empty responses get their own so
+    /// the two are separable in logs (issue #672).
+    pub(crate) fn empty_turn_log_event(stop_reason: Option<&str>) -> &'static str {
+        if Self::is_guardrail_stop_reason(stop_reason) {
+            "PROVIDER_GUARDRAIL"
+        } else {
+            "PROVIDER_EMPTY_RESPONSE"
+        }
+    }
+
+    /// Retry a whitespace-only final response that arrived right after tool
+    /// results, by asking the model to produce the final answer. Shared by the
+    /// non-streaming and streaming (mpsc) turn loops so their recovery
+    /// behavior cannot drift (issue #672). Returns true when a continuation
+    /// message was injected and the caller should re-issue the request.
+    pub(crate) fn maybe_continue_empty_post_tool_response(
+        &mut self,
+        visible_text_empty: bool,
+        prompt_has_recent_tool_result: bool,
+        stop_reason: Option<&str>,
+        attempts: &mut u32,
+    ) -> Result<bool> {
+        if !visible_text_empty || !prompt_has_recent_tool_result {
+            return Ok(false);
+        }
+        // A model-side refusal is deliberate; retrying it just burns tokens.
+        if Self::is_guardrail_stop_reason(stop_reason) {
+            return Ok(false);
+        }
+        if *attempts >= Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS {
+            return Ok(false);
+        }
+        *attempts += 1;
+        logging::warn(&format!(
+            "Provider returned whitespace-only final response after tool results (stop_reason={:?}); requesting final answer continuation (attempt {}/{})",
+            stop_reason,
+            attempts,
+            Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS
+        ));
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "The previous provider response was empty after tool results. Please provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.".to_string(),
+                cache_control: None,
+            }],
+        );
+        self.session.save()?;
+        Ok(true)
+    }
+
     fn continuation_prompt_for_stop_reason(stop_reason: &str) -> String {
         format!(
             "[System reminder: your previous response ended before completion (stop_reason: {}). Continue exactly where you left off, do not repeat completed content, and if the next step is a tool call, emit the tool call now.]",

@@ -166,6 +166,18 @@ impl Config {
         Ok(())
     }
 
+    /// Update the persisted Anthropic reasoning effort preference.
+    pub fn set_anthropic_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.provider.anthropic_reasoning_effort = value.map(|s| s.to_string());
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved anthropic_reasoning_effort to config: {}",
+            value.unwrap_or("(none)")
+        ));
+        Ok(())
+    }
+
     /// Update the persisted OpenAI transport preference.
     pub fn set_openai_transport(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load();

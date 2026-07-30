@@ -95,6 +95,7 @@ impl Agent {
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
+        let mut empty_post_tool_continuations = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -203,6 +204,7 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
             // transparently switch models mid-request (e.g. Anthropic's retired
@@ -1132,6 +1134,20 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                // Retry transient empty responses (dropped/empty upstream
+                // streams) before surfacing anything, matching the
+                // non-streaming loop's recovery behavior (issue #672).
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && self.maybe_continue_empty_post_tool_response(
+                        text_content.trim().is_empty(),
+                        prompt_has_recent_tool_result,
+                        stop_reason.as_deref(),
+                        &mut empty_post_tool_continuations,
+                    )?
+                {
+                    continue;
+                }
                 match self.handle_streaming_no_tool_calls(
                     stop_reason.as_deref(),
                     &mut incomplete_continuations,
@@ -1152,7 +1168,8 @@ impl Agent {
                             )
                         {
                             logging::warn(&format!(
-                                "PROVIDER_GUARDRAIL: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
+                                "{}: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
+                                Self::empty_turn_log_event(stop_reason.as_deref()),
                                 stop_reason,
                                 reasoning_content.len()
                             ));

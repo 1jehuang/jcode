@@ -481,6 +481,9 @@ fn rendered_rule_width(max_width: Option<usize>) -> usize {
 // Colors matching ui.rs palette
 use jcode_tui_workspace::color_support::rgb;
 const MATH_FOREGROUND: (u8, u8, u8) = (100, 160, 255);
+/// Inline math sits inside prose, so it matches the body text brightness with
+/// only a gentle blue tint instead of the saturated display-math blue.
+const MATH_INLINE_FOREGROUND: (u8, u8, u8) = (185, 200, 225);
 
 fn code_bg() -> Color {
     rgb(45, 45, 45)
@@ -490,6 +493,13 @@ fn code_fg() -> Color {
 }
 fn math_fg() -> Color {
     rgb(MATH_FOREGROUND.0, MATH_FOREGROUND.1, MATH_FOREGROUND.2)
+}
+fn math_inline_fg() -> Color {
+    rgb(
+        MATH_INLINE_FOREGROUND.0,
+        MATH_INLINE_FOREGROUND.1,
+        MATH_INLINE_FOREGROUND.2,
+    )
 }
 fn link_fg() -> Color {
     rgb(120, 180, 240)
@@ -947,12 +957,12 @@ fn count_unescaped_double_dollar(line: &str) -> usize {
 fn math_inline_span(math: &str) -> Span<'static> {
     Span::styled(
         jcode_render_core::render_inline_latex(math),
-        Style::default().fg(math_fg()),
+        Style::default().fg(math_inline_fg()),
     )
 }
 
 fn raw_math_inline_span(math: &str) -> Span<'static> {
-    Span::styled(format!("${math}$"), Style::default().fg(math_fg()))
+    Span::styled(format!("${math}$"), Style::default().fg(math_inline_fg()))
 }
 
 fn math_display_lines(math: &str) -> Vec<Line<'static>> {
