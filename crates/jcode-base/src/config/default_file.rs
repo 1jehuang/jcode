@@ -324,7 +324,7 @@ tool_profile = "acp"
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+B to save as default
-# default_model = "claude-fable-5"
+# default_model = "claude-opus-5"
 # Default provider (optional: claude|anthropic-api|openai|openai-api|copilot|openrouter|...)
 # When set, this provider is preferred on startup if available.
 #   claude        = Claude via OAuth/subscription (token in ~/.jcode/auth.json)

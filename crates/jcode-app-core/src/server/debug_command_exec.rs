@@ -548,10 +548,10 @@ pub(super) async fn execute_debug_command(
                 if claude_usage_exhausted {
                     "claude-sonnet-4-6"
                 } else {
-                    "claude-fable-5"
+                    jcode_provider_core::DEFAULT_CLAUDE_MODEL
                 }
             }
-            "openai" | "codex" => "gpt-5.5",
+            "openai" | "codex" => jcode_provider_core::DEFAULT_OPENAI_MODEL,
             "openrouter" => "anthropic/claude-sonnet-4",
             "cursor" => "gpt-5",
             "copilot" => "copilot:claude-sonnet-4",

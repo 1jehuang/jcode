@@ -1010,6 +1010,20 @@ impl OpenAIProvider {
         }
     }
 
+    /// Default reasoning effort to apply when the user has *not* explicitly
+    /// configured one. GPT-5.6 Sol defaults to `low`: it is strong enough at
+    /// low effort for day-to-day coding/agentic work, and users can cycle up
+    /// when they want deeper reasoning. Every other model keeps the model's
+    /// own API-side default (no forced effort).
+    fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
+        let key = jcode_provider_core::model_id::canonical(model);
+        if key.starts_with("gpt-5.6-sol") {
+            Some("low".to_string())
+        } else {
+            None
+        }
+    }
+
     fn revalidate_reasoning_effort(&self) {
         let current = self
             .reasoning_effort

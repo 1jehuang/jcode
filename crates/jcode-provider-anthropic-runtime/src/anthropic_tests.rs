@@ -1854,15 +1854,16 @@ fn ping_keepalive_emits_streaming_phase_event() {
 
 #[test]
 fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
-    // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus defaults to
-    // `xhigh`, so an explicit `low` must survive normalization, must NOT be
-    // silently promoted, and must land in `output_config.effort` on the request.
+    // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus 5 also
+    // *defaults* to `low` (jcode's default model/effort pairing), and an
+    // explicit `low` must survive normalization, must NOT be silently
+    // promoted, and must land in `output_config.effort` on the request.
     assert!(AnthropicProvider::model_supports_output_effort(
         "claude-opus-5"
     ));
     assert_eq!(
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
-        Some("xhigh"),
+        Some("low"),
     );
     assert_eq!(
         AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
