@@ -199,6 +199,11 @@ struct PinTodosEnvGuard;
 impl PinTodosEnvGuard {
     fn enable() -> Self {
         crate::env::set_var("JCODE_PIN_TODOS", "1");
+        // jcode-base's config cache throttles env re-checks (the zero
+        // interval under cfg!(test) applies only when jcode-base itself is
+        // the crate under test), so force a reload or a sibling test's
+        // JCODE_PIN_TODOS state leaks into this one for up to 500ms.
+        crate::config::invalidate_config_cache();
         Self
     }
 }
@@ -206,6 +211,9 @@ impl PinTodosEnvGuard {
 impl Drop for PinTodosEnvGuard {
     fn drop(&mut self) {
         crate::env::remove_var("JCODE_PIN_TODOS");
+        // See enable(): flush the removal too, so later tests that expect
+        // pin_todos off do not observe this test's stale cached config.
+        crate::config::invalidate_config_cache();
     }
 }
 
