@@ -913,3 +913,99 @@ mod named_colors {
         assert_eq!(adapt_color(&palette, Color::Reset), Color::Reset);
     }
 }
+
+#[cfg(test)]
+mod default_palette_is_frozen {
+    use super::*;
+
+    /// The exact hand-tuned palette jcode has always shipped.
+    ///
+    /// This is a deliberate, redundant copy of [`Role::default_rgb`]. It exists
+    /// so the shipped look cannot drift: the generator, the harmony scorer, and
+    /// the repair pass all consume these values, and it would be easy to "improve"
+    /// a default while tuning one of them. Any change here is a change to what
+    /// every existing user sees on launch, so it must be a deliberate edit to
+    /// this table rather than a side effect of tooling work.
+    ///
+    /// Values were chosen by hand and are not derived from any metric. A low
+    /// harmony score on this table is not a reason to change it.
+    const HAND_TUNED: &[(Role, (u8, u8, u8))] = &[
+        (Role::User, (138, 180, 248)),
+        (Role::Ai, (129, 199, 132)),
+        (Role::Tool, (120, 120, 120)),
+        (Role::FileLink, (180, 200, 255)),
+        (Role::Dim, (80, 80, 80)),
+        (Role::Accent, (186, 139, 255)),
+        (Role::System, (255, 170, 220)),
+        (Role::Queued, (255, 193, 7)),
+        (Role::Asap, (110, 210, 255)),
+        (Role::Pending, (140, 140, 140)),
+        (Role::UserText, (245, 245, 255)),
+        (Role::UserBg, (35, 40, 50)),
+        (Role::AiText, (220, 220, 215)),
+        (Role::HeaderIcon, (120, 210, 230)),
+        (Role::HeaderName, (190, 210, 235)),
+        (Role::HeaderSession, (255, 255, 255)),
+        (Role::Success, (100, 200, 100)),
+        (Role::Warning, (255, 200, 100)),
+        (Role::Error, (255, 100, 100)),
+        (Role::Info, (140, 180, 255)),
+        (Role::Border, (100, 100, 110)),
+        (Role::SelectionBg, (60, 60, 80)),
+    ];
+
+    #[test]
+    fn every_role_keeps_its_hand_tuned_default() {
+        for (role, expected) in HAND_TUNED.iter().copied() {
+            assert_eq!(
+                role.default_rgb(),
+                expected,
+                "{} changed from its hand-tuned default {expected:?}. If this is intentional, \
+                 update HAND_TUNED too and understand that every existing user's colors change.",
+                role.key()
+            );
+        }
+        assert_eq!(
+            HAND_TUNED.len(),
+            ALL_ROLES.len(),
+            "a role was added or removed without recording its hand-tuned default"
+        );
+    }
+
+    /// An unconfigured palette must resolve to exactly that table, so the
+    /// default *experience* is the hand-tuned one and not merely the constants.
+    #[test]
+    fn unconfigured_palette_resolves_to_the_hand_tuned_table() {
+        let palette = Palette::default();
+        for (role, expected) in HAND_TUNED.iter().copied() {
+            assert_eq!(palette.rgb(role), expected, "{}", role.key());
+            assert!(
+                !palette.is_overridden(role),
+                "{} must not be marked as user-configured by default",
+                role.key()
+            );
+        }
+        assert!(
+            !palette.has_overrides(),
+            "the default palette must claim no overrides, or literal remapping would engage"
+        );
+    }
+
+    /// Generation and scoring must never mutate the shipped default. They take
+    /// `&Palette` and return new values, but a future refactor could plausibly
+    /// reach for the global, so assert the global is untouched by both.
+    #[test]
+    fn generating_and_scoring_do_not_disturb_the_default() {
+        let before = Palette::default();
+        let _generated = crate::harmony::generate_from_seed((138, 180, 248), (18, 18, 18));
+        let _report = crate::harmony::analyze(&before, (18, 18, 18));
+        assert_eq!(
+            Palette::default(),
+            before,
+            "the default palette must be immutable"
+        );
+        for (role, expected) in HAND_TUNED.iter().copied() {
+            assert_eq!(role.default_rgb(), expected, "{}", role.key());
+        }
+    }
+}
