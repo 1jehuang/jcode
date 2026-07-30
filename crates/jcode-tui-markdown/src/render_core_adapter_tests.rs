@@ -170,30 +170,31 @@ fn parity_two_currency_amounts_not_math() {
 
 #[test]
 fn probe_math_divergence() {
-    let math = crate::math_fg();
-    for input in [
-        "$5x$ and more",
-        "price $5$ each",
-        "$5+$3 = $8",
-        "a $1 and $2 b",
-        "x$5$y",
-        "buy $5 sell $9 net $4",
-        "$$\nx=5\n$$",
-        "inline $a+b$ ok",
-    ] {
-        let cm: Vec<String> = render_markdown_via_core(input)
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .filter(|s| s.style.fg == Some(math))
-            .map(|s| s.content.to_string())
-            .collect();
-        let lm: Vec<String> = render_markdown(input)
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .filter(|s| s.style.fg == Some(math))
-            .map(|s| s.content.to_string())
-            .collect();
-        assert_eq!(cm, lm, "math styling mismatch for {input:?}");
+    for math in [crate::math_fg(), crate::math_inline_fg()] {
+        for input in [
+            "$5x$ and more",
+            "price $5$ each",
+            "$5+$3 = $8",
+            "a $1 and $2 b",
+            "x$5$y",
+            "buy $5 sell $9 net $4",
+            "$$\nx=5\n$$",
+            "inline $a+b$ ok",
+        ] {
+            let cm: Vec<String> = render_markdown_via_core(input)
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| s.style.fg == Some(math))
+                .map(|s| s.content.to_string())
+                .collect();
+            let lm: Vec<String> = render_markdown(input)
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| s.style.fg == Some(math))
+                .map(|s| s.content.to_string())
+                .collect();
+            assert_eq!(cm, lm, "math styling mismatch for {input:?}");
+        }
     }
 }
 
