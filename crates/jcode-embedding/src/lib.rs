@@ -8,8 +8,9 @@ use tract_hir::infer::Factoid as _;
 use tract_hir::prelude::*;
 
 pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
-type RunnableEmbeddingModel =
-    SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+// tract 0.23 renamed the runnable plan alias and dropped its third (model)
+// type parameter. `into_runnable` now hands back an `Arc<RunnableModel<..>>`.
+type RunnableEmbeddingModel = std::sync::Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
 #[derive(Debug)]
 struct TopKItem<T> {
@@ -205,7 +206,7 @@ impl Embedder {
 
         let outputs = self.model.run(inputs)?;
 
-        let output = outputs[0].to_array_view::<f32>()?.to_owned();
+        let output = outputs[0].to_plain_array_view::<f32>()?.to_owned();
 
         let shape = output.shape();
         if shape.len() == 3 {
@@ -336,7 +337,7 @@ impl CrossEncoder {
             encoding.get_type_ids(),
         )?;
         let outputs = self.model.run(inputs)?;
-        let view = outputs[0].to_array_view::<f32>()?;
+        let view = outputs[0].to_plain_array_view::<f32>()?;
         // logits shape is [1, 1] (relevance) or [1, N]; take the first/primary.
         view.iter()
             .next()
