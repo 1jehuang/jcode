@@ -65,6 +65,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/colors", "List, configure, and score every TUI color"),
     RegisteredCommand::hidden("/color", "Alias for /colors"),
     RegisteredCommand::public("/hotkeys", "List hotkeys with your personal usage"),
+    RegisteredCommand::public("/terminal-setup", "Fix Shift+Enter newlines"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public(
         "/commit-push",

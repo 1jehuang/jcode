@@ -101,6 +101,7 @@ mod subscribe_nudge;
 mod support;
 mod swarm_hint;
 mod terminal_liveness;
+mod terminal_setup_command;
 mod todos_view;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
@@ -1440,6 +1441,7 @@ pub struct App {
     learn_hint: Option<(String, Instant)>,
     // Whether a learned-keybinding nudge has already been surfaced this session.
     learn_hint_shown_this_session: bool,
+    terminal_setup_hint_shown_this_session: bool,
     // Whether the swarm-config-is-a-prompt hint has been surfaced this session.
     swarm_hint_shown_this_session: bool,
     // Sponsored-discovery disclosure shown yet (once per session).

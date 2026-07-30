@@ -251,6 +251,37 @@ def _chat_targets(
     targets.append(UITarget("composer_field", field_w, field_h, field_x, field_y, exists=True))
     _note("composer_field", f"height = body line({field_line}) + 2*vpad({field_vpad}); single-line at rest")
 
+    # --- Conditional in-transcript targets -----------------------------------
+    # These exist only for specific content states, so they are mapped with
+    # exists=False (the engine forces them present for the actions that use
+    # them; see engine._targets_for_action). Positions are representative:
+    # a tool card header sits in the middle band of the transcript; the
+    # jump-to-latest button is pinned bottom-trailing above the composer; a
+    # notice dismiss button sits under the header band.
+    transcript_top = header_band_top + header_vpad * 2.0 + 44.0
+    transcript_bottom = band_bottom - comp_vpad * 2.0 - 44.0
+    mid_y = (transcript_top + transcript_bottom) / 2.0
+
+    card_w = screen_w - 2.0 * h_margin
+    targets.append(UITarget("tool_card_header", card_w, 33.0, screen_w / 2.0, mid_y, exists=False))
+    _note("tool_card_header", "exists=False: only with tool calls; height = mono(13) line + 2*8 padding; centered in transcript band")
+
+    targets.append(UITarget("reasoning_row", card_w, 18.0, screen_w / 2.0, mid_y - 60.0, exists=False))
+    _note("reasoning_row", "exists=False: only while reasoning text present; one mono(12) line collapsed")
+
+    jump_w, jump_h = _size_from_source(frames, "arrow.down", "jump_to_latest")
+    targets.append(
+        UITarget("jump_to_latest", jump_w, jump_h,
+                 screen_w - h_margin - jump_w / 2.0,
+                 transcript_bottom - jump_h / 2.0, exists=False))
+    _note("jump_to_latest", "exists=False: only when scrolled up; bottom-trailing above the composer")
+
+    targets.append(
+        UITarget("notice_dismiss", HIG_MIN_PT, HIG_MIN_PT,
+                 screen_w - h_margin - HIG_MIN_PT / 2.0,
+                 transcript_top + HIG_MIN_PT / 2.0, exists=False))
+    _note("notice_dismiss", "exists=False: only with an active notice; trailing 44pt xmark under the header")
+
     return targets
 
 

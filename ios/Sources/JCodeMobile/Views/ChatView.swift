@@ -37,7 +37,8 @@ struct ChatView: View {
 
             TranscriptView(
                 entries: model.session.transcript,
-                isReasoning: model.session.isReasoning
+                isReasoning: model.session.isReasoning,
+                onSuggestion: { model.draft = $0 }
             )
 
             if model.session.hasPendingInterrupts {
@@ -97,7 +98,7 @@ struct ChatView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let modelName = model.session.modelName {
-                    Text(modelName)
+                    Text(shortModelName(modelName))
                         .font(Theme.mono(10.5))
                         .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
@@ -134,5 +135,14 @@ struct ChatView: View {
             }
             .ignoresSafeArea(edges: .top)
         }
+    }
+
+    /// Strips the auth-route prefix ("claude-api:claude-fable-5" -> "claude-fable-5")
+    /// so the header shows the model, not plumbing.
+    private func shortModelName(_ name: String) -> String {
+        if let idx = name.firstIndex(of: ":"), idx != name.startIndex {
+            return String(name[name.index(after: idx)...])
+        }
+        return name
     }
 }

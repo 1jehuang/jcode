@@ -20,7 +20,13 @@ struct ToolCallCard: View {
                         .font(Theme.mono(13, weight: .medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                    Spacer()
+                    if !expanded, let summary = inputSummary {
+                        Text(summary)
+                            .font(Theme.mono(11))
+                            .foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
                     Image(systemName: "chevron.down")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Theme.textTertiary)
@@ -69,6 +75,33 @@ struct ToolCallCard: View {
         switch call.status {
         case .streamingInput: "Preparing"
         case .running: "Running"
+        case .succeeded: "Succeeded"
+        case .failed: "Failed"
+        }
+    }
+
+    /// One-line human summary of the tool input for the collapsed header,
+    /// so most calls never need expanding (cheaper than a tap + read).
+    private var inputSummary: String? {
+        let input = call.input
+        guard !input.isEmpty else { return nil }
+        // Common shape: {"command": "..."} / {"file_path": "..."}; fall back
+        // to the raw (single-line) input when it is not JSON.
+        if let data = input.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["command", "file_path", "path", "query", "url"] {
+                if let value = obj[key] as? String, !value.isEmpty {
+                    return value
+                }
+            }
+        }
+        let flat = input.replacingOccurrences(of: "\n", with: " ")
+        return flat.isEmpty ? nil : flat
+    }
+
+    private var statusText: String {
+        switch call.status {
+        case .streamingInput, .running: "Running"
         case .succeeded: "Succeeded"
         case .failed: "Failed"
         }

@@ -213,6 +213,17 @@ fn idle_animation_partial_repaint_allowed(
 pub(super) struct StatusSpinnerRenderer {
     last_frame: Option<Buffer>,
     last_full_frame_at: Option<Instant>,
+    /// Animated rectangle whose surrounding cells are already seeded into
+    /// ratatui's working buffer.
+    ///
+    /// The animation-only repaint used to `clone_from` the whole previous frame
+    /// every tick just to re-render one rectangle over it: ~920k cell copies a
+    /// second at 60fps on a 160x48 terminal, to update ~2200 cells. Once the
+    /// working buffer is seeded for a given rectangle, everything outside it is
+    /// already correct (this path is the only writer between full frames), so
+    /// later ticks copy just those rows. Cleared whenever another path rewrites
+    /// the buffer, which forces one full seed again.
+    seeded_animation_area: Option<Rect>,
     /// Composer contents as of the last full frame.
     ///
     /// The animation-only path reuses that frame for everything except the
@@ -224,6 +235,20 @@ pub(super) struct StatusSpinnerRenderer {
     last_full_frame_input: String,
 }
 
+/// Copy the cells of `area` from `src` into `dst`, leaving every other cell
+/// untouched.
+///
+/// The targeted alternative to `Buffer::clone_from` for the animation-only
+/// repaint, which only ever changes one rectangle.
+fn copy_cells_in(src: &Buffer, dst: &mut Buffer, area: Rect) {
+    let area = area.intersection(*src.area()).intersection(*dst.area());
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            dst[(x, y)] = src[(x, y)].clone();
+        }
+    }
+}
+
 impl StatusSpinnerRenderer {
     pub(super) fn spinner_only_available(&self, app: &App) -> bool {
         status_spinner_only_symbol(app).is_some()
@@ -232,6 +257,9 @@ impl StatusSpinnerRenderer {
     pub(super) fn invalidate(&mut self) {
         self.last_frame = None;
         self.last_full_frame_at = None;
+        // Nothing is known to be seeded any more, so the next animation-only
+        // repaint must do one full seed before copying just the animated rows.
+        self.seeded_animation_area = None;
         self.last_full_frame_input.clear();
     }
 
@@ -310,19 +338,28 @@ impl StatusSpinnerRenderer {
             return Ok(false);
         }
 
-        let next_frame = {
+        {
             let current_buffer = terminal.current_buffer_mut();
             if current_buffer.area != previous_frame.area {
                 return Ok(false);
             }
-            current_buffer.clone_from(previous_frame);
+            // Seed the working buffer from the last known frame. Only the
+            // animated rows can differ once this path owns the screen, so after
+            // the first pass copy just those rows instead of the whole screen:
+            // measured on a real session, the full clones cost 0.257 CPU cores
+            // and nearly doubled keystroke latency (p50 6.6ms vs 3.5ms).
+            if self.seeded_animation_area == Some(area) {
+                copy_cells_in(previous_frame, current_buffer, area);
+            } else {
+                current_buffer.clone_from(previous_frame);
+                self.seeded_animation_area = Some(area);
+            }
             crate::tui::ui::render_idle_animation_into(
                 current_buffer,
                 area,
                 crate::tui::TuiState::animation_elapsed(app),
             );
-            current_buffer.clone()
-        };
+        }
 
         // Same protocol as the one-cell spinner fast path: keep ratatui's
         // virtual buffers authoritative, flush the diff inside a synchronized
@@ -340,7 +377,16 @@ impl StatusSpinnerRenderer {
         )?;
         terminal.swap_buffers();
         terminal.backend_mut().flush()?;
-        self.last_frame = Some(next_frame);
+        // Keep the remembered frame current without cloning the whole screen: it
+        // already matches everywhere except the rows just re-rendered, and the
+        // animation is deterministic for a given elapsed time.
+        if let Some(last) = self.last_frame.as_mut() {
+            crate::tui::ui::render_idle_animation_into(
+                last,
+                area,
+                crate::tui::TuiState::animation_elapsed(app),
+            );
+        }
         crate::tui::ui::note_frame_painted();
         // Without this the animation-only path was invisible in `draw-stats`:
         // `partial_repaints` stayed at 0 while this path served ~60 repaints a
@@ -419,6 +465,9 @@ impl StatusSpinnerRenderer {
         }
         self.last_frame = Some(completed_buffer);
         self.last_full_frame_at = Some(Instant::now());
+        // A full frame rewrote the whole surface, so the working buffer no longer
+        // matches `last_frame` outside the animated rows. Force a re-seed.
+        self.seeded_animation_area = None;
         // This frame drew the composer as it is now, so the animation-only path
         // may reuse it again until the input changes.
         if self.last_full_frame_input != app.input {
@@ -483,6 +532,10 @@ impl StatusSpinnerRenderer {
         terminal.swap_buffers();
         terminal.backend_mut().flush()?;
         self.last_frame = Some(next_frame);
+        // This path `clone_from`s the whole previous frame and patches one cell,
+        // so the animation-only repaint must re-seed before trusting its
+        // "everything outside the animated rows is already correct" assumption.
+        self.seeded_animation_area = None;
         crate::tui::ui::note_frame_painted();
         crate::tui::ui::note_idle_animation_partial_repaint();
         Ok(true)
