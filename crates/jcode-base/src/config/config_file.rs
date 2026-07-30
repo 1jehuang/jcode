@@ -476,6 +476,91 @@ impl Config {
         }
     }
 
+    /// One-time migration: flip a persisted `idle_animation = true` to `false`.
+    ///
+    /// The idle animation is being turned off for everyone. Users who toggled
+    /// it on earlier (or had the old `true` default baked in by a full
+    /// `Config::save()`) get flipped off once. This rewrites exactly that one
+    /// line (preserving the rest of the file byte-for-byte) and drops a marker
+    /// so it runs at most once. A user who explicitly re-enables it after the
+    /// migration is never flipped again.
+    ///
+    /// Returns `true` when it rewrote the config. Best-effort: errors are
+    /// logged and swallowed.
+    pub fn migrate_idle_animation_off_once() -> bool {
+        let Ok(dir) = jcode_dir() else {
+            return false;
+        };
+        let marker = dir.join("migrations").join("idle-animation-off");
+        if marker.exists() {
+            return false;
+        }
+        let write_marker = || {
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&marker, "idle_animation forced migration: true -> false\n");
+        };
+
+        let path = dir.join("config.toml");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            // No config file (fresh install): nothing to migrate.
+            write_marker();
+            return false;
+        };
+
+        let mut changed = false;
+        let migrated: Vec<String> = content
+            .lines()
+            .map(|line| {
+                if changed {
+                    return line.to_string();
+                }
+                let trimmed = line.trim_start();
+                let Some(rest) = trimmed.strip_prefix("idle_animation") else {
+                    return line.to_string();
+                };
+                let Some(value) = rest.trim_start().strip_prefix('=') else {
+                    return line.to_string();
+                };
+                let value = value.split('#').next().unwrap_or("");
+                if value.trim() == "true" {
+                    changed = true;
+                    let indent = &line[..line.len() - trimmed.len()];
+                    format!("{indent}idle_animation = false")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+
+        if !changed {
+            write_marker();
+            return false;
+        }
+
+        let mut new_content = migrated.join("\n");
+        if content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        match std::fs::write(&path, new_content) {
+            Ok(()) => {
+                Self::invalidate_cache();
+                write_marker();
+                crate::logging::info(
+                    "Migrated idle_animation \"true\" to \"false\" in config.toml",
+                );
+                true
+            }
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "idle_animation migration failed to write config: {err}"
+                ));
+                false
+            }
+        }
+    }
+
     fn normalize_external_auth_source_id(source_id: &str) -> String {
         source_id.trim().to_ascii_lowercase()
     }

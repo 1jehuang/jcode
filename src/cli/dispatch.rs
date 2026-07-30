@@ -79,6 +79,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     // current `inline` default. Cheap (single file read, marker-gated), and it
     // must run before the config cache is first populated.
     crate::config::Config::migrate_legacy_swarm_spawn_mode_once();
+    // One-time config migration: force idle_animation off for all existing
+    // users; anyone re-enabling it afterwards keeps their choice.
+    crate::config::Config::migrate_idle_animation_off_once();
 
     if let Some(profile_name) = args
         .provider_profile
