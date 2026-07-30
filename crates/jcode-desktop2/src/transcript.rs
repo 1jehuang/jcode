@@ -95,6 +95,16 @@ impl Message {
         }
     }
 
+    /// A user message typed while the agent was mid-turn. The daemon refuses
+    /// a second message outright, so this one waits in the transcript's tail
+    /// until the turn ends and [`Transcript::promote_oldest_queued`] sends it.
+    pub fn queued(source: impl Into<String>) -> Self {
+        Self {
+            delivery: Some(crate::ack::Delivery::Queued),
+            ..Self::user(source)
+        }
+    }
+
     pub fn assistant(source: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -230,7 +240,9 @@ impl Transcript {
     /// messages were sent, so the first unacked card is the one this ack
     /// belongs to. Returns whether anything changed, so the caller can skip a
     /// redraw for an ack that answers a message this window did not send (a
-    /// second client on the same session, or a replayed history).
+    /// second client on the same session, or a replayed history). A `Queued`
+    /// message is not a candidate: it has not been handed to the connection,
+    /// so no ack can be about it.
     pub fn acknowledge_oldest_pending(&mut self, at: std::time::Instant) -> bool {
         let pending = self
             .messages
@@ -243,6 +255,31 @@ impl Transcript {
             }
             None => false,
         }
+    }
+
+    /// Promote the oldest queued message to `Sent` and return its text for
+    /// the connection, or `None` when nothing is waiting.
+    ///
+    /// One at a time, because the daemon takes one message per turn: sending
+    /// the whole queue at a turn boundary would have every message past the
+    /// first refused for the same reason it was queued. The promoted message
+    /// keeps its place on the page; later streamed text lands *after* it (see
+    /// [`Self::text_tail`]), which is the order the agent will actually read
+    /// things in.
+    pub fn promote_oldest_queued(&mut self) -> Option<String> {
+        let message = self
+            .messages
+            .iter_mut()
+            .find(|message| message.delivery == Some(crate::ack::Delivery::Queued))?;
+        message.delivery = Some(crate::ack::Delivery::Sent);
+        Some(message.source.clone())
+    }
+
+    /// Whether any message is still waiting for its turn to be sent.
+    pub fn has_queued(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.delivery == Some(crate::ack::Delivery::Queued))
     }
 
     /// Every delivery mark currently on the page, for animation scheduling.
@@ -309,12 +346,9 @@ impl Transcript {
     }
 
     /// The live thought's index: the trailing reasoning message, looking past
-    /// the live tool card that is pinned to the tail.
+    /// the live tool card and any queued messages pinned to the tail.
     fn live_reasoning_index(&self) -> Option<usize> {
-        let mut index = self.messages.len().checked_sub(1)?;
-        if self.messages[index].role == Role::Tool {
-            index = index.checked_sub(1)?;
-        }
+        let index = self.text_tail().checked_sub(1)?;
         (self.messages[index].role == Role::Reasoning).then_some(index)
     }
 
@@ -332,13 +366,34 @@ impl Transcript {
         }
     }
 
+    /// Start of the trailing run of queued messages.
+    ///
+    /// Queued messages live at the very bottom of the transcript: they are
+    /// the *future* of the conversation, typed while the current turn was
+    /// still producing its past, so everything the turn streams has to land
+    /// above them. A queue that is not trailing cannot happen through the
+    /// public methods: queued messages are only ever pushed at the end, and
+    /// promotion keeps them in place while later text is inserted above the
+    /// ones still waiting.
+    fn queued_tail_start(&self) -> usize {
+        let mut index = self.messages.len();
+        while index > 0
+            && self.messages[index - 1].delivery == Some(crate::ack::Delivery::Queued)
+        {
+            index -= 1;
+        }
+        index
+    }
+
     /// Where streamed text goes: the end of the transcript, except that a live
-    /// tool card at the tail is skipped over. One definition, so both append
-    /// paths keep the card pinned and neither can strand it mid-transcript.
+    /// tool card and the queued messages at the tail are skipped over. One
+    /// definition, so every append path keeps the card and the queue pinned
+    /// and none can strand them mid-transcript.
     fn text_tail(&self) -> usize {
-        match self.messages.last() {
-            Some(last) if last.role == Role::Tool => self.messages.len() - 1,
-            _ => self.messages.len(),
+        let tail = self.queued_tail_start();
+        match tail.checked_sub(1).map(|index| &self.messages[index]) {
+            Some(last) if last.role == Role::Tool => tail - 1,
+            _ => tail,
         }
     }
 
@@ -363,18 +418,22 @@ impl Transcript {
         // thinking. (No-op outside `current` mode.)
         self.retire_live_reasoning();
         // Refine the card in place, whichever call it belongs to now: the
-        // card is a slot, not a log entry.
-        if let Some(last) = self.messages.last_mut()
-            && last.role == Role::Tool
+        // card is a slot, not a log entry. `text_tail` points *at* the card
+        // when one is pinned under the streamed text and above the queue.
+        let slot = self.text_tail();
+        if let Some(card) = self.messages.get_mut(slot)
+            && card.role == Role::Tool
         {
-            last.call_id = Some(call_id.to_string());
-            last.source = label.to_string();
+            card.call_id = Some(call_id.to_string());
+            card.source = label.to_string();
             return;
         }
-        // No card yet: open one at the tail. The clear is a guard against a
-        // stray card left by a replayed history, which must not double up.
+        // No card yet: open one under the text, above any queued messages.
+        // The clear is a guard against a stray card left by a replayed
+        // history, which must not double up.
         self.clear_live_tool();
-        self.messages.push(Message::tool(call_id, label));
+        let at = self.text_tail();
+        self.messages.insert(at, Message::tool(call_id, label));
     }
 
     /// Remove the live tool card. Called when the turn ends: a card left
@@ -406,14 +465,17 @@ impl Transcript {
             return;
         }
         self.clear_live_tool();
-        if self
-            .messages
-            .last()
+        // Above the queued messages: a failure is part of the turn that just
+        // happened, while the queue is what happens next.
+        let at = self.queued_tail_start();
+        if at
+            .checked_sub(1)
+            .map(|index| &self.messages[index])
             .is_some_and(|last| last.role == Role::Notice && last.source == text)
         {
             return;
         }
-        self.messages.push(Message::notice(text));
+        self.messages.insert(at, Message::notice(text));
     }
 
     /// Plain-text rendering, for tests and for copying the conversation.
@@ -429,16 +491,12 @@ impl Transcript {
     /// streaming reveal is animating. Zero when the last turn is the user's,
     /// because nothing is arriving.
     ///
-    /// A live tool card at the tail is skipped: the card is a status readout
-    /// that appears whole, not prose to sweep in, so the reveal animates the
-    /// text arriving above it.
+    /// A live tool card and queued messages at the tail are skipped: both are
+    /// pinned under the streamed text and appear whole, so the reveal
+    /// animates the text arriving above them (the same message `text_tail`
+    /// puts that text in, or the two would disagree).
     pub fn streaming_len(&self) -> usize {
-        let mut tail = self.messages.iter().rev();
-        let mut last = tail.next();
-        if last.is_some_and(|message| message.role == Role::Tool) {
-            last = tail.next();
-        }
-        match last {
+        match self.text_tail().checked_sub(1).map(|index| &self.messages[index]) {
             // A notice is a status line, not prose arriving: it appears whole,
             // so it must not put the reveal back into a streaming state (which
             // would leave the failure fading in with nothing behind it).

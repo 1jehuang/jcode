@@ -532,21 +532,51 @@ impl App {
         // Move to the next hint, so the set is discovered across turns instead
         // of one line being the whole of the user's experience of it.
         self.model.hint = self.model.hint.wrapping_add(1);
-        self.model
-            .transcript
-            .push(transcript::Message::sent(content.clone()));
-        // The user's own message was typed, not streamed: revealing it would
-        // animate text they are already looking at.
-        self.model.stream.reveal_all();
-        self.model.busy = true;
+        // Mid-turn, the daemon refuses a second message outright ("already
+        // processing"), so the message is not sent: it waits at the tail of
+        // the transcript in the queued tone, and the turn ending is what
+        // sends it (see `flush_queued_message`).
+        let queued = self.model.busy;
+        self.model.transcript.push(match queued {
+            true => transcript::Message::queued(content.clone()),
+            false => transcript::Message::sent(content.clone()),
+        });
         // Sending clears the last failure: the user has responded to it, and a
         // stale "no network" footnote hanging over a fresh turn would be a
         // report about the past.
         self.model.failure = None;
-        self.model.activity.start(std::time::Instant::now());
         // Submitting jumps back to the live tail; otherwise the reply streams
         // in off-screen.
         self.model.scroll = 0.0;
+        if queued {
+            // The turn is still streaming its reply above the queued card, so
+            // the reveal must keep running; resetting it here would replay
+            // text the user has already read.
+            return;
+        }
+        // The user's own message was typed, not streamed: revealing it would
+        // animate text they are already looking at.
+        self.model.stream.reveal_all();
+        self.model.busy = true;
+        self.model.activity.start(std::time::Instant::now());
+        if let Some((_, outgoing)) = self.harness.as_ref() {
+            let _ = outgoing.send(harness::Command::Send(content));
+        }
+    }
+
+    /// Send the oldest queued message, now that the turn it waited out is
+    /// over. One per turn boundary: the daemon takes one message at a time,
+    /// and the rest of the queue waits for the turn this one starts.
+    ///
+    /// The promotion is what the queued tone and the wiggle hang off: the
+    /// card leaves the faint "not sent yet" state, nods, and takes the normal
+    /// transcript ink, exactly as if it had been submitted at this moment.
+    pub(crate) fn flush_queued_message(&mut self) {
+        let Some(content) = self.model.transcript.promote_oldest_queued() else {
+            return;
+        };
+        self.model.busy = true;
+        self.model.activity.start(std::time::Instant::now());
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Send(content));
         }
