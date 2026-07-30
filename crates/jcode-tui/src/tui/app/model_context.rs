@@ -249,17 +249,6 @@ impl App {
         format!("{} via {} ({})", route.model, method, route.provider)
     }
 
-    /// Condense a (possibly multi-line JSON) provider error down to a single,
-    /// length-capped line for the fallback offer summary.
-    fn clip_error_one_line(error: &str, max_chars: usize) -> String {
-        let first = error.lines().next().unwrap_or(error).trim();
-        if first.chars().count() <= max_chars {
-            return first.to_string();
-        }
-        let clipped: String = first.chars().take(max_chars).collect();
-        format!("{clipped}…")
-    }
-
     /// After a provider turn error, compute the next best available route and, if
     /// one exists, arm an interactive offer the user can accept with a keypress to
     /// switch and resend. Returns true when an offer was armed.
@@ -339,13 +328,13 @@ impl App {
 
         let remote_resend = if self.is_remote { remote_resend } else { None };
 
+        // The raw error was already shown by the caller just above this offer,
+        // so only name the failed route here instead of echoing the error text
+        // a second time.
         let key_label = crate::tui::keybind::fallback_switch_key_label();
         self.push_display_message(DisplayMessage::system(format!(
-            "↪ Fallback available: press {} to switch to {} and resend.\n\nWhat failed: {}\nError: {}",
-            key_label,
-            target_label,
-            from_label,
-            Self::clip_error_one_line(error, 160),
+            "↪ {} failed. Fallback available: press {} to switch to {} and resend.",
+            from_label, key_label, target_label,
         )));
         self.set_status_notice(format!("Press {} to switch to {}", key_label, route.model));
         self.pending_fallback_offer = Some(super::PendingFallbackOffer {
