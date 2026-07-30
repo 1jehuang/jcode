@@ -289,6 +289,11 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         "scroll_bookmark",
         "toggle the scroll bookmark",
     );
+    out.push(KnownHotkey::new(
+        key(KeyCode::Char('k'), KeyModifiers::SUPER),
+        "clear_view",
+        "clear the view, keeping context (/cls)",
+    ));
 
     // Built-in readline-style editing chords.
     out.push(KnownHotkey::new(
