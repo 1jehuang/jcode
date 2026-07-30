@@ -38,6 +38,20 @@ import repro_slash_flicker as flick  # noqa: E402
 from repro_real_spawn_lag import recent_session  # noqa: E402
 
 
+def load_average() -> float:
+    """1-minute load average, used to reject polluted measurements.
+
+    Keystroke latency is measured in milliseconds, so a concurrent compile can
+    dwarf the effect under test: a run taken at load 16 reported 9ms typing with
+    the animation *inactive*, which says nothing about the animation. Recording
+    the load makes such runs identifiable instead of silently misleading.
+    """
+    try:
+        return float(Path("/proc/loadavg").read_text().split()[0])
+    except Exception:
+        return float("nan")
+
+
 def cpu_seconds(pid: int) -> float | None:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
@@ -100,6 +114,7 @@ def run_once(binary: str, session: str, animation: bool, window_s: float,
 
         out = {
             "animation": animation,
+            "load_average": round(load_average(), 2),
             "donut_active": sched.get("idle_animation_active"),
             "interval_ms": sched.get("interval_ms"),
             "partial_repaints_total": anim.get("partial_repaints"),
@@ -154,10 +169,15 @@ def main() -> int:
                          args.rows, args.cols)
             rows.append(r)
             label = "donut ON " if animation else "donut OFF"
+            warn = ""
+            load = r.get("load_average")
+            if load is not None and load == load and load > 4.0:
+                # A busy machine makes millisecond latency numbers meaningless.
+                warn = f"  [!] load={load}, latency unreliable"
             print(f"  {label}: cpu={r.get('cpu_cores')} cores  "
                   f"interval={r.get('interval_ms')}ms  "
                   f"typing p50={r.get('typing_p50_ms')}ms "
-                  f"p95={r.get('typing_p95_ms')}ms")
+                  f"p95={r.get('typing_p95_ms')}ms{warn}")
 
     on = [r["cpu_cores"] for r in rows
           if r.get("animation") and r.get("cpu_cores") is not None]
