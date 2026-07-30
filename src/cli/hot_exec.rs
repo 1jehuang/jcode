@@ -276,6 +276,26 @@ pub fn check_for_updates() -> Option<bool> {
     }
 }
 
+/// True when the source checkout has local commits that upstream lacks, so a
+/// fast-forward pull (and therefore auto-update) can never succeed. Returns
+/// `None` when the repo or upstream cannot be inspected.
+pub fn local_commits_ahead_of_upstream() -> Option<bool> {
+    let repo_dir = get_repo_dir()?;
+    let ahead = ProcessCommand::new("git")
+        .args(["rev-list", "--count", "@{u}..HEAD"])
+        .current_dir(&repo_dir)
+        .output()
+        .ok()?;
+    if !ahead.status.success() {
+        return None;
+    }
+    let count: u32 = String::from_utf8_lossy(&ahead.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    Some(count > 0)
+}
+
 pub fn run_auto_update() -> Result<()> {
     use crate::bus::{Bus, BusEvent, UpdateStatus};
 
