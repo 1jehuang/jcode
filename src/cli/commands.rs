@@ -2421,7 +2421,7 @@ fn run_command_auto_poke_enabled() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !matches!(value.as_str(), "0" | "false" | "off" | "no")
         })
-        .unwrap_or(true)
+        .unwrap_or_else(|| crate::config::config().features.auto_poke)
 }
 
 /// Whether headless `jcode run` should load MCP servers from `~/.jcode/mcp.json`.
