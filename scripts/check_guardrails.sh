@@ -57,6 +57,11 @@ run_ratchet() {
 }
 
 echo "=== Format ==="
+# Before rustfmt: a `mod x;` with no file makes rustfmt fail with "Error writing
+# files: failed to resolve mod", which reads like a formatting problem and hides
+# every gate behind it. Naming the real cause first turns a confusing Format
+# failure into an obvious one (221159294).
+run_gate "module declarations resolve" python3 scripts/check_module_files.py
 if $FIX; then
     cargo fmt --all
 fi

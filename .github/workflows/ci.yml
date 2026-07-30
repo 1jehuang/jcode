@@ -46,6 +46,12 @@ jobs:
         # --all-features` above is affected the same way.
         run: sudo apt-get update && sudo apt-get install -y -qq libfontconfig1-dev
 
+      - name: Check module declarations resolve
+        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
+        # failed to resolve mod", which reads like a formatting problem and hides
+        # every gate behind it. Naming the real cause first (221159294).
+        run: python3 scripts/check_module_files.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -476,6 +482,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+
+      - name: Check module declarations resolve
+        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
+        # failed to resolve mod", which reads like a formatting problem and hides
+        # every gate behind it. Naming the real cause first (221159294).
+        run: python3 scripts/check_module_files.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check
