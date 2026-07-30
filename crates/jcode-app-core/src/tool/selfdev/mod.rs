@@ -489,8 +489,7 @@ impl SelfDevTool {
         if is_selfdev {
             "Manage self-dev builds, tests, and reloads while working on jcode itself."
         } else {
-            "Enter self-dev mode to work on jcode itself. Also sets up the dev \
-             environment, reloads jcode to a newer build, and locates jcode config/paths."
+            "Enter self-dev mode to work on jcode itself: setup, reload, find config/paths."
         }
     }
 

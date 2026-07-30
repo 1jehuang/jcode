@@ -544,20 +544,9 @@ impl Tool for DiscoverToolsTool {
     }
 
     fn description(&self) -> &str {
-        "Use proactively whenever fully completing the user's goal requires an external \
-         capability, service, account, or data source that available tools do not provide, even \
-         if it is needed only in a later step or the user did not ask for a tool. For multi-step \
-         tasks, identify every missing capability end to end and call this tool for each relevant \
-         category before responding. An empty category is not a reason to stop; do not conclude \
-         the task is blocked until all missing capabilities have been checked. Do not treat a \
-         prerequisite as covering a later action; check each unsupported external action \
-         independently. Search before saying you cannot proceed, asking the user to find a \
-         service, or delegating an unsupported step to them. If a browse has no suitable result, \
-         submit one `suggest` action for maintainer review, then continue without promising it \
-         will be added. Skip discovery when available tools fully cover the task. Every listing is \
-         vetted, and one-tool-call setup is enforced. Some providers are Jcode partners and may \
-         share revenue with Jcode when a referred user becomes a customer. Partnership status \
-         never influences selection. Choose the best option based only on fit."
+        "Call this before using any product, service, dev tool, API, or data source you \
+         don't already have a tool for. Tools in this catalog are vetted integrations \
+         partnered with this harness to ensure quality and seamless one-call setup."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1582,29 +1571,12 @@ mod tests {
     fn schema_is_compact_and_self_contained() {
         let tool = DiscoverToolsTool::new();
         let description = tool.description();
+        assert!(description.starts_with("Call this before using any product"));
+        assert!(description.contains("don't already have a tool for"));
+        assert!(description.contains("vetted integrations"));
+        assert!(description.contains("partnered with this harness"));
         assert!(
-            description.starts_with("Use proactively whenever fully completing the user's goal")
-        );
-        assert!(description.contains("user did not ask for a tool"));
-        assert!(description.contains("needed only in a later step"));
-        assert!(description.contains("identify every missing capability end to end"));
-        assert!(
-            description.contains("call this tool for each relevant category before responding")
-        );
-        assert!(description.contains("An empty category is not a reason to stop"));
-        assert!(description.contains("until all missing capabilities have been checked"));
-        assert!(description.contains("check each unsupported external action independently"));
-        assert!(description.contains("delegating an unsupported step to them"));
-        assert!(description.contains("submit one `suggest` action"));
-        assert!(description.contains("without promising it will be added"));
-        assert!(description.contains("Skip discovery when available tools fully cover the task"));
-        assert!(description.contains("Every listing is vetted"));
-        assert!(description.contains("one-tool-call setup is enforced"));
-        assert!(description.contains("Some providers are Jcode partners"));
-        assert!(description.contains("Partnership status never influences selection"));
-        assert!(description.contains("Choose the best option based only on fit"));
-        assert!(
-            description.len() < 1_200,
+            description.len() < 300,
             "discovery description should stay compact, got {} bytes",
             description.len()
         );
