@@ -435,7 +435,9 @@ fn test_mermaid_renders_inline_even_in_pinned_diagram_mode() {
 fn test_inline_math_render() {
     let lines = render_markdown(r"Area is $\pi a^2$.");
     let rendered = lines_to_string(&lines);
-    assert!(rendered.contains("πa²"), "{rendered}");
+    // 0716055ae deliberately preserves the separator after word commands, so
+    // `\pi a^2` reads as `π a²` rather than `πa²`.
+    assert!(rendered.contains("π a²"), "{rendered}");
     assert!(!rendered.contains(r"\pi"), "{rendered}");
 }
 
