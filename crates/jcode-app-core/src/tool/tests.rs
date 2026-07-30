@@ -511,7 +511,10 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // self-assessment rubrics (see the SECURITY/EVAL note in todo.rs); the
     // gate quality depends on them, so they stay above the cap.
     const EXEMPT_PATHS: &[(&str, &str)] = &[
-        ("todo", "$.properties.plan.properties.understands_user_intent"),
+        (
+            "todo",
+            "$.properties.plan.properties.understands_user_intent",
+        ),
         ("todo", "$.properties.goals.items.properties.feedback_loop"),
         (
             "todo",
@@ -531,7 +534,10 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
             }
             let tokens = crate::util::estimate_tokens(&description);
             if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
-                over_cap.push(format!("{} {} (~{} tokens): {}", def.name, path, tokens, description));
+                over_cap.push(format!(
+                    "{} {} (~{} tokens): {}",
+                    def.name, path, tokens, description
+                ));
             }
         }
     }
