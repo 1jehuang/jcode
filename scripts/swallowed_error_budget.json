@@ -1,9 +1,9 @@
 {
-  "total": 3078,
+  "total": 3085,
   "totals_by_pattern": {
-    "dot_ok": 1154,
-    "let_underscore": 1161,
-    "unwrap_or_default": 763
+    "dot_ok": 1156,
+    "let_underscore": 1164,
+    "unwrap_or_default": 765
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -683,7 +683,7 @@
     },
     "crates/jcode-base/src/config/config_file.rs": {
       "dot_ok": 1,
-      "let_underscore": 2,
+      "let_underscore": 4,
       "unwrap_or_default": 2
     },
     "crates/jcode-base/src/copilot_usage.rs": {
@@ -1153,7 +1153,7 @@
     },
     "crates/jcode-desktop2/src/main.rs": {
       "dot_ok": 0,
-      "let_underscore": 1,
+      "let_underscore": 2,
       "unwrap_or_default": 0
     },
     "crates/jcode-desktop2/src/mem.rs": {
@@ -1860,6 +1860,11 @@
       "dot_ok": 5,
       "let_underscore": 1,
       "unwrap_or_default": 0
+    },
+    "crates/jcode-tui/src/tui/app/prompt_history.rs": {
+      "dot_ok": 2,
+      "let_underscore": 0,
+      "unwrap_or_default": 2
     },
     "crates/jcode-tui/src/tui/app/remote.rs": {
       "dot_ok": 0,
