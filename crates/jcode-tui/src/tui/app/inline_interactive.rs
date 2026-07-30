@@ -1374,29 +1374,27 @@ impl App {
             self.provider.reasoning_effort()
         };
 
-        let is_config_default =
-            |name: &str, route: &PickerOption, effort: Option<&str>| -> bool {
-                if !model_picker_route_is_default(
-                    name,
-                    route,
-                    config_default_model.as_deref(),
-                    config_default_provider.as_deref(),
-                ) {
-                    return false;
-                }
-                let selection =
-                    crate::provider::MultiProvider::default_model_selection_from_route(
-                        name,
-                        &route.api_method,
-                        &route.provider,
-                    );
-                model_picker_effort_matches_default(
-                    selection.provider_key.as_deref(),
-                    effort,
-                    config_anthropic_effort.as_deref(),
-                    config_openai_effort.as_deref(),
-                )
-            };
+        let is_config_default = |name: &str, route: &PickerOption, effort: Option<&str>| -> bool {
+            if !model_picker_route_is_default(
+                name,
+                route,
+                config_default_model.as_deref(),
+                config_default_provider.as_deref(),
+            ) {
+                return false;
+            }
+            let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+                name,
+                &route.api_method,
+                &route.provider,
+            );
+            model_picker_effort_matches_default(
+                selection.provider_key.as_deref(),
+                effort,
+                config_anthropic_effort.as_deref(),
+                config_openai_effort.as_deref(),
+            )
+        };
 
         let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
@@ -3194,16 +3192,16 @@ impl App {
                             // effort (issue #675).
                             if let Some(effort) = entry_effort.as_deref() {
                                 let save_result = match provider_key.as_deref() {
-                                    Some("claude-oauth") | Some("claude-api") => Some(
-                                        crate::config::Config::set_anthropic_reasoning_effort(
+                                    Some("claude-oauth") | Some("claude-api") => {
+                                        Some(crate::config::Config::set_anthropic_reasoning_effort(
                                             Some(effort),
-                                        ),
-                                    ),
-                                    Some("openai-oauth") | Some("openai-api") => Some(
-                                        crate::config::Config::set_openai_reasoning_effort(Some(
-                                            effort,
-                                        )),
-                                    ),
+                                        ))
+                                    }
+                                    Some("openai-oauth") | Some("openai-api") => {
+                                        Some(crate::config::Config::set_openai_reasoning_effort(
+                                            Some(effort),
+                                        ))
+                                    }
                                     _ => None,
                                 };
                                 if let Some(Err(e)) = save_result {
