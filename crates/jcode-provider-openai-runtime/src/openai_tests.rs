@@ -112,10 +112,10 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
                 Ok(WsMessage::Ping(payload)) => {
                     server_ping_notify.notify_one();
                     let _ = ws
-                        .send(WsMessage::Pong(b"stale-pong".to_vec().into()))
+                        .send(WsMessage::Pong(b"stale-pong".to_vec()))
                         .await;
                     let _ = ws
-                        .send(WsMessage::Ping(b"server-keepalive".to_vec().into()))
+                        .send(WsMessage::Ping(b"server-keepalive".to_vec()))
                         .await;
                     let _ = ws.send(WsMessage::Pong(payload)).await;
                 }
