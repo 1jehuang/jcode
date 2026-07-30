@@ -3,6 +3,19 @@
 Every color the jcode TUI renders is user-configurable, and palettes can be
 measured objectively rather than eyeballed.
 
+## The default palette is fixed
+
+jcode's built-in palette is hand-tuned and is **not** derived from the harmony
+metric. It stays the default. `default_palette_is_frozen` in `palette.rs` holds a
+redundant copy of every value and fails if any of them change, because the
+generator, scorer, and repair pass all read those constants and it would be easy
+to "improve" one while tuning the tooling. Changing a default changes what every
+existing user sees on launch, so it has to be a deliberate edit to that table.
+
+A low harmony score on the default palette is not a reason to change it. The
+metric is there to help users evaluate palettes *they* choose, and to let
+`/colors generate` build one on request.
+
 ## Configuring colors
 
 Colors live in `~/.jcode/config.toml`:
