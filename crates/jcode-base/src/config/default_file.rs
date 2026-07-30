@@ -173,8 +173,8 @@ reasoning_display = "off"
 # When neither toolchain is available, formulas fall back to Unicode.
 latex_rendering = "image"
 
-# Show idle animation before first prompt (default: true)
-idle_animation = true
+# Show idle animation before first prompt (default: false)
+idle_animation = false
 
 # Briefly animate a user prompt line when it enters the viewport (default: true)
 prompt_entry_animation = true

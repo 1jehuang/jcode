@@ -1041,7 +1041,7 @@ pub struct DisplayConfig {
     /// it scrolls, like the sticky previous-prompt preview (default: false)
     #[serde(default)]
     pub pin_todos: bool,
-    /// Show idle animation before first prompt (default: true)
+    /// Show idle animation before first prompt (default: false)
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
     pub prompt_entry_animation: bool,
@@ -1120,7 +1120,7 @@ impl Default for DisplayConfig {
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
             latex_rendering: LatexRenderingMode::default(),
-            idle_animation: true,
+            idle_animation: false,
             prompt_entry_animation: true,
             disabled_animations: Vec::new(),
             diff_line_wrap: true,
