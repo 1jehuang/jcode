@@ -581,17 +581,22 @@ impl AnthropicProvider {
     }
 
     /// Default reasoning effort to apply when the user has *not* explicitly
-    /// configured one. Claude Opus models are reasoning-heavy flagships, so we
-    /// default them to `xhigh` where supported (Opus 4.7/4.8), clamped to
-    /// `high` on older Opus. Deliberately NOT `max`: Anthropic recommends
-    /// `xhigh` as the starting point for coding/agentic work and reserves
-    /// `max` for frontier problems (it costs much more and can overthink).
-    /// Claude Fable 5 defaults to `high`: it benefits from deeper reasoning
-    /// on coding/agentic work. Every other model keeps the model's own
-    /// default (no forced effort) so cheaper models stay cheap.
+    /// configured one. Claude Opus 5 defaults to `low`: it is strong enough
+    /// at low effort for day-to-day coding/agentic work, and users can cycle
+    /// up when they want deeper reasoning. Older Claude Opus models are
+    /// reasoning-heavy flagships, so we default them to `xhigh` where
+    /// supported (Opus 4.7/4.8), clamped to `high` on older Opus.
+    /// Deliberately NOT `max`: Anthropic recommends `xhigh` as the starting
+    /// point for coding/agentic work and reserves `max` for frontier problems
+    /// (it costs much more and can overthink). Claude Fable 5 defaults to
+    /// `high`: it benefits from deeper reasoning on coding/agentic work.
+    /// Every other model keeps the model's own default (no forced effort) so
+    /// cheaper models stay cheap.
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
         let key = Self::normalized_model_key(model);
-        if key.contains("claude-opus") {
+        if key.contains("claude-opus-5") {
+            Some("low".to_string())
+        } else if key.contains("claude-opus") {
             Some(if Self::model_supports_xhigh_effort(model) {
                 "xhigh".to_string()
             } else {

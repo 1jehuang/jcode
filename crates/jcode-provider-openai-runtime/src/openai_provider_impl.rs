@@ -50,7 +50,10 @@ impl Provider for OpenAIProvider {
             .reasoning_effort
             .read()
             .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            // No explicit user effort: fall back to the model's jcode-side
+            // default (e.g. `low` for GPT-5.6 Sol).
+            .or_else(|| Self::default_reasoning_effort_for_model(&model_id));
         // Map the `swarm` sentinel (and any future aliases) to the real effort
         // value the API understands.
         let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
@@ -871,6 +874,10 @@ impl Provider for OpenAIProvider {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            // Surface the *effective* effort so the UI/status reflects the
+            // model default (e.g. `low` for GPT-5.6 Sol) when the user has
+            // not picked one explicitly.
+            .or_else(|| Self::default_reasoning_effort_for_model(&self.model()))
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
@@ -1164,7 +1171,15 @@ impl Provider for OpenAIProvider {
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
-            reasoning_effort: Arc::new(StdRwLock::new(self.reasoning_effort())),
+            // Copy the raw stored effort (not the surfaced effective value) so
+            // a fork that later switches models does not inherit another
+            // model's default as if the user had chosen it.
+            reasoning_effort: Arc::new(StdRwLock::new(
+                self.reasoning_effort
+                    .read()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().clone()),
+            )),
             model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             native_compaction_mode: self.native_compaction_mode,
