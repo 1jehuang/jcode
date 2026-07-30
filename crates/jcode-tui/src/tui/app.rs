@@ -1319,11 +1319,16 @@ pub struct App {
     todo_card_rendered_hash: u64,
     /// JSON payload for the pinned todo band (display.pin_todos). `None` when
     /// the feature is off or the session has no todos. Refreshed on tick.
+    /// The renderer wiring for these three fields is landing separately, so
+    /// they are allowed to be unread until it does.
+    #[allow(dead_code)]
     pinned_todos_payload: Option<String>,
     /// Hash of the todo payload behind `pinned_todos_payload`, used to skip
     /// re-serializing when nothing changed between ticks.
+    #[allow(dead_code)]
     pinned_todos_rendered_hash: u64,
     /// Last time the pinned todo band re-read todos from disk (1s throttle).
+    #[allow(dead_code)]
     pinned_todos_checked_at: Option<Instant>,
     last_side_panel_refresh: Option<Instant>,
     // Most recently persisted focus target for dictation routing.
