@@ -230,6 +230,21 @@ jobs:
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
+      - name: Run secret-input pty cohort (all platforms with a pty)
+        if: runner.os != 'Windows'
+        shell: bash
+        # `jcode-base --lib` is never executed on Linux CI: the only jcode-base
+        # test invocation anywhere in this workflow is a Windows-only
+        # `power_inhibit::tests::windows_` filter. So the masking fix for #660 had
+        # a test that was compiled and never run, which is the same
+        # looks-green-but-never-ran shape as the warning budget and the stdin
+        # detector (#651). These tests fork a pty, so they cannot run on the
+        # Windows runner; everywhere else they take about a second.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 300 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-base --lib secret_input -- --nocapture
+
       - name: Run TUI library tests (Linux only)
         if: runner.os == 'Linux'
         shell: bash

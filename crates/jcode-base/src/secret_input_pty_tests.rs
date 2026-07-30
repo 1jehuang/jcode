@@ -65,6 +65,8 @@ fn read_secret_over_pty(typed: &str) -> (String, String) {
             libc::dup2(slave_fd, libc::STDERR_FILENO);
             libc::close(slave_fd);
 
+            // Hard deadline inside the child: a stuck read must not hang CI.
+            libc::alarm(20);
             let value = super::read_secret_line().unwrap_or_default();
             let mut wr = std::fs::File::from_raw_fd(pipe_fds[1]);
             let _ = wr.write_all(value.as_bytes());
