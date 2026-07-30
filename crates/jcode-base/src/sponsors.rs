@@ -1,9 +1,9 @@
-//! Partner discovery: shared constants and provenance tracking.
+//! Integration discovery: shared constants and provenance tracking.
 //!
-//! Partner discovery makes third-party developer tools discoverable to the
-//! agent through the `discover_tools` tool, backed by a hosted manifest. All
-//! agent-facing guidance lives in that tool's schema rather than the system
-//! prompt.
+//! Integration discovery makes third-party developer tools discoverable to
+//! the agent through the `discover_tools` tool, backed by a hosted manifest.
+//! All agent-facing guidance lives in that tool's schema rather than the
+//! system prompt.
 //! Some providers may share revenue with Jcode when users choose their tools.
 //! Partnership status never influences recommendations. The relationship is
 //! disclosed in the UI with a link to <https://jcode.sh/discovery-tools>.
@@ -30,10 +30,10 @@ pub const DISCOVERY_PARTNERS_URL: &str = "https://jcode.sh/discovery-tools";
 pub mod provenance;
 
 /// Internal marker used to render the first discovery disclosure in a session.
-pub const DISCOVERY_DISCLOSURE_TAG: &str = "(partner discovery disclosure)";
+pub const DISCOVERY_DISCLOSURE_TAG: &str = "(integration discovery disclosure)";
 
 /// First-use-per-session disclosure detail rendered inline with discovery.
-pub const DISCOVERY_DISCLOSURE_NOTICE: &str = "Editor's picks are vetted by Jcode maintainers. \
+pub const DISCOVERY_DISCLOSURE_NOTICE: &str = "Listings are vetted by Jcode maintainers. \
      Some providers share revenue with Jcode; this never influences selection. Learn more: \
      https://jcode.sh/discovery-tools";
 

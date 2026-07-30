@@ -89,7 +89,7 @@ impl Config {
         }
         self.sponsors = SponsorsConfig::default();
         crate::logging::info(
-            "config: restored partner discovery default (legacy opt-in value was frozen by an \
+            "config: restored integration discovery default (legacy opt-in value was frozen by an \
              earlier config save)",
         );
     }

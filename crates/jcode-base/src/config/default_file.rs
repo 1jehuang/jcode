@@ -650,10 +650,10 @@ desktop_notifications = true
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
 
 # [sponsors] # Legacy config section name retained for compatibility.
-# Tool partner discovery (enabled by default; set enabled = false to opt out).
+# Integration discovery (enabled by default; set enabled = false to opt out).
 # When enabled, the agent gains a `discover_tools` tool listing third-party
-# developer tools from Jcode's hosted partner directory. Some partners may
-# share revenue with Jcode when a referred user becomes a customer, but
+# developer tools from Jcode's hosted integration directory. Some providers
+# may share revenue with Jcode when a referred user becomes a customer, but
 # partnership status never influences recommendations. Each session's first
 # use of discover_tools shows a concise disclosure with a learn-more link.
 # See https://jcode.sh/discovery-tools

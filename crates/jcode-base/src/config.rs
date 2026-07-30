@@ -728,7 +728,7 @@ mod tests;
 #[path = "config_color_tests.rs"]
 mod color_tests;
 
-/// Whether partner discovery settings carry no information beyond the shipped
+/// Whether integration discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.
 ///
 /// Discovery originally shipped opt-in with `enabled = false`, and because
