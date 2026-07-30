@@ -2695,11 +2695,16 @@ impl OpenRouterProvider {
     }
 
     async fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
-        let cache = self.models_cache.read().await;
-        if cache.fetched
-            && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+        // Scope the read guard: `fetch_models()` below takes a write guard on the
+        // same `RwLock`, and tokio's writers block new/holding readers, so holding
+        // this guard across the fetch deadlocks on a cold catalog (issue #649).
         {
-            return Some(model.pricing.clone());
+            let cache = self.models_cache.read().await;
+            if cache.fetched
+                && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+            {
+                return Some(model.pricing.clone());
+            }
         }
 
         if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
@@ -2783,6 +2788,10 @@ mod tests;
 #[cfg(test)]
 #[path = "openrouter_catalog_merge_tests.rs"]
 mod openrouter_catalog_merge_tests;
+
+#[cfg(test)]
+#[path = "openrouter_pricing_deadlock_tests.rs"]
+mod openrouter_pricing_deadlock_tests;
 
 #[cfg(test)]
 mod profile_catalog_backoff_tests {

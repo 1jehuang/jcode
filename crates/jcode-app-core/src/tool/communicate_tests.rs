@@ -1037,6 +1037,29 @@ fn schema_requires_a_nonblank_label_for_spawn() {
 }
 
 #[test]
+fn schema_branches_only_require_properties_they_declare() {
+    // Gemini rejects the entire request when a `required` entry names a property
+    // the same object does not define, which made every tool-enabled Gemini call
+    // fail on this tool's spawn branch (issue #655).
+    let schema = CommunicateTool::new().parameters_schema();
+    for branch in schema["anyOf"].as_array().expect("schema branches") {
+        let declared = branch["properties"]
+            .as_object()
+            .expect("branch properties")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for required in branch["required"].as_array().expect("branch required") {
+            let name = required.as_str().expect("required name");
+            assert!(
+                declared.iter().any(|known| known == name),
+                "branch requires '{name}' without declaring it: {branch}"
+            );
+        }
+    }
+}
+
+#[test]
 fn spawn_label_validation_rejects_missing_or_blank_labels() {
     let missing: CommunicateInput =
         serde_json::from_value(json!({"action": "spawn"})).expect("spawn input");
