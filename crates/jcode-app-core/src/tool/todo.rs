@@ -529,13 +529,13 @@ impl Tool for TodoTool {
                             },
                             "group": {
                                 "type": "string",
-                                "description": "Optional group label. Todos sharing a group render together under one header. Use one group per coherent goal (e.g. 'optimize rendering'). When the user steers into new work, start a new group instead of renaming the existing one. Omit for an ungrouped flat list."
+                                "description": "Optional group label; one group per coherent goal, new direction = new group. Omit for flat list."
                             },
                             "confidence": {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessed confidence, 0-100, that this todo can be completed correctly. Reassess it as evidence accumulates while working."
+                                "description": "Confidence 0-100 that this todo can be completed correctly; reassess as evidence accumulates."
                             },
                             "completion_confidence": {
                                 "type": "integer",
@@ -548,12 +548,12 @@ impl Tool for TodoTool {
                 },
                 "plan": {
                     "type": "object",
-                    "description": "Plan-level understanding of the user's request, covering the whole todo list. Send it on the first write and whenever your understanding changes.",
+                    "description": "Plan-level understanding of the request. Send on first write and whenever understanding changes.",
                     "required": ["user_intention", "understands_user_intent"],
                     "properties": {
                         "user_intention": {
                             "type": "string",
-                            "description": "Concise statement of what the user actually wants: their underlying reason and desired end state for this work. Omit on later updates to retain the stored intention."
+                            "description": "What the user actually wants: underlying reason and desired end state. Omit later to retain."
                         },
                         "understands_user_intent": {
                             "type": "integer",
@@ -565,7 +565,7 @@ impl Tool for TodoTool {
                 },
                 "goals": {
                     "type": "array",
-                    "description": "Optional goal-level assessments, one per todo group. Use group: null for an ungrouped list. Stored assessments for groups omitted from an update are retained.",
+                    "description": "Goal-level assessments, one per todo group (null = ungrouped). Omitted groups are retained.",
                     "items": {
                         "type": "object",
                         "required": ["closed_feedback_loop", "feedback_loop"],
@@ -578,7 +578,7 @@ impl Tool for TodoTool {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 100,
-                                "description": "Self-assessment, 0-100: how much of this goal's correctness the `feedback_loop` below can tell you on its own, without your judgment or the user's."
+                                "description": "0-100: how much of this goal's correctness the feedback_loop can verify on its own."
                             },
                             "feedback_loop": {
                                 "type": "string",
@@ -728,7 +728,7 @@ mod tests {
         assert!(!item_props.contains_key("closed_feedback_loop"));
         assert_eq!(
             item_props["confidence"]["description"],
-            "Self-assessed confidence, 0-100, that this todo can be completed correctly. Reassess it as evidence accumulates while working."
+            "Confidence 0-100 that this todo can be completed correctly; reassess as evidence accumulates."
         );
 
         let plan_props = props["plan"]

@@ -18,7 +18,7 @@ impl BrowserTool {
 }
 
 fn browser_tool_description_text() -> &'static str {
-    "Control the browser. Use action='status' to check whether the browser bridge is ready. Use action='setup' only for first-time install or repair when status shows the bridge is not already ready. Do not run setup before every browser task."
+    "Control the browser. Check action='status' first; run setup only if not ready."
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,7 +184,7 @@ impl Tool for BrowserTool {
                     "fill_form", "select", "wait", "screenshot", "eval", "scroll", "upload",
                     "press", "provider_command"
                 ],
-                "description": "Action. Use 'status' to check readiness first. Use 'setup' only for first-time install or repair, not before every browser task."
+                "description": "Action. Check 'status' first; run 'setup' only when the bridge is not ready."
             }),
         );
         properties.insert(
@@ -214,7 +214,7 @@ impl Tool for BrowserTool {
             ("tab_id", json!({"type": "integer"})),
             (
                 "window_id",
-                json!({"type": "integer", "description": "Scope the action to a specific browser window. Useful when multiple agents drive the browser in parallel."}),
+                json!({"type": "integer", "description": "Scope the action to one browser window when multiple agents share the browser."}),
             ),
             ("frame_id", json!({"type": "integer"})),
             ("all_frames", json!({"type": "boolean"})),

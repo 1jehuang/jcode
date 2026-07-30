@@ -30,8 +30,9 @@ const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
-const BASH_TOOL_DESCRIPTION: &str = "Run a bash command. For long-running background commands, prefer scripts that emit progress/checkpoint lines. Print `JCODE_PROGRESS {json}` or `JCODE_CHECKPOINT {json}` lines for reliable reporting, or at least output parseable progress like `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or `Running ...`. Put large temporary files and worktrees under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
-const WINDOWS_SHELL_TOOL_DESCRIPTION: &str = "Run a Windows cmd.exe command. The tool keeps the compatibility name `bash`, but commands must use cmd.exe syntax and quoting, not Bash syntax. Invoke PowerShell explicitly when PowerShell syntax is needed. For long-running background commands, prefer scripts that emit progress/checkpoint lines. Print `JCODE_PROGRESS {json}` or `JCODE_CHECKPOINT {json}` lines for reliable reporting, or at least output parseable progress like `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or `Running ...`.";
+const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
+const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
+    "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
 
 /// Build a clear timeout message. The `timeout` param is in milliseconds, which
 /// agents frequently mistake for seconds (e.g. passing 1000 thinking it means
@@ -1253,7 +1254,8 @@ impl BashTool {
              {}\n\
              To wait for completion/checkpoints: use the `bg` tool with action=\"wait\" and task_id=\"{}\"\n\
              To check progress immediately: use the `bg` tool with action=\"status\" and task_id=\"{}\"\n\
-             To see output: use the `read` tool on the output file, or `bg` with action=\"output\"",
+             To see output: use the `read` tool on the output file, or `bg` with action=\"output\"\n\n\
+             {}",
             info.task_id,
             display_name,
             info.output_file.display(),
@@ -1261,6 +1263,7 @@ impl BashTool {
             notify_msg,
             info.task_id,
             info.task_id,
+            BACKGROUND_PROGRESS_GUIDANCE,
         );
 
         Ok(ToolOutput::new(output)

@@ -489,8 +489,7 @@ impl SelfDevTool {
         if is_selfdev {
             "Manage self-dev builds, tests, and reloads while working on jcode itself."
         } else {
-            "Enter self-dev mode to work on jcode itself. Also sets up the dev \
-             environment, reloads jcode to a newer build, and locates jcode config/paths."
+            "Enter self-dev mode to work on jcode itself: setup, reload, find config/paths."
         }
     }
 
@@ -553,7 +552,7 @@ impl SelfDevTool {
                             "status",
                             "find-config"
                         ],
-                        "description": "Action. `enter` spawns a self-dev session (optionally seeded with `prompt`); `setup` checks/installs the dev prerequisites (rust toolchain, git, repo clone); `reload` restarts jcode into a newer installed build; `status` shows build/version state; `find-config` locates jcode config and key paths."
+                        "description": "Action. `enter` starts a self-dev session; `setup` installs prerequisites; `reload` restarts jcode."
                     },
                     "prompt": {
                         "type": "string",

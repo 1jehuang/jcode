@@ -797,25 +797,12 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
-                if visible_text_is_empty
-                    && prompt_has_recent_tool_result
-                    && empty_post_tool_continuations
-                        < Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS
-                {
-                    empty_post_tool_continuations += 1;
-                    logging::warn(&format!(
-                        "Provider returned whitespace-only final response after tool results; requesting final answer continuation (attempt {}/{})",
-                        empty_post_tool_continuations,
-                        Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS
-                    ));
-                    self.add_message(
-                        Role::User,
-                        vec![ContentBlock::Text {
-                            text: "The previous provider response was empty after tool results. Please provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.".to_string(),
-                            cache_control: None,
-                        }],
-                    );
-                    self.session.save()?;
+                if self.maybe_continue_empty_post_tool_response(
+                    visible_text_is_empty,
+                    prompt_has_recent_tool_result,
+                    stop_reason.as_deref(),
+                    &mut empty_post_tool_continuations,
+                )? {
                     continue;
                 }
                 if self.maybe_continue_incomplete_response(
@@ -832,7 +819,8 @@ impl Agent {
                     !reasoning_content.trim().is_empty(),
                 ) {
                     logging::warn(&format!(
-                        "PROVIDER_GUARDRAIL: turn ended with no visible output (stop_reason={:?})",
+                        "{}: turn ended with no visible output (stop_reason={:?})",
+                        Self::empty_turn_log_event(stop_reason.as_deref()),
                         stop_reason
                     ));
                     if print_output {
@@ -1118,7 +1106,7 @@ impl Agent {
         Ok(final_text)
     }
 
-    fn messages_end_with_tool_result(messages: &[Message]) -> bool {
+    pub(super) fn messages_end_with_tool_result(messages: &[Message]) -> bool {
         messages.iter().rev().any(|message| {
             if !matches!(message.role, Role::User) {
                 return false;

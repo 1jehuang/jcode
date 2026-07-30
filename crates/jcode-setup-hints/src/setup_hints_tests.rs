@@ -208,7 +208,7 @@ fn paused_jcode_shell_command_keeps_failures_visible() {
 fn fresh_user_gets_hotkey_install() {
     let state = SetupHintsState::default();
     assert_eq!(
-        mac_hotkey_action_for_state(&state),
+        mac_hotkey_action_for_state(&state, None),
         MacHotkeyAction::Install
     );
 }
@@ -223,7 +223,7 @@ fn legacy_configured_user_gets_migrated_on_update() {
         ..SetupHintsState::default()
     };
     assert_eq!(
-        mac_hotkey_action_for_state(&state),
+        mac_hotkey_action_for_state(&state, None),
         MacHotkeyAction::Migrate
     );
 }
@@ -236,7 +236,10 @@ fn current_version_user_is_left_alone() {
         hotkey_listener_version: HOTKEY_LISTENER_VERSION,
         ..SetupHintsState::default()
     };
-    assert_eq!(mac_hotkey_action_for_state(&state), MacHotkeyAction::None);
+    assert_eq!(
+        mac_hotkey_action_for_state(&state, None),
+        MacHotkeyAction::None
+    );
 }
 
 #[test]
@@ -252,7 +255,7 @@ fn previous_listener_version_user_gets_migrated_on_update() {
             ..SetupHintsState::default()
         };
         assert_eq!(
-            mac_hotkey_action_for_state(&state),
+            mac_hotkey_action_for_state(&state, None),
             MacHotkeyAction::Migrate,
             "listener version {old_version} should be migrated"
         );
@@ -540,4 +543,32 @@ fn launch_hotkey_notice_keeps_showing_for_new_user_with_many_launches() {
     let lines =
         launch_hotkey_notice_lines(&rows, &usage, 50).expect("never learned -> keep showing");
     assert_eq!(lines.len(), 1);
+}
+
+#[test]
+fn disabled_config_wins_over_install_and_migrate() {
+    // Fresh user with hotkeys disabled in config: never install (issue #670).
+    let fresh = SetupHintsState::default();
+    assert_eq!(
+        mac_hotkey_action_for_state(&fresh, Some(false)),
+        MacHotkeyAction::Disable
+    );
+
+    // Configured user on an old listener with hotkeys disabled: remove, not migrate.
+    let legacy = SetupHintsState {
+        hotkey_configured: true,
+        hotkey_dismissed: true,
+        hotkey_listener_version: 0,
+        ..SetupHintsState::default()
+    };
+    assert_eq!(
+        mac_hotkey_action_for_state(&legacy, Some(false)),
+        MacHotkeyAction::Disable
+    );
+
+    // Explicit enabled = true behaves like the unset default.
+    assert_eq!(
+        mac_hotkey_action_for_state(&fresh, Some(true)),
+        MacHotkeyAction::Install
+    );
 }

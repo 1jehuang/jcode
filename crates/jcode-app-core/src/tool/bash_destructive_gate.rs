@@ -46,9 +46,9 @@ pub(super) fn destructive_command_refusal(
 /// sync, and so bash.rs stays inside the code-size budget.
 pub(super) fn bash_parameters_schema() -> serde_json::Value {
     let cmd_desc = if cfg!(windows) {
-        "The Windows command to execute via cmd.exe. Use cmd.exe syntax and quoting, not Bash syntax. Double-quote individual arguments containing spaces. Invoke PowerShell explicitly when PowerShell syntax is needed. If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`."
+        "The Windows command to execute via cmd.exe. Use cmd.exe syntax and quoting, not Bash syntax."
     } else {
-        "The bash command to execute. If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`. Put large temporary files and worktrees under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed."
+        "The bash command to execute. Put large temp files under `$JCODE_SCRATCH_DIR`, not `/tmp`."
     };
     serde_json::json!({
         "type": "object",
@@ -61,11 +61,11 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in MILLISECONDS (not seconds). Kills the command when exceeded and reports exit 124. e.g. 1000 = 1s, 600000 = 10min. Omit to run with no timeout; do NOT pass small values like 1000 for long jobs such as builds or test suites."
+                "description": "Timeout in MILLISECONDS (not seconds), e.g. 600000 = 10min; kills with exit 124. Omit for no timeout."
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": format!("Run in background. {}", super::BACKGROUND_PROGRESS_GUIDANCE)
+                "description": "Run in background. Emit `JCODE_PROGRESS {json}` lines for progress reporting."
             },
             "notify": {
                 "type": "boolean",
@@ -77,7 +77,7 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             },
             "justification": {
                 "type": "string",
-                "description": "Only for re-issuing a command the destructive-command gate refused. Explain which specific user request this command serves. Do not set it preemptively."
+                "description": "Only when re-issuing a command the destructive gate refused; explain which user request it serves."
             }
         }
     })
