@@ -1,8 +1,8 @@
 {
-  "total": 3085,
+  "total": 3086,
   "totals_by_pattern": {
     "dot_ok": 1156,
-    "let_underscore": 1164,
+    "let_underscore": 1165,
     "unwrap_or_default": 765
   },
   "tracked_files": {
@@ -1518,7 +1518,7 @@
     },
     "crates/jcode-setup-hints/src/lib.rs": {
       "dot_ok": 6,
-      "let_underscore": 20,
+      "let_underscore": 21,
       "unwrap_or_default": 14
     },
     "crates/jcode-setup-hints/src/macos_launcher.rs": {
