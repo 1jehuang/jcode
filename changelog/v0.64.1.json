@@ -1,0 +1,13 @@
+{
+  "version": "0.64.1",
+  "date": "2026-07-30",
+  "title": "View clear moves to Ctrl+L",
+  "highlights": [
+    "The view-only clear now lives on Ctrl+L (terminal-style) instead of Cmd+K, which collided with Cmd+J/K prompt navigation on macOS"
+  ],
+  "improvements": [
+    "Ctrl+L and /cls keep queued messages as well as context; only the rendered transcript is wiped",
+    "While a diagram or diff pane is available, Ctrl+L still focuses the pane as before"
+  ],
+  "fixes": []
+}
