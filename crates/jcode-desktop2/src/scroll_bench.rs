@@ -483,6 +483,7 @@ fn schedule(gestures: &[Gesture]) -> (Vec<(u64, Event)>, u64) {
 }
 
 /// Replay one script at [`GATE_MS`], the cadence the gates apply to.
+#[cfg(test)]
 pub fn run(script: &Script) -> Report {
     run_at(script, GATE_MS)
 }
