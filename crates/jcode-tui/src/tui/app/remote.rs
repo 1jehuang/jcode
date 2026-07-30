@@ -113,11 +113,13 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
+    needs_redraw |= app.refresh_pinned_todos_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
+    needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
     let _ = check_debug_command(app, remote).await;
 
@@ -380,9 +382,8 @@ async fn apply_terminal_event(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
-            // Start the key-to-paint clock where the key is read: the only point
-            // that corresponds to the user's press. A spawned client runs this
-            // loop, so without it the metric reports nothing for real sessions.
+            // Start the key-to-paint clock at the moment the key is read, which is
+            // the only point that corresponds to the user's press.
             crate::tui::ui::note_key_event_read();
             input_attribution.event = Some(format!("key:{:?}:{:?}", key.code, key.kind));
             input_attribution.scroll_delta = key_scroll_delta(&key);

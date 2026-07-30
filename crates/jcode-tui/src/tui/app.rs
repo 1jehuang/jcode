@@ -1423,6 +1423,10 @@ pub struct App {
     open_resume_key: OptionalBinding,
     // Optional configured keybinding for accepting the post-error fallback offer
     fallback_switch_key: OptionalBinding,
+    // Config reload generation the keybinding snapshot above was parsed at.
+    // Polled on idle ticks so config.toml keybinding edits hot-reload
+    // without a restart.
+    keybindings_config_generation: u64,
     // Active external dictation session, if one is running
     dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running
