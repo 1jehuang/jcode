@@ -91,7 +91,6 @@ pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
 mod split_view;
-mod sponsor_disclosure;
 mod state_ui;
 mod state_ui_input_helpers;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
@@ -1455,8 +1454,6 @@ pub struct App {
     terminal_setup_hint_shown_this_session: bool,
     // Whether the swarm-config-is-a-prompt hint has been surfaced this session.
     swarm_hint_shown_this_session: bool,
-    // Sponsored-discovery disclosure shown yet (once per session).
-    sponsor_disclosure_shown_this_session: bool,
     subscribe_nudge: subscribe_nudge::SubscribeNudgeState,
     // Inline hotkey feedback: "pressed X → does Y" for rare known chords or
     // "X isn't bound · nearest: ..." for unknown; same slot as learn_hint.

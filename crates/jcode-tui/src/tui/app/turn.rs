@@ -136,7 +136,6 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
-                                        self.interleave_images.clear();
                                         self.pending_soft_interrupts.clear();
                                         self.pending_soft_interrupt_requests.clear();
                                         self.clear_streaming_render_state();
@@ -303,7 +302,6 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
-                                        self.interleave_images.clear();
                                         self.pending_soft_interrupts.clear();
                                         self.pending_soft_interrupt_requests.clear();
                                         // Save partial assistant response before clearing
@@ -372,8 +370,6 @@ impl App {
                                     }
                                     // Check for interleave request (Shift+Enter)
                                     if let Some(interleave_msg) = self.interleave_message.take() {
-                                        let interleave_images =
-                                            std::mem::take(&mut self.interleave_images);
                                         // Save partial assistant response if any
                                         if !text_content.is_empty() || !tool_calls.is_empty() {
                                             // Complete any pending tool
@@ -430,14 +426,7 @@ impl App {
                                             }
                                         }
                                         // Add user's interleaved message
-                                        if interleave_images.is_empty() {
-                                            self.add_provider_message(Message::user(&interleave_msg));
-                                        } else {
-                                            self.add_provider_message(Message::user_with_images(
-                                                &interleave_msg,
-                                                interleave_images,
-                                            ));
-                                        }
+                                        self.add_provider_message(Message::user(&interleave_msg));
                                         self.push_display_message(DisplayMessage {
                                             role: "user".to_string(),
                                             content: interleave_msg,
@@ -582,8 +571,6 @@ impl App {
                                             if tool.name == "swarm" {
                                                 self.maybe_surface_swarm_config_hint();
                                             }
-                                            let sponsor_disclosure_title =
-                                                self.inline_sponsor_disclosure_title(&tool);
                                             if let Some(streaming_tool) = self
                                                 .streaming_tool_calls
                                                 .iter_mut()
@@ -604,7 +591,7 @@ impl App {
                                                 content: tool.name.clone(),
                                                 tool_calls: vec![],
                                                 duration_secs: None,
-                                                title: sponsor_disclosure_title,
+                                                title: None,
                                                 tool_data: Some(tool.clone()),
                                             });
 
@@ -1317,7 +1304,6 @@ impl App {
                                         if self.cancel_requested {
                                             self.cancel_requested = false;
                                             self.interleave_message = None;
-                                            self.interleave_images.clear();
                                             self.pending_soft_interrupts.clear();
                                             self.pending_soft_interrupt_requests.clear();
                                             // Partial text+tool_calls were already saved

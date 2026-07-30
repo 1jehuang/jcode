@@ -3415,7 +3415,6 @@ fn render_discovery_card(
     tool_output: &str,
     is_error: bool,
     available_width: usize,
-    show_inline_disclosure: bool,
 ) -> Option<Vec<Line<'static>>> {
     if tools_ui::canonical_tool_name(&tool.name) != "discover_tools" {
         return None;
@@ -3434,18 +3433,7 @@ fn render_discovery_card(
     let mut content = Vec::new();
 
     if is_error {
-        if show_inline_disclosure {
-            push_compact_discovery_kv(
-                &mut content,
-                "about",
-                crate::sponsors::DISCOVERY_DISCLOSURE_NOTICE,
-                block_width,
-                muted_style,
-                muted_style,
-                MAX_DISCOVERY_DETAIL_LINES,
-            );
-        }
-        return (!content.is_empty()).then_some(content);
+        return None;
     }
 
     let category = tool
@@ -3682,18 +3670,6 @@ fn render_discovery_card(
                 );
             }
         }
-    }
-
-    if show_inline_disclosure {
-        push_compact_discovery_kv(
-            &mut content,
-            "about",
-            crate::sponsors::DISCOVERY_DISCLOSURE_NOTICE,
-            block_width,
-            muted_style,
-            muted_style,
-            MAX_DISCOVERY_DETAIL_LINES,
-        );
     }
 
     Some(content)
@@ -3981,20 +3957,10 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
-    let mut show_inline_sponsor_disclosure =
-        msg.title.as_deref() == Some(crate::sponsors::DISCOVERY_DISCLOSURE_TAG);
-
     if let Some(draft_lines) = render_gmail_draft_card(tc, &msg.content, is_error, row_width) {
         lines.extend(draft_lines);
     }
-    if let Some(discovery_lines) = render_discovery_card(
-        tc,
-        &msg.content,
-        is_error,
-        row_width,
-        show_inline_sponsor_disclosure,
-    ) {
-        show_inline_sponsor_disclosure = false;
+    if let Some(discovery_lines) = render_discovery_card(tc, &msg.content, is_error, row_width) {
         lines.extend(discovery_lines);
     }
 
@@ -4106,10 +4072,8 @@ pub(crate) fn render_tool_message(
                     &result.content,
                     sub_errored,
                     row_width.saturating_sub(4),
-                    show_inline_sponsor_disclosure,
                 )
             {
-                show_inline_sponsor_disclosure = false;
                 for line in &mut discovery_lines {
                     line.spans.insert(0, Span::raw("    "));
                 }
