@@ -1414,6 +1414,76 @@ fn guardrail_notice_absent_for_normal_turns() {
     assert!(Agent::provider_guardrail_notice(None, false, true).is_none());
 }
 
+#[test]
+fn empty_turn_log_event_separates_guardrails_from_transient_empties() {
+    assert_eq!(
+        Agent::empty_turn_log_event(Some("refusal")),
+        "PROVIDER_GUARDRAIL"
+    );
+    assert_eq!(
+        Agent::empty_turn_log_event(Some("content_filter")),
+        "PROVIDER_GUARDRAIL"
+    );
+    assert_eq!(
+        Agent::empty_turn_log_event(Some("stop")),
+        "PROVIDER_EMPTY_RESPONSE"
+    );
+    assert_eq!(Agent::empty_turn_log_event(None), "PROVIDER_EMPTY_RESPONSE");
+}
+
+#[test]
+fn guardrail_notice_for_transient_empty_does_not_blame_content_filter() {
+    let notice = Agent::provider_guardrail_notice(Some("stop"), true, false)
+        .expect("empty visible output must produce a notice");
+    assert!(
+        !notice.contains("usually a provider-side guardrail"),
+        "transient empty responses must not be blamed on a guardrail: {notice}"
+    );
+    assert!(notice.contains("empty response"), "{notice}");
+}
+
+#[tokio::test]
+async fn empty_post_tool_response_is_retried_in_shared_helper() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let mut attempts = 0u32;
+    // Empty response right after tool results: inject continuation.
+    let retried = agent
+        .maybe_continue_empty_post_tool_response(true, true, Some("stop"), &mut attempts)
+        .expect("helper must not error");
+    assert!(retried);
+    assert_eq!(attempts, 1);
+
+    // A guardrail refusal is deliberate and must not be retried.
+    let retried = agent
+        .maybe_continue_empty_post_tool_response(true, true, Some("refusal"), &mut attempts)
+        .expect("helper must not error");
+    assert!(!retried);
+
+    // Visible output or no recent tool result: no retry.
+    assert!(
+        !agent
+            .maybe_continue_empty_post_tool_response(false, true, Some("stop"), &mut attempts)
+            .unwrap()
+    );
+    assert!(
+        !agent
+            .maybe_continue_empty_post_tool_response(true, false, Some("stop"), &mut attempts)
+            .unwrap()
+    );
+
+    // Retry budget is bounded.
+    attempts = Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS;
+    assert!(
+        !agent
+            .maybe_continue_empty_post_tool_response(true, true, Some("stop"), &mut attempts)
+            .unwrap()
+    );
+}
+
 include!("agent_tests/retention_readiness.rs");
 
 /// Provider that reproduces the DeepSWE Opus 5 incident: the first response

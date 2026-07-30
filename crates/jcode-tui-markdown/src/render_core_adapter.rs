@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 
 use crate::{
     bold_color, code_bg, code_fg, heading_color, heading_h1_color, heading_h2_color,
-    heading_h3_color, html_fg, link_fg, math_fg, md_dim_color, text_color,
+    heading_h3_color, html_fg, link_fg, math_fg, math_inline_fg, md_dim_color, text_color,
 };
 
 /// Convert a parsed neutral [`Document`] into ratatui lines using the TUI
@@ -119,7 +119,9 @@ fn role_color(role: StyleRole, kind: &BlockKind) -> ratatui::style::Color {
         StyleRole::Link => link_fg(),
         StyleRole::Html => html_fg(),
         StyleRole::Reasoning => md_dim_color(),
-        StyleRole::Math => math_fg(),
+        // Display math is framed by `push_math_display` with `math_fg`;
+        // this arm only ever colors inline math inside prose.
+        StyleRole::Math => math_inline_fg(),
         StyleRole::Strong => match kind {
             BlockKind::Heading { level } => match level {
                 1 => heading_h1_color(),
