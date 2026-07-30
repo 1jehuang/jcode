@@ -66,6 +66,7 @@ impl Config {
 **Features:**
 - Memory: {}
 - Swarm: {}
+- Auto-poke: {}
 - Message timestamps: {}
 - Persist memory injections: {}
 - KV cache miss notices: {}
@@ -193,6 +194,7 @@ impl Config {
             self.display.tool_call_details,
             self.features.memory,
             self.features.swarm,
+            self.features.auto_poke,
             self.features.message_timestamps,
             self.features.persist_memory_injections,
             self.features.kv_cache_miss_notices,

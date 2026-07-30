@@ -73,6 +73,28 @@ fn mermaid_environment_override_uses_standard_boolean_values() {
 }
 
 #[test]
+fn auto_poke_feature_defaults_on_and_parses_false() {
+    assert!(Config::default().features.auto_poke);
+
+    let cfg: Config =
+        toml::from_str("[features]\nauto_poke = false\n").expect("features.auto_poke should parse");
+    assert!(!cfg.features.auto_poke);
+}
+
+#[test]
+fn auto_poke_environment_override_uses_standard_boolean_values() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_AUTO_POKE");
+    crate::env::set_var("JCODE_AUTO_POKE", "off");
+
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert!(!cfg.features.auto_poke);
+
+    restore_env_var("JCODE_AUTO_POKE", previous);
+}
+
+#[test]
 fn latex_rendering_defaults_to_image_and_parses_all_modes() {
     assert_eq!(
         Config::default().display.latex_rendering,
