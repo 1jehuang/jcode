@@ -335,6 +335,26 @@ pub fn run_auto_update() -> Result<()> {
     Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installed {
         version: version.clone(),
     }));
+
+    // With a live TUI session, let the app reload gracefully (input line
+    // saved, current turn finished, session resumed) instead of exec-ing over
+    // the running interface, which visibly resets the screen.
+    if let Some(session_id) = crate::get_current_session() {
+        use crate::bus::{ClientMaintenanceAction, SessionUpdateStatus};
+        crate::logging::info(&format!(
+            "Updated to {}. Requesting graceful session reload...",
+            version
+        ));
+        Bus::global().publish(BusEvent::SessionUpdateStatus(
+            SessionUpdateStatus::ReadyToReload {
+                session_id,
+                action: ClientMaintenanceAction::Update,
+                version,
+            },
+        ));
+        return Ok(());
+    }
+
     crate::logging::info(&format!("Updated to {}. Restarting...", version));
     std::thread::sleep(std::time::Duration::from_millis(250));
 

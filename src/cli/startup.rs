@@ -276,30 +276,51 @@ fn spawn_background_update_check(args: &Args) {
     }
 
     if update::is_release_build() {
-        std::thread::spawn(move || match update::check_and_maybe_update(auto_update) {
-            update::UpdateCheckResult::UpdateAvailable {
-                current, latest, ..
-            } => {
-                logging::info(&format!("Update available: {} -> {}", current, latest));
+        std::thread::spawn(move || {
+            use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
+            match update::check_and_maybe_update(auto_update) {
+                update::UpdateCheckResult::UpdateAvailable {
+                    current, latest, ..
+                } => {
+                    logging::info(&format!("Update available: {} -> {}", current, latest));
+                }
+                update::UpdateCheckResult::UpdateInstalled { version, path } => {
+                    // When an interactive TUI session is running, hand the switch
+                    // to the app's graceful reload path (saves the input line,
+                    // waits for the current turn, resumes the session) instead of
+                    // exec-ing over the live UI, which visibly resets the screen.
+                    if let Some(session_id) = terminal::get_current_session() {
+                        logging::info(&format!(
+                            "Updated to {}. Requesting graceful session reload...",
+                            version
+                        ));
+                        Bus::global().publish(BusEvent::SessionUpdateStatus(
+                            SessionUpdateStatus::ReadyToReload {
+                                session_id,
+                                action: ClientMaintenanceAction::Update,
+                                version,
+                            },
+                        ));
+                        return;
+                    }
+                    logging::info(&format!("Updated to {}. Restarting...", version));
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let exec_path = build::client_update_candidate(false)
+                        .map(|(p, _)| p)
+                        .unwrap_or(path);
+                    let err = crate::platform::replace_process(
+                        ProcessCommand::new(&exec_path)
+                            .args(&args)
+                            .arg("--no-update"),
+                    );
+                    eprintln!("Failed to exec new binary: {}", err);
+                }
+                update::UpdateCheckResult::Error(e) => {
+                    logging::info(&format!("Update check failed: {}", e));
+                }
+                update::UpdateCheckResult::NoUpdate => {}
             }
-            update::UpdateCheckResult::UpdateInstalled { version, path } => {
-                logging::info(&format!("Updated to {}. Restarting...", version));
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                let exec_path = build::client_update_candidate(false)
-                    .map(|(p, _)| p)
-                    .unwrap_or(path);
-                let err = crate::platform::replace_process(
-                    ProcessCommand::new(&exec_path)
-                        .args(&args)
-                        .arg("--no-update"),
-                );
-                eprintln!("Failed to exec new binary: {}", err);
-            }
-            update::UpdateCheckResult::Error(e) => {
-                logging::info(&format!("Update check failed: {}", e));
-            }
-            update::UpdateCheckResult::NoUpdate => {}
         });
     } else {
         std::thread::spawn(move || {
