@@ -1727,6 +1727,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/cls" || trimmed == "/clear-view" {
+        app.clear_view_keep_context();
+        return true;
+    }
+
     if trimmed == "/save" || trimmed.starts_with("/save ") {
         let label = trimmed.strip_prefix("/save").unwrap_or_default().trim();
         let label = if label.is_empty() {

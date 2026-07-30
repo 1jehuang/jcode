@@ -117,6 +117,8 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/reasoning", "Alias for /thinking-display"),
     RegisteredCommand::public("/cancel", "Cancel the current prompt or operation"),
     RegisteredCommand::public("/clear", "Clear conversation history"),
+    RegisteredCommand::public("/cls", "Clear the view only, keeping context (Cmd+K)"),
+    RegisteredCommand::hidden("/clear-view", "Alias for /cls"),
     RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
     RegisteredCommand::public("/poke", "Poke model to resume with incomplete todos"),
     RegisteredCommand::public("/plan", "Create a plan-only response as a plan card"),

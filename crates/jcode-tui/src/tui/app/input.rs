@@ -1980,10 +1980,28 @@ pub(super) fn handle_navigation_shortcuts(
     false
 }
 
+/// Cmd+K clears the rendered view while keeping provider context (like a
+/// terminal's clear). Cmd+Shift+K stays reserved for the incremental
+/// line-scroll fallback, and an explicitly configured scroll binding on the
+/// same chord keeps priority.
+pub(super) fn is_clear_view_key(app: &App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::SUPER)
+        && !modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(code, KeyCode::Char('k'))
+        && app.scroll_keys.scroll_amount(code, modifiers).is_none()
+}
+
 pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+    // Cmd+K repaints the transcript (view clear), so it must not be treated
+    // as scroll-only even though the built-in prompt-jump fallback would
+    // otherwise match it.
+    if is_clear_view_key(app, code, modifiers) {
+        return false;
+    }
 
     if app.scroll_keys.scroll_amount(code, modifiers).is_some()
         || app.scroll_keys.prompt_jump(code, modifiers).is_some()
@@ -2077,6 +2095,14 @@ pub(super) fn handle_pre_control_shortcuts(
         && !app.input.is_empty()
     {
         delete_input_to_end(app);
+        return true;
+    }
+
+    // Cmd+K: view-only clear. Placed before the navigation fallbacks so it
+    // wins over the built-in Cmd+K prompt-jump fallback, but after the
+    // explicit-scroll-binding guard inside `is_clear_view_key`.
+    if is_clear_view_key(app, code, modifiers) {
+        app.clear_view_keep_context();
         return true;
     }
 

@@ -660,6 +660,95 @@ fn test_ctrl_l_without_focusable_pane_does_not_clear_session() {
     assert!(!app.diff_pane_focus);
 }
 
+/// Cmd+K is the view-only clear: display messages go away, but provider
+/// context, the input draft, and queued messages all survive so the model
+/// still remembers the conversation.
+#[test]
+fn test_cmd_k_clears_view_but_keeps_context() {
+    let mut app = create_test_app();
+    app.input = "draft message".to_string();
+    app.cursor_pos = app.input.len();
+    app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "remembered turn".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.queued_messages.push("queued".to_string());
+    app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
+    app.bump_display_messages_version();
+    let session_messages_before = app.session.messages.len();
+    let provider_view_before = app.materialized_provider_messages().len();
+
+    app.handle_key(KeyCode::Char('k'), KeyModifiers::SUPER)
+        .unwrap();
+
+    assert!(app.display_messages().is_empty(), "view should be cleared");
+    // Local provider context is materialized from session.messages, so the
+    // session transcript surviving means the model keeps its memory.
+    assert_eq!(
+        app.session.messages.len(),
+        session_messages_before,
+        "provider context must survive"
+    );
+    assert_eq!(
+        app.materialized_provider_messages().len(),
+        provider_view_before,
+        "materialized provider view must survive"
+    );
+    assert_eq!(app.input(), "draft message", "input draft must survive");
+    assert_eq!(app.queued_messages.len(), 1, "queue must survive");
+}
+
+/// Cmd+Shift+K stays reserved for line scrolling and must not clear the view.
+#[test]
+fn test_cmd_shift_k_does_not_clear_view() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
+    app.bump_display_messages_version();
+
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    )
+    .unwrap();
+
+    assert_eq!(app.display_messages().len(), 1);
+}
+
+/// `/cls` is the slash-command form of the Cmd+K view-only clear.
+#[test]
+fn test_cls_command_clears_view_but_keeps_context() {
+    let mut app = create_test_app();
+    app.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "remembered turn".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
+    app.bump_display_messages_version();
+    let session_id_before = app.session.id.clone();
+    let session_messages_before = app.session.messages.len();
+
+    app.input = "/cls".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    assert!(app.display_messages().is_empty(), "view should be cleared");
+    assert_eq!(
+        app.session.messages.len(),
+        session_messages_before,
+        "provider context must survive"
+    );
+    assert_eq!(
+        app.session.id, session_id_before,
+        "/cls must not start a fresh session (that is /clear)"
+    );
+}
+
 #[test]
 fn test_diagram_cycle_ctrl_arrows() {
     let _render_lock = scroll_render_test_lock();

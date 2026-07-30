@@ -369,6 +369,22 @@ impl App {
         }
     }
 
+    /// View-only clear (Cmd+K, `/cls`): wipe the rendered transcript while
+    /// keeping provider context, queued messages, and the input draft intact,
+    /// so the model still remembers everything. Contrast with `/clear`
+    /// (`reset_current_session`), which discards context too.
+    pub(super) fn clear_view_keep_context(&mut self) {
+        self.clear_display_messages();
+        // The rendered transcript is gone, so every entry in the
+        // process-global ACTIVE_DIAGRAMS registry is orphaned (same rationale
+        // as reset_current_session; partial-retention paths like /rewind must
+        // NOT do this).
+        crate::tui::mermaid::clear_active_diagrams();
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = false;
+        self.set_status_notice("View cleared (context kept)");
+    }
+
     pub(super) fn apply_compacted_history_window(
         &mut self,
         mut messages: Vec<DisplayMessage>,
