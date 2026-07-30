@@ -8,6 +8,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+mod invocation;
+pub use invocation::SkillInvocation;
+
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -31,14 +34,6 @@ struct SkillFrontmatter {
 #[derive(Debug, Default, Clone)]
 pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
-}
-
-/// A slash-command skill invocation, optionally followed by a prompt that
-/// should be submitted immediately after activating the skill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SkillInvocation<'a> {
-    pub name: &'a str,
-    pub prompt: Option<&'a str>,
 }
 
 /// Maximum directory depth scanned under a Claude Code plugin root when
