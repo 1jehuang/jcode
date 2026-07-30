@@ -429,6 +429,31 @@ fn model_picker_route_provider_matches_key(
     )
 }
 
+/// Whether an effort-qualified picker entry matches the persisted reasoning
+/// effort for its route's provider family. Entries without an effort always
+/// match. When no effort is persisted for the family, every variant matches
+/// (legacy model-level behavior) so we never hide the `default` marker
+/// entirely (issue #675).
+fn model_picker_effort_matches_default(
+    provider_key: Option<&str>,
+    entry_effort: Option<&str>,
+    anthropic_effort: Option<&str>,
+    openai_effort: Option<&str>,
+) -> bool {
+    let Some(effort) = entry_effort else {
+        return true;
+    };
+    let stored = match provider_key {
+        Some("claude-oauth") | Some("claude-api") => anthropic_effort,
+        Some("openai-oauth") | Some("openai-api") => openai_effort,
+        _ => None,
+    };
+    match stored {
+        Some(stored) => stored.eq_ignore_ascii_case(effort),
+        None => true,
+    }
+}
+
 fn model_picker_route_is_default(
     model_name: &str,
     route: &PickerOption,
@@ -1341,20 +1366,37 @@ impl App {
         let config = crate::config::config();
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
+        let config_anthropic_effort = config.provider.anthropic_reasoning_effort.clone();
+        let config_openai_effort = config.provider.openai_reasoning_effort.clone();
         let current_effort = if self.is_remote {
             self.remote_reasoning_effort.clone()
         } else {
             self.provider.reasoning_effort()
         };
 
-        let is_config_default = |name: &str, route: &PickerOption| -> bool {
-            model_picker_route_is_default(
-                name,
-                route,
-                config_default_model.as_deref(),
-                config_default_provider.as_deref(),
-            )
-        };
+        let is_config_default =
+            |name: &str, route: &PickerOption, effort: Option<&str>| -> bool {
+                if !model_picker_route_is_default(
+                    name,
+                    route,
+                    config_default_model.as_deref(),
+                    config_default_provider.as_deref(),
+                ) {
+                    return false;
+                }
+                let selection =
+                    crate::provider::MultiProvider::default_model_selection_from_route(
+                        name,
+                        &route.api_method,
+                        &route.provider,
+                    );
+                model_picker_effort_matches_default(
+                    selection.provider_key.as_deref(),
+                    effort,
+                    config_anthropic_effort.as_deref(),
+                    config_openai_effort.as_deref(),
+                )
+            };
 
         let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
@@ -1574,7 +1616,7 @@ impl App {
                                 && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                             created_date: or_created.map(format_created),
                             effort: Some(effort.to_string()),
-                            is_default: is_config_default(name, route),
+                            is_default: is_config_default(name, route, Some(effort)),
                             is_favorite: model_picker_is_favorite(
                                 &favorites_store,
                                 name,
@@ -1597,7 +1639,7 @@ impl App {
                         &current_model,
                         &current_provider,
                     );
-                    let is_default = is_config_default(name, &route);
+                    let is_default = is_config_default(name, &route, None);
                     entries.push(PickerEntry {
                         name: name.clone(),
                         options: vec![route.clone()],
@@ -3121,6 +3163,7 @@ impl App {
                     let route = entry.options.get(entry.selected_option);
 
                     let bare_name = model_entry_base_name(entry);
+                    let entry_effort = entry.effort.clone();
 
                     let (model_spec, provider_key) = if let Some(r) = route {
                         let selection =
@@ -3145,6 +3188,31 @@ impl App {
                         provider_key.as_deref(),
                     ) {
                         Ok(()) => {
+                            // Persist the effort variant the user picked, so an
+                            // effort-qualified entry (e.g. "Claude Opus 5 (high)")
+                            // survives restarts instead of silently dropping the
+                            // effort (issue #675).
+                            if let Some(effort) = entry_effort.as_deref() {
+                                let save_result = match provider_key.as_deref() {
+                                    Some("claude-oauth") | Some("claude-api") => Some(
+                                        crate::config::Config::set_anthropic_reasoning_effort(
+                                            Some(effort),
+                                        ),
+                                    ),
+                                    Some("openai-oauth") | Some("openai-api") => Some(
+                                        crate::config::Config::set_openai_reasoning_effort(Some(
+                                            effort,
+                                        )),
+                                    ),
+                                    _ => None,
+                                };
+                                if let Some(Err(e)) = save_result {
+                                    self.push_display_message(DisplayMessage::error(format!(
+                                        "Saved default model, but failed to save effort: {}",
+                                        e
+                                    )));
+                                }
+                            }
                             self.invalidate_model_picker_cache();
                             if let Some(ref mut picker) = self.inline_interactive_state {
                                 for entry in &mut picker.entries {
@@ -3556,10 +3624,11 @@ mod tests {
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
         REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
-        model_picker_route_is_current, model_picker_route_is_default,
-        model_picker_route_is_recommended, picker_is_runtime_model_picker,
-        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
+        model_picker_effort_matches_default, model_picker_route_is_current,
+        model_picker_route_is_default, model_picker_route_is_recommended,
+        picker_is_runtime_model_picker, remote_model_catalog_cache_is_fresh,
+        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
+        route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -3793,6 +3862,57 @@ mod tests {
             &api_route,
             Some("claude-opus-4-8"),
             Some("claude-api"),
+        ));
+    }
+
+    #[test]
+    fn model_picker_effort_default_matches_only_stored_variant() {
+        // Anthropic: stored effort selects exactly one variant.
+        assert!(model_picker_effort_matches_default(
+            Some("claude-oauth"),
+            Some("high"),
+            Some("high"),
+            None,
+        ));
+        assert!(!model_picker_effort_matches_default(
+            Some("claude-oauth"),
+            Some("low"),
+            Some("high"),
+            None,
+        ));
+        // OpenAI uses its own stored effort.
+        assert!(model_picker_effort_matches_default(
+            Some("openai-oauth"),
+            Some("medium"),
+            None,
+            Some("medium"),
+        ));
+        assert!(!model_picker_effort_matches_default(
+            Some("openai-api"),
+            Some("high"),
+            None,
+            Some("medium"),
+        ));
+        // No stored effort: every variant keeps the legacy default marker.
+        assert!(model_picker_effort_matches_default(
+            Some("claude-oauth"),
+            Some("xhigh"),
+            None,
+            None,
+        ));
+        // Entries without an effort always match.
+        assert!(model_picker_effort_matches_default(
+            Some("claude-oauth"),
+            None,
+            Some("high"),
+            None,
+        ));
+        // Unknown provider families ignore stored efforts.
+        assert!(model_picker_effort_matches_default(
+            Some("openrouter"),
+            Some("high"),
+            Some("low"),
+            Some("low"),
         ));
     }
 
