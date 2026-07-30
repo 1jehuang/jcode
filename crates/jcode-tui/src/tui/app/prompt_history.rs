@@ -33,7 +33,14 @@ pub(crate) struct PromptHistorySearchState {
     /// Selected index into `matches` (0 = newest match).
     pub(crate) selected: usize,
     /// Matching prompts, newest first, refreshed on every query change.
+    /// Empty until the user types a query (readline-style: no results are
+    /// shown for an empty query).
     pub(crate) matches: Vec<String>,
+    /// Input-line draft captured when the search opened, restored on cancel
+    /// (Esc) or when the query stops matching anything.
+    pub(crate) original_input: String,
+    /// Cursor position matching `original_input`.
+    pub(crate) original_cursor: usize,
 }
 
 pub(crate) fn history_file_path() -> Option<PathBuf> {
@@ -241,10 +248,15 @@ impl App {
         }
     }
 
-    /// Open the Ctrl+R reverse history search overlay.
+    /// Open the Ctrl+R reverse history search overlay. No matches are shown
+    /// until the user types a query; the current input-line draft is saved so
+    /// Esc can restore it after the live preview overwrites the input.
     pub(super) fn open_prompt_history_search(&mut self) {
-        self.prompt_history_search = Some(PromptHistorySearchState::default());
-        self.refresh_prompt_history_search_matches();
+        self.prompt_history_search = Some(PromptHistorySearchState {
+            original_input: self.input.clone(),
+            original_cursor: self.cursor_pos,
+            ..PromptHistorySearchState::default()
+        });
     }
 
     fn refresh_prompt_history_search_matches(&mut self) {
@@ -253,8 +265,10 @@ impl App {
             return;
         };
         let query = state.query.trim().to_string();
+        // Readline-style: an empty query matches nothing (the overlay only
+        // shows results once the user starts typing).
         let mut matches: Vec<String> = if query.is_empty() {
-            history.into_iter().rev().collect()
+            Vec::new()
         } else {
             let mut scored: Vec<(i32, usize, String)> = history
                 .into_iter()
@@ -273,6 +287,34 @@ impl App {
         matches.truncate(MAX_SEARCH_MATCHES);
         state.selected = state.selected.min(matches.len().saturating_sub(1));
         state.matches = matches;
+        self.apply_prompt_history_search_preview();
+    }
+
+    /// Live-preview the selected match in the input line (readline-style).
+    /// Falls back to the saved draft when nothing matches.
+    fn apply_prompt_history_search_preview(&mut self) {
+        let Some(state) = self.prompt_history_search.as_ref() else {
+            return;
+        };
+        match state.matches.get(state.selected) {
+            Some(prompt) => {
+                self.input = prompt.clone();
+                self.cursor_pos = self.input.len();
+            }
+            None => {
+                self.input = state.original_input.clone();
+                self.cursor_pos = state.original_cursor;
+            }
+        }
+    }
+
+    /// Close the search overlay and restore the input-line draft that was
+    /// active when it opened.
+    fn cancel_prompt_history_search(&mut self) {
+        if let Some(state) = self.prompt_history_search.take() {
+            self.input = state.original_input;
+            self.cursor_pos = state.original_cursor;
+        }
     }
 
     /// Handle a key event while the history search overlay is open.
@@ -285,10 +327,10 @@ impl App {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         match code {
             KeyCode::Esc => {
-                self.prompt_history_search = None;
+                self.cancel_prompt_history_search();
             }
             KeyCode::Char('g') | KeyCode::Char('c') | KeyCode::Char('d') if ctrl => {
-                self.prompt_history_search = None;
+                self.cancel_prompt_history_search();
             }
             KeyCode::Enter => {
                 let selected = self
@@ -334,6 +376,7 @@ impl App {
         }
         let max = state.matches.len() as i64 - 1;
         state.selected = (state.selected as i64 + delta).clamp(0, max) as usize;
+        self.apply_prompt_history_search_preview();
     }
 
     /// Render-friendly snapshot of the search overlay for the UI layer.
