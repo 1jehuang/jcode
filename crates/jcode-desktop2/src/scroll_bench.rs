@@ -45,8 +45,24 @@ const WIDTH: u32 = 2200;
 const HEIGHT: u32 = 1440;
 const SCALE: f64 = 2.0;
 
-/// Simulated frame cadence, matching [`crate::scroll::FRAME`].
-const FRAME_MS: u64 = 8;
+/// Simulated frame cadences, in milliseconds per frame.
+///
+/// The replay used to run only at 8ms, matching [`crate::scroll::FRAME`], on
+/// the assumption that a faster cadence is a strictly harder test. It is not,
+/// and that assumption is what let a real problem hide: the ease and the
+/// friction here are exponential decays evaluated per frame, so *how much of
+/// the gesture each frame gets* changes with the display. A 60Hz panel (which
+/// is what most laptops, including the one this was tuned on, actually run)
+/// gets half as many frames to resolve the same glide, so it sees twice the lag
+/// per frame and coarser motion. Anything that is frame-rate dependent rather
+/// than time dependent shows up as a difference between these rows, and a
+/// single-cadence bench cannot show it at all.
+const CADENCES: [u64; 2] = [8, 16];
+
+/// Cadence the quality gates are enforced at. 16ms, not 8: gating the faster
+/// display and merely reporting the slower one would pass a scroll that only
+/// feels right on hardware the user does not have.
+const GATE_MS: u64 = 16;
 
 /// Hard cap on replayed frames, so a fling that never comes to rest fails
 /// loudly rather than hanging the bench.
@@ -225,6 +241,8 @@ pub struct FrameSample {
 /// Everything one script says about the scroll's feel.
 pub struct Report {
     pub name: &'static str,
+    /// Cadence this replay ran at, in milliseconds per frame.
+    pub frame_ms: u64,
     pub samples: Vec<FrameSample>,
     /// Simulated milliseconds from the first input event to the first frame
     /// that drew the view somewhere new.
@@ -349,6 +367,32 @@ impl Report {
             .unwrap_or(0)
     }
 
+    /// Which frame the worst cost landed on, and the typical frame's cost.
+    ///
+    /// Reported together with [`Self::max_us`] because on its own a worst-frame
+    /// number is unreadable: a 7ms max looks like a dropped frame every time,
+    /// but if it lands on frame 0 while the median frame is a tenth of that, it
+    /// is the replay's own warm-up (first allocation of the scene buffers, the
+    /// glyph atlas filling) and not something a hand can feel. A max that lands
+    /// mid-gesture with a median near it is the real thing.
+    pub fn worst_frame(&self) -> usize {
+        self.samples
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, sample)| sample.us)
+            .map_or(0, |(index, _)| index)
+    }
+
+    /// Median frame cost, in microseconds: what a scroll frame usually costs.
+    pub fn median_us(&self) -> u64 {
+        let mut costs: Vec<u64> = self.samples.iter().map(|sample| sample.us).collect();
+        if costs.is_empty() {
+            return 0;
+        }
+        costs.sort_unstable();
+        costs[costs.len() / 2]
+    }
+
     /// How far the view ended up from the logical position. The model's
     /// `scroll` is what selection and hit-testing read, so a scroll that
     /// finishes with the two apart means a click lands on the wrong glyph.
@@ -361,7 +405,8 @@ impl Report {
     pub fn line(&self) -> String {
         format!(
             "{:<22} latency {:>5} settle {:>6} ratio {:>6} track {:>6.1}px \
-             drag {:>6} rev {:>2} jerk {:>6.1} still {:>4} relayout {:>3} max {:>6}us lag {:>5.2}",
+             drag {:>6} rev {:>2} jerk {:>6.1} still {:>4} relayout {:>3} \
+             mid {:>5}us max {:>6}us@f{:<4} lag {:>5.2}",
             self.name,
             self.latency_ms
                 .map_or_else(|| "-".into(), |ms| format!("{ms}ms")),
@@ -376,7 +421,9 @@ impl Report {
             self.peak_jerk(),
             self.still_frames(),
             self.relayout_frames(),
+            self.median_us(),
             self.max_us(),
+            self.worst_frame(),
             self.final_lag(),
         )
     }
@@ -435,8 +482,13 @@ fn schedule(gestures: &[Gesture]) -> (Vec<(u64, Event)>, u64) {
     (out, at)
 }
 
-/// Replay one script and measure every frame.
+/// Replay one script at [`GATE_MS`], the cadence the gates apply to.
 pub fn run(script: &Script) -> Report {
+    run_at(script, GATE_MS)
+}
+
+/// Replay one script at a given frame cadence and measure every frame.
+pub fn run_at(script: &Script, frame_ms: u64) -> Report {
     let mut app = App {
         model: Model {
             session_id: Some("session_scroll_bench".into()),
@@ -561,7 +613,7 @@ pub fn run(script: &Script) -> Report {
         if done {
             break;
         }
-        sim_ms += FRAME_MS;
+        sim_ms += frame_ms;
     }
 
     let latency_ms = first_event_ms.and_then(|from| {
@@ -585,15 +637,24 @@ pub fn run(script: &Script) -> Report {
 
     Report {
         name: script.name,
+        frame_ms,
         samples,
         latency_ms,
         settle_ms,
     }
 }
 
-/// Replay the whole suite.
+/// Replay the whole suite at every cadence in [`CADENCES`].
 pub fn sweep() -> Vec<Report> {
-    Script::suite().iter().map(run).collect()
+    CADENCES
+        .into_iter()
+        .flat_map(|frame_ms| {
+            Script::suite()
+                .into_iter()
+                .map(move |script| run_at(&script, frame_ms))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Print the sweep and say whether the scroll is behaving. Returns false when
@@ -601,20 +662,81 @@ pub fn sweep() -> Vec<Report> {
 pub fn report(reports: &[Report]) -> bool {
     println!("scroll feel ({WIDTH}x{HEIGHT} @{SCALE})\n");
     let mut ok = true;
+    let mut cadence = None;
     for report in reports {
-        println!("  {}", report.line());
+        if cadence != Some(report.frame_ms) {
+            cadence = Some(report.frame_ms);
+            let hz = 1000.0 / report.frame_ms as f64;
+            let gated = if report.frame_ms == GATE_MS {
+                " (gated)"
+            } else {
+                " (reported)"
+            };
+            println!("  at {}ms/frame, {hz:.0}Hz{gated}", report.frame_ms);
+        }
+        println!("    {}", report.line());
+        // Only the gated cadence fails the run. The other is printed so a
+        // frame-rate dependence is visible as a difference between the blocks,
+        // without making the suite's verdict depend on which display the
+        // reader happens to own.
+        if report.frame_ms != GATE_MS {
+            continue;
+        }
         for failure in gate(report) {
             ok = false;
-            println!("    FAIL {failure}");
+            println!("      FAIL {failure}");
         }
     }
+    // The gates above judge each cadence alone, which is not enough: the
+    // scroll's *behaviour* must not depend on the display, and the way that
+    // dependence appeared was a gesture that measured 1.97x travel at 8ms and
+    // 3.39x at 16ms, from a velocity estimate that divided one delta by the
+    // microseconds between two batched events. Nothing about either row on its
+    // own was obviously wrong; only the disagreement was. So the disagreement
+    // is the gate.
+    for pair in pairs(reports) {
+        let (fast, slow) = pair;
+        if let (Some(a), Some(b)) = (fast.travel_ratio(), slow.travel_ratio()) {
+            // Loose, because a coarser cadence legitimately quantises the tail
+            // of a coast by up to a frame's worth of travel.
+            if (a - b).abs() > 0.25 * a.abs().max(1.0) {
+                ok = false;
+                println!(
+                    "  FAIL {}: travelled {a:.2}x at {}ms/frame but {b:.2}x at {}ms/frame; \
+                     the scroll must not depend on the display",
+                    fast.name, fast.frame_ms, slow.frame_ms,
+                );
+            }
+        }
+    }
+
     println!(
         "\n  latency: to first drawn movement. settle: motion after the last event.\n  \
          ratio: drawn travel / input travel, whole script; drag: the same while\n  \
          the fingers were down, which must be 1.00. track: worst fingers-down\n  \
-         disagreement. rev: frames moving backwards. jerk: peak per-frame speed change."
+         disagreement. rev: frames moving backwards. jerk: peak per-frame speed change.\n  \
+         mid: the frame cost a hand actually feels. max@fN: worst frame and where it\n  \
+         landed; on frame 0 it is the replay warming its own buffers, not a stutter."
     );
     ok
+}
+
+/// Pair each script's report across cadences, so the same gesture measured on
+/// two displays can be compared.
+fn pairs(reports: &[Report]) -> Vec<(&Report, &Report)> {
+    let mut out = Vec::new();
+    for (index, fast) in reports.iter().enumerate() {
+        if fast.frame_ms != CADENCES[0] {
+            continue;
+        }
+        if let Some(slow) = reports[index + 1..]
+            .iter()
+            .find(|other| other.name == fast.name && other.frame_ms != fast.frame_ms)
+        {
+            out.push((fast, slow));
+        }
+    }
+    out
 }
 
 /// The rules a good scroll obeys, as assertions rather than prose. These are
@@ -625,7 +747,7 @@ pub fn gate(report: &Report) -> Vec<String> {
     // Answering an event late is the one thing no amount of easing can hide.
     // One frame of latency is the floor (the event arrives, the next frame
     // draws it); two is the budget.
-    if report.latency_ms.is_none_or(|ms| ms > 2 * FRAME_MS) {
+    if report.latency_ms.is_none_or(|ms| ms > 2 * report.frame_ms) {
         failures.push(format!(
             "slow to answer: {:?} to first movement",
             report.latency_ms

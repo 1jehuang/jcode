@@ -152,7 +152,15 @@ impl RenderState {
         self.window.request_redraw();
     }
 
-    pub fn render(&mut self, scene: &Scene) -> Result<()> {
+    /// Draw `scene` and put it on screen, timing the GPU and present spans
+    /// into `meter`.
+    ///
+    /// The meter is threaded through as a parameter rather than owned here
+    /// because a frame's spans only mean something together: the build span is
+    /// measured by the caller around `build_scene`, and a GPU number without
+    /// the build number beside it cannot say which half is slow.
+    pub fn render(&mut self, scene: &Scene, meter: &mut crate::frame_meter::FrameMeter) -> Result<()> {
+        meter.start();
         let (width, height) = self.size();
         self.renderer
             .render_to_texture(
@@ -188,7 +196,14 @@ impl RenderState {
                 .create_view(&wgpu::TextureViewDescriptor::default()),
         );
         self.queue.submit([encoder.finish()]);
+        meter.end_gpu();
+        // Timed separately from the work above because this is the call that
+        // blocks on the compositor: vsync back-pressure shows up here and
+        // nowhere else, and it is not a cost any code change to painting can
+        // reduce.
+        meter.start();
         surface_texture.present();
+        meter.end_present();
         Ok(())
     }
 }

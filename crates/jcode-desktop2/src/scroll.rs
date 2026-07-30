@@ -66,6 +66,20 @@ const GESTURE_STALL: Duration = Duration::from_millis(500);
 /// Velocity samples older than this belong to a previous gesture.
 const SAMPLE_GAP: Duration = Duration::from_millis(120);
 
+/// Shortest interval a single velocity sample may be measured over.
+///
+/// A gesture's speed is pixels over time, and the time has to be *real* time.
+/// Two events can arrive with timestamps a few microseconds apart, either
+/// because the compositor batched a burst into one wakeup or because libinput
+/// coalesced them, and dividing one delta by that interval reports a speed the
+/// finger never had: with a 1ms floor, an ordinary 12px event reads as
+/// 12'000px/s and saturates `MAX_VELOCITY`. That is how a hand-speed drag
+/// turned into a full-clamp fling on release, and it happened *more* on a 60Hz
+/// display, because a longer frame batches more events per wakeup. So a sample
+/// measured over less than this is accumulated rather than divided, and the
+/// speed is taken once enough real time has passed to divide by.
+const MIN_SAMPLE: Duration = Duration::from_millis(6);
+
 /// Weight of the newest velocity sample in the running estimate. Low enough to
 /// ignore one jittery frame, high enough to follow a real change of speed.
 const VELOCITY_BLEND: f64 = 0.45;
@@ -106,6 +120,12 @@ pub struct Smooth {
     velocity: f64,
     /// When the most recent gesture event arrived.
     last_event: Option<Instant>,
+    /// Start of the interval the pending velocity sample is accumulating over,
+    /// and the travel accumulated in it. Present so a burst of events delivered
+    /// in one wakeup is measured as one interval of real time rather than
+    /// several impossibly short ones. See [`MIN_SAMPLE`].
+    sample_since: Option<Instant>,
+    sample_travel: f64,
     /// Whether the backend says the fingers are still on the surface.
     holding_gesture: bool,
     /// Whether the current input carries a usable gesture phase.
@@ -138,15 +158,26 @@ impl Smooth {
     /// after the fingers lift, the way a browser does.
     pub fn glide_from(&mut self, delta: f64, now: Instant) {
         if delta != 0.0 {
-            let sample = match self.last_event {
-                Some(prev) if now.saturating_duration_since(prev) < SAMPLE_GAP => {
-                    let dt = now.saturating_duration_since(prev).as_secs_f64().max(0.001);
-                    Some(delta / dt)
-                }
-                // First event of a gesture: no interval to measure against, so
-                // start from rest rather than inventing a speed from one delta.
-                _ => None,
-            };
+            // A gap this long means the previous gesture is over, so nothing
+            // accumulated for it may be measured against this event.
+            let stale = self
+                .last_event
+                .is_none_or(|prev| now.saturating_duration_since(prev) >= SAMPLE_GAP);
+            if stale {
+                self.sample_since = None;
+                self.sample_travel = 0.0;
+            }
+            // Accumulate into the open interval, and only take a speed once
+            // that interval is long enough to divide by. See `MIN_SAMPLE`.
+            let opened = *self.sample_since.get_or_insert(now);
+            self.sample_travel += delta;
+            let span = now.saturating_duration_since(opened);
+            let sample = (span >= MIN_SAMPLE).then(|| {
+                let speed = self.sample_travel / span.as_secs_f64();
+                self.sample_since = Some(now);
+                self.sample_travel = 0.0;
+                speed
+            });
             self.velocity = match sample {
                 Some(sample) if self.velocity.signum() == sample.signum() => {
                     (self.velocity * (1.0 - VELOCITY_BLEND) + sample * VELOCITY_BLEND)
@@ -154,7 +185,13 @@ impl Smooth {
                 }
                 // A reversal is a new intent, not something to average with.
                 Some(sample) => sample.clamp(-MAX_VELOCITY, MAX_VELOCITY),
-                None => 0.0,
+                // Not enough real time yet to say how fast this is. The
+                // previous estimate stands (it was measured over a full
+                // interval of this same gesture); zeroing it here would throw
+                // the speed away every time a burst arrived in one wakeup,
+                // which is what a release then has to guess at.
+                None if stale => 0.0,
+                None => self.velocity,
             };
             self.last_event = Some(now);
             self.last.get_or_insert(now);
@@ -220,6 +257,8 @@ impl Smooth {
         self.stop();
         self.holding_gesture = false;
         self.last_event = None;
+        self.sample_since = None;
+        self.sample_travel = 0.0;
     }
 
     /// Offset to subtract from the logical scroll when drawing.
@@ -295,6 +334,75 @@ impl Smooth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A burst of gesture events delivered in one compositor wakeup must
+    /// estimate the hand's real speed, not one delta divided by the microseconds
+    /// between two timestamps.
+    ///
+    /// This is the bug that made scrolling feel wrong on a 60Hz display while
+    /// every headless number looked fine: a longer frame batches more events per
+    /// wakeup, each near-zero interval saturated `MAX_VELOCITY`, and the release
+    /// then flung the page at the clamp instead of at hand speed.
+    #[test]
+    fn a_batched_burst_is_not_read_as_a_flick() {
+        let start = Instant::now();
+        // Same gesture, same total travel, same wall-clock duration: 120px over
+        // 60ms. Once delivered evenly, once as bursts of three events sharing a
+        // wakeup. The estimated speed must be about the same, because the hand
+        // moved identically.
+        let even = {
+            let mut smooth = Smooth::default();
+            for step in 0..12 {
+                smooth.gesture_held(true);
+                smooth.glide_from(10.0, start + Duration::from_millis(step * 5));
+            }
+            smooth.velocity
+        };
+        let bursty = {
+            let mut smooth = Smooth::default();
+            for group in 0..4 {
+                let at = start + Duration::from_millis(group * 15);
+                for offset in 0..3 {
+                    smooth.gesture_held(true);
+                    // Microseconds apart, as a coalesced burst arrives.
+                    smooth.glide_from(10.0, at + Duration::from_micros(offset * 20));
+                }
+            }
+            smooth.velocity
+        };
+        // The real speed is 120px / 60ms = 2000px/s.
+        assert!(
+            (even - 2_000.0).abs() < 700.0,
+            "evenly delivered gesture misread its own speed: {even:.0}px/s"
+        );
+        assert!(
+            bursty < MAX_VELOCITY,
+            "a batched burst saturated the clamp at {bursty:.0}px/s"
+        );
+        assert!(
+            (bursty - even).abs() < 0.5 * even.abs().max(1.0),
+            "the same gesture read as {even:.0}px/s evenly and {bursty:.0}px/s in bursts"
+        );
+    }
+
+    /// The estimate must still follow a genuinely fast flick: the fix above
+    /// must not have turned every gesture into a slow one.
+    #[test]
+    fn a_real_flick_still_reads_fast() {
+        let start = Instant::now();
+        let mut smooth = Smooth::default();
+        for step in 0..8 {
+            smooth.gesture_held(true);
+            smooth.glide_from(60.0, start + Duration::from_millis(step * 8));
+        }
+        // 60px per 8ms is 7500px/s, above the clamp, so the estimate should sit
+        // at or near it rather than be dragged down by the smoothing.
+        assert!(
+            smooth.velocity > 4_000.0,
+            "a fast flick read as only {:.0}px/s",
+            smooth.velocity
+        );
+    }
 
     #[test]
     fn a_scroll_lags_and_then_lands() {
