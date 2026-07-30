@@ -39,7 +39,7 @@ pub(super) fn idle_animation_partial_repaint_allowed(
 ///
 /// The targeted alternative to `Buffer::clone_from` for the animation-only
 /// repaint, which only ever changes one rectangle.
-pub(super) fn copy_cells_in(src: &Buffer, dst: &mut Buffer, area: Rect) {
+pub(crate) fn copy_cells_in(src: &Buffer, dst: &mut Buffer, area: Rect) {
     let area = area.intersection(*src.area()).intersection(*dst.area());
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {

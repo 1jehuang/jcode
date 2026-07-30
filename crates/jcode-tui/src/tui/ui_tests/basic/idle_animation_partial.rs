@@ -428,11 +428,14 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
             let elapsed = 1.0 + step as f32 * 0.05;
 
             if seeded {
-                for y in area.top()..area.bottom() {
-                    for x in area.left()..area.right() {
-                        optimized[(x, y)] = base[(x, y)].clone();
-                    }
-                }
+                // Call the real production helper, not a local reimplementation.
+                // A hand-rolled copy here would pass even if `copy_cells_in`
+                // were wrong, which defeats the point of the comparison.
+                crate::tui::app::idle_animation_repaint::copy_cells_in(
+                    &base,
+                    &mut optimized,
+                    area,
+                );
             } else {
                 optimized = base.clone();
                 seeded = true;
@@ -462,4 +465,70 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
             "an empty animation rectangle must leave the frame untouched"
         );
     }
+}
+
+
+/// `copy_cells_in` is what makes the animation-only repaint cheap: it copies just
+/// the animated rectangle instead of cloning the whole screen. Its correctness
+/// cannot be observed through the animation, because the animation overwrites
+/// every cell it copies, so a broken copy still produces a correct frame there.
+/// (Verified: injecting an off-by-one into the copy did not fail the
+/// frame-comparison test.)
+///
+/// So exercise the copy directly: it must reproduce the source rectangle exactly
+/// and touch nothing outside it. That second half is the real risk, since the
+/// whole optimization rests on cells outside the rectangle staying untouched.
+#[test]
+fn copy_cells_in_copies_exactly_the_rectangle_and_nothing_else() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let full = Rect::new(0, 0, 24, 10);
+    // Two distinguishable buffers: every cell encodes its own coordinates, so a
+    // copy that is off by one row or column is visible rather than plausible.
+    let mut src = Buffer::empty(full);
+    let mut dst = Buffer::empty(full);
+    for y in 0..full.height {
+        for x in 0..full.width {
+            src[(x, y)].set_symbol(&format!("s{}", (x + y) % 10));
+            dst[(x, y)].set_symbol(&format!("d{}", (x + y) % 10));
+        }
+    }
+    let before = dst.clone();
+
+    let area = Rect::new(3, 2, 8, 4);
+    crate::tui::app::idle_animation_repaint::copy_cells_in(&src, &mut dst, area);
+
+    for y in 0..full.height {
+        for x in 0..full.width {
+            let inside = x >= area.left() && x < area.right() && y >= area.top() && y < area.bottom();
+            let expected = if inside { &src[(x, y)] } else { &before[(x, y)] };
+            assert_eq!(
+                &dst[(x, y)], expected,
+                "cell ({x},{y}) {} the copied rectangle {area:?} is wrong: the \
+                 animation-only repaint relies on copying exactly this region",
+                if inside { "inside" } else { "outside" }
+            );
+        }
+    }
+
+    // Degenerate and out-of-bounds rectangles must be no-ops, not panics: the
+    // published animation area is recomputed per frame and can be empty.
+    let mut untouched = before.clone();
+    crate::tui::app::idle_animation_repaint::copy_cells_in(
+        &src,
+        &mut untouched,
+        Rect::new(3, 2, 0, 0),
+    );
+    assert_eq!(untouched, before, "an empty rectangle must copy nothing");
+
+    crate::tui::app::idle_animation_repaint::copy_cells_in(
+        &src,
+        &mut untouched,
+        Rect::new(100, 100, 5, 5),
+    );
+    assert_eq!(
+        untouched, before,
+        "a rectangle outside the buffer must copy nothing and must not panic"
+    );
 }

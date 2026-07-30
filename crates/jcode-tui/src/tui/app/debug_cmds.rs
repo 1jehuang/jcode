@@ -1146,6 +1146,13 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
                 .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
             "client_focused": crate::tui::TuiState::client_focused(app),
             "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
+            // Unlike `idle_animation.last_full_frame_reason`, which is sticky,
+            // this is evaluated against current state, so an expired notice
+            // cannot masquerade as the thing pinning the loop at animation
+            // cadence. Diagnosing the fresh-spawn lag needed exactly this
+            // distinction, and the field had been dropped while the function
+            // it calls stayed behind as dead code.
+            "current_full_frame_reason": crate::tui::current_full_frame_redraw_reason(app),
             // Latency the user actually feels: key read -> frame flushed.
             "key_to_paint": crate::tui::ui::key_to_paint_debug_json(),
         }),

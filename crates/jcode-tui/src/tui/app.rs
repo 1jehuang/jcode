@@ -68,7 +68,7 @@ mod event_wrappers;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
 mod hotkey_feedback;
-mod idle_animation_repaint;
+pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
 mod inline_interactive;
 mod input;
