@@ -450,10 +450,15 @@ fn draw_transcript(
     // has been read and must be drawn whole. The live tool card is skipped:
     // it is pinned to the tail as a status readout and appears whole, while
     // the reveal animates the text arriving above it (the same message
-    // `Transcript::streaming_len` counts, or the two would disagree).
+    // `Transcript::streaming_len` counts, or the two would disagree). Queued
+    // messages are skipped the same way: they sit *below* the streaming text,
+    // waiting for their turn, and were typed rather than streamed.
     let streaming_index = laid
         .iter()
-        .rposition(|message| !matches!(message.role, Role::Tool | Role::Notice | Role::Edit))
+        .rposition(|message| {
+            !matches!(message.role, Role::Tool | Role::Notice | Role::Edit)
+                && message.delivery != Some(crate::ack::Delivery::Queued)
+        })
         .filter(|_| model.stream.is_revealing())
         .filter(|index| laid[*index].role != Role::User);
 
@@ -468,6 +473,29 @@ fn draw_transcript(
             .message
             .delivery
             .map_or(0.0, |delivery| delivery.wiggle(now));
+        // The delivery tone: a message the agent has not confirmed yet is
+        // drawn faint, and the acknowledgement ramps it to full ink over the
+        // wiggle. One layer over the whole card, so the wash, the dot, and
+        // the text fade as one object rather than as three.
+        let tone = placed
+            .message
+            .delivery
+            .map_or(1.0, |delivery| delivery.tone(now));
+        let toned = tone < 1.0;
+        if toned {
+            scene.push_layer(
+                vello::peniko::Fill::NonZero,
+                vello::peniko::Mix::Normal,
+                tone as f32,
+                Affine::scale(scale),
+                &Rect::new(
+                    frame.left + wiggle - crate::ack::WIGGLE_AMPLITUDE,
+                    message_top,
+                    frame.right + wiggle + crate::ack::WIGGLE_AMPLITUDE,
+                    message_top + placed.message.height,
+                ),
+            );
+        }
         // The user's card: the same fill and radius as the composer, so the
         // message and the field it came from are visibly one object.
         if is_user {
@@ -729,6 +757,9 @@ fn draw_transcript(
                 revealed,
             );
             drawn_glyphs += block.glyphs;
+        }
+        if toned {
+            scene.pop_layer();
         }
     }
 }

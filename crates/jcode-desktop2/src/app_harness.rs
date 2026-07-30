@@ -12,6 +12,10 @@ impl App {
         let Some((updates, _)) = self.harness.as_ref() else {
             return;
         };
+        // Whether a turn boundary went by in this batch. Queued messages are
+        // sent at the boundary, after the drain: the flush needs `&mut self`,
+        // which the loop's borrow of the update channel forbids.
+        let mut turn_ended = false;
         while let Ok(update) = updates.try_recv() {
             match update {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
@@ -30,6 +34,11 @@ impl App {
                     // leaving a reveal in flight would fade the failure in
                     // behind an animation that has nothing left to animate.
                     self.model.stream.reveal_all();
+                    // A failure ends the turn as surely as `TurnDone` (the
+                    // daemon sends `error` *instead of* `done`), so a message
+                    // queued behind the failed turn gets its chance now
+                    // rather than waiting forever.
+                    turn_ended = true;
                 }
                 harness::HarnessUpdate::Attached {
                     session_id,
@@ -114,6 +123,7 @@ impl App {
                     // there is none, and a card left behind would claim work
                     // is still happening.
                     self.model.transcript.clear_live_tool();
+                    turn_ended = true;
                 }
                 harness::HarnessUpdate::Peek {
                     session_id,
@@ -132,6 +142,13 @@ impl App {
                         strip::Strip::build(entries, self.model.session_id.as_deref());
                 }
             }
+        }
+        // The turn is over and the channel is drained: if the user typed
+        // while the agent was busy, the oldest waiting message goes now. Its
+        // card leaves the queued tone, and the send is exactly the one the
+        // submit would have made had the agent been free.
+        if turn_ended && !self.model.busy {
+            self.flush_queued_message();
         }
     }
 

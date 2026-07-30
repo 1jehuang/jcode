@@ -37,6 +37,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("edit_card", edit_card),
     ("edit_cards_many", edit_cards_many),
     ("working", working),
+    ("queued_message", queued_message),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
     ("scrolled_back", scrolled_back),
@@ -859,6 +860,31 @@ fn working() -> Model {
             5,
             std::time::Duration::from_secs(42),
             Some("running the desktop2 test suite"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// A message typed while the agent was mid-turn: it waits at the tail in the
+/// queued tone, under the reply that is still streaming in. This is the state
+/// that replaced the daemon's "already processing" error.
+fn queued_message() -> Model {
+    let mut transcript = conversation(vec![(
+        "explain the harness API handshake".into(),
+        "The client opens the socket and sends a `hello` frame carrying \
+         its supported version range. The server replies with"
+            .into(),
+    )]);
+    transcript.push(crate::transcript::Message::queued(
+        "and after that, add a reconnect test",
+    ));
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            2,
+            std::time::Duration::from_secs(8),
+            Some("thinking"),
         ),
         ..attached_empty()
     }

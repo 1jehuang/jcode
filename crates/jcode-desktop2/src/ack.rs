@@ -8,13 +8,16 @@
 //! has it" are different facts, and conflating them is what makes a stalled
 //! turn indistinguishable from a dropped message.
 //!
-//! So a user message carries a [`Delivery`]: `Sent` the moment it leaves the
-//! composer, `Acked` when the daemon confirms the agent took it
-//! (`ApiEvent::MessageAccepted`). The difference is shown twice over, because
-//! one channel is not enough: a small dot beside the card (hollow while
-//! pending, solid once acked) is the *state*, and a short damped wiggle of the
-//! card is the *transition*. Motion is what the eye notices without looking,
-//! which is exactly the right weight for "it arrived".
+//! So a user message carries a [`Delivery`]: `Queued` while this window is
+//! holding it back (the agent is mid-turn, and the daemon rejects a second
+//! message outright), `Sent` the moment it leaves the composer, `Acked` when
+//! the daemon confirms the agent took it (`ApiEvent::MessageAccepted`). The
+//! difference is shown twice over, because one channel is not enough: a small
+//! dot beside the card (hollow while pending, solid once acked) is the
+//! *state*, and a short damped wiggle of the card is the *transition*. Motion
+//! is what the eye notices without looking, which is exactly the right weight
+//! for "it arrived". A queued card is additionally drawn in a fainter tone,
+//! because "this has not gone anywhere yet" is a bigger claim than a dot.
 //!
 //! Like the rest of this app's animation, the wiggle is derived from
 //! (state, now) rather than driven by a timer: a frame stays a pure function of
@@ -46,9 +49,20 @@ pub const DOT_RADIUS: f64 = 2.6;
 /// Gap between the dot and the card's right text edge.
 pub const DOT_GAP: f64 = 7.0;
 
+/// Opacity of a message the agent has not confirmed yet: queued in this
+/// window, or written to the socket without an acknowledgement. Faint enough
+/// to read as "not landed", solid enough to stay legible, because the text
+/// may be waiting a whole turn.
+pub const PENDING_TONE: f64 = 0.55;
+
 /// Where a user's message is on its way to the agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
+    /// Held in this window until the current turn finishes. The daemon
+    /// refuses a message while it is processing one, so sending now would
+    /// only earn an error; the message waits at the tail of the transcript
+    /// instead, visibly not yet anyone's but ours.
+    Queued,
     /// Handed to the connection; the agent has not confirmed it yet.
     Sent,
     /// The agent has the message. Carries when that was known, so the wiggle
@@ -59,6 +73,25 @@ pub enum Delivery {
 impl Delivery {
     pub fn is_acked(self) -> bool {
         matches!(self, Self::Acked { .. })
+    }
+
+    /// Opacity of the message's card and text this frame.
+    ///
+    /// A message the agent does not have yet is drawn at [`PENDING_TONE`]:
+    /// visibly on the page, visibly not yet part of the conversation. The
+    /// acknowledgement ramps it to full ink over the wiggle's own duration,
+    /// so the nod and the tone change read as one event, and a missed frame
+    /// lands on solid ink rather than leaving the card washed out.
+    pub fn tone(self, now: Instant) -> f64 {
+        let Self::Acked { at } = self else {
+            return PENDING_TONE;
+        };
+        let elapsed = now.saturating_duration_since(at).as_secs_f64();
+        let span = WIGGLE.as_secs_f64();
+        if elapsed >= span {
+            return 1.0;
+        }
+        PENDING_TONE + (1.0 - PENDING_TONE) * (elapsed / span)
     }
 
     /// Horizontal offset for the card this frame, in logical pixels.
