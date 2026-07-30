@@ -1121,8 +1121,17 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             if auto_install {
                 Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Downloading {
                     version: latest.clone(),
+                    downloaded: 0,
+                    total: None,
                 }));
-                match download_and_install_blocking(&release) {
+                let progress_version = latest.clone();
+                match download_and_install_blocking_with_progress(&release, |progress| {
+                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Downloading {
+                        version: progress_version.clone(),
+                        downloaded: progress.downloaded,
+                        total: progress.total,
+                    }));
+                }) {
                     Ok(path) => {
                         Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installed {
                             version: latest.clone(),

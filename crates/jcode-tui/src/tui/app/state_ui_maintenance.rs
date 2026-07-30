@@ -155,15 +155,24 @@ impl App {
                     ),
                 );
             }
-            UpdateStatus::Downloading { version } => {
+            UpdateStatus::Downloading {
+                version,
+                downloaded,
+                total,
+            } => {
                 self.background_client_action = Some(action);
-                self.set_status_notice(format!("Updating to {}...", version));
+                let progress =
+                    crate::update::format_download_progress_bar(crate::update::DownloadProgress {
+                        downloaded,
+                        total,
+                    });
+                self.set_status_notice(format!("Updating to {}... {}", version, progress));
                 self.set_client_maintenance_message(
                     action,
                     Self::client_maintenance_card_message(
                         action,
-                        format!("downloading {}", version),
-                        "jcode will restart automatically when the update is ready.",
+                        format!("downloading {}\n{}", version, progress),
+                        "jcode will reload in place (input preserved) when the update is ready.",
                     ),
                 );
             }

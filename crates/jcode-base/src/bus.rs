@@ -323,10 +323,23 @@ pub struct SidePanelUpdated {
 #[derive(Clone, Debug)]
 pub enum UpdateStatus {
     Checking,
-    Available { current: String, latest: String },
-    Downloading { version: String },
-    Installing { version: String },
-    Installed { version: String },
+    Available {
+        current: String,
+        latest: String,
+    },
+    Downloading {
+        version: String,
+        /// Bytes downloaded so far (0 before the transfer starts).
+        downloaded: u64,
+        /// Total asset size when known, for progress-bar rendering.
+        total: Option<u64>,
+    },
+    Installing {
+        version: String,
+    },
+    Installed {
+        version: String,
+    },
     UpToDate,
     Error(String),
 }
