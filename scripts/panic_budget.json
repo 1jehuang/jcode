@@ -9,6 +9,7 @@
     "crates/jcode-desktop2/src/cli.rs": 1,
     "crates/jcode-desktop2/src/main.rs": 2,
     "crates/jcode-desktop2/src/scroll_bench.rs": 1,
+    "crates/jcode-desktop2/src/states.rs": 1,
     "crates/jcode-desktop2/src/transcript.rs": 1,
     "crates/jcode-harness-api/examples/harness_repl.rs": 15,
     "crates/jcode-plan/src/dag/ops.rs": 1,
