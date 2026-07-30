@@ -117,10 +117,15 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         _ => heading_color(),
                     };
 
+                    let underline = matches!(heading_level, Some(1) | Some(2));
                     let heading_spans: Vec<Span<'static>> = current_spans
                         .drain(..)
                         .map(|s| {
-                            Span::styled(s.content.to_string(), Style::default().fg(color).bold())
+                            let mut style = Style::default().fg(color).bold();
+                            if underline {
+                                style = style.underlined();
+                            }
+                            Span::styled(s.content.to_string(), style)
                         })
                         .collect();
                     lines.push(Line::from(heading_spans));

@@ -102,6 +102,13 @@ fn styled_span_to_span(span: &StyledSpan, kind: &BlockKind) -> Span<'static> {
     if span.attrs.underline {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
+    // H1/H2 render underlined to stand apart from body text (terminal cells
+    // cannot change font size). Keep in sync with the legacy renderers.
+    if span.role == StyleRole::Strong
+        && matches!(kind, BlockKind::Heading { level: 1 | 2 })
+    {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
 
     Span::styled(span.text.clone(), style)
 }
