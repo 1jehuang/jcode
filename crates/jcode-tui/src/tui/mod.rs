@@ -45,6 +45,7 @@ pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
 mod stream_buffer;
+pub mod terminal_setup;
 pub mod test_harness;
 pub mod theme_detect;
 mod ui;

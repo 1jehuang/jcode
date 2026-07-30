@@ -1391,6 +1391,9 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     if let Some(interleave_msg) = app.interleave_message.take() {
+        // Carry the staged attachments through. A local revert of #627 had this
+        // passing `vec![]`, which silently dropped every image on an interleaved
+        // send while still compiling, so the comment marks why the take matters.
         let interleave_images = std::mem::take(&mut app.interleave_images);
         if !interleave_msg.trim().is_empty() {
             app.push_display_message(DisplayMessage {

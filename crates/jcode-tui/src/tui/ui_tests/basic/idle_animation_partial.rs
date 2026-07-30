@@ -387,3 +387,79 @@ fn the_animation_can_still_start_from_a_state_with_nothing_published() {
         "with the animation on screen again the loop must resume animation ticks"
     );
 }
+
+/// The optimized animation-only repaint must be byte-identical to the naive
+/// "clone the whole previous frame, then re-render the animation over it"
+/// version, for every tick in a sequence.
+///
+/// The optimization is a correctness risk, not just a speed change: it stops
+/// copying the cells outside the animated rectangle, betting that they are
+/// already correct. If that bet is ever wrong the user sees stale glyphs, which
+/// is exactly the kind of bug a single-frame render test cannot catch. So this
+/// simulates the real sequence (seed once, then copy only the animated rows on
+/// later ticks) and compares against a full clone every tick.
+///
+/// Why it matters: the naive version copied the whole screen twice per tick,
+/// ~920k cell copies a second at 60fps on a 160x48 terminal to update ~2200
+/// cells. Measured on a real session, the animation cost 0.257 CPU cores over an
+/// idle client and nearly doubled keystroke latency.
+#[test]
+fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
+    use ratatui::layout::Rect;
+
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+
+    for (width, height) in [(160u16, 48u16), (100, 40), (80, 24)] {
+        let idle = idle_animation_state(1.0);
+        let terminal = render_full(&idle, width, height);
+        let base = terminal.backend().buffer().clone();
+        let Some(area) = crate::tui::ui::last_idle_animation_area() else {
+            continue;
+        };
+
+        // `optimized` mirrors the real path: one full seed, then per-tick copies
+        // of just the animated rectangle. `naive` re-clones everything each tick.
+        let mut optimized = base.clone();
+        let mut naive;
+        let mut seeded = false;
+
+        for step in 0..8 {
+            let elapsed = 1.0 + step as f32 * 0.05;
+
+            if seeded {
+                for y in area.top()..area.bottom() {
+                    for x in area.left()..area.right() {
+                        optimized[(x, y)] = base[(x, y)].clone();
+                    }
+                }
+            } else {
+                optimized = base.clone();
+                seeded = true;
+            }
+            crate::tui::ui::render_idle_animation_into(&mut optimized, area, elapsed);
+
+            naive = base.clone();
+            crate::tui::ui::render_idle_animation_into(&mut naive, area, elapsed);
+
+            assert_eq!(
+                optimized, naive,
+                "at {width}x{height} tick {step}: copying only the animated rows \
+                 diverged from a full clone, so the optimization would leave \
+                 stale cells on screen"
+            );
+        }
+
+        // A degenerate rectangle must not panic or write outside the buffer.
+        let mut edge = base.clone();
+        crate::tui::ui::render_idle_animation_into(
+            &mut edge,
+            Rect::new(area.x, area.y, 0, 0),
+            1.0,
+        );
+        assert_eq!(
+            edge, base,
+            "an empty animation rectangle must leave the frame untouched"
+        );
+    }
+}

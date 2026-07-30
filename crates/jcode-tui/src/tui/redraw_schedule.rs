@@ -299,6 +299,34 @@ fn fps_to_duration(fps: u32) -> Duration {
     Duration::from_millis((1000 / fps.max(1)) as u64)
 }
 
+/// Frame rate cap for the purely decorative idle animation.
+///
+/// Measured on a real session (`scripts/sweep_animation_fps.py`), the cost is
+/// linear in frame rate while the perceived motion is not:
+///
+/// | fps | CPU over idle baseline |
+/// |-----|------------------------|
+/// | 60  | 0.224 cores            |
+/// | 30  | 0.104 cores            |
+/// | 20  | 0.080 cores            |
+///
+/// Each animation frame is a coarse glyph change in a 3x3 subpixel grid, so 30fps
+/// already saturates what a terminal can express, and halving the frame rate
+/// halves the cost of a decoration that exists to look pleasant while idle.
+/// Burning a fifth of a core on it is not a good trade on a laptop.
+///
+/// This caps only the decorative animation. Functional motion (status spinners,
+/// scroll/tail-follow catch-up, streaming output) keeps the configured
+/// `animation_fps`, because there smoothness is the feature. Users who
+/// explicitly configure a *lower* `animation_fps` still get their value.
+const DECORATIVE_ANIMATION_FPS_CAP: u32 = 30;
+
+/// Cadence for the decorative idle animation: the configured animation rate,
+/// capped by [`DECORATIVE_ANIMATION_FPS_CAP`].
+fn decorative_animation_interval(policy: &crate::perf::TuiPerfPolicy) -> Duration {
+    fps_to_duration(policy.animation_fps.min(DECORATIVE_ANIMATION_FPS_CAP))
+}
+
 /// Chrome that is text-only and changes on a human timescale: the status notice,
 /// the learn hint, and the notification line.
 ///
@@ -423,7 +451,10 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         }
         return match policy.tier {
             crate::perf::PerformanceTier::Minimal => fast_interval,
-            _ => animation_interval,
+            // Decorative only: capped, because the cost is linear in frame rate
+            // and the perceived smoothness is not. See
+            // `DECORATIVE_ANIMATION_FPS_CAP`.
+            _ => decorative_animation_interval(policy),
         };
     }
 
