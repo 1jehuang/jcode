@@ -159,7 +159,11 @@ impl RenderState {
     /// because a frame's spans only mean something together: the build span is
     /// measured by the caller around `build_scene`, and a GPU number without
     /// the build number beside it cannot say which half is slow.
-    pub fn render(&mut self, scene: &Scene, meter: &mut crate::frame_meter::FrameMeter) -> Result<()> {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        meter: &mut crate::frame_meter::FrameMeter,
+    ) -> Result<()> {
         meter.start();
         let (width, height) = self.size();
         self.renderer

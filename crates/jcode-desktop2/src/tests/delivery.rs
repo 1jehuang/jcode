@@ -174,7 +174,9 @@ fn an_acknowledged_card_visibly_moves() {
         let from = ((frame.left - 14.0) * s).round().max(0.0) as u32;
         let to = ((frame.left + 14.0) * s).round() as u32;
         let top = (frame.body_top * s).round() as u32;
-        let bottom = (frame.body_bottom * s).round().min(f64::from(rendered.height - 1)) as u32;
+        let bottom = (frame.body_bottom * s)
+            .round()
+            .min(f64::from(rendered.height - 1)) as u32;
         for y in top..=bottom {
             let page = rendered.luma(from, y);
             if let Some(x) = (from..to).find(|x| rendered.luma(*x, y) < page - 0.01) {
