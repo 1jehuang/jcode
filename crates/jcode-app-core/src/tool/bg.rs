@@ -462,7 +462,7 @@ impl Tool for BgTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background tasks. Prefer action='wait' over polling or sleeping. Use action='tail' or output with tail_lines for logs, action='delivery' to change notify/wake behavior, and JCODE_CHECKPOINT/JCODE_PROGRESS from background commands for reliable wakeups."
+        "Manage background tasks. Prefer action='wait' over polling or sleeping."
     }
 
     fn parameters_schema(&self) -> Value {

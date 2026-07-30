@@ -442,6 +442,41 @@ async fn print_tool_definition_token_report() {
     }
 }
 
+/// Tool descriptions are always-on prompt cost, so they are capped at ~20
+/// estimated tokens. Behavioral guidance belongs in parameter descriptions.
+/// Exemptions must be justified inline.
+#[tokio::test]
+async fn tool_descriptions_stay_under_token_cap() {
+    const DESCRIPTION_TOKEN_CAP: usize = 20;
+    // discover_tools keeps a deliberate second sentence disclosing that catalog
+    // entries are vetted/partnered integrations.
+    // swarm appends the user-tunable swarm-prompt.md by design.
+    const EXEMPT: &[&str] = &["discover_tools", "swarm"];
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let over_cap: Vec<String> = registry
+        .definitions(None)
+        .await
+        .into_iter()
+        .filter(|def| !EXEMPT.contains(&def.name.as_str()))
+        .filter(|def| def.description_token_estimate() > DESCRIPTION_TOKEN_CAP)
+        .map(|def| {
+            format!(
+                "{} (~{} tokens): {}",
+                def.name,
+                def.description_token_estimate(),
+                def.description
+            )
+        })
+        .collect();
+    assert!(
+        over_cap.is_empty(),
+        "tool descriptions over the {DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
+        over_cap.join("\n")
+    );
+}
+
 fn schema_type_includes(schema: &Value, expected: &str) -> bool {
     match schema.get("type") {
         Some(Value::String(value)) => value == expected,

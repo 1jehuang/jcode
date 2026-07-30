@@ -294,7 +294,7 @@ impl Tool for SessionSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search past chat sessions. Current session, tool-only messages, and system reminders are hidden by default."
+        "Search past chat sessions. Current session and tool noise hidden by default."
     }
 
     fn parameters_schema(&self) -> Value {

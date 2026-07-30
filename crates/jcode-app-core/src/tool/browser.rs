@@ -18,7 +18,7 @@ impl BrowserTool {
 }
 
 fn browser_tool_description_text() -> &'static str {
-    "Control the browser. Use action='status' to check whether the browser bridge is ready. Use action='setup' only for first-time install or repair when status shows the bridge is not already ready. Do not run setup before every browser task."
+    "Control the browser. Check action='status' first; run setup only if not ready."
 }
 
 #[derive(Debug, Deserialize)]
