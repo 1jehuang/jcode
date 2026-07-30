@@ -461,6 +461,30 @@ pub fn remap_named_with(palette: &Palette, color: Color) -> Color {
 /// beyond this the literal is a genuinely different color and is left alone.
 const FAMILY_RADIUS: f32 = 0.16;
 
+/// Which role a rendered color belongs to, if any.
+///
+/// This is the same family match [`remap_literal_with`] uses, exposed so tooling
+/// can attribute *rendered frames* back to roles. Measuring which roles actually
+/// cover and touch each other on screen is what
+/// [`crate::harmony::graph`] needs, and hard-coding that layout by hand would
+/// encode an assumption about the UI instead of an observation of it.
+pub fn role_for_rendered(color: Color) -> Option<Role> {
+    let rgb = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => crate::color::indexed_to_rgb(index),
+        _ => return None,
+    };
+    let source = crate::harmony::Oklab::from_rgb(rgb);
+    let mut best: Option<(f32, Role)> = None;
+    for role in ALL_ROLES.iter().copied() {
+        let distance = source.distance(crate::harmony::Oklab::from_rgb(role.default_rgb()));
+        if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
+            best = Some((distance, role));
+        }
+    }
+    best.map(|(_, role)| role)
+}
+
 /// Palette-explicit variant of [`remap_literal`], for tests and tooling.
 pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
     let source = crate::harmony::Oklab::from_rgb(rgb);
