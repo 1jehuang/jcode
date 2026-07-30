@@ -1,0 +1,13 @@
+{
+  "version": "0.64.0",
+  "date": "2026-07-30",
+  "title": "View-only clear and cross-session prompt history",
+  "highlights": [
+    "Cmd+K (or /cls) clears the chat view while the model keeps its full context, unlike /clear which starts a fresh session",
+    "Ctrl+R opens a reverse search over your prompt history across all sessions"
+  ],
+  "improvements": [
+    "/cls and /clear-view are listed in /help and command suggestions, and Cmd+Shift+K stays reserved for line scrolling"
+  ],
+  "fixes": []
+}
