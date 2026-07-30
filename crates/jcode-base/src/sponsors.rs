@@ -33,8 +33,9 @@ pub mod provenance;
 pub const DISCOVERY_DISCLOSURE_TAG: &str = "(partner discovery disclosure)";
 
 /// First-use-per-session disclosure detail rendered inline with discovery.
-pub const DISCOVERY_DISCLOSURE_NOTICE: &str = "Jcode partners with tool providers to make their \
-     tools discoverable. Learn more: https://jcode.sh/discovery-tools";
+pub const DISCOVERY_DISCLOSURE_NOTICE: &str = "Editor's picks are vetted by Jcode maintainers. \
+     Some providers share revenue with Jcode; this never influences selection. Learn more: \
+     https://jcode.sh/discovery-tools";
 
 /// Categories in which discoverable tools exist. Shipped as a constant so the
 /// tool schema never depends on the network. The tools within each category are
