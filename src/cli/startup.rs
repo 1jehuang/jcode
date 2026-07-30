@@ -310,25 +310,41 @@ fn spawn_background_update_check(args: &Args) {
             if let Some(update_available) = hot_exec::check_for_updates()
                 && update_available
             {
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                    current: jcode_build_meta::version().to_string(),
-                    latest: "latest source".to_string(),
-                }));
-                if auto_update {
-                    logging::info("Update available - auto-updating...");
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
-                        version: "latest source".to_string(),
-                    }));
-                    if let Err(e) = hot_exec::run_auto_update() {
-                        Bus::global()
-                            .publish(BusEvent::UpdateStatus(UpdateStatus::Error(e.to_string())));
-                        logging::error(&format!(
-                            "Auto-update failed: {}. Continuing with current version.",
-                            e
-                        ));
-                    }
+                // A checkout with local commits can never fast-forward, so the
+                // pull below would always fail and surface a noisy "Update
+                // diverged. Press Ctrl+Y..." card in every new session.
+                // Developers with local work expect divergence; log it once
+                // and stay quiet in the UI (no Available/Error cards).
+                if hot_exec::local_commits_ahead_of_upstream() == Some(true) {
+                    logging::info(
+                        "Auto-update skipped: local commits are ahead of upstream (diverged). \
+                         Merge or rebase manually when ready.",
+                    );
+                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
                 } else {
-                    logging::info("Update available! Run `jcode update` or `/reload` to update.");
+                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
+                        current: jcode_build_meta::version().to_string(),
+                        latest: "latest source".to_string(),
+                    }));
+                    if auto_update {
+                        logging::info("Update available - auto-updating...");
+                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
+                            version: "latest source".to_string(),
+                        }));
+                        if let Err(e) = hot_exec::run_auto_update() {
+                            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(
+                                e.to_string(),
+                            )));
+                            logging::error(&format!(
+                                "Auto-update failed: {}. Continuing with current version.",
+                                e
+                            ));
+                        }
+                    } else {
+                        logging::info(
+                            "Update available! Run `jcode update` or `/reload` to update.",
+                        );
+                    }
                 }
             } else {
                 Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
