@@ -14,6 +14,19 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+/// Pin the performance tier before reading any redraw policy.
+///
+/// `redraw_interval` and `periodic_redraw_required` consult
+/// `perf::tui_policy()`, and the auto-detected tier depends on host load: under a
+/// parallel cargo build the host can look Reduced/Minimal, where the decorative
+/// animation is legitimately disabled. `pin_full_profile_for_tests` is
+/// first-initialization-wins, so a test that reads the policy without pinning
+/// inherits whatever another test happened to establish. That is exactly how these
+/// tests flaked once in a full parallel suite while passing in isolation.
+fn pin_full_tier() {
+    crate::perf::pin_full_profile_for_tests();
+}
+
 fn idle_animation_state(anim_elapsed: f32) -> TestState {
     TestState {
         anim_elapsed,
@@ -146,6 +159,7 @@ fn idle_animation_is_excluded_from_the_full_frame_redraw_signal() {
     // `handle_tick` uses the excluding variant so an animation-only tick does
     // not force a full frame; the animation still drives the tick cadence.
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     let idle = idle_animation_state(1.0);
@@ -255,6 +269,7 @@ fn published_rectangle_round_trips_through_the_shared_slot() {
 #[test]
 fn a_full_screen_overlay_stops_the_decorative_animation_cadence() {
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     // Baseline: this screen really is an animating idle screen once drawn, so a
@@ -319,6 +334,7 @@ fn a_full_screen_overlay_stops_the_decorative_animation_cadence() {
 #[test]
 fn animation_cadence_implies_the_renderer_published_animated_rows() {
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     let screens: Vec<(&str, TestState)> = vec![
@@ -364,6 +380,7 @@ fn animation_cadence_implies_the_renderer_published_animated_rows() {
 #[test]
 fn the_animation_can_still_start_from_a_state_with_nothing_published() {
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     // Simulate "an overlay was up, so nothing is published".
@@ -480,6 +497,11 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
 /// whole optimization rests on cells outside the rectangle staying untouched.
 #[test]
 fn copy_cells_in_copies_exactly_the_rectangle_and_nothing_else() {
+    // Pure buffer math, but take the render lock anyway: every other test in this
+    // file holds it, and an unlocked test here would be the one place a future
+    // edit could touch shared render state without serializing.
+    let _lock = viewport_snapshot_test_lock();
+
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
