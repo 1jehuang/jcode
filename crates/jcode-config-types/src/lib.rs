@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub mod features;
 pub mod keybindings;
+pub use features::FeatureConfig;
 pub use keybindings::{
     KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,
     KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding, default_binding_or,
@@ -1169,46 +1171,6 @@ impl DisplayConfig {
     /// Whether reasoning content should be generated/requested at all.
     pub fn reasoning_enabled(&self) -> bool {
         !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
-    }
-}
-
-/// Runtime feature toggles
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FeatureConfig {
-    /// Enable memory retrieval/extraction features (default: true)
-    pub memory: bool,
-    /// Enable swarm coordination features (default: true)
-    pub swarm: bool,
-    /// Enable Mermaid rendering and Mermaid-specific model guidance (default: true)
-    pub mermaid: bool,
-    /// Inject timestamps into user messages and tool results sent to the model (default: true)
-    pub message_timestamps: bool,
-    /// Persist auto-recalled memory injections into normal session history instead of sending
-    /// them as request-only ephemeral suffix messages (default: false)
-    pub persist_memory_injections: bool,
-    /// Surface an in-chat system message whenever a request misses the KV cache
-    /// for a harness-caused (avoidable) reason: the system prompt, tool set, or
-    /// message prefix changed without the conversation legitimately growing.
-    /// These should essentially never happen, so the notice acts as a loud alarm
-    /// that something in the harness silently invalidated the prefix cache
-    /// (default: true).
-    pub kv_cache_miss_notices: bool,
-    /// Update channel: "stable" (releases only) or "main" (latest commits)
-    pub update_channel: UpdateChannel,
-}
-
-impl Default for FeatureConfig {
-    fn default() -> Self {
-        Self {
-            memory: true,
-            swarm: true,
-            mermaid: true,
-            message_timestamps: true,
-            persist_memory_injections: false,
-            kv_cache_miss_notices: true,
-            update_channel: UpdateChannel::default(),
-        }
     }
 }
 

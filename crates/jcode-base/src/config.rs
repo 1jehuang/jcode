@@ -101,6 +101,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_JADE_RELAY_TOKEN_ID",
     "JCODE_JADE_RELAY_USER_ID",
     "JCODE_KV_CACHE_MISS_NOTICES",
+    "JCODE_AUTO_POKE",
     "JCODE_LATEX_RENDERING",
     "JCODE_MARKDOWN_SPACING",
     "JCODE_MEMORY_EMBEDDING_BACKEND",
@@ -705,6 +706,10 @@ mod env_overrides;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_auto_poke_tests.rs"]
+mod auto_poke_tests;
 
 /// Whether partner discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.

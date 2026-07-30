@@ -324,6 +324,11 @@ impl Config {
                 self.features.kv_cache_miss_notices = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_AUTO_POKE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.auto_poke = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL")
             && let Some(channel) = UpdateChannel::parse(&v)
         {

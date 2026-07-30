@@ -240,6 +240,11 @@ kv_cache_miss_notices = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
+# Whether auto-poke starts enabled in a new session. Auto-poke sends automatic
+# follow-up messages while todos are still incomplete. `/poke on` and
+# `/poke off` still override this for the running session; this only sets the
+# value each session starts with.
+auto_poke = true
 
 [websearch]
 # Preferred websearch engine: "duckduckgo", "bing", or "searxng".
