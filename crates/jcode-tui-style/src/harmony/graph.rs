@@ -110,6 +110,37 @@ impl Topology {
     }
 }
 
+/// The topology measured from jcode's own rendered frames.
+///
+/// Regenerate with
+/// `cargo test -p jcode-tui --lib print_measured_palette_topology -- --ignored --nocapture`
+/// after UI changes that shift how much area each role paints.
+///
+/// The distribution is the point: `dim` covers 77% of painted cells while every
+/// semantic role covers under 1%. Any scoring that weights roles equally is
+/// therefore describing a screen nobody sees.
+pub fn default_topology() -> Topology {
+    Topology::from_counts(
+        [
+            (Role::Dim, 1004),
+            (Role::HeaderName, 137),
+            (Role::System, 63),
+            (Role::UserText, 42),
+            (Role::Pending, 41),
+            (Role::User, 9),
+            (Role::Error, 3),
+            (Role::Warning, 1),
+        ],
+        [
+            (Role::Dim, Role::HeaderName, 10),
+            (Role::Error, Role::User, 3),
+            (Role::HeaderName, Role::UserText, 3),
+            (Role::Pending, Role::User, 2),
+            (Role::User, Role::Warning, 1),
+        ],
+    )
+}
+
 /// How concentrated the *visible* color is around a single hue, 0.0 to 1.0.
 ///
 /// This is the circular mean resultant length over chromatic roles, weighted by
@@ -145,6 +176,25 @@ pub fn hue_concentration(palette: &Palette, topology: &Topology) -> f32 {
 
 /// Below this chroma a color reads as gray and carries no usable hue.
 const NEUTRAL_CHROMA: f32 = 0.04;
+
+/// Area-weighted mean chroma: how colorful the screen actually is.
+///
+/// Pairs with [`hue_concentration`] to tell apart two very different palettes
+/// that both concentrate on one hue. Dracula measures 0.94 concentration but
+/// 0.091 area chroma, so its dominant color is a *saturated* violet and the
+/// screen reads as deliberately tinted. A generated olive palette measured 0.93
+/// concentration with 0.022 area chroma, so its dominant color was a desaturated
+/// olive-gray and the screen read as a drab wash. Concentration alone cannot
+/// distinguish those; concentration plus chroma can.
+pub fn area_chroma(palette: &Palette, topology: &Topology) -> f32 {
+    let mut chroma = 0.0f32;
+    let mut weight = 0.0f32;
+    for node in &topology.nodes {
+        chroma += Oklab::from_rgb(palette.rgb(node.role)).chroma() * node.cells as f32;
+        weight += node.cells as f32;
+    }
+    if weight <= 0.0 { 0.0 } else { chroma / weight }
+}
 
 /// Perceptual separation between roles that actually touch on screen, weighted
 /// by how often they touch.
