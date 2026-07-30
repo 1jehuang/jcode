@@ -276,6 +276,9 @@ async fn test_set_model_clears_persistent_ws_state() {
 }
 
 #[tokio::test]
+// The test-env lock is intentionally held across awaits to serialize
+// process-global env access with other tests (see comment below).
+#[allow(clippy::await_holding_lock)]
 async fn test_switching_to_https_clears_persistent_ws_state() {
     // Serialize with the tests that set JCODE_OPENAI_MODEL via EnvVarGuard:
     // provider construction reads that process-global env var, so an
