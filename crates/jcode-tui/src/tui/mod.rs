@@ -308,6 +308,11 @@ pub trait TuiState {
     fn command_suggestion_selected(&self) -> usize {
         0
     }
+    /// Snapshot of the Ctrl+R reverse prompt-history search overlay, or None
+    /// when the overlay is closed.
+    fn prompt_history_search(&self) -> Option<PromptHistorySearchView> {
+        None
+    }
     fn active_skill(&self) -> Option<String>;
     fn subagent_status(&self) -> Option<String>;
     /// Progress of a currently-running batch tool call.
@@ -872,6 +877,15 @@ pub enum PickerKind {
     Account,
     Login,
     Usage,
+}
+
+/// Render snapshot of the Ctrl+R reverse prompt-history search overlay.
+/// `matches` are single-line previews, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptHistorySearchView {
+    pub query: String,
+    pub matches: Vec<String>,
+    pub selected: usize,
 }
 
 /// What the first-run onboarding welcome screen should render in its body,

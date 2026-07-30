@@ -3408,6 +3408,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // instead of reserving layout height and shoving everything around.
     input_ui::draw_command_suggestions_overlay(frame, app, chunks[7]);
 
+    // Ctrl+R reverse prompt-history search overlay (drawn after the command
+    // palette so it wins when both could be visible).
+    input_ui::draw_prompt_history_search_overlay(frame, app, chunks[7]);
+
     // Observe the rendered messages area for the anchor-stability (smoothness)
     // report. Runs on the final buffer so it sees exactly what the user sees.
     smoothness::observe_frame(

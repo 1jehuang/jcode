@@ -765,6 +765,10 @@ impl crate::tui::TuiState for App {
         self.command_suggestion_selected
     }
 
+    fn prompt_history_search(&self) -> Option<crate::tui::PromptHistorySearchView> {
+        self.prompt_history_search_view()
+    }
+
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
     }
