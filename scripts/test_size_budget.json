@@ -1,12 +1,12 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent_tests.rs": 1515,
+    "crates/jcode-app-core/src/agent_tests.rs": 1585,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1232,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1393,
     "crates/jcode-app-core/src/server/swarm_persistence_tests.rs": 1232,
-    "crates/jcode-app-core/src/tool/communicate_tests.rs": 1782,
+    "crates/jcode-app-core/src/tool/communicate_tests.rs": 1776,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1440,
     "crates/jcode-base/src/config_tests.rs": 1278,
     "crates/jcode-base/src/live_tests.rs": 3087,
@@ -33,7 +33,7 @@
     "crates/jcode-tui/src/tui/info_widget_tests.rs": 1810,
     "crates/jcode-tui/src/tui/session_picker/loading_tests.rs": 1268,
     "crates/jcode-tui/src/tui/session_picker_tests.rs": 2453,
-    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2909,
+    "crates/jcode-tui/src/tui/ui_messages/tests.rs": 2892,
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1285,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1352,
     "tests/e2e/test_support/mod.rs": 1424
