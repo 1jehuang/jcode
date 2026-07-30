@@ -198,3 +198,57 @@ fn test_submit_input_records_prompt_history() {
         &["hello world".to_string()]
     );
 }
+
+#[test]
+fn test_history_search_overlay_renders_matches_in_frame() {
+    // Create the app before taking the render lock: create_test_app acquires
+    // the same non-reentrant lock internally to clear render state.
+    let mut app = create_test_app();
+    let _lock = crate::tui::ui::render_state_test_lock();
+    app.persisted_prompt_history = Some(vec![
+        "refactor the parser".to_string(),
+        "add prompt history".to_string(),
+    ]);
+
+    app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.prompt_history_search.is_some());
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    terminal
+        .draw(|f| crate::tui::ui::draw(f, &app))
+        .expect("draw failed");
+    let rendered = buffer_to_text(&terminal);
+
+    assert!(
+        rendered.contains("history search"),
+        "overlay header missing from frame:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("add prompt history"),
+        "newest match missing from frame:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("refactor the parser"),
+        "older match missing from frame:\n{rendered}"
+    );
+
+    // Filter down to one match and re-render.
+    for c in "parser".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    terminal
+        .draw(|f| crate::tui::ui::draw(f, &app))
+        .expect("draw failed");
+    let rendered = buffer_to_text(&terminal);
+    assert!(
+        rendered.contains("refactor the parser"),
+        "filtered match missing from frame:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("add prompt history"),
+        "non-matching prompt should be filtered out:\n{rendered}"
+    );
+}
