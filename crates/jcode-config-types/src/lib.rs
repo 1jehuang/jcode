@@ -821,9 +821,7 @@ pub struct AutoReviewConfig {
 /// Integration discovery makes third-party developer tools discoverable to
 /// the agent via a `discover_tools` tool backed by a hosted directory. Some
 /// providers may share revenue with Jcode when a referred user becomes a
-/// customer, but partnership status never influences recommendations. Each
-/// session's first use of `discover_tools` shows a concise disclosure with a
-/// learn-more link.
+/// customer, but partnership status never influences recommendations.
 /// See <https://jcode.sh/discovery-tools>.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

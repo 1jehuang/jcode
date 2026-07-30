@@ -178,9 +178,9 @@ fn record_discovery_telemetry(
 /// the hosted integration directory.
 ///
 /// Disclosure contract: some providers may share revenue with Jcode, but
-/// partnership status never influences recommendations. Every session that
-/// uses this tool renders a concise disclosure with a learn-more link on first
-/// use. The request carries the category, a short search query, a reason string,
+/// partnership status never influences recommendations. The policy is
+/// disclosed in the tool schema and at <https://jcode.sh/discovery-tools>.
+/// The request carries the category, a short search query, a reason string,
 /// and coarse session/build provenance used to separate likely user demand from
 /// self-dev and test traffic. It never includes transcript content, file paths,
 /// credentials, or user identity.
@@ -902,10 +902,7 @@ impl Tool for DiscoverToolsTool {
                 reason_present,
             );
             return Ok(ToolOutput::new(rendered)
-                .with_title(format!(
-                    "{tool_name} {}",
-                    crate::sponsors::DISCOVERY_DISCLOSURE_TAG
-                ))
+                .with_title(tool_name.to_string())
                 .with_metadata(json!({
                     "sponsored_discovery": true,
                     "category": category,
@@ -983,11 +980,7 @@ impl Tool for DiscoverToolsTool {
         );
 
         Ok(ToolOutput::new(rendered)
-            .with_title(format!(
-                "{} {}",
-                category,
-                crate::sponsors::DISCOVERY_DISCLOSURE_TAG
-            ))
+            .with_title(category.to_string())
             .with_metadata(json!({
                 "sponsored_discovery": true,
                 "category": category,
@@ -2100,10 +2093,7 @@ mod tests {
                 .contains("recommendations must be based only on fit")
         );
         let title = output.title.unwrap();
-        assert!(
-            title.contains("(integration discovery disclosure)"),
-            "{title}"
-        );
+        assert_eq!(title, "payments", "{title}");
         let meta = output.metadata.unwrap();
         assert_eq!(meta["sponsored_discovery"], true);
 

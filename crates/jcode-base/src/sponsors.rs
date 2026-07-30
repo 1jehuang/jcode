@@ -29,14 +29,6 @@ pub const DISCOVERY_PARTNERS_URL: &str = "https://jcode.sh/discovery-tools";
 /// as a result of a discovery listing.
 pub mod provenance;
 
-/// Internal marker used to render the first discovery disclosure in a session.
-pub const DISCOVERY_DISCLOSURE_TAG: &str = "(integration discovery disclosure)";
-
-/// First-use-per-session disclosure detail rendered inline with discovery.
-pub const DISCOVERY_DISCLOSURE_NOTICE: &str = "Listings are vetted by Jcode maintainers. \
-     Some providers share revenue with Jcode; this never influences selection. Learn more: \
-     https://jcode.sh/discovery-tools";
-
 /// Categories in which discoverable tools exist. Shipped as a constant so the
 /// tool schema never depends on the network. The tools within each category are
 /// served by the discovery endpoint.
