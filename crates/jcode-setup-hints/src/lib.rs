@@ -1168,12 +1168,24 @@ pub enum MacHotkeyAction {
     Install,
     /// Reinstall because the configured listener predates the current version.
     Migrate,
+    /// Config opted out (`[launch_hotkeys] enabled = false`): unload and
+    /// remove any installed LaunchAgent instead of (re)installing it.
+    Disable,
     /// Nothing to do.
     None,
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn mac_hotkey_action_for_state(state: &SetupHintsState) -> MacHotkeyAction {
+fn mac_hotkey_action_for_state(
+    state: &SetupHintsState,
+    hotkeys_enabled: Option<bool>,
+) -> MacHotkeyAction {
+    // `enabled = false` must win on macOS too, not just Linux/Windows
+    // (issue #670): otherwise the LaunchAgent keeps the chord registered
+    // until the user manually runs `launchctl unload`.
+    if hotkeys_enabled == Some(false) {
+        return MacHotkeyAction::Disable;
+    }
     if !state.hotkey_configured && !state.hotkey_dismissed {
         MacHotkeyAction::Install
     } else if state.hotkey_configured && state.hotkey_listener_version < HOTKEY_LISTENER_VERSION {
@@ -1209,7 +1221,7 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
 
     #[cfg(target_os = "macos")]
     {
-        match mac_hotkey_action_for_state(&state) {
+        match mac_hotkey_action_for_state(&state, load_launch_hotkeys_config().enabled) {
             MacHotkeyAction::Install => {
                 if let Err(err) = auto_install_macos_hotkey_listener(&mut state) {
                     jcode_logging::warn(&format!(
@@ -1224,6 +1236,13 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
                 if let Err(err) = migrate_macos_hotkey_listener(&mut state) {
                     jcode_logging::warn(&format!(
                         "failed to migrate macOS Cmd+; hotkey listener: {err}"
+                    ));
+                }
+            }
+            MacHotkeyAction::Disable => {
+                if let Err(err) = uninstall_macos_hotkey_listener() {
+                    jcode_logging::warn(&format!(
+                        "failed to remove disabled macOS hotkey listener: {err}"
                     ));
                 }
             }
@@ -2496,6 +2515,23 @@ fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
     Ok(())
 }
 
+/// Unload and remove the hotkey LaunchAgent when the user disabled launch
+/// hotkeys in config (`[launch_hotkeys] enabled = false`, issue #670).
+/// Idempotent: a missing plist is treated as already-uninstalled.
+#[cfg(target_os = "macos")]
+fn uninstall_macos_hotkey_listener() -> Result<()> {
+    let plist_path = mac_hotkey_launch_agent_path()?;
+    if !plist_path.exists() {
+        return Ok(());
+    }
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", plist_path.to_string_lossy().as_ref()])
+        .status();
+    std::fs::remove_file(&plist_path).context("failed to remove jcode hotkey LaunchAgent plist")?;
+    jcode_logging::info("Removed macOS launch-hotkey LaunchAgent (launch_hotkeys.enabled = false)");
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn auto_install_macos_hotkey_listener(state: &mut SetupHintsState) -> Result<()> {
     let terminal = install_macos_hotkey_listener(None)?;
@@ -2545,6 +2581,16 @@ pub fn reinstall_launch_hotkeys_after_config_change() {
     {
         let state = SetupHintsState::load();
         if !state.hotkey_configured {
+            return;
+        }
+        if load_launch_hotkeys_config().enabled == Some(false) {
+            // Explicit opt-out: tear the LaunchAgent down instead of
+            // rewriting it (issue #670).
+            if let Err(err) = uninstall_macos_hotkey_listener() {
+                jcode_logging::warn(&format!(
+                    "failed to remove disabled macOS hotkey listener: {err}"
+                ));
+            }
             return;
         }
         let preferred = load_preferred_macos_terminal();
