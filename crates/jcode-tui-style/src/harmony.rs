@@ -29,7 +29,9 @@
 use crate::palette::{ALL_ROLES, Palette, Role, to_hex};
 
 mod generate;
+pub mod graph;
 pub use generate::generate_from_seed;
+pub use graph::{Topology, adjacent_separation, hue_concentration};
 
 /// A color in the Oklab perceptual space.
 ///

@@ -520,6 +520,8 @@ mod diagrams;
 mod inline_picker;
 #[path = "onboarding.rs"]
 mod onboarding;
+#[path = "palette_topology.rs"]
+mod palette_topology;
 #[path = "prepare.rs"]
 mod prepared_messages_tests;
 #[path = "rendering.rs"]

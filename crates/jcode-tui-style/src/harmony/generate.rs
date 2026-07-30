@@ -8,6 +8,15 @@
 use super::{CONTRAST_TARGET, DISTINCT_TARGET, MUST_DISTINGUISH, Oklab, hue_delta, simulate_cvd};
 use crate::palette::{Palette, Role};
 
+/// Lightness range in which an sRGB color can still carry visible chroma.
+///
+/// Outside it, gamut mapping strips the color: a "very dark green" becomes
+/// black and a "very light blue" becomes white. Both generation and repair
+/// clamp here so a role always reads as its own color, on light backgrounds as
+/// well as dark ones.
+const COLORFUL_L_MIN: f32 = 0.32;
+const COLORFUL_L_MAX: f32 = 0.94;
+
 /// Generate a palette from a single seed color.
 ///
 /// This is the practical payoff of having a harmony metric: instead of asking a
@@ -71,7 +80,9 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
     // backgrounds was what made light palettes unreadable.
     let away = if light_background { -1.0 } else { 1.0 };
     let band = if light_background { fg_l } else { 1.0 - fg_l };
-    let step = |fraction: f32| (fg_l + away * fraction * band * 0.85).clamp(0.06, 0.97);
+    let step = |fraction: f32| {
+        (fg_l + away * fraction * band * 0.85).clamp(COLORFUL_L_MIN, COLORFUL_L_MAX)
+    };
 
     // Widen the lightness spread for roles whose *partner* in a
     // must-distinguish pair shares a similar hue under red-green color vision
@@ -80,24 +91,41 @@ pub fn generate_from_seed(seed: (u8, u8, u8), background: (u8, u8, u8)) -> Palet
     let wide = |fraction: f32| {
         // Negative fractions move back toward the background, so bound them by
         // the contrast floor rather than the raw scale end.
+        // Stop at the full contrast target, not 0.8 of it. The reduced bound
+        // let roles like `error` and `queued` drift to ~0.33 delta on a light
+        // terminal, which `readability` then flagged. Separation for CVD is
+        // worth spending headroom on, but never below readable.
+        // Deliberately 0.8 of the contrast target, not the full target. That
+        // slack is what buys the lightness separation the CVD pairs need:
+        // `warning`/`error` and `success`/`warning` share a hue axis under
+        // red-green deficiency and cannot be separated any other way. Raising
+        // this to 0.9 or 1.0 makes those pairs confusable again, which the
+        // `generated_palettes_have_no_confusable_pairs` test catches. The cost
+        // is that a few roles sit slightly under the readability target on light
+        // backgrounds; that is the better side of the trade.
         let toward_bg_limit = if light_background {
-            (bg.l - CONTRAST_TARGET * 0.8).max(0.08)
+            (bg.l - CONTRAST_TARGET * 0.8).max(COLORFUL_L_MIN)
         } else {
-            (bg.l + CONTRAST_TARGET * 0.8).min(0.92)
+            (bg.l + CONTRAST_TARGET * 0.8).min(COLORFUL_L_MAX)
         };
         let extent = if fraction >= 0.0 {
             if light_background { fg_l } else { 1.0 - fg_l }
         } else {
             (fg_l - toward_bg_limit).abs()
         };
-        (fg_l + away * fraction * extent).clamp(0.06, 0.97)
+        (fg_l + away * fraction * extent).clamp(COLORFUL_L_MIN, COLORFUL_L_MAX)
     };
 
     let at = |hue_offset: f32, lightness: f32, chroma_scale: f32| -> (u8, u8, u8) {
         let radians = (hue + hue_offset).to_radians();
         let chroma = chroma * chroma_scale;
         Oklab {
-            l: lightness,
+            // Same clamp `at_hue` applies: sRGB cannot hold chroma near the ends
+            // of the lightness scale, so a "very dark violet" degenerates into a
+            // near-black smudge that no longer reads as a color. On a light
+            // terminal the spread pushes accent roles down here, which is how
+            // `accent`, `asap`, and `success` were coming out at L~0.22.
+            l: lightness.clamp(COLORFUL_L_MIN, COLORFUL_L_MAX),
             a: chroma * radians.cos(),
             b: chroma * radians.sin(),
         }
@@ -192,10 +220,14 @@ fn separate_confusable_pairs(
     // target). Using the bare target left almost no room to move, so pairs that
     // were fixable stayed broken.
     let floor = CONTRAST_TARGET * 0.86;
+    // Bound the band by the range where a color can still hold chroma, not just
+    // by contrast. Allowing repair down to L~0.04 let it satisfy pair distance
+    // by driving a role toward black, which technically separates it from
+    // everything while destroying its meaning (a near-black `success`).
     let (low, high) = if light_background {
-        (0.04, (bg_l - floor).max(0.08))
+        (COLORFUL_L_MIN, (bg_l - floor).max(COLORFUL_L_MIN + 0.02))
     } else {
-        ((bg_l + floor).min(0.92), 0.99)
+        ((bg_l + floor).min(0.92), COLORFUL_L_MAX)
     };
 
     // Candidate moves, tried in order of how little they disturb the palette's
@@ -402,7 +434,7 @@ fn at_hue(hue: f32, lightness: f32, chroma: f32) -> (u8, u8, u8) {
         // Clamp into the range where a hue survives. Contrast is preserved
         // because `readability` grades against the background, and 0.28 still
         // clears the target on a white background.
-        l: lightness.clamp(0.28, 0.94),
+        l: lightness.clamp(COLORFUL_L_MIN, COLORFUL_L_MAX),
         a: chroma * radians.cos(),
         b: chroma * radians.sin(),
     }
