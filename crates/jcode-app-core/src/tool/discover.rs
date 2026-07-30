@@ -559,7 +559,7 @@ impl Tool for DiscoverToolsTool {
                 "action": {
                     "type": "string",
                     "enum": ["browse", "select", "suggest"],
-                    "description": "Discovery phase. Defaults to select when `tool` is set, otherwise browse. Use suggest only after a browse found no suitable catalog entry."
+                    "description": "Phase. Defaults to select when `tool` is set, else browse. Suggest only after browse fails."
                 },
                 "category": {
                     "type": "string",
@@ -570,13 +570,13 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": DISCOVERY_QUERY_MIN_CHARS,
                     "maxLength": DISCOVERY_QUERY_MAX_CHARS,
-                    "description": "Required capability summary. Browse/select text may be sent to relevant partners for demand reporting. Suggest text goes only to Jcode maintainers. Write a fresh summary instead of copying user text. Never include secrets, credentials, personal data, or private content."
+                    "description": "Capability summary. May be shared with partners; write fresh text, never secrets or personal data."
                 },
                 "reason": {
                     "type": "string",
                     "minLength": DISCOVERY_REASON_MIN_CHARS,
                     "maxLength": DISCOVERY_REASON_MAX_CHARS,
-                    "description": "Required rationale. For select, explain why the tool fits better than alternatives. For suggest, explain why browse results were unsuitable. Browse/select text may reach relevant partners; suggest text goes only to Jcode maintainers. Never include private data."
+                    "description": "Why the selection fits, or why browse results were unsuitable. Never include private data."
                 },
                 "tool": {
                     "type": "string",
@@ -585,7 +585,7 @@ impl Tool for DiscoverToolsTool {
                 "suggestion_kind": {
                     "type": "string",
                     "enum": ["known_product", "capability_gap"],
-                    "description": "Required for action=suggest. Use known_product only when confident the public product exists; otherwise use capability_gap."
+                    "description": "For suggest: known_product only when confident the public product exists, else capability_gap."
                 },
                 "product_name": {
                     "type": "string",
@@ -601,17 +601,17 @@ impl Tool for DiscoverToolsTool {
                 "gap_evidence": {
                     "type": "string",
                     "maxLength": 500,
-                    "description": "Optional concise explanation of which browse results were close and why they did not fit. Sent only to Jcode maintainers."
+                    "description": "Which browse results were close and why they did not fit. Maintainers only."
                 },
                 "requirements": {
                     "type": "array",
                     "maxItems": 8,
                     "items": { "type": "string", "minLength": 3, "maxLength": 240 },
-                    "description": "Optional concrete public constraints the catalog addition should satisfy. Sent only to Jcode maintainers."
+                    "description": "Constraints the catalog addition should satisfy. Maintainers only."
                 },
                 "prior_request_id": {
                     "type": "string",
-                    "description": "Required for action=suggest. Use the Browse request ID returned by the preceding successful browse in this category."
+                    "description": "For suggest: the request ID returned by the preceding browse in this category."
                 }
             }
         })
@@ -1596,10 +1596,9 @@ mod tests {
         );
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
-        assert!(schema.contains("Suggest text goes only to Jcode maintainers"));
-        assert!(schema.contains("instead of copying user text"));
-        assert!(schema.contains("explain why the tool fits better than alternatives"));
-        assert!(schema.contains("Never include secrets, credentials, personal data"));
+        assert!(schema.contains("May be shared with partners"));
+        assert!(schema.contains("never secrets or personal data"));
+        assert!(schema.contains("Why the selection fits"));
         assert!(schema.contains("known_product"));
         assert!(schema.contains("capability_gap"));
         assert!(schema.contains("prior_request_id"));

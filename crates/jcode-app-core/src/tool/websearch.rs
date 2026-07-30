@@ -70,7 +70,7 @@ impl Tool for WebSearchTool {
                 "engine": {
                     "type": "string",
                     "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Search engine. Defaults to duckduckgo. Bing uses JCODE_BING_API_KEY when set, otherwise Bing HTML scraping. searxng queries a configured SearXNG instance (JCODE_SEARXNG_URL)."
+                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL."
                 },
                 "bing_market": {
                     "type": "string",

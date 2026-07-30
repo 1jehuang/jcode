@@ -552,7 +552,7 @@ impl SelfDevTool {
                             "status",
                             "find-config"
                         ],
-                        "description": "Action. `enter` spawns a self-dev session (optionally seeded with `prompt`); `setup` checks/installs the dev prerequisites (rust toolchain, git, repo clone); `reload` restarts jcode into a newer installed build; `status` shows build/version state; `find-config` locates jcode config and key paths."
+                        "description": "Action. `enter` starts a self-dev session; `setup` installs prerequisites; `reload` restarts jcode."
                     },
                     "prompt": {
                         "type": "string",

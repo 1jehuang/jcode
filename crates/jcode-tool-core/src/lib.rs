@@ -6,10 +6,8 @@ use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-pub const TOOL_INTENT_DESCRIPTION: &str = concat!(
-    "Short natural-language label explaining why this tool call is being made. ",
-    "Used for compact UI display only. Required on every call; do not use this instead of required tool parameters."
-);
+pub const TOOL_INTENT_DESCRIPTION: &str =
+    "Required short label shown in the UI: why this call is being made.";
 
 pub fn intent_schema_property() -> Value {
     serde_json::json!({
