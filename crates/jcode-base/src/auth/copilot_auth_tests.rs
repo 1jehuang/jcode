@@ -536,6 +536,24 @@ fn normalize_github_host_key_rejects_non_github_hosts() {
     assert_eq!(normalize_github_host_key(""), None);
 }
 
+/// Regression test for issue #641: GitHub's `apps.json` keys carry a client-id
+/// suffix after a colon. Those entries hold valid tokens and must normalize,
+/// otherwise the credential is silently dropped and jcode falls through to a
+/// possibly stale token from a lower-priority source.
+#[test]
+fn normalize_github_host_key_accepts_apps_json_client_id_suffix() {
+    assert_eq!(
+        normalize_github_host_key("github.com:Iv1.b507a08c87ecfe98"),
+        Some("github.com".to_string())
+    );
+    assert_eq!(
+        normalize_github_host_key("api.github.com:Iv1.b507a08c87ecfe98"),
+        Some("api.github.com".to_string())
+    );
+    // A colon suffix does not make a non-GitHub host acceptable.
+    assert_eq!(normalize_github_host_key("gitlab.com:Iv1.abc"), None);
+}
+
 #[test]
 fn live_verify_failure_record_blocks_auto_use() -> Result<()> {
     // Lock the test env and isolate JCODE_HOME so the validation record we write

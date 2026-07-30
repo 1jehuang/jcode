@@ -1440,10 +1440,8 @@ mod tests {
     fn header_provider_auth_tag_prefers_app_resolved_credential_over_env() {
         let _guard = crate::storage::lock_test_env();
         let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
-        // The TUI client process usually does *not* inherit
-        // JCODE_RUNTIME_PROVIDER, so the env heuristic would answer "oauth"
-        // here. The app's authoritative resolution must win, otherwise the
-        // header claims OAuth while the info widget reports an API key.
+        // The TUI client usually does not inherit JCODE_RUNTIME_PROVIDER, so the
+        // env heuristic would answer "oauth" here; the app's resolution must win.
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
         let both = AuthStatus {
             anthropic: ProviderAuth {
