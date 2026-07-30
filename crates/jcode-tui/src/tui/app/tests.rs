@@ -18,6 +18,7 @@ include!("tests/remote_startup_input_03/part_01.rs");
 include!("tests/remote_startup_input_03/part_02.rs");
 include!("tests/remote_startup_input_04.rs");
 include!("tests/image_placeholder_commands.rs");
+include!("tests/interleave_images_guard.rs");
 include!("tests/remote_events_reload_01/part_01.rs");
 include!("tests/remote_events_reload_01/part_02.rs");
 include!("tests/remote_events_reload_02/part_01.rs");
