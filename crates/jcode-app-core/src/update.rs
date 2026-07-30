@@ -748,10 +748,6 @@ fn build_from_source() -> Result<PathBuf> {
     Ok(binary)
 }
 
-pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf> {
-    download_and_install_blocking_with_progress(release, |_| {})
-}
-
 /// Download an asset into memory, retrying with HTTP Range resume so a slow or
 /// flaky connection recovers instead of restarting from zero.
 ///
@@ -1119,11 +1115,6 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             }));
 
             if auto_install {
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Downloading {
-                    version: latest.clone(),
-                    downloaded: 0,
-                    total: None,
-                }));
                 let progress_version = latest.clone();
                 match download_and_install_blocking_with_progress(&release, |progress| {
                     Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Downloading {
