@@ -255,7 +255,7 @@ fn prompt_up_key(app: &App) -> (KeyCode, KeyModifiers) {
 
 /// Delegates to the single shared render-state lock so scroll/render tests
 /// serialize against viewport-snapshot tests too, not just each other (#593).
-fn scroll_render_test_lock() -> std::sync::MutexGuard<'static, ()> {
+fn scroll_render_test_lock() -> crate::tui::ui::RenderStateTestGuard {
     crate::tui::ui::render_state_test_lock()
 }
 
