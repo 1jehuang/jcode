@@ -1447,15 +1447,13 @@ mod tests {
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
         let both = AuthStatus {
             anthropic: ProviderAuth {
-                has_oauth: true,
-                has_api_key: true,
-                // `state` drives whether the inventory line shows a method suffix
-                // at all: the `NotConfigured` default renders a bare "anthropic",
-                // so leaving it defaulted made this test assert on a string the
-                // code cannot produce for these inputs.
+                // `state` must be set alongside the credential booleans:
+                // `build_auth_status_lines` filters `NotConfigured` providers out
+                // and falls back to the full "no credentials" list (issue #654).
                 state: AuthState::Available,
+                has_oauth: true,
                 oauth_state: AuthState::Available,
-                ..Default::default()
+                has_api_key: true,
             },
             ..AuthStatus::default()
         };

@@ -2168,7 +2168,12 @@ impl Tool for CommunicateTool {
                 "type": "object",
                 "required": ["action", "label"],
                 "properties": {
-                    "action": { "type": "string", "enum": ["spawn"] }
+                    "action": { "type": "string", "enum": ["spawn"] },
+                    // Gemini validates that every `required` name is defined in
+                    // the same object's `properties` and rejects the whole
+                    // request otherwise (issue #655), so declare `label` here
+                    // instead of relying on the parent schema's declaration.
+                    "label": { "type": "string", "minLength": 1 }
                 }
             },
             {
