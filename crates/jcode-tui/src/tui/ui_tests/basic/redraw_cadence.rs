@@ -114,6 +114,9 @@ fn a_status_notice_still_requires_periodic_frames() {
 /// here we only require that the donut still animates.
 #[test]
 fn an_idle_empty_session_still_animates_smoothly() {
+    // Pin the tier: the auto-detected one depends on host load, and a
+    // Reduced/Minimal host legitimately disables the decorative animation.
+    crate::perf::pin_full_profile_for_tests();
     let policy = full_tier_policy();
     let idle = TestState {
         time_since_activity: Some(Duration::from_millis(200)),
@@ -153,6 +156,9 @@ fn active_typing_backs_the_decorative_animation_off() {
 /// animation: the backoff is about active typing, not about having text.
 #[test]
 fn a_paused_draft_lets_the_animation_recover() {
+    // Pin the tier: the auto-detected one depends on host load, and a
+    // Reduced/Minimal host legitimately disables the decorative animation.
+    crate::perf::pin_full_profile_for_tests();
     let policy = full_tier_policy();
     let paused = TestState {
         input: "a draft i walked away from".to_string(),
@@ -177,6 +183,9 @@ fn a_paused_draft_lets_the_animation_recover() {
 /// decoration is the difference the user felt as "spawning a new one still lags".
 #[test]
 fn the_decorative_animation_is_capped_below_the_configured_animation_rate() {
+    // Pin the tier: the auto-detected one depends on host load, and a
+    // Reduced/Minimal host legitimately disables the decorative animation.
+    crate::perf::pin_full_profile_for_tests();
     let policy = full_tier_policy();
     assert_eq!(
         policy.animation_fps, 60,
@@ -204,6 +213,9 @@ fn the_decorative_animation_is_capped_below_the_configured_animation_rate() {
 /// ceiling, not an override.
 #[test]
 fn a_lower_configured_animation_rate_is_respected() {
+    // Pin the tier: the auto-detected one depends on host load, and a
+    // Reduced/Minimal host legitimately disables the decorative animation.
+    crate::perf::pin_full_profile_for_tests();
     let mut policy = full_tier_policy();
     policy.animation_fps = 10;
     let idle = TestState {
