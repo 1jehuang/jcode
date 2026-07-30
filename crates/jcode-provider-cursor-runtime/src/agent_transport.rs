@@ -55,12 +55,122 @@ fn cli_client_version() -> String {
         .unwrap_or_else(|| CLI_CLIENT_VERSION_DEFAULT.to_string())
 }
 
+/// Extract a bare host from a value that may be a full URL, a host with a
+/// scheme, or a host with trailing path/port noise.
+///
+/// The result is used directly as a DNS name (`TcpStream::connect`) and as the
+/// TLS `ServerName`, so it has to be a bare host: a leftover `:443` suffix or a
+/// trailing path makes both of those fail.
+fn normalize_agent_host(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let raw = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or(raw);
+    let host = raw.split('/').next().unwrap_or_default().trim();
+    // Drop any explicit port. Connections are always made on 443, so a port in
+    // the cached or overridden value is noise that would otherwise land inside
+    // the DNS name and the TLS SNI value.
+    let host = host.split(':').next().unwrap_or(host).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Regional agent host cached by the official `cursor-agent` CLI.
+///
+/// `cursor-agent` bootstraps `GetServerConfig` and caches the endpoint its team
+/// is actually routed to. Teams pinned to a region reject the `global` host with
+/// "This region is not yet available for your team" (issue #637), so reuse the
+/// CLI's cached value when it is present.
+fn agent_host_from_cursor_cli_config() -> Option<String> {
+    let path = match jcode_base::storage::user_home_path(".cursor/cli-config.json") {
+        Ok(path) => path,
+        Err(err) => {
+            jcode_base::logging::warn(&format!(
+                "Cursor: cannot locate ~/.cursor/cli-config.json ({err}); \
+                 falling back to the global agent host"
+            ));
+            return None;
+        }
+    };
+    // A missing file is the normal case for users who never ran `cursor-agent`,
+    // so that is not worth warning about. Anything else (unreadable, malformed,
+    // unexpected shape) is worth surfacing: silently discarding it is what made
+    // issue #637 hard to diagnose in the first place.
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            jcode_base::logging::warn(&format!(
+                "Cursor: cannot read {} ({err}); falling back to the global agent host",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            jcode_base::logging::warn(&format!(
+                "Cursor: {} is not valid JSON ({err}); falling back to the global agent host",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let Some(url_config) = value
+        .get("serverConfigCache")
+        .and_then(|cache| cache.get("agentUrlConfig"))
+    else {
+        jcode_base::logging::warn(&format!(
+            "Cursor: {} has no serverConfigCache.agentUrlConfig; \
+             falling back to the global agent host. Running `cursor-agent status` \
+             usually repopulates it.",
+            path.display()
+        ));
+        return None;
+    };
+    let candidate = url_config
+        .get("agentnUrl")
+        .and_then(|v| v.as_str())
+        .or_else(|| url_config.get("agentUrl").and_then(|v| v.as_str()));
+    let Some(host) = candidate.and_then(normalize_agent_host) else {
+        jcode_base::logging::warn(&format!(
+            "Cursor: {} has no usable agentnUrl/agentUrl host (found {candidate:?}); \
+             falling back to the global agent host",
+            path.display()
+        ));
+        return None;
+    };
+    jcode_base::logging::info(&format!(
+        "Cursor: using regional agent host {host} from {}",
+        path.display()
+    ));
+    Some(host)
+}
+
+/// Resolve the Cursor agent host, in precedence order:
+/// 1. `JCODE_CURSOR_AGENT_HOST` / `CURSOR_AGENT_HOST` (explicit override)
+/// 2. `~/.cursor/cli-config.json` regional endpoint cached by `cursor-agent`
+/// 3. the `global` host, as a last-resort fallback
 fn agent_host() -> String {
-    std::env::var("JCODE_CURSOR_AGENT_HOST")
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-        .unwrap_or_else(|| AGENT_HOST.to_string())
+    for var in ["JCODE_CURSOR_AGENT_HOST", "CURSOR_AGENT_HOST"] {
+        if let Ok(raw) = std::env::var(var) {
+            // Normalize overrides too. These get copied straight out of
+            // `cli-config.json` or a browser, so `https://host/path` and
+            // `host:443` are both likely spellings and both have to work.
+            if let Some(host) = normalize_agent_host(&raw) {
+                return host;
+            }
+        }
+    }
+    agent_host_from_cursor_cli_config().unwrap_or_else(|| AGENT_HOST.to_string())
 }
 
 // --------------------------------------------------------------------------
@@ -511,6 +621,75 @@ pub async fn run_agent_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for issue #637: teams routed to a region reject the
+    /// hardcoded `global` agent host, so a regional endpoint expressed as a full
+    /// URL must reduce to a bare host.
+    #[test]
+    fn normalize_agent_host_reduces_urls_to_bare_hosts() {
+        assert_eq!(
+            normalize_agent_host("https://agentn.us.api5.cursor.sh"),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        assert_eq!(
+            normalize_agent_host("http://agentn.eu.api5.cursor.sh/agent.v1.AgentService/Run"),
+            Some("agentn.eu.api5.cursor.sh".to_string())
+        );
+        // Already-bare hosts pass through, case-normalized.
+        assert_eq!(
+            normalize_agent_host("  AgentN.US.api5.cursor.sh  "),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        assert_eq!(normalize_agent_host(""), None);
+        assert_eq!(normalize_agent_host("   "), None);
+        assert_eq!(normalize_agent_host("https://"), None);
+    }
+
+    /// The normalized host is used as both the DNS name and the TLS
+    /// `ServerName`, so an explicit port must be stripped rather than carried
+    /// into either. Raised in review of the #637 fix.
+    #[test]
+    fn normalize_agent_host_strips_explicit_ports() {
+        assert_eq!(
+            normalize_agent_host("https://agentn.us.api5.cursor.sh:443/agent.v1.AgentService/Run"),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        assert_eq!(
+            normalize_agent_host("agentn.us.api5.cursor.sh:443"),
+            Some("agentn.us.api5.cursor.sh".to_string())
+        );
+        // A bare port with no host is not a usable host.
+        assert_eq!(normalize_agent_host(":443"), None);
+    }
+
+    /// `agent_host()` must normalize env overrides the same way it normalizes
+    /// the cached CLI value: people copy these out of `cli-config.json` or a
+    /// browser, so the full-URL spelling has to work. Raised in review of #637.
+    #[test]
+    fn agent_host_normalizes_env_overrides() {
+        // Serialized against other env-mutating tests in this module by the
+        // shared lock in jcode-base.
+        let _guard = jcode_base::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_CURSOR_AGENT_HOST");
+
+        jcode_base::env::set_var(
+            "JCODE_CURSOR_AGENT_HOST",
+            "https://agentn.us.api5.cursor.sh/agent.v1.AgentService/Run",
+        );
+        assert_eq!(agent_host(), "agentn.us.api5.cursor.sh");
+
+        jcode_base::env::set_var("JCODE_CURSOR_AGENT_HOST", "agentn.eu.api5.cursor.sh:443");
+        assert_eq!(agent_host(), "agentn.eu.api5.cursor.sh");
+
+        // A blank override must not win; it falls through to the next source.
+        jcode_base::env::set_var("JCODE_CURSOR_AGENT_HOST", "   ");
+        assert_ne!(agent_host(), "   ");
+
+        match prev {
+            Some(value) => jcode_base::env::set_var("JCODE_CURSOR_AGENT_HOST", value),
+            None => jcode_base::env::remove_var("JCODE_CURSOR_AGENT_HOST"),
+        }
+    }
 
     #[test]
     fn frames_are_well_formed_connect_frames() {
