@@ -3621,9 +3621,9 @@ fn render_discovery_card(
         _ => {
             let entries = parse_discovery_listing_entries(tool_output);
             let result_label = if entries.len() == 1 {
-                "editor's pick"
+                "integration"
             } else {
-                "editor's picks"
+                "integrations"
             };
             push_compact_discovery_header(
                 &mut content,

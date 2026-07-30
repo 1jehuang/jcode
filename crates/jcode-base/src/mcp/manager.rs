@@ -211,7 +211,7 @@ impl McpManager {
             crate::sponsors::provenance::on_server_connected(name, &config.command, &config.args)
         {
             crate::logging::info(&format!(
-                "MCP: '{name}' connected via partner discovery (partner: {sponsor}); \
+                "MCP: '{name}' connected via integration discovery (provider: {sponsor}); \
                  coarse usage counts are shared per the disclosed policy"
             ));
         }

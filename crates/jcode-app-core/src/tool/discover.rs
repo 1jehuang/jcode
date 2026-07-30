@@ -175,7 +175,7 @@ fn record_discovery_telemetry(
 }
 
 /// `discover_tools`: fetch discoverable third-party tools for a category from
-/// the hosted partner directory.
+/// the hosted integration directory.
 ///
 /// Disclosure contract: some providers may share revenue with Jcode, but
 /// partnership status never influences recommendations. Every session that
@@ -651,7 +651,7 @@ impl Tool for DiscoverToolsTool {
                 false,
             );
             return Err(anyhow::anyhow!(
-                "partner discovery is disabled (set [sponsors] enabled = true in config.toml)"
+                "integration discovery is disabled (set [sponsors] enabled = true in config.toml)"
             ));
         }
 
@@ -2100,7 +2100,7 @@ mod tests {
                 .contains("recommendations must be based only on fit")
         );
         let title = output.title.unwrap();
-        assert!(title.contains("(partner discovery disclosure)"), "{title}");
+        assert!(title.contains("(integration discovery disclosure)"), "{title}");
         let meta = output.metadata.unwrap();
         assert_eq!(meta["sponsored_discovery"], true);
 
