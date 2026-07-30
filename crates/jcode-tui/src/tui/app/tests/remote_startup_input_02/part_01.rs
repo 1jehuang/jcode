@@ -480,7 +480,15 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
 
 #[test]
 fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_providers() {
-    ensure_test_jcode_home_if_unset();
+    // The route count asserted here depends on `AuthStatus::check_fast()`,
+    // which reads real credentials from the environment. Without isolation the
+    // test observes whatever auth state a concurrently running test happens to
+    // have set, so it intermittently found extra provider routes (20 not 5).
+    // `with_temp_jcode_home` takes the shared env lock and points auth at an
+    // empty home, which is what the sibling subscription-catalog test already
+    // does for exactly this reason.
+    with_temp_jcode_home(|| {
+    crate::auth::AuthStatus::invalidate_cache();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -573,6 +581,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
                 "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
             )
     }));
+    });
 }
 
 #[test]
