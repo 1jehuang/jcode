@@ -2139,14 +2139,18 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(plain.contains("1 result · payments"), "{plain}");
+    assert!(plain.contains("1 editor's pick · payments"), "{plain}");
     assert!(plain.contains("why: the task needs test-mode"), "{plain}");
     assert!(plain.contains("agentcard"), "{plain}");
     assert!(plain.contains("prepaid virtual Visa cards"), "{plain}");
     assert!(plain.contains("agentcard.sh"), "{plain}");
     assert!(
-        plain.contains("Jcode partners with tool providers to make their tools discoverable"),
+        plain.contains("Editor's picks are vetted by Jcode maintainers"),
         "{plain}"
+    );
+    assert!(
+        without_whitespace(&plain).contains("SomeproviderssharerevenuewithJcode"),
+        "the revenue-share disclosure must stay user-visible: {plain}"
     );
     assert!(
         without_whitespace(&plain).contains("Learnmore:https://jcode.sh/discovery-tools"),
@@ -2208,10 +2212,10 @@ fn batched_discovery_renders_first_use_disclosure_inline_once() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("1 result · payments"), "{plain}");
+    assert!(plain.contains("1 editor's pick · payments"), "{plain}");
     assert_eq!(
         plain
-            .matches("Jcode partners with tool providers to make their tools discoverable")
+            .matches("Editor's picks are vetted by Jcode maintainers")
             .count(),
         1,
         "the batched first-use notice must render exactly once: {plain}"
@@ -2252,7 +2256,7 @@ fn render_tool_message_shows_selected_discovery_setup() {
     assert!(plain.contains("setup:"), "{plain}");
     assert!(plain.contains("agentcard-mcp@1.2.3"), "{plain}");
     assert!(
-        !plain.contains("Jcode partners with tool providers"),
+        !plain.contains("Editor's picks are vetted"),
         "later discovery results must not repeat the first-use notice: {plain}"
     );
 }
