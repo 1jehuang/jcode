@@ -314,6 +314,11 @@ impl Config {
                 self.features.mermaid = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_AUTO_POKE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.auto_poke = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MESSAGE_TIMESTAMPS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.message_timestamps = parsed;
