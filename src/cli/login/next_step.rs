@@ -37,6 +37,26 @@ mod tests {
         assert!(lmstudio.contains("Local Server"), "{lmstudio}");
     }
 
+    // Verify the extracted next-step hints are byte-identical to what login.rs
+    // printed before extraction. A `\` line continuation swallows the newline *and*
+    // the following indentation, so a mis-indented continuation silently changes
+    // user-facing text while still compiling.
+    #[test]
+    fn extracted_hints_match_the_strings_login_printed_before_extraction() {
+        assert_eq!(
+            local_endpoint_hint("ollama"),
+            "Next step: install a model with `ollama pull llama3.2`, then run `jcode --provider ollama --model llama3.2 run 'hello'`."
+        );
+        assert_eq!(
+            local_endpoint_hint("lmstudio"),
+            "Next step: load a chat model in LM Studio's Local Server, then run jcode with that exact model id, for example `jcode --provider lmstudio --model <model-id> run 'hello'`."
+        );
+        assert_eq!(
+            local_endpoint_hint("ollama-turbo"),
+            "Next step: run jcode with a model available on this endpoint, for example `jcode --provider ollama-turbo --model <model-id> run 'hello'`."
+        );
+    }
+
     #[test]
     fn unknown_providers_get_a_generic_hint_naming_themselves() {
         let hint = local_endpoint_hint("my-endpoint");
