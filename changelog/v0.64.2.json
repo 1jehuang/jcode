@@ -1,0 +1,15 @@
+{
+  "version": "0.64.2",
+  "date": "2026-07-30",
+  "title": "Idle animation off for everyone",
+  "highlights": [
+    "The decorative idle animation is now turned off for all users, including existing configs, via a one-time migration; re-enable it anytime with display.idle_animation = true"
+  ],
+  "improvements": [
+    "Ctrl+R reverse history search now behaves readline-style",
+    "H1/H2 markdown headings render visually larger via underline"
+  ],
+  "fixes": [
+    "Desktop: messages typed mid-turn are queued instead of being dropped with 'already processing'"
+  ]
+}
