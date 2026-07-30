@@ -495,6 +495,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Ctrl+H / Ctrl+L", "Focus chat / diagram / diffs"));
     lines.push(key_entry(
+        "Ctrl+L",
+        "Clear the view, keep context (/cls; no pane focused)",
+    ));
+    lines.push(key_entry(
         "Ctrl+Left / Right",
         "Cycle diagrams (when diagram focused)",
     ));

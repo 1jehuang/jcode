@@ -532,14 +532,6 @@ async fn handle_remote_key_internal(
                 app.paste_from_clipboard();
                 return Ok(());
             }
-            // Cmd+K: view-only clear (context kept). Checked before the
-            // scroll/prompt-jump fallbacks below so it wins over the built-in
-            // Cmd+K prompt-jump, unless the user explicitly bound Cmd+K to
-            // scrolling (guard inside is_clear_view_key).
-            KeyCode::Char('k') if input::is_clear_view_key(app, code, modifiers) => {
-                app.clear_view_keep_context();
-                return Ok(());
-            }
             _ => {}
         }
     }
@@ -637,6 +629,9 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('l') => {
+                // Terminal-style view clear (context kept); the diagram/diff
+                // focus handler above wins while a side pane is available.
+                app.clear_view_keep_context();
                 return Ok(());
             }
             KeyCode::Char('u') => {

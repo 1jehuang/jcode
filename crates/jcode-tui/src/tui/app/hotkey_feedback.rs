@@ -290,7 +290,7 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         "toggle the scroll bookmark",
     );
     out.push(KnownHotkey::new(
-        key(KeyCode::Char('k'), KeyModifiers::SUPER),
+        ctrl('l'),
         "clear_view",
         "clear the view, keeping context (/cls)",
     ));
