@@ -503,24 +503,11 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
 
 /// Parameter descriptions inside tool schemas are also always-on prompt cost,
 /// so each is capped. Longer guidance belongs in runtime error messages, docs,
-/// or the system prompt. Exemptions must be justified inline.
+/// or the system prompt (the todo calibration rubrics, for example, live in
+/// the gate continuation messages in jcode-base::todo).
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
     const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
-    // todo's calibration fields are deliberately detailed handwritten
-    // self-assessment rubrics (see the SECURITY/EVAL note in todo.rs); the
-    // gate quality depends on them, so they stay above the cap.
-    const EXEMPT_PATHS: &[(&str, &str)] = &[
-        (
-            "todo",
-            "$.properties.plan.properties.understands_user_intent",
-        ),
-        ("todo", "$.properties.goals.items.properties.feedback_loop"),
-        (
-            "todo",
-            "$.properties.goals.items.properties.end_to_end_ownership",
-        ),
-    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -529,9 +516,6 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         let mut descriptions = Vec::new();
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
-            if EXEMPT_PATHS.contains(&(def.name.as_str(), path.as_str())) {
-                continue;
-            }
             let tokens = crate::util::estimate_tokens(&description);
             if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
                 over_cap.push(format!(
