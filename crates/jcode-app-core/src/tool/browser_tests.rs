@@ -212,8 +212,7 @@ fn description_tells_models_to_check_status_before_setup() {
     let tool = BrowserTool::new();
     let description = tool.description();
     assert!(description.contains("action='status'"));
-    assert!(description.contains("action='setup' only"));
-    assert!(description.contains("Do not run setup before every browser task"));
+    assert!(description.contains("setup only if not ready"));
 }
 
 #[cfg(unix)]

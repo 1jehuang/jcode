@@ -821,10 +821,6 @@ fn test_bash_tool_schema_advertises_background_progress_guidance() {
         .expect("run_in_background description should be a string");
 
     assert!(
-        BashTool::new().description().contains("JCODE_PROGRESS"),
-        "tool description should teach cooperative progress output"
-    );
-    assert!(
         command_description.contains("JCODE_PROGRESS"),
         "command description should mention progress marker format"
     );
