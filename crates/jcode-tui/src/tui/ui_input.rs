@@ -155,7 +155,11 @@ pub(super) fn draw_prompt_history_search_overlay(
     ]));
 
     if view.matches.is_empty() {
-        lines.push(Line::from(Span::styled("  no matches", dim)));
+        if view.query.trim().is_empty() {
+            lines.push(Line::from(Span::styled("  type to search history", dim)));
+        } else {
+            lines.push(Line::from(Span::styled("  no matches", dim)));
+        }
     } else {
         // Keep the selected row inside the visible window.
         let window_start = view

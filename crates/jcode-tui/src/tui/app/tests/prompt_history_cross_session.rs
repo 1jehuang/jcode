@@ -97,11 +97,13 @@ fn test_ctrl_r_opens_history_search_and_enter_inserts_selection() {
     app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
         .unwrap();
     assert!(app.prompt_history_search.is_some());
-    // Newest first with an empty query.
-    assert_eq!(
-        app.prompt_history_search.as_ref().unwrap().matches[0],
-        "write more tests"
-    );
+    // Readline-style: no results until the user types a query.
+    assert!(app
+        .prompt_history_search
+        .as_ref()
+        .unwrap()
+        .matches
+        .is_empty());
 
     // Type a query that matches only the older prompt.
     for c in "login".chars() {
@@ -110,6 +112,8 @@ fn test_ctrl_r_opens_history_search_and_enter_inserts_selection() {
     }
     let state = app.prompt_history_search.as_ref().unwrap();
     assert_eq!(state.matches, vec!["fix the login bug".to_string()]);
+    // The selected match previews live in the input line.
+    assert_eq!(app.input, "fix the login bug");
 
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
@@ -129,41 +133,58 @@ fn test_history_search_esc_cancels_without_touching_input() {
         .unwrap();
     assert!(app.prompt_history_search.is_some());
 
+    // Typing a matching query previews the match in the input line...
+    for c in "some".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    assert_eq!(app.input, "some prompt");
+
+    // ...but Esc restores the original draft.
     app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
     assert!(app.prompt_history_search.is_none());
     assert_eq!(app.input, "draft");
+    assert_eq!(app.cursor_pos, "draft".len());
 }
 
 #[test]
 fn test_history_search_up_down_moves_selection() {
     let mut app = create_test_app();
     app.persisted_prompt_history = Some(vec![
-        "alpha".to_string(),
-        "beta".to_string(),
-        "gamma".to_string(),
+        "prompt alpha".to_string(),
+        "prompt beta".to_string(),
+        "prompt gamma".to_string(),
     ]);
 
     app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
         .unwrap();
+    // Type a query matching all three prompts; newest-first order is
+    // [gamma, beta, alpha].
+    for c in "prompt".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
     assert_eq!(app.prompt_history_search.as_ref().unwrap().selected, 0);
+    assert_eq!(app.input, "prompt gamma");
 
     app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
     assert_eq!(app.prompt_history_search.as_ref().unwrap().selected, 1);
+    assert_eq!(app.input, "prompt beta");
 
     // Ctrl+R again also steps older (readline muscle memory).
     app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
         .unwrap();
     assert_eq!(app.prompt_history_search.as_ref().unwrap().selected, 2);
+    assert_eq!(app.input, "prompt alpha");
 
     app.handle_key(KeyCode::Down, KeyModifiers::empty())
         .unwrap();
     assert_eq!(app.prompt_history_search.as_ref().unwrap().selected, 1);
 
-    // Enter inserts the selected (middle) match: newest-first order is
-    // [gamma, beta, alpha], selected=1 is beta.
+    // Enter keeps the selected (middle) match in the input line.
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
-    assert_eq!(app.input, "beta");
+    assert_eq!(app.input, "prompt beta");
 }
 
 #[test]
@@ -225,13 +246,14 @@ fn test_history_search_overlay_renders_matches_in_frame() {
         rendered.contains("history search"),
         "overlay header missing from frame:\n{rendered}"
     );
+    // No results are shown until the user types a query.
     assert!(
-        rendered.contains("add prompt history"),
-        "newest match missing from frame:\n{rendered}"
+        rendered.contains("type to search history"),
+        "empty-query hint missing from frame:\n{rendered}"
     );
     assert!(
-        rendered.contains("refactor the parser"),
-        "older match missing from frame:\n{rendered}"
+        !rendered.contains("add prompt history"),
+        "matches should be hidden before a query is typed:\n{rendered}"
     );
 
     // Filter down to one match and re-render.
