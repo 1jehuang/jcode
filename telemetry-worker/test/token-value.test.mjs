@@ -21,6 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 
 const DASHBOARD_SQL = readFileSync(join(root, "token-value.sql"), "utf8");
+const DAILY_SQL = readFileSync(join(root, "token-value-daily.sql"), "utf8");
 const PRICES_MIGRATION = readFileSync(
   join(root, "migrations", "0023_model_prices.sql"),
   "utf8",
@@ -33,6 +34,7 @@ CREATE TABLE events (
     created_at TEXT,
     model_end TEXT,
     provider_end TEXT,
+    telemetry_id TEXT,
     is_ci INTEGER DEFAULT 0,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
@@ -68,8 +70,8 @@ function insertSession(db, row) {
   db.prepare(
     `INSERT INTO events (event, created_at, model_end, provider_end, is_ci,
        input_tokens, output_tokens, cache_read_input_tokens,
-       cache_creation_input_tokens)
-     VALUES ('session_end', datetime('now', '-2 hours'), ?, ?, ?, ?, ?, ?, ?)`,
+       cache_creation_input_tokens, telemetry_id)
+     VALUES ('session_end', datetime('now', '-2 hours'), ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.model,
     row.provider ?? "TestProvider",
@@ -78,6 +80,7 @@ function insertSession(db, row) {
     row.output ?? 0,
     row.cacheRead ?? 0,
     row.cacheWrite ?? 0,
+    row.user ?? "user-1",
   );
 }
 
@@ -292,4 +295,96 @@ test("the 7-day window is a rolling 168 hours, not 8 calendar days", () => {
   // against the run rate.
   const modelTotal = modelRows(rows).reduce((sum, r) => sum + r.usd_value, 0);
   assert.equal(modelTotal, 49);
+});
+
+// --- token-value-daily.sql: the plain per-day time series -------------------
+
+function runDaily(db) {
+  return db.prepare(DAILY_SQL).all();
+}
+
+test("the daily series returns one row per day in date order", () => {
+  const db = makeDb();
+  insertPrice(db, { model: "m", input: 10, output: 0, cacheRead: 0 });
+  // Two sessions today, one yesterday, inserted newest-first so a missing
+  // ORDER BY or a dollar-sorted result would show up.
+  insertSession(db, { model: "m", input: 1_000_000 });
+  insertSession(db, { model: "m", input: 1_000_000 });
+  db.prepare(
+    `INSERT INTO events (event, created_at, model_end, provider_end, input_tokens, telemetry_id)
+     VALUES ('session_end', datetime('now', '-1 days'), 'm', 'p', 1000000, 'user-2')`,
+  ).run();
+
+  const rows = runDaily(db);
+  assert.equal(rows.length, 2);
+  assert.ok(rows[0].day < rows[1].day, "rows must be in ascending date order");
+  assert.equal(rows[1].usd, 20, "today's two sessions are $10 each");
+  assert.equal(rows[1].sessions, 2);
+});
+
+test("the daily series counts distinct users and value per user", () => {
+  const db = makeDb();
+  insertPrice(db, { model: "m", input: 10, output: 0, cacheRead: 0 });
+  // Three sessions from two distinct users: $30 over 2 users is $15 each.
+  insertSession(db, { model: "m", input: 1_000_000, user: "a" });
+  insertSession(db, { model: "m", input: 1_000_000, user: "a" });
+  insertSession(db, { model: "m", input: 1_000_000, user: "b" });
+
+  const row = runDaily(db)[0];
+  assert.equal(row.usd, 30);
+  assert.equal(row.sessions, 3);
+  assert.equal(row.users, 2);
+  assert.equal(row.usd_per_user, 15);
+});
+
+test("the daily series agrees with the token-value panel for the same day", () => {
+  // The two dashboards must never disagree about a day's dollar value, which
+  // is the risk of maintaining the pricing expression in two files.
+  const db = makeDb();
+  insertPrice(db, {
+    model: "openai-style",
+    input: 5,
+    output: 30,
+    cacheRead: 0.5,
+    cacheWrite: 6.25,
+    inputIncludesCacheRead: 1,
+  });
+  insertPrice(db, {
+    model: "anthropic-style",
+    input: 5,
+    output: 25,
+    cacheRead: 0.5,
+    cacheWrite: 6.25,
+    inputIncludesCacheRead: 0,
+  });
+  insertSession(db, {
+    model: "openai-style",
+    input: 1_000_000,
+    cacheRead: 900_000,
+    output: 10_000,
+    cacheWrite: 50_000,
+  });
+  insertSession(db, {
+    model: "anthropic-style",
+    input: 100_000,
+    cacheRead: 900_000,
+    output: 10_000,
+  });
+
+  const dailyTotal = runDaily(db).reduce((sum, r) => sum + r.usd, 0);
+  const panelTotal = summary(runDashboard(db), "last_24h").usd_value;
+  assert.equal(dailyTotal.toFixed(2), panelTotal.toFixed(2));
+});
+
+test("the daily series excludes CI and reports its price coverage", () => {
+  const db = makeDb();
+  insertPrice(db, { model: "priced", input: 10, output: 0, cacheRead: 0 });
+  insertSession(db, { model: "priced", input: 1_000_000 });
+  insertSession(db, { model: "no-price-row", input: 1_000_000 });
+  insertSession(db, { model: "priced", input: 5_000_000, isCi: 1 });
+
+  const row = runDaily(db)[0];
+  assert.equal(row.usd, 10, "CI sessions must not add dollars");
+  assert.equal(row.sessions, 2, "CI sessions must not be counted");
+  assert.equal(row.priced_pct, 50, "half the tokens came from an unpriced model");
 });
