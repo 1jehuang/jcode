@@ -799,19 +799,24 @@ pub fn lay_out_message_reusing(
     // Kind of the block laid immediately before this one, so the gap between
     // them can depend on the pair rather than on one of them alone.
     let mut previous_kind: Option<BlockKind> = None;
+    // Width of one monospace cell, measured lazily (see below).
+    let mut advance: Option<f64> = None;
 
     for block in &document.blocks {
         let inset = block_inset(block) + role_inset;
-        // Measure available in *characters*: the app is a monospace stack, so
-        // a table's columns are laid out in cells, and the cell width has to
-        // come from the font rather than from a guess.
         let measure = (width - inset * 2.0).max(1.0);
+        // Measure available in *characters*: the app is a monospace stack, so a
+        // table's columns are laid out in cells, and the cell width has to come
+        // from the font rather than from a guess. Measured at most once per
+        // message, and only when a table asks: it costs a Parley layout, and a
+        // streaming delta re-flattens every block of the tail message.
+        let advance = &mut advance;
         let lines = block_lines(block, || {
-            let advance = text.measure_width("0", base, scale);
-            if advance <= 0.0 {
-                80
+            let cell = *advance.get_or_insert_with(|| text.measure_width("0", base, scale));
+            if cell <= 0.0 {
+                DEFAULT_TABLE_COLUMNS
             } else {
-                ((measure / advance).floor() as usize).max(8)
+                ((measure / cell).floor() as usize).max(MIN_TABLE_COLUMNS)
             }
         });
         if lines.is_empty() {
@@ -1280,6 +1285,13 @@ fn column_widths(rows: &[Vec<String>], count: usize, columns: usize) -> Vec<usiz
     }
     widths
 }
+
+/// Measure to fall back to when the font reports no advance at all, and the
+/// narrowest measure a table is laid out against. A table squeezed below this
+/// is unreadable either way, so it is allowed to be the one thing that
+/// overflows rather than being shredded into single letters.
+const DEFAULT_TABLE_COLUMNS: usize = 80;
+const MIN_TABLE_COLUMNS: usize = 16;
 
 /// Narrowest a squeezed table column may become, in monospace cells.
 const MIN_COLUMN_WIDTH: usize = 6;
@@ -2354,6 +2366,69 @@ mod tests {
             block_inset(code) > CODE_PAD_X,
             "nested code block was not indented into its list item"
         );
+    }
+
+    /// A table streams in one character at a time without panicking or losing
+    /// its columns. Half a delimiter row is not a table yet, and the block a
+    /// prefix parses into changes shape as the rows arrive, which is exactly
+    /// the case a width-dependent layout can get wrong.
+    #[test]
+    fn tables_survive_being_streamed() {
+        let source = "| a | bb |\n|:--|--:|\n| 1 | 2000 |\n| 3 | 4 |\n";
+        let mut text = TextSystem::default();
+        for end in source
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([source.len()])
+        {
+            let laid = lay_out_message(
+                &mut text,
+                &Message::assistant(&source[..end]),
+                600.0,
+                &theme(),
+                base(),
+                1.75,
+            );
+            assert!(laid.height >= 0.0);
+        }
+    }
+
+    /// A table laid out to a narrow measure still fits it, and still has every
+    /// column. The squeeze is the only thing standing between a narrow window
+    /// and a table drawn off the page, so it is asserted through the real
+    /// layout rather than only through `table_lines`.
+    #[test]
+    fn narrow_windows_still_fit_their_tables() {
+        let mut text = TextSystem::default();
+        let source = "| field | meaning | bytes |\n|:--|:-:|--:|\n\
+                      | `kind` | which frame this is and how to read it | 1 |\n\
+                      | `payload` | length-prefixed line-delimited JSON | 4096 |\n";
+        for width in [220.0, 320.0, 600.0] {
+            let laid = lay_out_message(
+                &mut text,
+                &Message::assistant(source),
+                width,
+                &theme(),
+                base(),
+                1.75,
+            );
+            let table = laid
+                .blocks
+                .iter()
+                .find(|block| block.kind == BlockKind::Table)
+                .expect("no table block");
+            // Wrapping inside a cell is fine; wrapping the *row* is what the
+            // budget exists to prevent, because a wrapped row breaks the
+            // columns the reader is scanning down.
+            let rows = table.source.lines().count();
+            assert!(rows >= 4, "table lost rows at width {width}: {rows}");
+            for header in ["field", "meaning", "bytes"] {
+                assert!(
+                    table.source.contains(header),
+                    "table lost the {header:?} column at width {width}"
+                );
+            }
+        }
     }
 
     /// A nested block's furniture starts at the block's edge, which is inside

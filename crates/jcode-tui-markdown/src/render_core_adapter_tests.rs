@@ -562,3 +562,21 @@ fn fuzz_random_documents_wrapped_parity() {
             .join("\n\n")
     );
 }
+
+/// A table's delimiter row says how to read its columns, and the TUI has to
+/// honour it too: a right-aligned numeric column that renders left-aligned
+/// misreads what the author wrote, and the desktop and the terminal are meant
+/// to agree about what a document *is*.
+#[test]
+fn table_columns_follow_the_declared_alignment() {
+    let lines = super::render_markdown_via_core_wrapped("| n |\n|--:|\n| 1 |\n| 1000 |\n", 40);
+    let short = lines
+        .iter()
+        .map(crate::line_plain_text)
+        .find(|text| text.trim() == "1")
+        .expect("no short row");
+    assert!(
+        short.starts_with(' '),
+        "right-aligned cell was not padded on the left: {short:?}"
+    );
+}
