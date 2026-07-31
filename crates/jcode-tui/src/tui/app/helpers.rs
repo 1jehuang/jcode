@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+mod clipboard_helper;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
@@ -365,8 +366,9 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
 
 /// Copy text to clipboard. On Windows and macOS, the native clipboard API
 /// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
-/// Elsewhere, try wl-copy first (Wayland), then OSC 52 (works over SSH /
-/// Docker / tmux), then arboard as a final fallback.
+/// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
+/// the selection unlike arboard), then arboard, then OSC 52 as the
+/// remote-session fallback (SSH / Docker / tmux).
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
     // Under test, never touch the OS clipboard. Beyond making results identical
     // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
@@ -450,46 +452,28 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         // fail fast for lack of a display server.
         #[cfg(not(any(windows, target_os = "macos")))]
         {
-            if let Ok(mut child) = std::process::Command::new("wl-copy")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut()
-                    && stdin.write_all(text.as_bytes()).is_ok()
-                {
-                    drop(child.stdin.take());
-                    // Do not block the caller on `wait()`. `wl-copy` forks a
-                    // clipboard server that stays alive to serve paste requests, so
-                    // waiting can hang for as long as the clipboard is owned. This
-                    // runs on the UI thread from copy keybindings, where a stall is
-                    // felt directly as input lag. Poll briefly for an early failure
-                    // (e.g. no Wayland display) so the arboard/OSC 52 fallbacks
-                    // still run, then treat a live child as success and reap it in
-                    // the background.
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_millis(150);
-                    loop {
-                        match child.try_wait() {
-                            Ok(Some(status)) if status.success() => return true,
-                            Ok(Some(_)) => break, // exited nonzero: fall through
-                            Ok(None) => {
-                                if std::time::Instant::now() >= deadline {
-                                    // Still running: wl-copy became the clipboard
-                                    // owner, which is the success case.
-                                    std::thread::spawn(move || {
-                                        let _ = child.wait();
-                                    });
-                                    return true;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(5));
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
+            if clipboard_helper::copy_via_clipboard_helper("wl-copy", &[], text) {
+                return true;
+            }
+            // X11: prefer xclip/xsel over arboard. arboard's X11 backend sets the
+            // selection on a connection it owns and then closes it when the
+            // `Clipboard` is dropped, so the selection owner disappears and the
+            // clipboard silently reverts (issue #684) even though `set_text`
+            // returned Ok. xclip and xsel fork a background process that keeps
+            // owning the selection until a paste, which is what users expect.
+            if clipboard_helper::copy_via_clipboard_helper(
+                "xclip",
+                &["-selection", "clipboard"],
+                text,
+            ) {
+                return true;
+            }
+            if clipboard_helper::copy_via_clipboard_helper(
+                "xsel",
+                &["--clipboard", "--input"],
+                text,
+            ) {
+                return true;
             }
             if arboard::Clipboard::new()
                 .and_then(|mut cb| cb.set_text(text.to_string()))
