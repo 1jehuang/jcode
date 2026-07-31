@@ -1044,7 +1044,13 @@ fn a_user_message_reads_as_a_card_rather_than_a_marker() {
 #[test]
 #[ignore = "requires a GPU"]
 fn rich_content_never_inks_the_composer() {
-    for name in ["markdown", "latex", "code_block", "scrolled_back"] {
+    for name in [
+        "markdown",
+        "markdown_structure",
+        "latex",
+        "code_block",
+        "scrolled_back",
+    ] {
         let model = states::by_name(name).expect("node");
         let Some(r) = Rendered::new(&model) else {
             eprintln!("skipping: no GPU");

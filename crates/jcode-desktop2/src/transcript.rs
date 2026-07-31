@@ -23,7 +23,7 @@
 use crate::text::{ParagraphStyle, TextSystem};
 use crate::theme::Theme;
 use jcode_render_core::{
-    Block, BlockKind, Document, FillRole, StyleRole, StyledLine, parse_markdown,
+    Alignment, Block, BlockKind, Document, FillRole, StyleRole, StyledLine, parse_markdown,
 };
 use parley::{Layout, StyleProperty};
 use vello::peniko::{Brush, Color};
@@ -587,6 +587,18 @@ pub struct LaidBlock {
     pub washes: Vec<vello::kurbo::Rect>,
 }
 
+impl LaidBlock {
+    /// Where this block's furniture (a code wash, a quote rule) begins,
+    /// relative to the message's text left edge.
+    ///
+    /// Inside any list indent the block inherited, outside the block's own
+    /// padding: the wash wraps the text, and both have to agree on where the
+    /// block starts.
+    pub fn edge(&self) -> f64 {
+        (self.inset - own_pad(&self.kind)).max(0.0)
+    }
+}
+
 /// Vertical rhythm inside and between messages, in logical units.
 pub const BLOCK_GAP: f64 = 8.0;
 pub const MESSAGE_GAP: f64 = 18.0;
@@ -789,8 +801,19 @@ pub fn lay_out_message_reusing(
     let mut previous_kind: Option<BlockKind> = None;
 
     for block in &document.blocks {
-        let inset = block_inset(&block.kind) + role_inset;
-        let lines = block_lines(block);
+        let inset = block_inset(block) + role_inset;
+        // Measure available in *characters*: the app is a monospace stack, so
+        // a table's columns are laid out in cells, and the cell width has to
+        // come from the font rather than from a guess.
+        let measure = (width - inset * 2.0).max(1.0);
+        let lines = block_lines(block, || {
+            let advance = text.measure_width("0", base, scale);
+            if advance <= 0.0 {
+                80
+            } else {
+                ((measure / advance).floor() as usize).max(8)
+            }
+        });
         if lines.is_empty() {
             continue;
         }
@@ -926,8 +949,58 @@ fn diff_spans(source: &str, theme: &Theme) -> Vec<SpanStyle> {
     spans
 }
 
-/// Horizontal inset for a block kind, relative to the message's text column.
-fn block_inset(kind: &BlockKind) -> f64 {
+/// Horizontal inset for a block, relative to the message's text column.
+///
+/// Two indents compose here. The block's *own* kind indents it (code sits in
+/// from its wash, a quote clears its rule), and the list it is written inside
+/// indents it again: a fenced block or a table under item 2 belongs to item 2,
+/// and drawing it at the margin breaks the list open around it.
+fn block_inset(block: &Block) -> f64 {
+    let own = own_pad(&block.kind);
+    // A list item's own depth already places it, so only *other* blocks take
+    // the enclosing list's indent, and they hang under the item's text rather
+    // than under its bullet.
+    let nested = match block.kind {
+        // A loose item's *second* paragraph is emitted as another list-item
+        // block with no marker of its own. It is continuation prose, so it
+        // hangs under the item's text; left at the margin it read as a new
+        // paragraph that had escaped the list.
+        BlockKind::ListItem { depth, .. } if !starts_with_marker(block) => {
+            (depth + 1) as f64 * LIST_INDENT
+        }
+        BlockKind::ListItem { .. } => 0.0,
+        _ => block.list_depth as f64 * LIST_INDENT,
+    };
+    own + nested
+}
+
+/// Whether a list-item block carries a marker (`• `, `1. `) of its own, as
+/// opposed to being a continuation paragraph of the item above it. Render-core
+/// emits the marker as a leading dim span, so its absence is what distinguishes
+/// the two.
+fn starts_with_marker(block: &Block) -> bool {
+    let Some(first) = block.lines.first().and_then(|line| line.spans.first()) else {
+        return false;
+    };
+    if first.role != StyleRole::Dim {
+        return false;
+    }
+    let text = first.text.trim_start();
+    text.starts_with('\u{2022}')
+        || text.split_once(". ").is_some_and(|(digits, _)| {
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// The part of a block's inset that is the block's *own* padding, as opposed to
+/// the indent it inherits from an enclosing list.
+///
+/// The scene needs the two apart: a code block's wash and a quote's rule sit at
+/// the block's *edge*, which is inside the list indent but outside the block's
+/// own padding. Deriving the edge as `inset - own_pad` keeps the furniture and
+/// the text from disagreeing about where the block is, which is what left a
+/// nested code block's wash back at the margin while its text was indented.
+pub fn own_pad(kind: &BlockKind) -> f64 {
     match kind {
         BlockKind::CodeBlock { .. } => CODE_PAD_X,
         BlockKind::BlockQuote => QUOTE_INSET,
@@ -1020,13 +1093,16 @@ fn heading_scale(level: u8) -> f32 {
 
 /// The styled lines a block contributes.
 ///
-/// Two kinds need front-end treatment. Tables are left to the front-end by
-/// render-core because column widths depend on the measure. Quotes arrive with
-/// a terminal `│ ` bar on every line, which the desktop replaces with a real
-/// drawn rule; keeping both would mark the quote twice.
-fn block_lines(block: &Block) -> Vec<StyledLine> {
+/// Three kinds need front-end treatment. Tables are left to the front-end by
+/// render-core because column widths depend on the measure, so `columns` (the
+/// measure in monospace cells, computed lazily because only a table needs it)
+/// is what bounds them. Quotes arrive with a terminal `│ ` bar on every line,
+/// which the desktop replaces with a real drawn rule. Task-list items arrive as
+/// literal `[x]` text, which is the terminal's checkbox and reads as source
+/// here.
+fn block_lines(block: &Block, columns: impl FnOnce() -> usize) -> Vec<StyledLine> {
     if block.kind == BlockKind::Table && block.lines.is_empty() {
-        return table_lines(&block.table);
+        return table_lines(&block.table, &block.alignments, columns());
     }
     if block.kind == BlockKind::BlockQuote {
         return block
@@ -1043,17 +1119,238 @@ fn block_lines(block: &Block) -> Vec<StyledLine> {
     // (see `block_inset`), so keeping the spaces as well would double the
     // indent and, worse, leave a wrapped continuation line sitting under the
     // bullet rather than under the text.
-    if matches!(block.kind, BlockKind::ListItem { depth, .. } if depth > 0) {
+    if let BlockKind::ListItem { depth, .. } = block.kind {
         return block
             .lines
             .iter()
             .map(|line| StyledLine {
-                spans: strip_leading_indent(&line.spans),
+                spans: checkbox_spans(&if depth > 0 {
+                    strip_leading_indent(&line.spans)
+                } else {
+                    line.spans.clone()
+                }),
                 alignment: line.alignment,
             })
             .collect();
     }
     block.lines.clone()
+}
+
+/// Replace a task list's literal `[ ] ` / `[x] ` marker with a drawn checkbox.
+///
+/// The terminal has no glyph for a checkbox that is not text, so render-core
+/// emits the source form. On screen that reads as unrendered markdown sitting
+/// next to a bullet that *was* rendered, which is exactly the inconsistency
+/// this transcript exists to avoid.
+fn checkbox_spans(spans: &[jcode_render_core::StyledSpan]) -> Vec<jcode_render_core::StyledSpan> {
+    let mut spans = spans.to_vec();
+    // The marker is its own span, emitted right after the bullet, so only the
+    // first two spans can carry it.
+    for span in spans.iter_mut().take(2) {
+        match span.text.as_str() {
+            "[ ] " => span.text = "\u{2610} ".to_string(),
+            "[x] " => span.text = "\u{2611} ".to_string(),
+            _ => continue,
+        }
+        break;
+    }
+    spans
+}
+
+/// Lay a GFM table out as aligned columns bounded by `columns` monospace cells.
+///
+/// The app is a monospace stack throughout, so padding each cell to its
+/// column's width produces true columns. Three things make this more than a
+/// `join`. Columns are *budgeted*: a table wider than the measure had its right
+/// edge run off the page, so wide columns are squeezed and their cells wrap
+/// inside the column rather than overflowing it. Cells honour the delimiter
+/// row's alignment, because a right-aligned numeric column that renders
+/// left-aligned misreads the author. And a separator row is emitted under the
+/// header, so a table reads as a table rather than as bold text above some
+/// rows.
+fn table_lines(rows: &[Vec<String>], alignments: &[Alignment], columns: usize) -> Vec<StyledLine> {
+    use jcode_render_core::{StyledSpan, TextAttrs};
+
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if count == 0 {
+        return Vec::new();
+    }
+    let widths = column_widths(rows, count, columns);
+
+    let mut lines = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        // Wrap every cell to its column, then emit as many physical lines as
+        // the tallest cell needs. Truncating instead would hide content, and a
+        // table is usually the densest thing in a reply.
+        let wrapped: Vec<Vec<String>> = (0..count)
+            .map(|column| {
+                let cell = row.get(column).map(String::as_str).unwrap_or("");
+                wrap_cell(cell, widths[column])
+            })
+            .collect();
+        let physical = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        for line in 0..physical {
+            let mut text = String::new();
+            for (column, width) in widths.iter().enumerate() {
+                let cell = wrapped[column].get(line).map(String::as_str).unwrap_or("");
+                text.push_str(&pad_cell(cell, *width, alignment_of(alignments, column)));
+                if column + 1 < count {
+                    text.push_str(COLUMN_GAP);
+                }
+            }
+            let mut span = StyledSpan::plain(text.trim_end().to_string());
+            // The header is the one piece of table structure worth carrying in
+            // the text: it says which way to read the rest.
+            if index == 0 {
+                span = span.with_attrs(TextAttrs {
+                    bold: true,
+                    ..TextAttrs::none()
+                });
+            }
+            lines.push(StyledLine::from_spans(vec![span]));
+        }
+        if index == 0 {
+            lines.push(StyledLine::from_spans(vec![StyledSpan::new(
+                header_rule(&widths, count),
+                StyleRole::Dim,
+            )]));
+        }
+    }
+    lines
+}
+
+/// Gap between two table columns, in monospace cells.
+const COLUMN_GAP: &str = "  ";
+
+/// The rule under a table's header row, drawn in the text so it wraps and
+/// scrolls with the columns it belongs to.
+fn header_rule(widths: &[usize], count: usize) -> String {
+    let mut rule = String::new();
+    for (column, width) in widths.iter().enumerate() {
+        rule.push_str(&"\u{2500}".repeat(*width));
+        if column + 1 < count {
+            rule.push_str(&"\u{2500}".repeat(COLUMN_GAP.len()));
+        }
+    }
+    rule
+}
+
+/// Column widths for a table: each column's widest cell, squeezed to fit the
+/// measure when the natural widths overflow it.
+///
+/// Squeezing takes from the widest column first, so a table of one long prose
+/// column and three short ones narrows the prose rather than shredding the
+/// short ones into one character each.
+fn column_widths(rows: &[Vec<String>], count: usize, columns: usize) -> Vec<usize> {
+    use unicode_width::UnicodeWidthStr;
+
+    let mut widths: Vec<usize> = (0..count)
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| cell.width())
+                .max()
+                .unwrap_or(0)
+                .max(1)
+        })
+        .collect();
+
+    let gaps = count.saturating_sub(1) * COLUMN_GAP.len();
+    let available = columns.saturating_sub(gaps);
+    if available == 0 {
+        return widths;
+    }
+    // Never squeeze below this: a column narrower than a short word wraps into
+    // a vertical stack of letters, which is less readable than a table that is
+    // merely tight.
+    let floor = (available / count).clamp(1, MIN_COLUMN_WIDTH);
+    while widths.iter().sum::<usize>() > available {
+        let Some((widest, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > floor)
+            .max_by_key(|(index, width)| (**width, std::cmp::Reverse(*index)))
+        else {
+            break;
+        };
+        widths[widest] -= 1;
+    }
+    widths
+}
+
+/// Narrowest a squeezed table column may become, in monospace cells.
+const MIN_COLUMN_WIDTH: usize = 6;
+
+/// Alignment of a column, defaulting to left when the delimiter row said
+/// nothing (or when a row has more cells than the header declared).
+fn alignment_of(alignments: &[Alignment], column: usize) -> Alignment {
+    alignments.get(column).copied().unwrap_or(Alignment::Left)
+}
+
+/// Pad `cell` to `width` cells according to `alignment`.
+fn pad_cell(cell: &str, width: usize, alignment: Alignment) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let pad = width.saturating_sub(cell.width());
+    match alignment {
+        Alignment::Left => format!("{cell}{}", " ".repeat(pad)),
+        Alignment::Right => format!("{}{cell}", " ".repeat(pad)),
+        Alignment::Center => {
+            let left = pad / 2;
+            format!("{}{cell}{}", " ".repeat(left), " ".repeat(pad - left))
+        }
+    }
+}
+
+/// Wrap one cell to `width` cells, breaking at spaces where possible and
+/// mid-word only for a word that cannot fit at all.
+fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+
+    if width == 0 {
+        return vec![String::new()];
+    }
+    if cell.width() <= width {
+        return vec![cell.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in cell.split_whitespace() {
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if candidate.width() <= width {
+            line = candidate;
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        // A single word wider than the column: hard-break it, because leaving
+        // it whole would push the table past the measure it was budgeted for.
+        let mut rest = word;
+        while rest.width() > width {
+            let split = rest
+                .char_indices()
+                .take_while(|(index, _)| rest[..*index].width() < width)
+                .last()
+                .map(|(index, _)| index)
+                .unwrap_or(rest.len());
+            let split = split.max(rest.chars().next().map_or(1, char::len_utf8));
+            lines.push(rest[..split].to_string());
+            rest = &rest[split..];
+        }
+        line = rest.to_string();
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Drop the leading run of spaces from a line's first span.
@@ -1084,53 +1381,6 @@ fn strip_quote_bar(spans: &[jcode_render_core::StyledSpan]) -> Vec<jcode_render_
         }
     }
     spans
-}
-
-/// Lay a GFM table out as aligned columns.
-///
-/// The app is a monospace stack throughout, so padding each cell to the widest
-/// in its column produces true columns. A naive `join` would put every row's
-/// second cell at a different x, which reads worse than the markdown source.
-fn table_lines(rows: &[Vec<String>]) -> Vec<StyledLine> {
-    use jcode_render_core::{StyledSpan, TextAttrs};
-    use unicode_width::UnicodeWidthStr;
-
-    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let widths: Vec<usize> = (0..columns)
-        .map(|column| {
-            rows.iter()
-                .filter_map(|row| row.get(column))
-                .map(|cell| cell.width())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let mut text = String::new();
-            for (column, width) in widths.iter().enumerate() {
-                let cell = row.get(column).map(String::as_str).unwrap_or("");
-                text.push_str(cell);
-                // No trailing padding on the last column: invisible, and it
-                // makes the line measure wider than its ink.
-                if column + 1 < columns {
-                    text.push_str(&" ".repeat(width.saturating_sub(cell.width()) + 2));
-                }
-            }
-            let mut span = StyledSpan::plain(text);
-            // The header is the one piece of table structure worth carrying:
-            // it says which way to read the rest.
-            if index == 0 {
-                span = span.with_attrs(TextAttrs {
-                    bold: true,
-                    ..TextAttrs::none()
-                });
-            }
-            StyledLine::from_spans(vec![span])
-        })
-        .collect()
 }
 
 /// A span's byte range within the flattened source, plus its styling.
@@ -1953,7 +2203,8 @@ mod tests {
 
     /// Table cells line up into columns. A naive `join(" ")` adapter passes
     /// the test above while rendering an unreadable ragged block, so the
-    /// alignment itself has to be asserted.
+    /// alignment itself has to be asserted: every row's second column has to
+    /// start at the same cell.
     #[test]
     fn table_columns_are_aligned() {
         let rows = vec![
@@ -1961,27 +2212,211 @@ mod tests {
             vec!["hello".to_string(), "client".to_string()],
             vec!["a-much-longer-frame".to_string(), "server".to_string()],
         ];
-        let lines = table_lines(&rows);
-        let starts: Vec<usize> = lines
+        let lines = table_lines(&rows, &[], 80);
+        let seconds: Vec<usize> = lines
             .iter()
-            .map(|line| {
-                let text = line.plain_text();
-                text.find(|c: char| c != ' ')
-                    .map(|_| {
-                        // Column two starts after the padded first cell.
-                        text.len() - text.trim_start_matches(|c: char| c != ' ').len()
+            .map(|line| line.plain_text())
+            // The header rule is solid, so it has no column boundary to find.
+            .filter(|text| !text.starts_with('\u{2500}'))
+            .map(|text| {
+                text.find("  ")
+                    .map(|index| {
+                        text[index..].trim_start().as_ptr() as usize - text.as_ptr() as usize
                     })
                     .unwrap_or(0)
             })
             .collect();
-        let text: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
-        let second_column: Vec<usize> = text
-            .iter()
-            .map(|line| line.rfind("  ").map(|i| i + 2).unwrap_or(0))
-            .collect();
         assert!(
-            second_column.windows(2).all(|w| w[0] == w[1]),
-            "table columns did not align: {text:?} (starts {starts:?})"
+            seconds.windows(2).all(|pair| pair[0] == pair[1]),
+            "table columns did not align: {seconds:?}"
+        );
+    }
+
+    /// A table wider than its measure is squeezed to fit, not run off the page.
+    /// This is the failure a reader notices first: the right-hand columns of a
+    /// wide table were simply not on screen.
+    #[test]
+    fn wide_tables_fit_the_measure() {
+        use unicode_width::UnicodeWidthStr;
+
+        let rows = vec![
+            vec![
+                "a very wide heading indeed".to_string(),
+                "another wide heading here".to_string(),
+                "third wide heading again".to_string(),
+            ],
+            vec![
+                "lorem ipsum dolor sit amet consectetur adipiscing".to_string(),
+                "sed do eiusmod tempor incididunt ut labore".to_string(),
+                "magna aliqua ut enim ad minim veniam".to_string(),
+            ],
+        ];
+        let columns = 40;
+        for line in table_lines(&rows, &[], columns) {
+            let text = line.plain_text();
+            assert!(
+                text.width() <= columns,
+                "table line overflows the measure ({} > {columns}): {text:?}",
+                text.width()
+            );
+        }
+    }
+
+    /// A squeezed cell wraps inside its column instead of losing its tail: a
+    /// table is often the densest thing in a reply, so truncation hides the
+    /// answer.
+    #[test]
+    fn squeezed_cells_wrap_rather_than_truncate() {
+        let rows = vec![
+            vec!["h".to_string(), "heading".to_string()],
+            vec![
+                "one two three four five six seven".to_string(),
+                "x".to_string(),
+            ],
+        ];
+        let text: String = table_lines(&rows, &[], 24)
+            .iter()
+            .map(|line| line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for word in ["one", "seven"] {
+            assert!(text.contains(word), "cell text lost {word:?}: {text:?}");
+        }
+    }
+
+    /// A delimiter row's alignment is honoured: a right-aligned numeric column
+    /// that renders left-aligned misreads what the author wrote.
+    #[test]
+    fn table_alignment_follows_the_delimiter_row() {
+        let document = parse_markdown(
+            "| n |
+|--:|
+| 1 |
+| 1000 |",
+        );
+        let table = document
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::Table)
+            .expect("no table block");
+        assert_eq!(table.alignments.first().copied(), Some(Alignment::Right));
+        let lines = table_lines(&table.table, &table.alignments, 80);
+        let short = lines
+            .iter()
+            .map(|line| line.plain_text())
+            .find(|text| text.trim() == "1")
+            .expect("no short row");
+        assert!(
+            short.starts_with(' '),
+            "right-aligned cell was not padded on the left: {short:?}"
+        );
+    }
+
+    /// A table's header is separated from its body by a rule, so the table
+    /// reads as a table rather than as bold text sitting above some rows.
+    #[test]
+    fn tables_rule_off_their_header() {
+        let lines = table_lines(
+            &[
+                vec!["a".to_string(), "b".to_string()],
+                vec!["1".to_string(), "2".to_string()],
+            ],
+            &[],
+            80,
+        );
+        let second = lines[1].plain_text();
+        assert!(
+            second.chars().all(|glyph| glyph == '\u{2500}'),
+            "no header rule under the header row: {second:?}"
+        );
+    }
+
+    /// A fenced block written under a list item belongs to that item. Indenting
+    /// only the item pulled the code back to the margin, which broke the list
+    /// open around it.
+    #[test]
+    fn blocks_nested_in_a_list_keep_the_list_indent() {
+        let document = parse_markdown(
+            "1. step one
+
+   ```rust
+   let x = 1;
+   ```
+",
+        );
+        let code = document
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::CodeBlock { .. }))
+            .expect("no code block");
+        assert_eq!(code.list_depth, 1, "code block lost its list context");
+        assert!(
+            block_inset(code) > CODE_PAD_X,
+            "nested code block was not indented into its list item"
+        );
+    }
+
+    /// A nested block's furniture starts at the block's edge, which is inside
+    /// the list indent it inherited. Drawing the wash from the message margin
+    /// left it visibly detached from the text it is supposed to wrap.
+    #[test]
+    fn nested_block_furniture_follows_its_indent() {
+        let laid = laid("1. step one\n\n   ```rust\n   let x = 1;\n   ```\n");
+        let code = laid
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::CodeBlock { .. }))
+            .expect("no code block");
+        assert!(
+            code.edge() >= LIST_INDENT,
+            "nested code wash sat at the margin (edge {})",
+            code.edge()
+        );
+        assert!(
+            (code.inset - code.edge() - CODE_PAD_X).abs() < f64::EPSILON,
+            "wash and text disagree about the block's padding"
+        );
+    }
+
+    /// A loose item's continuation paragraph hangs under the item's text. Left
+    /// at the margin it read as a new paragraph that had escaped the list.
+    #[test]
+    fn list_continuation_paragraphs_hang_under_their_item() {
+        let document = parse_markdown("1. step one\n\n   then dispatch on it.\n");
+        let items: Vec<&Block> = document
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.kind, BlockKind::ListItem { .. }))
+            .collect();
+        assert_eq!(items.len(), 2, "expected the item and its continuation");
+        assert!(
+            block_inset(items[1]) > block_inset(items[0]),
+            "continuation paragraph was not indented under its item"
+        );
+    }
+
+    /// A task list renders as checkboxes. `[x]` on screen is markdown source
+    /// sitting next to a bullet that *was* rendered.
+    #[test]
+    fn task_lists_render_as_checkboxes() {
+        let document = parse_markdown(
+            "- [ ] todo
+- [x] done",
+        );
+        let text: String = document
+            .blocks
+            .iter()
+            .flat_map(|block| block_lines(block, || 80))
+            .map(|line| line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("[ ]") && !text.contains("[x]"),
+            "raw task markers survived: {text:?}"
+        );
+        assert!(
+            text.contains('\u{2610}') && text.contains('\u{2611}'),
+            "no checkboxes drawn: {text:?}"
         );
     }
 
@@ -1995,7 +2430,7 @@ mod tests {
             .iter()
             .find(|block| block.kind == BlockKind::BlockQuote)
             .expect("no quote block");
-        let lines = block_lines(quote);
+        let lines = block_lines(quote, || 80);
         for line in &lines {
             assert!(
                 !line.plain_text().contains('\u{2502}'),
@@ -2121,7 +2556,7 @@ mod tests {
     #[test]
     fn a_link_is_underlined() {
         let document = parse_markdown("see [the docs](https://example.com) for more");
-        let lines = block_lines(&document.blocks[0]);
+        let lines = block_lines(&document.blocks[0], || 80);
         let (_, spans) = flatten(&lines);
         assert!(
             spans

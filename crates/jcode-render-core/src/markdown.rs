@@ -180,6 +180,7 @@ pub fn parse_markdown(text: &str) -> Document {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut table_row: Vec<String> = Vec::new();
     let mut current_cell = String::new();
+    let mut table_alignments: Vec<Alignment> = Vec::new();
 
     // Blockquote line accumulation. Legacy emits one rendered line per source
     // line inside a quote (soft breaks split lines), so we buffer the lines and
@@ -225,6 +226,12 @@ pub fn parse_markdown(text: &str) -> Document {
     };
 
     for event in parser {
+        // How deep in lists we were before and after this event. Blocks a
+        // single event emits belong to the *shallower* of the two: the
+        // paragraph flushed when a nested list opens is the parent item's
+        // text, not the new list's.
+        let depth_before = list_stack.len();
+        let first_new_block = doc.blocks.len();
         match event {
             // ---- block starts ----
             Event::Start(Tag::Heading { level, .. }) => {
@@ -289,7 +296,7 @@ pub fn parse_markdown(text: &str) -> Document {
                 flush_paragraph(
                     &mut doc,
                     &mut spans,
-                    BlockKind::Paragraph,
+                    current_kind(blockquote_depth, &list_stack),
                     Alignment::Left,
                     blockquote_depth,
                     &mut bq_lines,
@@ -382,7 +389,7 @@ pub fn parse_markdown(text: &str) -> Document {
             }
 
             // ---- tables ----
-            Event::Start(Tag::Table(_)) => {
+            Event::Start(Tag::Table(ref aligns)) => {
                 flush_paragraph(
                     &mut doc,
                     &mut spans,
@@ -393,6 +400,14 @@ pub fn parse_markdown(text: &str) -> Document {
                 );
                 in_table = true;
                 table_rows.clear();
+                table_alignments = aligns
+                    .iter()
+                    .map(|align| match align {
+                        pulldown_cmark::Alignment::Right => Alignment::Right,
+                        pulldown_cmark::Alignment::Center => Alignment::Center,
+                        _ => Alignment::Left,
+                    })
+                    .collect();
             }
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
                 table_row.clear();
@@ -412,8 +427,10 @@ pub fn parse_markdown(text: &str) -> Document {
             Event::End(TagEnd::Table) => {
                 in_table = false;
                 if !table_rows.is_empty() {
-                    doc.blocks
-                        .push(Block::table(std::mem::take(&mut table_rows)));
+                    doc.blocks.push(Block::aligned_table(
+                        std::mem::take(&mut table_rows),
+                        std::mem::take(&mut table_alignments),
+                    ));
                 }
             }
 
@@ -678,6 +695,12 @@ pub fn parse_markdown(text: &str) -> Document {
             }
 
             _ => {}
+        }
+        let depth = depth_before.min(list_stack.len());
+        if depth > 0 {
+            for block in doc.blocks.iter_mut().skip(first_new_block) {
+                block.list_depth = depth;
+            }
         }
     }
 
