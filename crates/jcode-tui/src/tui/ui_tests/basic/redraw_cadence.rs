@@ -114,6 +114,7 @@ fn a_status_notice_still_requires_periodic_frames() {
 /// here we only require that the donut still animates.
 #[test]
 fn an_idle_empty_session_still_animates_smoothly() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // Pin the tier: the auto-detected one depends on host load, and a
     // Reduced/Minimal host legitimately disables the decorative animation.
     crate::perf::pin_full_profile_for_tests();
@@ -156,6 +157,7 @@ fn active_typing_backs_the_decorative_animation_off() {
 /// animation: the backoff is about active typing, not about having text.
 #[test]
 fn a_paused_draft_lets_the_animation_recover() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // Pin the tier: the auto-detected one depends on host load, and a
     // Reduced/Minimal host legitimately disables the decorative animation.
     crate::perf::pin_full_profile_for_tests();
@@ -183,6 +185,7 @@ fn a_paused_draft_lets_the_animation_recover() {
 /// decoration is the difference the user felt as "spawning a new one still lags".
 #[test]
 fn the_decorative_animation_is_capped_below_the_configured_animation_rate() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // Pin the tier: the auto-detected one depends on host load, and a
     // Reduced/Minimal host legitimately disables the decorative animation.
     crate::perf::pin_full_profile_for_tests();
@@ -213,6 +216,7 @@ fn the_decorative_animation_is_capped_below_the_configured_animation_rate() {
 /// ceiling, not an override.
 #[test]
 fn a_lower_configured_animation_rate_is_respected() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // Pin the tier: the auto-detected one depends on host load, and a
     // Reduced/Minimal host legitimately disables the decorative animation.
     crate::perf::pin_full_profile_for_tests();

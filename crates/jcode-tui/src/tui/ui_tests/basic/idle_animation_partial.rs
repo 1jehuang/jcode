@@ -27,6 +27,37 @@ fn pin_full_tier() {
     crate::perf::pin_full_profile_for_tests();
 }
 
+/// RAII guard enabling `display.idle_animation` for one test.
+///
+/// The decorative idle donut is opt-in since 17e075fb2 flipped the config
+/// default to `false`, but these tests exist to pin the donut's redraw
+/// cadence and partial-repaint machinery, which only run when the feature is
+/// on. Holds the shared test-env lock for its lifetime so the env mutation
+/// cannot leak into tests that expect the default-off behavior. Acquire this
+/// guard *before* any render-state lock, matching the env-then-render order
+/// the app tests use.
+struct IdleAnimationEnvGuard {
+    _env: std::sync::MutexGuard<'static, ()>,
+}
+
+impl IdleAnimationEnvGuard {
+    fn enable() -> Self {
+        let env = crate::storage::lock_test_env();
+        crate::env::set_var("JCODE_IDLE_ANIMATION", "1");
+        // The config cache throttles env re-checks; flush it so this test
+        // observes the override immediately rather than a sibling's state.
+        crate::config::invalidate_config_cache();
+        Self { _env: env }
+    }
+}
+
+impl Drop for IdleAnimationEnvGuard {
+    fn drop(&mut self) {
+        crate::env::remove_var("JCODE_IDLE_ANIMATION");
+        crate::config::invalidate_config_cache();
+    }
+}
+
 fn idle_animation_state(anim_elapsed: f32) -> TestState {
     TestState {
         anim_elapsed,
@@ -46,6 +77,7 @@ fn render_full(state: &TestState, width: u16, height: u16) -> Terminal<TestBacke
 
 #[test]
 fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
 
@@ -77,6 +109,7 @@ fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
 
 #[test]
 fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
 
@@ -121,6 +154,7 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
 
 #[test]
 fn advancing_the_animation_actually_changes_the_animated_rows() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // Guards against the partial-repaint test passing vacuously: if the
     // animation were static, "matches a full frame" would be trivially true and
     // the fast path could silently freeze the animation.
@@ -156,6 +190,7 @@ fn advancing_the_animation_actually_changes_the_animated_rows() {
 
 #[test]
 fn idle_animation_is_excluded_from_the_full_frame_redraw_signal() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // `handle_tick` uses the excluding variant so an animation-only tick does
     // not force a full frame; the animation still drives the tick cadence.
     let _lock = viewport_snapshot_test_lock();
@@ -190,6 +225,7 @@ fn idle_animation_is_excluded_from_the_full_frame_redraw_signal() {
 
 #[test]
 fn partial_repaint_does_no_layout_or_transcript_work() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     // The savings come entirely from skipping the frame pipeline, so assert that
     // structurally rather than by timing (which varies by build profile): a full
     // frame republishes layout/viewport bookkeeping, a partial repaint must
@@ -268,6 +304,7 @@ fn published_rectangle_round_trips_through_the_shared_slot() {
 /// passes.
 #[test]
 fn a_full_screen_overlay_stops_the_decorative_animation_cadence() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
     pin_full_tier();
     clear_flicker_frame_history_for_tests();
@@ -379,6 +416,7 @@ fn animation_cadence_implies_the_renderer_published_animated_rows() {
 /// the animation on screen and the loop back to animation cadence.
 #[test]
 fn the_animation_can_still_start_from_a_state_with_nothing_published() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
     pin_full_tier();
     clear_flicker_frame_history_for_tests();
