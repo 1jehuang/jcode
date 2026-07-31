@@ -159,7 +159,10 @@ fn detect_update_state() -> UpdateState {
         return UpdateState::Unknown;
     };
     // A dev build outside the install tree has no channel to compare against.
-    if !is_managed_install(&exe, &std::fs::canonicalize(&builds).unwrap_or(builds.clone())) {
+    if !is_managed_install(
+        &exe,
+        &std::fs::canonicalize(&builds).unwrap_or(builds.clone()),
+    ) {
         return UpdateState::Unknown;
     }
     let running = mtime(&exe);
