@@ -178,7 +178,16 @@ impl Provider for OpenRouterSpecCaptureProvider {
 pub(crate) fn create_test_app() -> App {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // `clear_test_render_state_for_tests` wipes process-global render state
+    // (flicker history, layout snapshots, copy targets). Rendering tests guard
+    // that state with `render_state_test_lock`, so clearing it unlocked let any
+    // of the ~570 `create_test_app` callers race a concurrent render test and
+    // reset its state mid-assertion. Take the same lock for the clear so the
+    // two can no longer interleave.
+    {
+        let _render_state_guard = crate::tui::ui::render_state_test_lock();
+        crate::tui::ui::clear_test_render_state_for_tests();
+    }
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -324,10 +333,39 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
     }
 }
 
+/// Point `JCODE_HOME` at a per-process scratch directory if nothing set one.
+///
+/// This runs from `create_test_app`, so roughly 570 tests call it, and it
+/// mutates a process-global that Rust's parallel test threads all share. Tests
+/// that scope their own `JCODE_HOME` restore it by *removing* the variable, so
+/// without serialization this function would observe the gap and repoint
+/// `JCODE_HOME` at the shared scratch home while that test was still running.
+/// That is the race behind jcode-tui's intermittent failures in unrelated
+/// ambient, header, and model-picker tests, which all read files under
+/// `JCODE_HOME` mid-assertion.
+///
+/// Taking the same lock those tests use makes the check-then-set atomic with
+/// respect to them. The lock is released on return, which is correct: it only
+/// needs to cover this read-modify-write, not the caller's whole test.
+///
+/// The env check runs *before* taking the lock: `with_temp_jcode_home` holds
+/// this same non-reentrant mutex for the whole test body and sets `JCODE_HOME`
+/// under it, so locking unconditionally here would self-deadlock every
+/// `create_*_test_app` call made inside such a test. When the variable is
+/// already set the caller either holds the lock itself (no removal possible)
+/// or accepts the same benign race that existed before serialization; the
+/// lock is only required for the unset -> set transition, which re-checks
+/// under the lock.
 fn ensure_test_jcode_home_if_unset() {
     use std::sync::OnceLock;
 
     static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    if std::env::var_os("JCODE_HOME").is_some() {
+        return;
+    }
+
+    let _env_lock = crate::storage::lock_test_env();
 
     if std::env::var_os("JCODE_HOME").is_some() {
         return;

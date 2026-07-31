@@ -368,14 +368,23 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
 /// Elsewhere, try wl-copy first (Wayland), then OSC 52 (works over SSH /
 /// Docker / tmux), then arboard as a final fallback.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
-    // Tests that opted into capture never touch the real clipboard, so they
-    // behave identically on a desktop and on a headless runner.
+    // Under test, never touch the OS clipboard. Beyond making results identical
+    // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
+    // which forks a clipboard server that does not exit; waiting on it hangs the
+    // test binary indefinitely. Tests that assert copied text call
+    // `capture_clipboard_for_tests` first and then read the sink; tests that
+    // only assert "a copy happened" get a truthy result either way.
     #[cfg(test)]
-    if let Ok(mut sink) = TEST_CLIPBOARD.lock()
-        && let Some(captured) = sink.as_mut()
     {
-        captured.clear();
-        captured.push_str(text);
+        if let Ok(mut sink) = TEST_CLIPBOARD.lock() {
+            match sink.as_mut() {
+                Some(captured) => {
+                    captured.clear();
+                    captured.push_str(text);
+                }
+                None => *sink = Some(text.to_string()),
+            }
+        }
         return true;
     }
 
@@ -447,8 +456,32 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
                 && stdin.write_all(text.as_bytes()).is_ok()
             {
                 drop(child.stdin.take());
-                if child.wait().map(|s| s.success()).unwrap_or(false) {
-                    return true;
+                // Do not block the caller on `wait()`. `wl-copy` forks a
+                // clipboard server that stays alive to serve paste requests, so
+                // waiting can hang for as long as the clipboard is owned. This
+                // runs on the UI thread from copy keybindings, where a stall is
+                // felt directly as input lag. Poll briefly for an early failure
+                // (e.g. no Wayland display) so the arboard/OSC 52 fallbacks
+                // still run, then treat a live child as success and reap it in
+                // the background.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) if status.success() => return true,
+                        Ok(Some(_)) => break, // exited nonzero: fall through
+                        Ok(None) => {
+                            if std::time::Instant::now() >= deadline {
+                                // Still running: wl-copy became the clipboard
+                                // owner, which is the success case.
+                                std::thread::spawn(move || {
+                                    let _ = child.wait();
+                                });
+                                return true;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
                 }
             }
         }
