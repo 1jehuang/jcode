@@ -268,3 +268,28 @@ test("the run rate is the 7-day mean and the projection is 30x it", () => {
   assert.equal(runRate, 1, "$7 of usage over a 7-day window is $1/day");
   assert.equal(projection, 30);
 });
+
+test("the 7-day window is a rolling 168 hours, not 8 calendar days", () => {
+  // Regression: a `day >= date('now','-7 days')` filter includes both the
+  // boundary day and today, so it spans 8 partial calendar days. Dividing that
+  // by 7 overstates the run rate, and the monthly projection inherits it.
+  const db = makeDb();
+  insertPrice(db, { model: "m", input: 7, output: 0, cacheRead: 0 });
+  // One session per day for the last 10 days, $7 of usage each.
+  for (let daysAgo = 0; daysAgo < 10; daysAgo += 1) {
+    db.prepare(
+      `INSERT INTO events (event, created_at, model_end, provider_end, input_tokens)
+       VALUES ('session_end', datetime('now', '-' || ? || ' hours'), 'm', 'p', 1000000)`,
+    ).run(daysAgo * 24 + 1);
+  }
+
+  const rows = runDashboard(db);
+  // Exactly 7 sessions fall inside the trailing 168 hours: $49 total and a
+  // $7/day run rate. The 8-calendar-day form would report $8/day.
+  assert.equal(summary(rows, "run_rate_usd_per_day_7d").usd_value, 7);
+  assert.equal(summary(rows, "projected_usd_per_month_from_7d").usd_value, 210);
+  // Panel 2 must share the window, else per-model dollars will not reconcile
+  // against the run rate.
+  const modelTotal = modelRows(rows).reduce((sum, r) => sum + r.usd_value, 0);
+  assert.equal(modelTotal, 49);
+});
