@@ -19,6 +19,12 @@ fn measure() -> (
     BTreeMap<&'static str, u32>,
     BTreeMap<(&'static str, &'static str), u32>,
 ) {
+    // Attribution matches rendered RGB back to role defaults, so the frame
+    // must be rendered in truecolor. A hosted CI runner without COLORTERM
+    // detects 256-color and quantizes every cell, which pushed most colors
+    // out of their role's family radius and left the adjacency graph nearly
+    // empty (4 edges instead of the required 5+).
+    jcode_tui_style::color::pin_truecolor_for_tests();
     let mut area: BTreeMap<&'static str, u32> = BTreeMap::new();
     let mut touches: BTreeMap<(&'static str, &'static str), u32> = BTreeMap::new();
 
