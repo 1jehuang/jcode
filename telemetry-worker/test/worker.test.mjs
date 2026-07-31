@@ -898,3 +898,75 @@ test("POST responses from the beacon origin carry CORS headers", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://jcode.sh");
 });
+
+// ---------------------------------------------------------------------------
+// Coarse geography (country only, resolved at Cloudflare's edge).
+// ---------------------------------------------------------------------------
+
+function postRequestFromCountry(body, country, url = EVENT_URL) {
+  const request = postRequest(body, url);
+  Object.defineProperty(request, "cf", { value: { country }, configurable: true });
+  return request;
+}
+
+test("country is taken from request.cf and rolled up per day", async () => {
+  const db = makeDb();
+  const geo = makeFirehose();
+  const response = await worker.fetch(
+    postRequestFromCountry(makeBody({ event: "install" }), "de"),
+    { DB: db, FIREHOSE_GEO: geo },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  // Geo firehose point: blob2 = country, normalized to uppercase.
+  assert.equal(geo.points.length, 1);
+  assert.equal(geo.points[0].blobs[0], "install");
+  assert.equal(geo.points[0].blobs[1], "DE");
+
+  const rollup = db.executed.find(({ sql }) => /INSERT INTO country_daily/.test(sql));
+  assert.ok(rollup, "country_daily rollup should be written");
+  assert.equal(rollup.values[1], "DE");
+  assert.equal(rollup.values[2], "install");
+  assert.equal(rollup.values[3], 0);
+});
+
+test("lifecycle events stamp last_country on the DAU rollup", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequestFromCountry(makeBody({ event: "session_end", event_id: "se-geo" }), "JP"),
+    { DB: db },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  const dau = db.executed.find(({ sql }) => /INSERT INTO daily_active_users/.test(sql));
+  assert.ok(dau, "daily_active_users rollup should be written");
+  assert.ok(columnIndex(dau.sql, "last_country") >= 0, "last_country column should be present");
+  // last_country is the final bound placeholder (raw_active is a literal 1, so
+  // column positions and bind positions are intentionally not aligned).
+  assert.equal(dau.values[dau.values.length - 1], "JP");
+});
+
+test("client-supplied country is ignored and bogus codes are dropped", async () => {
+  const db = makeDb();
+  const geo = makeFirehose();
+  // "XX" (unknown) and "T1" (Tor) are not real countries; a spoofed body field
+  // must never win over the edge value.
+  const response = await worker.fetch(
+    postRequestFromCountry(makeBody({ event: "install", country: "US" }), "XX"),
+    { DB: db, FIREHOSE_GEO: geo },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(geo.points.length, 0);
+  assert.ok(!db.executed.some(({ sql }) => /INSERT INTO country_daily/.test(sql)));
+});
+
+test("missing geo binding and missing cf never break the event insert", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(postRequest(makeBody()), { DB: db }, makeCtx());
+  const json = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(json.durable, true);
+});

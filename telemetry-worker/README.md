@@ -37,7 +37,7 @@ Events are dual-written to two stores with different jobs:
    identity anchors (`install`, `feedback`), auth/lifecycle events, the
    `daily_active_users` rollup, and a retention-pruned raw tail of the
    high-volume events (see `RETENTION_DAYS`). All the dashboard SQL in this
-   repo (`users.sql`, `dau.sql`, `health.sql`) reads D1.
+   repo (`users.sql`, `dau.sql`, `geo.sql`, `health.sql`) reads D1.
 
 ### D1 size self-defense
 
@@ -215,6 +215,12 @@ The 0018 fields were appended without reordering: `blob18=metric_name`,
 ## Querying Data
 
 ```bash
+# Where are our users? (country only; see migration 0022 and TELEMETRY.md)
+npm run geo   # or: wrangler d1 execute jcode-telemetry --remote --file=geo.sql
+
+# Users by country over the last 30 days, straight from the rollup
+wrangler d1 execute jcode-telemetry --remote --command "SELECT COALESCE(last_country, 'unknown') AS country, COUNT(DISTINCT telemetry_id) AS users FROM daily_active_users WHERE activity_date >= date('now', '-30 days') AND last_is_ci = 0 GROUP BY 1 ORDER BY users DESC LIMIT 25"
+
 # Total installs (raw, and excluding CI runners which mint a fresh id per job)
 wrangler d1 execute jcode-telemetry --command "SELECT COUNT(DISTINCT telemetry_id) AS raw_installs, COUNT(DISTINCT CASE WHEN is_ci = 0 THEN telemetry_id END) AS installs_noci FROM events WHERE event = 'install'"
 

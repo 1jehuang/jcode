@@ -219,7 +219,54 @@ const FIREHOSE_INSTALL_SCHEMA = {
   doubles: [],
 };
 
+// Coarse geography (`jcode_geo_firehose` dataset). The main and web datasets
+// are both at Analytics Engine's 20-blob limit, so the country dimension gets
+// its own dataset instead of repurposing a position. Country only: no IP,
+// city, region, coordinates, or timezone is read from request.cf.
+const FIREHOSE_GEO_SCHEMA = {
+  blobs: ["event", "country", "version", "os", "arch", "build_channel"],
+  doubles: ["is_ci"],
+  // index1: telemetry_id, so adaptive sampling stays per user.
+  indexes: ["telemetry_id"],
+};
+
+// Cloudflare sets request.cf.country to "XX" for unknown clients and "T1" for
+// Tor exit nodes. Normalize to a 2-letter uppercase code or null.
+const NON_COUNTRY_CODES = new Set(["XX", "T1"]);
+
+function normalizeCountry(value) {
+  const code = String(value || "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code) || NON_COUNTRY_CODES.has(code)) {
+    return null;
+  }
+  return code;
+}
+
+function writeGeoFirehose(env, body) {
+  const sink = env.FIREHOSE_GEO;
+  if (!body.country || !sink || typeof sink.writeDataPoint !== "function") {
+    return false;
+  }
+  try {
+    sink.writeDataPoint({
+      indexes: [String(body.id || "").slice(0, 96)],
+      blobs: FIREHOSE_GEO_SCHEMA.blobs.map((name) => {
+        const value = body[name];
+        return value == null ? "" : String(value).slice(0, 200);
+      }),
+      doubles: [boolToInt(body.is_ci)],
+    });
+    return true;
+  } catch (err) {
+    console.warn("geo firehose write failed", err?.message || err);
+    return false;
+  }
+}
+
 function writeFirehose(env, body) {
+  // Geo is dimensioned separately from every event family, so it is written
+  // before the per-family dispatch below (which returns early).
+  writeGeoFirehose(env, body);
   if (body.event === "discovery") {
     return writeDiscoveryFirehose(env, body);
   }
@@ -426,6 +473,12 @@ export default {
     if (!KNOWN_EVENTS.includes(body.event)) {
       return jsonResponse({ error: "Unknown event type" }, 400, cors);
     }
+
+    // Coarse geography, resolved at the edge rather than collected by the
+    // client. Clients cannot spoof or set this: any inbound `country` field is
+    // overwritten. Country only, so this stays consistent with TELEMETRY.md
+    // (no IP, city, region, coordinates, or timezone is read or stored).
+    body.country = normalizeCountry(request.cf?.country);
 
     if (SUBSCRIPTION_EVENTS.includes(body.event)) {
       const problem = normalizeSubscriptionEvent(body);
@@ -1060,6 +1113,9 @@ async function insertTurnDetails(env, body, columns) {
 }
 
 async function recordDailyActivity(env, body) {
+  // Country rollup covers every event family, including the ones that never
+  // reach the DAU table (install, upgrade, web_pageview, ...).
+  await recordCountryDaily(env, body);
   if (!["session_start", "turn_end", "session_end", "session_crash"].includes(body.event)) {
     return;
   }
@@ -1089,8 +1145,9 @@ async function recordDailyActivity(env, body) {
         session_crash_count,
         ci_active,
         last_is_ci,
-        last_build_channel
-      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_build_channel,
+        last_country
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(activity_date, telemetry_id) DO UPDATE SET
         last_seen_at = datetime('now'),
         raw_active = 1,
@@ -1103,7 +1160,8 @@ async function recordDailyActivity(env, body) {
         session_crash_count = session_crash_count + excluded.session_crash_count,
         ci_active = MAX(ci_active, excluded.ci_active),
         last_is_ci = excluded.last_is_ci,
-        last_build_channel = COALESCE(excluded.last_build_channel, daily_active_users.last_build_channel)
+        last_build_channel = COALESCE(excluded.last_build_channel, daily_active_users.last_build_channel),
+        last_country = COALESCE(excluded.last_country, daily_active_users.last_country)
     `).bind(
       activityDate,
       body.id,
@@ -1117,11 +1175,34 @@ async function recordDailyActivity(env, body) {
       isCi,
       isCi,
       body.build_channel || null,
+      body.country || null,
     ).run();
   } catch (err) {
     // Older databases may not have the rollup migration yet. Do not reject the
     // canonical event insert, because raw events remain the source of truth.
     console.warn("daily activity rollup failed", err?.message || err);
+  }
+}
+
+// Durable per-day country x event counts. Aggregate only (no telemetry_id), so
+// it survives retention pruning and cannot be used to profile an individual.
+async function recordCountryDaily(env, body) {
+  if (!body.country) {
+    return;
+  }
+  const activityDate = new Date().toISOString().slice(0, 10);
+  try {
+    await env.DB.prepare(`
+      INSERT INTO country_daily (activity_date, country, event, is_ci, event_count)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT(activity_date, country, event, is_ci) DO UPDATE SET
+        event_count = event_count + 1,
+        last_seen_at = datetime('now')
+    `).bind(activityDate, body.country, body.event, boolToInt(body.is_ci)).run();
+  } catch (err) {
+    // Databases predating migration 0022 have no country_daily table; never
+    // fail the canonical event insert over the geo rollup.
+    console.warn("country rollup failed", err?.message || err);
   }
 }
 
