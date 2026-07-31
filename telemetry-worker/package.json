@@ -31,6 +31,8 @@
     "migrate:web-quality": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0018_web_quality_telemetry.sql",
     "migrate:install-conversion": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0020_install_conversion_funnel.sql",
     "migrate:todo-telemetry": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0021_todo_telemetry.sql",
+    "migrate:geo-country": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0022_geo_country.sql",
+    "geo": "npx wrangler d1 execute jcode-telemetry --remote --file=geo.sql",
     "conversion": "npx wrangler d1 execute jcode-telemetry --remote --file=conversion.sql"
   },
   "devDependencies": {

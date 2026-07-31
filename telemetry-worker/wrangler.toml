@@ -58,5 +58,14 @@ dataset = "jcode_discovery_firehose"
 binding = "FIREHOSE_INSTALL"
 dataset = "jcode_install_firehose"
 
+# Coarse geography (country only, from Cloudflare's edge). Separate dataset
+# because the main and web schemas are at the 20-blob limit. See
+# FIREHOSE_GEO_SCHEMA in src/worker.js. Same one-time Analytics Engine enable
+# caveat as above; the worker degrades gracefully without the binding (the D1
+# country_daily rollup still records).
+[[analytics_engine_datasets]]
+binding = "FIREHOSE_GEO"
+dataset = "jcode_geo_firehose"
+
 [vars]
 ALLOWED_ORIGIN = "*"

@@ -354,6 +354,9 @@ CREATE TABLE IF NOT EXISTS daily_active_users (
     ci_active INTEGER DEFAULT 0,
     last_is_ci INTEGER DEFAULT 0,
     last_build_channel TEXT,
+    -- Coarse geo: 2-letter country code from Cloudflare's edge (migration
+    -- 0022). Country only; IP / city / coordinates are never stored.
+    last_country TEXT,
     PRIMARY KEY (activity_date, telemetry_id)
 );
 
@@ -365,3 +368,22 @@ CREATE INDEX IF NOT EXISTS idx_daily_active_date_release
 
 CREATE INDEX IF NOT EXISTS idx_daily_active_date_ci
     ON daily_active_users(activity_date, last_is_ci, meaningful_release_active);
+
+-- Coarse geographic dimension (migration 0022). Country only, derived from
+-- Cloudflare's edge (request.cf.country); IP addresses are never stored.
+CREATE INDEX IF NOT EXISTS idx_daily_active_date_country
+    ON daily_active_users(activity_date, last_country);
+
+CREATE TABLE IF NOT EXISTS country_daily (
+    activity_date TEXT NOT NULL,
+    country TEXT NOT NULL,
+    event TEXT NOT NULL,
+    is_ci INTEGER NOT NULL DEFAULT 0,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT (datetime('now')),
+    last_seen_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (activity_date, country, event, is_ci)
+);
+
+CREATE INDEX IF NOT EXISTS idx_country_daily_date ON country_daily(activity_date);
+CREATE INDEX IF NOT EXISTS idx_country_daily_country ON country_daily(country);
