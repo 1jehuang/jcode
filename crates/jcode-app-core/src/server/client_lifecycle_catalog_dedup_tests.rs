@@ -62,3 +62,37 @@ fn age_normalization_handles_trailing_digits_and_unicode() {
         "→ · émoji <age>"
     );
 }
+
+/// Real route detail strings captured from a production OpenRouter catalog
+/// cache. These carry both self-ticking cache ages and endpoint stats
+/// (`p50`, `tps`) that only move when the endpoint cache genuinely refreshes.
+/// Ages must normalize away; stats must not, since a stats change means the
+/// upstream data really did change and clients should see it.
+#[test]
+fn production_route_details_normalize_ages_but_preserve_endpoint_stats() {
+    let with_age = "in $0.30/M, out $2.50/M, cache write $0.08/M, cache read $0.03/M, 100%, \
+                    493ms p50, 143tps, cache on, 17m ago";
+    let later_age = "in $0.30/M, out $2.50/M, cache write $0.08/M, cache read $0.03/M, 100%, \
+                     493ms p50, 143tps, cache on, 56m ago";
+    let changed_stats = "in $0.30/M, out $2.50/M, cache write $0.08/M, cache read $0.03/M, 100%, \
+                         900ms p50, 143tps, cache on, 17m ago";
+
+    // Age drift alone must collapse to the same key.
+    assert_eq!(
+        strip_relative_age_text(with_age),
+        strip_relative_age_text(later_age),
+        "cache-age drift must not look like a catalog change"
+    );
+    // A real endpoint-stat change must survive normalization.
+    assert_ne!(
+        strip_relative_age_text(with_age),
+        strip_relative_age_text(changed_stats),
+        "endpoint stat changes are real and must still propagate"
+    );
+    // `143tps` has no " ago" suffix, so it must be left intact.
+    assert!(
+        strip_relative_age_text(with_age).contains("143tps"),
+        "bare unit-suffixed numbers must not be mistaken for ages"
+    );
+    assert!(strip_relative_age_text(with_age).ends_with("cache on, <age>"));
+}
