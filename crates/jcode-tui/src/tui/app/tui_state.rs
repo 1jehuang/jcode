@@ -585,6 +585,10 @@ impl crate::tui::TuiState for App {
         &self.streaming.streaming_text
     }
 
+    fn pinned_todos_payload(&self) -> Option<&str> {
+        self.pinned_todos_payload_ref()
+    }
+
     fn input(&self) -> &str {
         &self.input
     }
