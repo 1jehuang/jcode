@@ -179,15 +179,13 @@ pub(crate) fn create_test_app() -> App {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     // `clear_test_render_state_for_tests` wipes process-global render state
-    // (flicker history, layout snapshots, copy targets). Rendering tests guard
-    // that state with `render_state_test_lock`, so clearing it unlocked let any
-    // of the ~570 `create_test_app` callers race a concurrent render test and
-    // reset its state mid-assertion. Take the same lock for the clear so the
-    // two can no longer interleave.
-    {
-        let _render_state_guard = crate::tui::ui::render_state_test_lock();
-        crate::tui::ui::clear_test_render_state_for_tests();
-    }
+    // (flicker history, layout snapshots, copy targets) and internally takes
+    // the shared render-state lock unless this thread already holds it. Do
+    // not take `render_state_test_lock()` explicitly here: the mutex is not
+    // reentrant, so tests that hold the lock and then build an app (e.g. the
+    // pinned-todo-band render test) would self-deadlock, which hung the CI
+    // TUI test step at its 35-minute job timeout.
+    crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -348,14 +346,13 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// respect to them. The lock is released on return, which is correct: it only
 /// needs to cover this read-modify-write, not the caller's whole test.
 ///
-/// The env check runs *before* taking the lock: `with_temp_jcode_home` holds
-/// this same non-reentrant mutex for the whole test body and sets `JCODE_HOME`
-/// under it, so locking unconditionally here would self-deadlock every
-/// `create_*_test_app` call made inside such a test. When the variable is
-/// already set the caller either holds the lock itself (no removal possible)
-/// or accepts the same benign race that existed before serialization; the
-/// lock is only required for the unset -> set transition, which re-checks
-/// under the lock.
+/// The lock is acquired with `try_lock`, never blocking: tests like
+/// `with_temp_jcode_home` hold this same non-reentrant mutex for their whole
+/// body and may call `create_*_test_app` inside it, so a blocking lock here
+/// self-deadlocks (this hung CI's TUI test step at the job timeout). When
+/// `try_lock` fails because this thread holds the lock, the caller's own
+/// exclusion already covers the transition; a cross-thread `try_lock` miss
+/// falls back to the pre-serialization benign race for that one call.
 fn ensure_test_jcode_home_if_unset() {
     use std::sync::OnceLock;
 
@@ -365,7 +362,16 @@ fn ensure_test_jcode_home_if_unset() {
         return;
     }
 
-    let _env_lock = crate::storage::lock_test_env();
+    // Serialize the unset -> set transition against tests that scope their
+    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
+    // several tests hold it while calling `create_test_app` (e.g. the
+    // pinned-todo-band test), so a blocking `lock_test_env()` here would
+    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
+    // `try_lock` keeps the serialization when the lock is free and degrades
+    // to the caller's own exclusion when this thread already holds it: if
+    // try_lock fails because *we* hold the lock, no other thread can race
+    // this read-modify-write anyway.
+    let _env_lock = crate::storage::test_env_lock().try_lock();
 
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
