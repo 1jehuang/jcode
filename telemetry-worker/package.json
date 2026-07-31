@@ -24,6 +24,7 @@
     "dau": "node scripts/run-dashboard.mjs dau.sql",
     "users": "node scripts/run-dashboard.mjs users.sql",
     "token-value": "node scripts/run-dashboard.mjs token-value.sql",
+    "token-value:daily": "node scripts/run-dashboard.mjs token-value-daily.sql",
     "sync:model-prices": "node scripts/sync-model-prices.mjs",
     "migrate:detail-fields": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0013_detail_table_turn_session_fields.sql",
     "migrate:dau-full-backfill": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0014_full_history_dau_backfill.sql",

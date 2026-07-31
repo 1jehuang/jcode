@@ -151,7 +151,13 @@ through jcode, priced per model rather than with one blended rate. Setup:
 npm run migrate:model-prices   # creates model_prices (migration 0023)
 npm run sync:model-prices      # fills it from https://models.dev/api.json
 npm run token-value            # daily / per-model / summary panels
+npm run token-value:daily      # just the per-day series, in date order
 ```
+
+`npm run token-value:daily` is the plain time series when all you want is
+"dollars per day": one row per day with the tokens, sessions, distinct users,
+and value per user behind it. `usd_per_user` is the figure that stays
+comparable as the fleet grows, since the raw total mostly tracks user count.
 
 `scripts/sync-model-prices.mjs` reads the model labels actually observed in
 telemetry (`events.model_end` on `session_end` rows) and matches each one to a
