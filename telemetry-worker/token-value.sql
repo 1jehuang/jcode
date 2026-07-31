@@ -98,6 +98,9 @@ GROUP BY day
 UNION ALL
 
 -- Panel 2: per-model value over the last 7 days, biggest spenders first.
+-- Rolling 168 hours on created_at, matching panel 3's run rate. A
+-- `day >= date('now','-7 days')` filter would span 8 calendar days (both the
+-- -7 boundary day and today) and inflate the total by a day.
 SELECT
     'model_7d' AS panel,
     model || ' (' || COALESCE(provider, '?') || ', ' || COALESCE(price_kind, 'no-row') || ')'
@@ -111,13 +114,21 @@ SELECT
         AS unpriced_tokens,
     NULL AS priced_token_pct
 FROM valued
-WHERE day >= date('now', '-7 days')
+WHERE created_at >= datetime('now', '-7 days')
 GROUP BY model, provider, price_kind
 
 UNION ALL
 
 -- Panel 3: headline rollups. run_rate_usd_per_day is the 7-day mean, which is
 -- the number to quote; single days swing a lot with CI-adjacent bursts.
+--
+-- The 7-day windows filter on `created_at >= datetime('now','-7 days')`, a
+-- rolling 168 hours, so dividing the total by 7 gives a true per-day mean. The
+-- calendar-day form (`day >= date('now','-7 days')`) covers 8 partial days and
+-- overstates the run rate.
+--
+-- projected_usd_per_month is 30x that mean and assumes flat usage. Volume has
+-- been growing, so treat it as a floor rather than a forecast.
 SELECT
     'summary' AS panel,
     label AS bucket,
@@ -156,7 +167,7 @@ FROM (
             1
         )
     FROM valued
-    WHERE day >= date('now', '-7 days')
+    WHERE created_at >= datetime('now', '-7 days')
     UNION ALL
     SELECT
         'projected_usd_per_month_from_7d',
@@ -165,7 +176,7 @@ FROM (
         NULL,
         NULL
     FROM valued
-    WHERE day >= date('now', '-7 days')
+    WHERE created_at >= datetime('now', '-7 days')
     UNION ALL
     SELECT
         'last_30d_total',
