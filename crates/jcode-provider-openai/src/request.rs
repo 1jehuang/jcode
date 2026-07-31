@@ -656,4 +656,59 @@ mod tests {
             json!([{ "type": "summary_text", "text": "Checked constraints." }])
         );
     }
+
+    /// Integration-level regression test for issue #687: the payload actually
+    /// sent to OpenAI must not carry `uniqueItems`.
+    ///
+    /// The schema-level tests in `jcode-provider-core` cover normalization, but
+    /// the bug was that this whole request got rejected, so the guarantee is
+    /// worth asserting on the real tool payload, including after the strict
+    /// pass runs on top.
+    #[test]
+    fn build_tools_strips_unique_items_from_the_request_payload() {
+        // The reporter's MCP schema (@tubealfred/mcp youtube_*_batch).
+        let defs = vec![ToolDefinition {
+            name: "mcp__tubealfred__youtube_channels_batch".to_string(),
+            description: "Batch fetch channels".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "uniqueItems": true
+                    },
+                    "fields": { "type": ["string", "null"] }
+                },
+                "required": ["ids"]
+            }),
+        }];
+
+        let api_tools = build_tools(&defs);
+        let payload = serde_json::to_string(&api_tools).expect("serialize tools");
+        assert!(
+            !payload.contains("uniqueItems"),
+            "the serialized request must not contain a keyword OpenAI rejects: {payload}"
+        );
+
+        // The tool is still usable: the parameter and its supported
+        // constraints survive, so stripping did not gut the schema.
+        let parameters = &api_tools[0]["parameters"];
+        assert_eq!(parameters["properties"]["ids"]["type"], json!("array"));
+        assert_eq!(
+            parameters["properties"]["ids"]["items"]["type"],
+            json!("string")
+        );
+        assert_eq!(parameters["properties"]["ids"]["minItems"], json!(1));
+        assert_eq!(parameters["properties"]["ids"]["maxItems"], json!(50));
+        assert!(
+            parameters["required"]
+                .as_array()
+                .expect("required array")
+                .contains(&json!("ids")),
+            "ids must stay required"
+        );
+    }
 }

@@ -101,3 +101,108 @@ mod tests {
         );
     }
 }
+
+/// Runtime ordering tests for issue #684. `copy_to_clipboard` itself is
+/// short-circuited under `cfg(test)` (it must never touch the developer's real
+/// clipboard), so these exercise the same fallback chain it runs, using stub
+/// helpers on a temporary PATH. That pins the property that actually matters:
+/// the first helper that takes ownership wins, and one that fails fast hands
+/// off to the next instead of reporting a false success.
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
+mod ordering_tests {
+    use super::copy_via_clipboard_helper;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Same chain as the Linux arm of `copy_to_clipboard`, reporting which
+    /// helper claimed the clipboard.
+    fn first_helper_that_wins() -> Option<&'static str> {
+        for (program, args) in [
+            ("wl-copy", &[][..]),
+            ("xclip", &["-selection", "clipboard"][..]),
+            ("xsel", &["--clipboard", "--input"][..]),
+        ] {
+            if copy_via_clipboard_helper(program, args, "payload") {
+                return Some(program);
+            }
+        }
+        None
+    }
+
+    /// Puts only the named stubs on PATH, so any helper not listed behaves as
+    /// if it is not installed.
+    struct StubPath {
+        _dir: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl StubPath {
+        fn with(stubs: &[(&str, &str)]) -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            for (name, body) in stubs {
+                let path = dir.path().join(name);
+                let mut file = std::fs::File::create(&path).expect("create stub");
+                writeln!(file, "#!/bin/sh").expect("write stub");
+                writeln!(file, "{body}").expect("write stub");
+                drop(file);
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod stub");
+            }
+            let prev = std::env::var_os("PATH");
+            crate::env::set_var("PATH", dir.path());
+            Self { _dir: dir, prev }
+        }
+    }
+
+    impl Drop for StubPath {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(prev) => crate::env::set_var("PATH", prev),
+                None => crate::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// Regression guard: adding the X11 helpers must not steal the Wayland path
+    /// that already worked.
+    #[test]
+    fn wayland_still_wins_when_wl_copy_works() {
+        let _lock = crate::storage::lock_test_env();
+        let _stubs = StubPath::with(&[("wl-copy", "cat > /dev/null; exit 0"), ("xclip", "exit 0")]);
+        assert_eq!(first_helper_that_wins(), Some("wl-copy"));
+    }
+
+    /// The actual #684 scenario: no Wayland display, so wl-copy fails fast and
+    /// xclip must take over instead of falling through to arboard.
+    #[test]
+    fn xclip_takes_over_when_wl_copy_fails() {
+        let _lock = crate::storage::lock_test_env();
+        let _stubs = StubPath::with(&[
+            ("wl-copy", "exit 1"),
+            ("xclip", "cat > /dev/null; exit 0"),
+            ("xsel", "exit 0"),
+        ]);
+        assert_eq!(first_helper_that_wins(), Some("xclip"));
+    }
+
+    #[test]
+    fn xsel_takes_over_when_wl_copy_and_xclip_are_missing() {
+        let _lock = crate::storage::lock_test_env();
+        let _stubs = StubPath::with(&[("xsel", "cat > /dev/null; exit 0")]);
+        assert_eq!(first_helper_that_wins(), Some("xsel"));
+    }
+
+    /// With no working helper the chain must report failure, so the real
+    /// `copy_to_clipboard` continues to arboard and then OSC 52 rather than
+    /// showing a false "Copied" toast.
+    #[test]
+    fn no_working_helper_reports_failure_so_later_fallbacks_run() {
+        let _lock = crate::storage::lock_test_env();
+        let _stubs = StubPath::with(&[
+            ("wl-copy", "exit 1"),
+            ("xclip", "exit 1"),
+            ("xsel", "exit 1"),
+        ]);
+        assert_eq!(first_helper_that_wins(), None);
+    }
+}
