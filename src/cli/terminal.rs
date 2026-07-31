@@ -233,9 +233,6 @@ pub fn show_crash_resume_hint() {
         return;
     }
 
-    let (id, name) = &crashed[0];
-    let session_label = id::extract_session_name(id).unwrap_or(name.as_str());
-
     // Crash hints print outside the TUI, possibly on a console that never had
     // VT processing enabled (issue #498), so gate the color codes.
     let ansi = crate::console::stderr_supports_ansi();
@@ -245,23 +242,101 @@ pub fn show_crash_resume_hint() {
         ("", "", "")
     };
 
-    if crashed.len() == 1 {
-        let message = format!(
-            "{yellow}💥 Session {bold}{}{reset}{yellow} crashed. Resume with:{reset}  jcode --resume {}",
-            session_label, id
-        );
-        eprintln!("{}", crate::output_style::terminal_text(&message));
-    } else {
-        let message = format!(
-            "{yellow}💥 {} sessions crashed recently. Most recent: {bold}{}{reset}",
-            crashed.len(),
-            session_label
-        );
-        eprintln!("{}", crate::output_style::terminal_text(&message));
-        eprintln!("{yellow}   Resume with:{reset}  jcode --resume {}", id);
-        eprintln!("{yellow}   List all:{reset}     jcode --resume");
+    for line in crash_resume_hint_lines(&crashed, yellow, bold, reset) {
+        eprintln!("{}", crate::output_style::terminal_text(&line));
     }
     eprintln!();
+}
+
+/// Build the crash-resume hint lines for `crashed`, newest first.
+///
+/// Pure so the wording is testable: the lines are printed to stderr outside the
+/// TUI, where nothing asserts on them, and the bug in issue #690 was purely
+/// about wording (the single-session form never mentioned that bare
+/// `jcode --resume` opens a searchable picker, so it read as "memorize this ID
+/// or lose the session").
+fn crash_resume_hint_lines(
+    crashed: &[(String, String)],
+    yellow: &str,
+    bold: &str,
+    reset: &str,
+) -> Vec<String> {
+    let Some((id, name)) = crashed.first() else {
+        return Vec::new();
+    };
+    let session_label = id::extract_session_name(id).unwrap_or(name.as_str());
+
+    if crashed.len() == 1 {
+        vec![
+            format!(
+                "{yellow}💥 Session {bold}{session_label}{reset}{yellow} crashed. Resume with:{reset}  jcode --resume {id}"
+            ),
+            // Always mention the picker. Showing only the ID form reads as
+            // "write this down or lose the session", when bare
+            // `jcode --resume` opens a searchable list (issue #690).
+            format!("{yellow}   Or browse all:{reset} jcode --resume"),
+        ]
+    } else {
+        vec![
+            format!(
+                "{yellow}💥 {} sessions crashed recently. Most recent: {bold}{session_label}{reset}",
+                crashed.len()
+            ),
+            format!("{yellow}   Resume with:{reset}  jcode --resume {id}"),
+            format!("{yellow}   List all:{reset}     jcode --resume"),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod crash_resume_hint_tests {
+    use super::crash_resume_hint_lines;
+
+    fn session(id: &str, name: &str) -> (String, String) {
+        (id.to_string(), name.to_string())
+    }
+
+    #[test]
+    fn no_crashed_sessions_produces_no_hint() {
+        assert!(crash_resume_hint_lines(&[], "", "", "").is_empty());
+    }
+
+    /// Issue #690: a user who cannot memorize the ID must still be told how to
+    /// get to the picker.
+    #[test]
+    fn single_session_hint_also_points_at_the_picker() {
+        let lines = crash_resume_hint_lines(&[session("ses_koala_123", "koala")], "", "", "");
+        let joined = lines.join("\n");
+
+        assert!(
+            joined.contains("jcode --resume ses_koala_123"),
+            "the direct resume command must still be offered: {joined}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Or browse all: jcode --resume")),
+            "the picker form (bare --resume) must be mentioned too: {joined}"
+        );
+    }
+
+    #[test]
+    fn multiple_sessions_hint_lists_recent_and_the_picker() {
+        let lines = crash_resume_hint_lines(
+            &[
+                session("ses_koala_123", "koala"),
+                session("ses_otter_456", "otter"),
+            ],
+            "",
+            "",
+            "",
+        );
+        let joined = lines.join("\n");
+
+        assert!(joined.contains("2 sessions crashed"), "{joined}");
+        assert!(joined.contains("jcode --resume ses_koala_123"), "{joined}");
+        assert!(joined.contains("List all:"), "{joined}");
+    }
 }
 
 fn init_tui_terminal(inherited_terminal: bool) -> Result<ratatui::DefaultTerminal> {
