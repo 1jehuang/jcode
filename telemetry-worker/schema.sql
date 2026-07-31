@@ -387,3 +387,23 @@ CREATE TABLE IF NOT EXISTS country_daily (
 
 CREATE INDEX IF NOT EXISTS idx_country_daily_date ON country_daily(activity_date);
 CREATE INDEX IF NOT EXISTS idx_country_daily_country ON country_daily(country);
+
+-- List prices per model, in USD per million tokens (migration 0023). Populated
+-- by scripts/sync-model-prices.mjs from https://models.dev/api.json, keyed on
+-- the raw telemetry model label (not a models.dev id) so gateway aliases can be
+-- priced. Powers token-value.sql. See migrations/0023_model_prices.sql for the
+-- full rationale, especially input_includes_cache_read.
+CREATE TABLE IF NOT EXISTS model_prices (
+    model TEXT PRIMARY KEY,
+    source_model TEXT,
+    source_provider TEXT,
+    input_usd_per_mtok REAL,
+    output_usd_per_mtok REAL,
+    cache_read_usd_per_mtok REAL,
+    cache_write_usd_per_mtok REAL,
+    input_includes_cache_read INTEGER NOT NULL DEFAULT 0,
+    price_kind TEXT NOT NULL DEFAULT 'catalog',
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_prices_price_kind ON model_prices(price_kind);
