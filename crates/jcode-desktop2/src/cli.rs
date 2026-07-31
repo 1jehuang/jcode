@@ -342,6 +342,24 @@ fn run_e2e(message: &str) -> Result<()> {
                 model.transcript.push_edit(&card);
             }
             harness::HarnessUpdate::Sessions(_) => {}
+            // Background progress is folded into the model so the captured
+            // frame is the one a user would see, bar and all.
+            harness::HarnessUpdate::Progress {
+                task_id,
+                label,
+                summary,
+                percent,
+                done,
+            } => {
+                println!("[e2e] progress: {label} · {summary}");
+                if done {
+                    model.transcript.clear_progress(&task_id);
+                } else {
+                    model
+                        .transcript
+                        .set_progress(&task_id, &label, &summary, percent);
+                }
+            }
             // The probe asserts on the reply, so delivery of the prompt is a
             // log line rather than a state change.
             harness::HarnessUpdate::MessageAccepted => {

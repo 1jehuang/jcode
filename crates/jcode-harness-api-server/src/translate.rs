@@ -1,6 +1,7 @@
 //! Pure JSON-to-JSON translation between the harness API and the legacy
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
+use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{ApiEvent, ErrorCode, HistoryMessage, ServerFrame, SessionInfo};
 
 /// Default number of messages a `peek_session` returns. A preview is a glance,
@@ -405,6 +406,21 @@ impl BridgeState {
             }
             "available_models_updated" => {
                 vec![ServerFrame::event(self.model_info(session(self), event))]
+            }
+            // Background-task traffic reaches clients as a notification whose
+            // body is the markdown the TUI renders. The API refuses to make
+            // clients re-derive a progress bar from prose, so the two shapes
+            // that matter (a progress tick and a task finishing) are parsed
+            // into one typed event and everything else is dropped.
+            "notification" => {
+                let message = event["message"].as_str().unwrap_or("");
+                match parse_background_notification(message) {
+                    Some(mut progress) => {
+                        progress.session_id = session(self);
+                        vec![ServerFrame::event(progress.into_event())]
+                    }
+                    None => vec![],
+                }
             }
             "ack" => {
                 let id = event["id"].as_u64().unwrap_or(0);

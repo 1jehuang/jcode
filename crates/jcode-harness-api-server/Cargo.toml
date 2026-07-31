@@ -12,6 +12,15 @@ serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "sync"] }
 
+[dev-dependencies]
+# The parser in `background_progress` reads markdown produced by the daemon's
+# own formatter, so the contract test builds that formatter rather than a copy
+# of its output: a change to the wire prose then fails here instead of silently
+# turning every client's progress bar off. Dev-only, so the bridge binary stays
+# free of the application foundation.
+jcode-base = { path = "../jcode-base", default-features = false }
+jcode-background-types = { path = "../jcode-background-types" }
+
 [[bin]]
 name = "jcode-harness-api-bridge"
 path = "src/bin/bridge.rs"

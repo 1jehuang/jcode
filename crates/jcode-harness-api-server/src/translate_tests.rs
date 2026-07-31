@@ -368,3 +368,42 @@ fn a_failed_turn_clears_the_pending_message() {
         "a failed turn reported a second, phantom completion"
     );
 }
+
+#[test]
+fn background_notifications_become_progress_events() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "notification",
+        "from_session": "background_task",
+        "message": "**Background task progress** `t9` · `bash`\n\n[#####-----] 50% · Running tests (reported)",
+    }));
+    assert_eq!(frames.len(), 1);
+    match &frames[0].event {
+        ApiEvent::BackgroundProgress {
+            session_id,
+            task_id,
+            percent,
+            done,
+            ..
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(task_id, "t9");
+            assert_eq!(*percent, Some(50.0));
+            assert!(!done);
+        }
+        other => panic!("unexpected background event: {other:?}"),
+    }
+}
+
+/// A DM or a shared-context push is not progress, and inventing a bar for it
+/// would put a phantom task on every client's screen.
+#[test]
+fn unrelated_notifications_are_dropped() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "notification",
+        "from_session": "fox",
+        "message": "hello from another agent",
+    }));
+    assert!(frames.is_empty());
+}

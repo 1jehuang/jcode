@@ -88,6 +88,30 @@ pub enum ApiEvent {
     /// The turn finished; the agent is idle.
     TurnDone { session_id: String },
 
+    /// A background task the agent is waiting on reported progress, or
+    /// finished.
+    ///
+    /// The daemon already tracks percent/counts for backgrounded work (a long
+    /// build, a test sweep, a swarm plan) and pushes it to its own UI, which
+    /// draws a bar. Forwarding it as a typed event means any API client can
+    /// draw the same bar instead of leaving the user with a spinner that says
+    /// only "still working".
+    BackgroundProgress {
+        session_id: String,
+        /// The `bg` task id, so a client can key one bar per task.
+        task_id: String,
+        /// Human label for the work, e.g. `bash` or `Model list refresh`.
+        label: String,
+        /// Completion fraction 0..=100, when the task reports one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        percent: Option<f32>,
+        /// One-line status, e.g. `42% · Running tests`.
+        summary: String,
+        /// The task ended: clients should retire its bar.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        done: bool,
+    },
+
     /// The agent accepted a user message: it is in the session's queue and
     /// will be processed. Sent once per `SendMessage` that the daemon acks.
     ///

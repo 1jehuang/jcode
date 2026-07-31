@@ -199,6 +199,13 @@ const SUPER_TAP: std::time::Duration = std::time::Duration::from_millis(180);
 /// still commits within a frame or two.
 const SUPER_BOUNCE: std::time::Duration = std::time::Duration::from_millis(90);
 
+/// Frame interval for an indeterminate progress bar's sweep. Well short of
+/// the display rate: the segment crosses the track over more than a second, so
+/// 40ms is smooth to the eye while costing a fraction of a display-paced
+/// animation, and it stays outside [`CONTINUOUS_FRAME`] so a window waiting on
+/// a build sleeps between wakes instead of chaining frames.
+const PROGRESS_FRAME: std::time::Duration = std::time::Duration::from_millis(40);
+
 /// Frame interval while the overview zooms (~60fps).
 const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
@@ -313,6 +320,13 @@ pub struct Model {
     /// the window. Default is *finished*, so captures and tests see the settled
     /// frame; the real window replaces it on the first paint.
     pub boot: boot::Boot,
+    /// When the first background-progress card appeared, or `None` when none
+    /// are on screen.
+    ///
+    /// One clock for all of them, so an indeterminate bar's sweep is a pure
+    /// function of the model (a pinned capture passes its own `now`) and so
+    /// several bars sweep in step rather than each starting its own phase.
+    pub progress_clock: Option<std::time::Instant>,
     /// Live RAM readout for this window and the daemon, drawn on the trailing
     /// end of the top chrome row. `None` until the first sample, and always
     /// `None` in pinned captures, so frames stay deterministic.
@@ -377,6 +391,7 @@ impl Default for Model {
             working_dir: None,
             model: None,
             boot: boot::Boot::default(),
+            progress_clock: None,
             mem: None,
         }
     }
@@ -988,7 +1003,13 @@ impl App {
             // The reveal keeps running unfocused: a window opened behind the
             // pointer's focus must not be stuck on a black frame.
             let boot = self.model.boot.next_frame_at(now);
-            return [overview, bounce, spinner, stream, smooth, boot]
+            // A progress bar is informative motion too, and waiting on a build
+            // from another window is exactly when a user watches it, so an
+            // indeterminate bar keeps sweeping at the background cadence.
+            let progress = (self.model.progress_clock.is_some()
+                && self.model.transcript.has_indeterminate_progress())
+            .then(|| now + BACKGROUND_FRAME);
+            return [overview, bounce, spinner, stream, smooth, boot, progress]
                 .into_iter()
                 .flatten()
                 .min();
@@ -1010,6 +1031,12 @@ impl App {
         // Scroll smoothing and the scrollbar fade both need frames, and both
         // stop themselves once the view has landed and the bar is gone.
         let smooth = self.model.smooth.next_frame_at(now);
+        // An indeterminate progress bar sweeps, so it needs frames for as long
+        // as a task is running without a percentage. A determinate bar is a
+        // still image between ticks and asks for nothing.
+        let progress = (self.model.progress_clock.is_some()
+            && self.model.transcript.has_indeterminate_progress())
+        .then(|| now + PROGRESS_FRAME);
         // The delivery wiggle: short, and it stops itself, so an idle window
         // with every message acknowledged still sleeps.
         let ack = self
@@ -1019,7 +1046,7 @@ impl App {
             .filter_map(|delivery| delivery.next_frame_at(now))
             .min();
         [
-            caret, donut, spinner, stream, smooth, overview, bounce, boot, ack,
+            caret, donut, spinner, stream, smooth, overview, bounce, boot, ack, progress,
         ]
         .into_iter()
         .flatten()

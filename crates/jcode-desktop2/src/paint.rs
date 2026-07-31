@@ -114,6 +114,10 @@ impl TranscriptCache {
                 // without re-laying the message that was acknowledged.
                 if let Some(entry) = self.laid.get_mut(index) {
                     entry.delivery = message.delivery;
+                    // Same reasoning for a progress bar: it advances by a
+                    // drawn width, so a tick that leaves the label unchanged
+                    // must move the bar without re-laying the card.
+                    entry.permille = message.permille;
                 }
                 self.hits += 1;
                 continue;
