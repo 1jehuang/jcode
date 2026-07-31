@@ -628,6 +628,10 @@ fn draw_transcript(
 
         for (block_index, block) in placed.message.blocks.iter().enumerate() {
             let block_top = text_top + block.top;
+            // The block's own left edge: inside any list indent it inherited,
+            // so a fenced block written under an item keeps its wash under that
+            // item instead of back at the margin.
+            let block_left = text_left + block.edge();
             match &block.kind {
                 // A code block gets a wash and an inset, so it reads as a
                 // quoted artefact rather than as more prose.
@@ -638,7 +642,7 @@ fn draw_transcript(
                         theme.wash,
                         None,
                         &RoundedRect::new(
-                            text_left,
+                            block_left,
                             block_top,
                             frame.right - USER_PAD_X,
                             block_top + block.height,
@@ -655,9 +659,9 @@ fn draw_transcript(
                         theme.rule,
                         None,
                         &Rect::new(
-                            text_left,
+                            block_left,
                             block_top,
-                            text_left + frame.hairline() * 2.0,
+                            block_left + frame.hairline() * 2.0,
                             block_top + block.height,
                         ),
                     );
@@ -669,7 +673,7 @@ fn draw_transcript(
                         theme.rule,
                         None,
                         &Rect::new(
-                            text_left,
+                            block_left,
                             block_top + block.height / 2.0,
                             frame.right - USER_PAD_X,
                             block_top + block.height / 2.0 + frame.hairline(),

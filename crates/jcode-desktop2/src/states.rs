@@ -43,6 +43,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("scrolled_back", scrolled_back),
     ("markdown", markdown),
     ("markdown_typography", markdown_typography),
+    ("markdown_structure", markdown_structure),
     ("latex", latex),
     ("code_block", code_block),
     ("session_strip", session_strip),
@@ -983,6 +984,41 @@ fn markdown_typography() -> Model {
                 "tail, so the total is\n\n",
                 "$$\\sum_{i=1}^{n} c_i \\leq n \\cdot \\max_i c_i$$\n\n",
                 "which is why streaming stays flat. Use `--stream-bench` to check it.\n",
+            )
+            .into(),
+        )]),
+        ..attached_empty()
+    }
+}
+
+/// The structural end of markdown: a wide aligned table, a task list, and a
+/// list with a fenced block and a quote written *inside* its items.
+///
+/// These are the cases that read as broken rather than merely plain when the
+/// front-end ignores them: a table that runs off the measure loses its right
+/// columns, `[x]` renders as source next to a rendered bullet, and a fenced
+/// block indented back to the margin breaks its list open.
+fn markdown_structure() -> Model {
+    Model {
+        transcript: conversation(vec![(
+            "what changed in the wire format".into(),
+            concat!(
+                "| field | meaning | bytes |\n",
+                "|:--|:-:|--:|\n",
+                "| `kind` | which frame this is, and how to read the rest of it | 1 |\n",
+                "| `session` | the session the frame belongs to | 16 |\n",
+                "| `payload` | length-prefixed body, encoded as line-delimited JSON | 4096 |\n\n",
+                "Migration:\n\n",
+                "- [x] carry the alignments through the model\n",
+                "- [x] budget the columns against the measure\n",
+                "- [ ] version the header\n\n",
+                "1. read the header\n\n",
+                "   ```rust\n",
+                "   let kind = Kind::from_u8(bytes[0])?;\n",
+                "   ```\n\n",
+                "   then dispatch on it.\n\n",
+                "2. read the payload\n\n",
+                "   > A short frame is a protocol error, never a partial read.\n",
             )
             .into(),
         )]),

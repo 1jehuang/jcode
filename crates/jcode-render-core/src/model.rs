@@ -191,6 +191,23 @@ pub struct Block {
     /// [`BlockKind::Table`]; layout is deferred to the front-end adapter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table: Vec<Vec<String>>,
+    /// Per-column alignment from a GFM delimiter row (`|:--|:-:|--:|`), one
+    /// entry per column. Only populated for [`BlockKind::Table`]. Carried here
+    /// rather than dropped because a numeric column that is right-aligned in
+    /// the source and left-aligned on screen misreads: the alignment *is* the
+    /// author saying what the column means.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alignments: Vec<Alignment>,
+    /// How many lists enclose this block: 0 when it is not inside a list, 1
+    /// inside a top-level list, and so on. A fenced code block or a quote written under a list item belongs
+    /// *to* that item, and a front-end that indents only [`BlockKind::ListItem`]
+    /// pulls it back out to the margin, breaking the list open.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub list_depth: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Block {
@@ -199,6 +216,8 @@ impl Block {
             kind,
             lines,
             table: Vec::new(),
+            alignments: Vec::new(),
+            list_depth: 0,
         }
     }
 
@@ -208,6 +227,23 @@ impl Block {
             kind: BlockKind::Table,
             lines: Vec::new(),
             table: rows,
+            alignments: Vec::new(),
+            list_depth: 0,
+        }
+    }
+
+    /// This block, marked as sitting inside a list at `depth`.
+    #[must_use]
+    pub fn in_list(mut self, depth: usize) -> Self {
+        self.list_depth = depth;
+        self
+    }
+
+    /// As [`Block::table`], with the delimiter row's per-column alignments.
+    pub fn aligned_table(rows: Vec<Vec<String>>, alignments: Vec<Alignment>) -> Self {
+        Self {
+            alignments,
+            ..Self::table(rows)
         }
     }
 }
