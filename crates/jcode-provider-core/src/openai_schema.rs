@@ -167,13 +167,67 @@ pub fn openai_compatible_schema(schema: &Value) -> Value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (key, value) in map {
+                if is_openai_unsupported_keyword(key) {
+                    continue;
+                }
                 let normalized_key = if key == "oneOf" { "anyOf" } else { key };
-                out.insert(normalized_key.to_string(), openai_compatible_schema(value));
+                out.insert(
+                    normalized_key.to_string(),
+                    openai_compatible_keyword(key, value),
+                );
             }
             flatten_all_of_schema(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(openai_compatible_schema).collect()),
         _ => schema.clone(),
+    }
+}
+
+/// JSON Schema keywords that are valid JSON Schema 2020-12 but rejected by the
+/// OpenAI function-parameters subset. One unsupported keyword invalidates the
+/// entire tool catalog, so they are stripped instead of failing the request
+/// (see issue #687). Constraints they express (e.g. `uniqueItems`) stay
+/// enforced by the tool/MCP server at execution time.
+const OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
+    "uniqueItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "propertyNames",
+    "minProperties",
+    "maxProperties",
+    "dependentSchemas",
+    "dependentRequired",
+    "if",
+    "then",
+    "else",
+    "not",
+];
+
+fn is_openai_unsupported_keyword(key: &str) -> bool {
+    OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS.contains(&key)
+}
+
+/// Recurse into a keyword's value while respecting whether the value is a
+/// schema, a map of schemas, or plain data. Without this, a property literally
+/// named `uniqueItems` inside `properties` would be stripped.
+fn openai_compatible_keyword(key: &str, value: &Value) -> Value {
+    match key {
+        "properties" | "$defs" | "definitions" | "patternProperties" => match value {
+            Value::Object(children) => Value::Object(
+                children
+                    .iter()
+                    .map(|(child_key, child_value)| {
+                        (child_key.clone(), openai_compatible_schema(child_value))
+                    })
+                    .collect(),
+            ),
+            other => openai_compatible_schema(other),
+        },
+        "enum" | "const" | "examples" | "default" => value.clone(),
+        _ => openai_compatible_schema(value),
     }
 }
 
@@ -575,5 +629,65 @@ mod tests {
             json!("integer")
         );
         assert_eq!(normalized["required"], json!(["file_path"]));
+    }
+
+    /// Regression test for issue #687: a valid MCP schema using `uniqueItems`
+    /// made OpenAI reject the whole tool catalog, blocking every turn.
+    #[test]
+    fn openai_compatible_schema_strips_unsupported_keywords() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "uniqueItems": true
+                },
+                "fields": { "type": ["string", "null"] }
+            },
+            "required": ["ids"],
+            "minProperties": 1
+        });
+
+        let normalized = openai_compatible_schema(&schema);
+
+        assert!(normalized["properties"]["ids"].get("uniqueItems").is_none());
+        assert!(normalized.get("minProperties").is_none());
+        // Supported array constraints survive.
+        assert_eq!(normalized["properties"]["ids"]["minItems"], json!(1));
+        assert_eq!(normalized["properties"]["ids"]["maxItems"], json!(50));
+        assert_eq!(
+            normalized["properties"]["ids"]["items"]["type"],
+            json!("string")
+        );
+        assert_eq!(normalized["required"], json!(["ids"]));
+
+        // Strict normalization keeps it clean too.
+        let strict = strict_normalize_schema(&normalized);
+        assert!(strict["properties"]["ids"].get("uniqueItems").is_none());
+    }
+
+    /// Stripping is keyword-aware: a *property* named like an unsupported
+    /// keyword must be preserved.
+    #[test]
+    fn openai_compatible_schema_keeps_properties_named_like_keywords() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "uniqueItems": { "type": "boolean" },
+                "not": { "type": "string" }
+            },
+            "required": ["uniqueItems"]
+        });
+
+        let normalized = openai_compatible_schema(&schema);
+
+        assert_eq!(
+            normalized["properties"]["uniqueItems"]["type"],
+            json!("boolean")
+        );
+        assert_eq!(normalized["properties"]["not"]["type"], json!("string"));
     }
 }
