@@ -14,7 +14,6 @@ use unicode_width::UnicodeWidthStr;
 const MAX_INLINE_DIFF_LINES: usize = 12;
 const MAX_DISCOVERY_DETAIL_LINES: usize = 2;
 const MAX_DISCOVERY_SETUP_LINES: usize = 3;
-const MAX_DISCOVERY_LISTING_ENTRIES: usize = 4;
 
 fn prefer_width_stable_system_glyphs() -> bool {
     std::env::var("TERM_PROGRAM")
@@ -3302,13 +3301,6 @@ fn render_gmail_draft_card(
     ))
 }
 
-#[derive(Debug, Clone)]
-struct DiscoveryListingEntry {
-    name: String,
-    blurb: String,
-    url: Option<String>,
-}
-
 fn split_discovery_blurb_url(value: &str) -> (String, Option<String>) {
     let value = value.trim();
     if let Some((blurb, url)) = value.rsplit_once(" (")
@@ -3320,17 +3312,12 @@ fn split_discovery_blurb_url(value: &str) -> (String, Option<String>) {
     (value.to_string(), None)
 }
 
-fn parse_discovery_listing_entries(output: &str) -> Vec<DiscoveryListingEntry> {
+fn parse_discovery_listing_names(output: &str) -> Vec<String> {
     output
         .lines()
         .filter_map(|line| {
-            let (name, value) = line.trim().strip_prefix("- ")?.split_once(": ")?;
-            let (blurb, url) = split_discovery_blurb_url(value);
-            Some(DiscoveryListingEntry {
-                name: name.trim().to_string(),
-                blurb,
-                url,
-            })
+            let (name, _) = line.trim().strip_prefix("- ")?.split_once(": ")?;
+            Some(name.trim().to_string())
         })
         .collect()
 }
@@ -3436,13 +3423,6 @@ fn render_discovery_card(
         return None;
     }
 
-    let category = tool
-        .input
-        .get("category")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("other");
     let explicit_action = tool
         .input
         .get("action")
@@ -3607,67 +3587,26 @@ fn render_discovery_card(
             }
         }
         _ => {
-            let entries = parse_discovery_listing_entries(tool_output);
-            let result_label = if entries.len() == 1 {
-                "integration"
-            } else {
-                "integrations"
-            };
-            push_compact_discovery_header(
-                &mut content,
-                vec![
-                    Span::styled(format!("{} {result_label}", entries.len()), muted_style),
-                    Span::styled(" · ", muted_style),
-                    Span::styled(category.to_string(), name_style),
-                ],
-                block_width,
-            );
-            if entries.is_empty() {
-                push_compact_discovery_kv(
-                    &mut content,
-                    "catalog",
-                    "no matching entries",
-                    block_width,
-                    label_style,
-                    muted_style,
-                    1,
-                );
-            } else {
-                for entry in entries.iter().take(MAX_DISCOVERY_LISTING_ENTRIES) {
-                    let details = match (&entry.blurb[..], entry.url.as_deref()) {
-                        ("", Some(url)) => url.to_string(),
-                        (blurb, Some(url)) => format!("{blurb} · {url}"),
-                        (blurb, None) => blurb.to_string(),
-                    };
-                    push_compact_discovery_kv(
-                        &mut content,
-                        &entry.name,
-                        &details,
-                        block_width,
-                        name_style,
-                        muted_style,
-                        MAX_DISCOVERY_DETAIL_LINES,
-                    );
-                }
-                let hidden = entries.len().saturating_sub(MAX_DISCOVERY_LISTING_ENTRIES);
-                if hidden > 0 {
+            // Browse results render as a single compact line: the entry name
+            // when exactly one matched, a count otherwise, and nothing at all
+            // when the catalog had no matches.
+            let entries = parse_discovery_listing_names(tool_output);
+            match entries.len() {
+                0 => return None,
+                1 => {
                     push_compact_discovery_header(
                         &mut content,
-                        vec![Span::styled(format!("+{hidden} more"), muted_style)],
+                        vec![Span::styled(entries[0].clone(), name_style)],
                         block_width,
                     );
                 }
-            }
-            if let Some(reason) = tool.input.get("reason").and_then(|value| value.as_str()) {
-                push_compact_discovery_kv(
-                    &mut content,
-                    "why",
-                    reason,
-                    block_width,
-                    label_style,
-                    muted_style,
-                    MAX_DISCOVERY_DETAIL_LINES,
-                );
+                count => {
+                    push_compact_discovery_header(
+                        &mut content,
+                        vec![Span::styled(format!("{count} integrations"), muted_style)],
+                        block_width,
+                    );
+                }
             }
         }
     }

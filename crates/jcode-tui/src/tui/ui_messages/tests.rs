@@ -2133,11 +2133,23 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(plain.contains("1 integration · payments"), "{plain}");
-    assert!(plain.contains("why: the task needs test-mode"), "{plain}");
     assert!(plain.contains("agentcard"), "{plain}");
-    assert!(plain.contains("prepaid virtual Visa cards"), "{plain}");
-    assert!(plain.contains("agentcard.sh"), "{plain}");
+    assert!(
+        !plain.contains("1 integration"),
+        "single-result browse shows only the entry name: {plain}"
+    );
+    assert!(
+        !plain.contains("why:"),
+        "browse results stay to a single line without rationale: {plain}"
+    );
+    assert!(
+        !plain.contains("prepaid virtual Visa cards"),
+        "browse results must not render descriptions: {plain}"
+    );
+    assert!(
+        !plain.contains("agentcard.sh"),
+        "browse results must not render URLs: {plain}"
+    );
     assert!(
         !plain.contains("Listings are vetted"),
         "discovery results must not render the disclosure notice: {plain}"
@@ -2198,7 +2210,11 @@ fn batched_discovery_renders_without_disclosure_notice() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("1 integration · payments"), "{plain}");
+    assert!(plain.contains("agentcard"), "{plain}");
+    assert!(
+        !plain.contains("1 integration"),
+        "single-result browse shows only the entry name: {plain}"
+    );
     assert!(
         !plain.contains("Listings are vetted"),
         "batched discovery must not render the disclosure notice: {plain}"
