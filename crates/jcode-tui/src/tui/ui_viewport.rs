@@ -359,11 +359,16 @@ pub(super) fn draw_messages(
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
+    // Pinned todo band (display.pin_todos): the full todo card rendered at the
+    // very top of the viewport while the transcript is scrolled, like the
+    // sticky previous-prompt preview below it.
+    let pinned_todo_band = pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
         wrapped_user_prompt_starts,
         user_prompt_texts,
         text_render_area,
+        pinned_todo_band.len() as u16,
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -407,12 +412,20 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
+    let pinned_todo_lines = if scroll > 0 {
+        pinned_todo_band.len() as u16
+    } else {
+        0u16
+    };
+    // Total synthetic rows reserved at the top of the viewport (todo band
+    // first, then the previous-prompt preview, then transcript content).
+    let top_band_lines = pinned_todo_lines + prompt_preview_lines;
 
     let content_area = Rect {
         x: text_render_area.x,
-        y: render_area.y.saturating_add(prompt_preview_lines),
+        y: render_area.y.saturating_add(top_band_lines),
         width: text_render_area.width,
-        height: render_area.height.saturating_sub(prompt_preview_lines),
+        height: render_area.height.saturating_sub(top_band_lines),
     };
     let visible_height = content_area.height as usize;
     let copy_badge_ui = app.copy_badge_ui();
@@ -444,7 +457,7 @@ pub(super) fn draw_messages(
         &visible_lines,
         &visible_user_indices,
         content_area.width,
-        prompt_preview_lines,
+        top_band_lines,
     );
     let visible_streaming_hash =
         if prepared.visible_intersects_section(PreparedSectionKind::Streaming, scroll, visible_end)
@@ -469,16 +482,16 @@ pub(super) fn draw_messages(
         app.centered_mode(),
     );
     let mut margins = info_widget::Margins {
-        right_widths: vec![0; prompt_preview_lines as usize],
-        left_widths: vec![0; prompt_preview_lines as usize],
+        right_widths: vec![0; top_band_lines as usize],
+        left_widths: vec![0; top_band_lines as usize],
         centered: content_margins.centered,
         // Bind row `r` of the margin to transcript line `scroll_top + r` so info
         // widgets are residents of the transcript: they ride with the content they
         // were placed next to, whether the user is scrolling or new lines are
-        // appending while pinned at the bottom. The prompt-preview band at the top
-        // is synthetic (not part of the scrolled transcript), so offset by it to
-        // keep the content rows aligned.
-        scroll_top: scroll.saturating_sub(prompt_preview_lines as usize),
+        // appending while pinned at the bottom. The top band (pinned todos +
+        // prompt preview) is synthetic (not part of the scrolled transcript), so
+        // offset by it to keep the content rows aligned.
+        scroll_top: scroll.saturating_sub(top_band_lines as usize),
         ..Default::default()
     };
     margins
@@ -525,7 +538,7 @@ pub(super) fn draw_messages(
             let row_first = region.abs_line_idx.saturating_sub(1).max(scroll);
             let row_last = region.end_line.min(visible_end);
             for abs_line in row_first..row_last {
-                let row = prompt_preview_lines as usize + (abs_line - scroll);
+                let row = top_band_lines as usize + (abs_line - scroll);
                 if let Some(width) = margins.right_widths.get_mut(row) {
                     *width = (*width).min(free_right);
                 }
@@ -593,7 +606,7 @@ pub(super) fn draw_messages(
         visible_end,
         visible_lines: visible_lines.len(),
         total_wrapped_lines: total_lines,
-        prompt_preview_lines,
+        prompt_preview_lines: top_band_lines,
         visible_user_prompts: visible_user_indices.len(),
         visible_copy_targets: badge_assignments.len(),
         content_width: content_area.width,
@@ -742,8 +755,9 @@ pub(super) fn draw_messages(
                 // clear the appended `[Alt] [⇧] [E] expand` block instead of being
                 // squeezed into a too-narrow slot that wraps/collides with it. The
                 // margin row for `visible_lines[rel_idx]` is offset by the synthetic
-                // prompt-preview band, matching the image-region carve above.
-                let margin_row = prompt_preview_lines as usize + rel_idx;
+                // top band (pinned todos + prompt preview), matching the
+                // image-region carve above.
+                let margin_row = top_band_lines as usize + rel_idx;
                 if let Some(width) = margins.right_widths.get_mut(margin_row) {
                     *width = (*width).saturating_sub(reserved as u16);
                 }
@@ -1144,6 +1158,17 @@ pub(super) fn draw_messages(
         );
     }
 
+    if pinned_todo_lines > 0 {
+        let band_area = Rect {
+            x: content_area.x,
+            y: render_area.y,
+            width: content_area.width,
+            height: pinned_todo_lines.min(render_area.height),
+        };
+        clear_area(frame, band_area);
+        frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
+    }
+
     if crate::config::config().display.prompt_preview && scroll > 0 {
         let last_offscreen_prompt_idx =
             lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
@@ -1210,7 +1235,7 @@ pub(super) fn draw_messages(
                 let line_count = preview_lines.len() as u16;
                 let preview_area = Rect {
                     x: content_area.x,
-                    y: render_area.y,
+                    y: render_area.y.saturating_add(pinned_todo_lines),
                     width: content_area.width.saturating_sub(1),
                     height: line_count,
                 };
@@ -1285,6 +1310,57 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
     out
 }
 
+/// Lines for the pinned todo band (`display.pin_todos`): the full inline todo
+/// card rendered at the top of the viewport while scrolled, capped to roughly
+/// a third of the viewport so the transcript stays usable. Empty when the
+/// feature is off, the session has no todos, or the viewport is too small.
+fn pinned_todo_band_lines(
+    app: &dyn TuiState,
+    width: u16,
+    viewport_height: u16,
+) -> Vec<Line<'static>> {
+    if !crate::config::config().display.pin_todos {
+        return Vec::new();
+    }
+    let Some(payload) = app.pinned_todos_payload() else {
+        return Vec::new();
+    };
+    if width < 8 || viewport_height < 9 {
+        return Vec::new();
+    }
+    let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+    let card_lines = super::messages::get_cached_message_lines(
+        &msg,
+        width,
+        app.diff_mode(),
+        super::messages::render_todos_message,
+    );
+    if card_lines.is_empty() {
+        return Vec::new();
+    }
+    // Band budget: about a third of the viewport, separator included.
+    let budget = ((viewport_height as usize) / 3).clamp(2, 12);
+    let content_budget = budget.saturating_sub(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if card_lines.len() > content_budget {
+        let shown = content_budget.saturating_sub(1);
+        let hidden = card_lines.len() - shown;
+        lines.extend(card_lines.into_iter().take(shown));
+        lines.push(Line::from(Span::styled(
+            format!("  … +{} more (todo)", hidden),
+            Style::default().fg(dim_color()),
+        )));
+    } else {
+        lines.extend(card_lines);
+    }
+    // Separator between the pinned band and the scrolled transcript.
+    lines.push(Line::from(Span::styled(
+        "─".repeat(width as usize),
+        Style::default().fg(dim_color()),
+    )));
+    lines
+}
+
 fn compute_prompt_preview_line_count(
     wrapped_user_prompt_starts: &[usize],
     user_prompt_texts: &[String],
@@ -1315,20 +1391,28 @@ fn compute_max_scroll_with_prompt_preview(
     wrapped_user_prompt_starts: &[usize],
     user_prompt_texts: &[String],
     area: Rect,
+    pinned_todo_lines: u16,
 ) -> usize {
     let mut max_scroll = total_lines.saturating_sub(area.height as usize);
-    if max_scroll == 0 || !crate::config::config().display.prompt_preview {
+    let preview_enabled = crate::config::config().display.prompt_preview;
+    if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
         return max_scroll;
     }
 
     for _ in 0..4 {
-        let prompt_preview_lines = compute_prompt_preview_line_count(
-            wrapped_user_prompt_starts,
-            user_prompt_texts,
-            max_scroll,
-            area.width,
-        );
-        let content_height = area.height.saturating_sub(prompt_preview_lines) as usize;
+        let prompt_preview_lines = if preview_enabled {
+            compute_prompt_preview_line_count(
+                wrapped_user_prompt_starts,
+                user_prompt_texts,
+                max_scroll,
+                area.width,
+            )
+        } else {
+            0
+        };
+        let content_height =
+            area.height
+                .saturating_sub(prompt_preview_lines + pinned_todo_lines) as usize;
         let adjusted = total_lines.saturating_sub(content_height);
         if adjusted == max_scroll {
             break;
