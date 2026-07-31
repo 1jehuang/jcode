@@ -157,7 +157,11 @@ pub fn document_to_lines_with_width(doc: &Document, width: Option<usize>) -> Vec
                 push_math_display(&mut lines, block);
             }
             BlockKind::Table => {
-                lines.extend(crate::render_support::render_table(&block.table, width));
+                lines.extend(crate::render_support::render_table_aligned(
+                    &block.table,
+                    width,
+                    &block.alignments,
+                ));
             }
             BlockKind::ThematicBreak => {
                 lines.push(Line::from(Span::styled(
