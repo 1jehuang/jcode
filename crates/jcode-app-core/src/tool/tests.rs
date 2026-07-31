@@ -550,6 +550,27 @@ fn collect_schema_errors(schema: &Value, path: &str, errors: &mut Vec<String>) {
                 errors.push(format!("{path}: array schema missing items"));
             }
 
+            // Gemini validates `required` against the same object's `properties`
+            // and rejects the entire request when a name is missing, which broke
+            // every tool-enabled Gemini call (issue #655). Objects without a
+            // local `properties` map are exempt: there is nothing to check
+            // against, and Gemini accepts those.
+            if let (Some(Value::Array(required)), Some(Value::Object(properties))) =
+                (map.get("required"), map.get("properties"))
+            {
+                for name in required {
+                    let Some(name) = name.as_str() else {
+                        errors.push(format!("{path}.required: entries must be strings"));
+                        continue;
+                    };
+                    if !properties.contains_key(name) {
+                        errors.push(format!(
+                            "{path}.required: '{name}' is not defined in the same object's properties"
+                        ));
+                    }
+                }
+            }
+
             for keyword in ["anyOf", "oneOf", "allOf"] {
                 let Some(branches) = map.get(keyword) else {
                     continue;
@@ -806,4 +827,54 @@ async fn gemini_build_tools_from_registry_definitions_omits_const_keywords() {
         &serde_json::json!(parameters),
         "const"
     ));
+
+    // Gemini rejects the whole generateContent request when any `required` entry
+    // names a property the same object does not declare, which made every
+    // tool-enabled Gemini call fail (issue #655). Assert on the *converted*
+    // declarations: the pre-conversion sweep in
+    // `test_tool_definitions_do_not_expose_invalid_array_schemas` cannot prove
+    // the adapter output is clean, and the adapter is what Gemini actually sees.
+    let mut dangling = Vec::new();
+    for declaration in parameters {
+        collect_dangling_required(
+            &declaration.parameters,
+            &format!("tool `{}`", declaration.name),
+            &mut dangling,
+        );
+    }
+    assert!(
+        dangling.is_empty(),
+        "converted Gemini function declarations still require undeclared properties:\n{}",
+        dangling.join("\n")
+    );
+}
+
+/// Collect `required` entries that name a property absent from the same
+/// object's `properties` map. Objects without a local `properties` map are
+/// exempt, matching what Gemini validates.
+fn collect_dangling_required(schema: &Value, path: &str, errors: &mut Vec<String>) {
+    match schema {
+        Value::Object(map) => {
+            if let (Some(Value::Array(required)), Some(Value::Object(properties))) =
+                (map.get("required"), map.get("properties"))
+            {
+                for name in required {
+                    if let Some(name) = name.as_str()
+                        && !properties.contains_key(name)
+                    {
+                        errors.push(format!("{path}.required: '{name}' is not declared here"));
+                    }
+                }
+            }
+            for (key, value) in map {
+                collect_dangling_required(value, &format!("{path}.{key}"), errors);
+            }
+        }
+        Value::Array(values) => {
+            for (idx, value) in values.iter().enumerate() {
+                collect_dangling_required(value, &format!("{path}[{idx}]"), errors);
+            }
+        }
+        _ => {}
+    }
 }

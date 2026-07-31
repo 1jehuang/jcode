@@ -8,7 +8,11 @@ use std::collections::{HashMap, HashSet};
 
 pub const COPILOT_API_VERSION: &str = "2025-04-01";
 
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// Default model id. This must be a **Copilot catalog** id (dot-separated,
+/// e.g. `claude-sonnet-4.6`), not the Anthropic-native hyphenated form: the
+/// Copilot API rejects the latter with HTTP 400 `model_not_supported`
+/// (issue #640). Keep this in sync with the head of [`FALLBACK_MODELS`].
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4.6";
 
 pub const FALLBACK_MODELS: &[&str] = &[
     "claude-sonnet-4.6",
