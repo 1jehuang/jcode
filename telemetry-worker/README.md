@@ -130,10 +130,51 @@ npm run migrate:auth-failure-reason
 npm run migrate:web-subscription
 npm run migrate:discovery
 npm run migrate:web-quality
+npm run migrate:model-prices
 
-# Run the health dashboard query
+# Run a dashboard query. These go through scripts/run-dashboard.mjs, which
+# sends the file via `--command` instead of `--file`: wrangler's `--file` path
+# is D1's *import* API and prints only "Rows read / Rows written / Database
+# size", discarding the result set, so these panels used to render no data.
 npm run health
+npm run dau
+npm run users
+npm run token-value
 ```
+
+## Token value dashboard
+
+`npm run token-value` reports the list-price dollar value of the token flow
+through jcode, priced per model rather than with one blended rate. Setup:
+
+```bash
+npm run migrate:model-prices   # creates model_prices (migration 0023)
+npm run sync:model-prices      # fills it from https://models.dev/api.json
+npm run token-value            # daily / per-model / summary panels
+```
+
+`scripts/sync-model-prices.mjs` reads the model labels actually observed in
+telemetry (`events.model_end` on `session_end` rows) and matches each one to a
+models.dev price, normalizing the gateway aliases users produce
+(`cc/claude-opus-5`, `openai/gpt-5.6-sol`, `claude-opus-4-5-20251101`,
+`...-4-8@Anthropic`, `-xhigh` effort suffixes). Re-run it after new models
+appear; it is an idempotent upsert. Current token coverage is ~97%, with the
+remainder being users' private gateway aliases (`my-coding`, `SeaaveyCombo`)
+that cannot be resolved to a public price.
+
+Three things to know before quoting the number:
+
+- **Cache accounting is provider-specific.** OpenAI-compatible APIs report
+  cached tokens as a *subset* of prompt tokens; Anthropic reports them as a
+  disjoint bucket. `model_prices.input_includes_cache_read` drives the
+  correction. Skipping it overcharges OpenAI traffic ~10x, and since cache
+  reads are ~85% of all tokens, that error dominates the total.
+- **It is list price, not spend.** Most traffic runs on subscriptions (Claude
+  Max, ChatGPT Pro, Copilot) or free routes, so read it as "list-price
+  equivalent value of tokens served".
+- **Check `priced_token_pct` / `unpriced_tokens`.** Every panel reports them.
+  If coverage drops, re-run the sync before trusting the dollar figure.
+
 
 ## Event types
 
