@@ -9,6 +9,11 @@
 -- date order, next to the token and session counts it came from, so it can be
 -- read directly or piped somewhere that draws a chart.
 --
+-- Deliberately no per-user dollar column: it tracked tokens-per-user almost
+-- exactly (coefficient of variation 0.147 vs 0.142 over a 10-day sample),
+-- because the blended rate per million tokens barely moves day to day. It was
+-- the same series twice in different units.
+--
 -- Requires migration 0023 plus a populated `model_prices` table:
 --   npm run migrate:model-prices && npm run sync:model-prices
 --
@@ -50,9 +55,6 @@ SELECT
     SUM(total_tokens) AS tokens,
     COUNT(*) AS sessions,
     COUNT(DISTINCT telemetry_id) AS users,
-    -- Value per active user per day: the unit that stays comparable as the
-    -- fleet grows, unlike the raw total.
-    ROUND(SUM(usd) / NULLIF(COUNT(DISTINCT telemetry_id), 0), 2) AS usd_per_user,
     -- Coverage guard: if this drops, re-run the price sync before quoting the
     -- dollar column. Unpriced models contribute tokens but no dollars.
     ROUND(
