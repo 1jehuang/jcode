@@ -34,6 +34,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("reasoning_streaming", reasoning_streaming),
     ("reasoning_paragraphs", reasoning_paragraphs),
     ("tool_progress", tool_progress),
+    ("background_progress", background_progress),
+    ("background_progress_many", background_progress_many),
     ("edit_card", edit_card),
     ("edit_cards_many", edit_cards_many),
     ("working", working),
@@ -140,6 +142,9 @@ fn connecting() -> Model {
         // Pinned off: a live RAM figure would make every capture depend on
         // the machine and moment it ran on.
         mem: None,
+        // No bars on screen by default, so nothing animates: a node that wants
+        // one sets it (see `background_progress`).
+        progress_clock: None,
         // Settled: a node renders the window after the boot reveal, so every
         // existing capture is unchanged by it. The reveal has its own nodes.
         boot: crate::boot::Boot::default(),
@@ -251,6 +256,9 @@ fn attached_empty() -> Model {
         // Pinned off: a live RAM figure would make every capture depend on
         // the machine and moment it ran on.
         mem: None,
+        // No bars on screen by default, so nothing animates: a node that wants
+        // one sets it (see `background_progress`).
+        progress_clock: None,
         // Settled: a node renders the window after the boot reveal, so every
         // existing capture is unchanged by it. The reveal has its own nodes.
         boot: crate::boot::Boot::default(),
@@ -761,6 +769,60 @@ fn tool_progress() -> Model {
             4,
             std::time::Duration::from_secs(23),
             Some("run the desktop2 scroll tests"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// Waiting on a background task, with its bar on the page. This is the state a
+/// spinner cannot express: the agent is blocked on work that *does* know how
+/// far along it is, and a window that only says "still working" throws that
+/// away.
+fn background_progress() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("run the whole workspace test suite"));
+    transcript.set_live_tool("call_1", "wait for the test sweep");
+    transcript.set_progress(
+        "224715dw29",
+        "bash",
+        "62% · Running jcode-desktop2 tests",
+        Some(62.0),
+    );
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            2,
+            std::time::Duration::from_secs(94),
+            Some("wait for the test sweep"),
+        ),
+        // Pinned to the render clock's own instant, so the indeterminate bar in
+        // `background_progress_many` draws at phase zero rather than wherever
+        // the wall clock happens to be.
+        progress_clock: None,
+        ..attached_empty()
+    }
+}
+
+/// Several tasks at once, one of them unable to report a percentage. Bars do
+/// not collapse into one line: a turn waiting on three things has to show which
+/// of them is the one that is stuck.
+fn background_progress_many() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("build, test, and deploy the preview"));
+    transcript.set_progress("build-1", "bash", "88% · Compiling jcode-app-core", Some(88.0));
+    transcript.set_progress("test-1", "bash", "12/96 crates", Some(12.5));
+    transcript.set_progress("swarm-1", "swarm", "working · waiting on 3 workers", None);
+    transcript.set_live_tool("call_4", "wait for the plan to resolve");
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            6,
+            std::time::Duration::from_secs(212),
+            Some("wait for the plan to resolve"),
         ),
         ..attached_empty()
     }

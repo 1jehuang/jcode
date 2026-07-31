@@ -13,6 +13,7 @@ mod failures;
 mod hero_visual;
 mod overview_gesture;
 mod page_bands;
+mod progress;
 mod scheduling;
 mod selection_visual;
 mod strip_visual;

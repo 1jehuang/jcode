@@ -116,6 +116,41 @@ impl App {
                         .transcript
                         .acknowledge_oldest_pending(std::time::Instant::now());
                 }
+                // A background task the agent is waiting on. The card lands in
+                // the transcript's live status band rather than in the footnote:
+                // the footnote is one line shared with failures and the model
+                // caption, and a turn can be waiting on several tasks at once.
+                harness::HarnessUpdate::Progress {
+                    task_id,
+                    label,
+                    summary,
+                    percent,
+                    done,
+                } => {
+                    if done {
+                        self.model.transcript.clear_progress(&task_id);
+                    } else {
+                        self.model
+                            .transcript
+                            .set_progress(&task_id, &label, &summary, percent);
+                    }
+                    // One clock for every bar on screen, started when the first
+                    // card appears and stopped when the last one leaves: an
+                    // indeterminate bar sweeps off it, and an idle window with
+                    // no cards must not be asking for frames.
+                    self.model.progress_clock = self.model.transcript.has_progress().then(|| {
+                        self.model
+                            .progress_clock
+                            .unwrap_or(std::time::Instant::now())
+                    });
+                    // A card appearing changes the transcript's height, and the
+                    // reveal counts characters, so the sweep is told about the
+                    // new tail rather than being left to animate a stale one.
+                    self.model.stream.extend_to(
+                        self.model.transcript.streaming_len(),
+                        std::time::Instant::now(),
+                    );
+                }
                 harness::HarnessUpdate::TurnDone => {
                     self.model.busy = false;
                     self.model.activity.finish();
@@ -123,6 +158,10 @@ impl App {
                     // there is none, and a card left behind would claim work
                     // is still happening.
                     self.model.transcript.clear_live_tool();
+                    // Progress cards deliberately survive the turn: a
+                    // backgrounded build keeps running after the agent stops
+                    // waiting on it, and its own completion event is what
+                    // retires the bar.
                     turn_ended = true;
                 }
                 harness::HarnessUpdate::Peek {
@@ -174,6 +213,10 @@ impl App {
         self.model.stream.reveal_all();
         self.model.busy = false;
         self.model.activity.finish();
+        // The fresh transcript took the bars with it (they belong to the
+        // session being left), so the clock they animate off stops too, or an
+        // empty page would keep asking for frames.
+        self.model.progress_clock = None;
         self.model.scroll = 0.0;
         // Attaching is a jump, not a scroll: easing here would sweep through
         // the previous session's layout.

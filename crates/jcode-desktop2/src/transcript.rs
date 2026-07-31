@@ -55,6 +55,15 @@ pub enum Role {
     /// session is attached, and a failure the user cannot see is
     /// indistinguishable from an app that silently ignored them.
     Notice,
+    /// A background task the agent is waiting on: its label, its status line,
+    /// and a drawn bar when it reports a percentage.
+    ///
+    /// Like [`Role::Tool`] this is live status rather than history, so it is
+    /// pinned to the tail and retired when the task finishes. Unlike the tool
+    /// card there can be several at once: a turn can be waiting on a build, a
+    /// test sweep, and a swarm plan at the same time, and collapsing them into
+    /// one line would hide the one that is stuck.
+    Progress,
 }
 
 /// One turn of the conversation.
@@ -73,6 +82,15 @@ pub struct Message {
     /// a thought, or a user message replayed from history is not in flight,
     /// and marking it "sent" would be a claim about a past this app never saw.
     pub delivery: Option<crate::ack::Delivery>,
+    /// Completion of a [`Role::Progress`] card, in per mille (0..=1000).
+    /// `None` means the task is running but cannot say how far along it is,
+    /// which is drawn as an indeterminate track rather than a bar stuck at
+    /// zero.
+    ///
+    /// An integer rather than a float so a message stays `Eq` (the transcript
+    /// is compared wholesale in tests and in the paint cache) and so two ticks
+    /// reporting the same progress are byte-identical.
+    pub permille: Option<u16>,
 }
 
 impl Message {
@@ -84,6 +102,7 @@ impl Message {
             source: source.into(),
             call_id: None,
             delivery: None,
+            permille: None,
         }
     }
 
@@ -111,6 +130,7 @@ impl Message {
             source: source.into(),
             call_id: None,
             delivery: None,
+            permille: None,
         }
     }
 
@@ -120,6 +140,7 @@ impl Message {
             source: source.into(),
             call_id: None,
             delivery: None,
+            permille: None,
         }
     }
 
@@ -129,6 +150,7 @@ impl Message {
             source: label.into(),
             call_id: Some(call_id.into()),
             delivery: None,
+            permille: None,
         }
     }
 
@@ -139,7 +161,34 @@ impl Message {
             source: edit_source(card),
             call_id: None,
             delivery: None,
+            permille: None,
         }
+    }
+
+    /// A background task's live progress card. `task_id` rides in `call_id`
+    /// for the same reason a tool call's does: it is the key that lets the
+    /// next tick refine this card in place instead of stacking a new row per
+    /// update.
+    pub fn progress(
+        task_id: impl Into<String>,
+        label: &str,
+        summary: &str,
+        percent: Option<f32>,
+    ) -> Self {
+        Self {
+            role: Role::Progress,
+            source: progress_source(label, summary),
+            call_id: Some(task_id.into()),
+            delivery: None,
+            permille: percent.map(|percent| (percent.clamp(0.0, 100.0) * 10.0).round() as u16),
+        }
+    }
+
+    /// Completion as a 0..=1 fraction, for drawing. `None` for an
+    /// indeterminate task, and for every role that is not a progress card.
+    pub fn fraction(&self) -> Option<f64> {
+        self.permille
+            .map(|permille| f64::from(permille.min(1000)) / 1000.0)
     }
 
     /// A failure, placed in the conversation where the user is already looking.
@@ -149,6 +198,7 @@ impl Message {
             source: source.into(),
             call_id: None,
             delivery: None,
+            permille: None,
         }
     }
 }
@@ -184,6 +234,22 @@ fn edit_source(card: &crate::edits::EditCard) -> String {
     source.push_str(card.diff.trim_end());
     source.push_str("\n```\n");
     source
+}
+
+/// Markdown for a progress card: the task's label, then its status line.
+///
+/// One line, not two: the card is a status readout pinned to the tail, and a
+/// wrapped paragraph per background task would push the conversation off the
+/// page whenever a build got chatty.
+fn progress_source(label: &str, summary: &str) -> String {
+    let label = label.trim();
+    let summary = summary.trim();
+    match (label.is_empty(), summary.is_empty()) {
+        (true, true) => "background task".to_string(),
+        (true, false) => summary.to_string(),
+        (false, true) => label.to_string(),
+        (false, false) => format!("{label} · {summary}"),
+    }
 }
 
 /// The conversation. Streaming appends to the trailing assistant message
@@ -383,12 +449,27 @@ impl Transcript {
         index
     }
 
+    /// Start of the trailing run of background-progress cards, which sit just
+    /// above the queue and just below the live tool card.
+    ///
+    /// The tail band reads top to bottom as "what is being done now" (the tool
+    /// card), "what is being waited on" (the progress cards), "what happens
+    /// next" (the queue), and every append path routes through these three
+    /// functions so that order cannot come apart.
+    fn progress_tail_start(&self) -> usize {
+        let mut index = self.queued_tail_start();
+        while index > 0 && self.messages[index - 1].role == Role::Progress {
+            index -= 1;
+        }
+        index
+    }
+
     /// Where streamed text goes: the end of the transcript, except that a live
     /// tool card and the queued messages at the tail are skipped over. One
     /// definition, so every append path keeps the card and the queue pinned
     /// and none can strand them mid-transcript.
     fn text_tail(&self) -> usize {
-        let tail = self.queued_tail_start();
+        let tail = self.progress_tail_start();
         match tail.checked_sub(1).map(|index| &self.messages[index]) {
             Some(last) if last.role == Role::Tool => tail - 1,
             _ => tail,
@@ -440,6 +521,70 @@ impl Transcript {
         self.messages.retain(|message| message.role != Role::Tool);
     }
 
+    /// Show, or refine, a background task's progress card.
+    ///
+    /// Keyed by task id, so a task that ticks a hundred times is one card that
+    /// updates rather than a hundred rows. Cards live in the same pinned band
+    /// as the live tool card, below the streamed text and above the queue, so
+    /// a growing reply never strands a bar mid-transcript.
+    pub fn set_progress(
+        &mut self,
+        task_id: &str,
+        label: &str,
+        summary: &str,
+        percent: Option<f32>,
+    ) {
+        let updated = Message::progress(task_id, label, summary, percent);
+        if let Some(card) = self.messages.iter_mut().find(|message| {
+            message.role == Role::Progress && message.call_id.as_deref() == Some(task_id)
+        }) {
+            card.source = updated.source;
+            card.permille = updated.permille;
+            return;
+        }
+        // At the *end* of the progress band, so the cards read in the order
+        // their tasks started rather than newest-first: a bar that jumps above
+        // the ones already on screen makes a second task look like a restart.
+        let at = self.queued_tail_start();
+        self.messages.insert(at, updated);
+    }
+
+    /// Retire one task's progress card, because the task finished.
+    ///
+    /// Returns whether a card was actually removed, so the caller can skip a
+    /// redraw for a completion notice about a task this window never saw start.
+    pub fn clear_progress(&mut self, task_id: &str) -> bool {
+        let before = self.messages.len();
+        self.messages.retain(|message| {
+            message.role != Role::Progress || message.call_id.as_deref() != Some(task_id)
+        });
+        self.messages.len() != before
+    }
+
+    /// Retire every bar. The conversation on screen is being replaced (a
+    /// session switch), so bars belonging to the session being left must not
+    /// be shown against the one being opened.
+    pub fn clear_all_progress(&mut self) {
+        self.messages.retain(|message| message.role != Role::Progress);
+    }
+
+    /// Whether any background task's bar is on the page. Drives the one clock
+    /// the bars animate off, so a window with nothing running still sleeps.
+    pub fn has_progress(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.role == Role::Progress)
+    }
+
+    /// Whether any bar on the page is indeterminate, and so needs frames to
+    /// keep its segment sweeping. A page of determinate bars is a still image
+    /// between ticks and must not pull the loop awake.
+    pub fn has_indeterminate_progress(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.role == Role::Progress && message.permille.is_none())
+    }
+
     /// Record a completed edit in the conversation.
     ///
     /// Placed above the live tool card, like streamed text: the card is pinned
@@ -463,9 +608,10 @@ impl Transcript {
             return;
         }
         self.clear_live_tool();
-        // Above the queued messages: a failure is part of the turn that just
-        // happened, while the queue is what happens next.
-        let at = self.queued_tail_start();
+        // Above the live status band: a failure is part of the turn that just
+        // happened, while progress cards and the queue are about what is still
+        // to come.
+        let at = self.progress_tail_start();
         if at
             .checked_sub(1)
             .map(|index| &self.messages[index])
@@ -533,6 +679,10 @@ pub struct LaidMessage {
     /// nothing (see [`crate::paint::TranscriptCache`], which refreshes this
     /// field on every frame instead).
     pub delivery: Option<crate::ack::Delivery>,
+    /// Completion of the progress card this message is, in per mille. Refreshed
+    /// on a cache hit like `delivery`: a bar advancing changes a drawn width,
+    /// never a wrap.
+    pub permille: Option<u16>,
     /// Laid-out blocks, in order, with their vertical offset from the top of
     /// the message and the kind that produced them.
     pub blocks: Vec<LaidBlock>,
@@ -552,12 +702,18 @@ impl LaidMessage {
             Role::User => USER_PAD_Y,
             // A notice is a card too: it has to be visibly an interjection
             // from the app rather than a line the model wrote.
-            Role::Tool | Role::Notice => TOOL_PAD_Y,
+            Role::Tool | Role::Notice | Role::Progress => TOOL_PAD_Y,
             // An edit card is a card too: the diff sits on a wash that must
             // not crop the first line of it.
             Role::Edit => TOOL_PAD_Y,
             Role::Assistant | Role::Reasoning => 0.0,
         }
+    }
+
+    /// Completion as a 0..=1 fraction, or `None` for an indeterminate task.
+    pub fn fraction(&self) -> Option<f64> {
+        self.permille
+            .map(|permille| f64::from(permille.min(1000)) / 1000.0)
     }
 }
 
@@ -637,6 +793,21 @@ pub const TOOL_INSET: f64 = 24.0;
 pub const NOTICE_INSET: f64 = 16.0;
 /// Vertical padding inside the live tool card.
 pub const TOOL_PAD_Y: f64 = 6.0;
+/// The progress bar's track: thin, because it is a readout rather than a
+/// control, and the same halftone language as the rest of the app means it
+/// only has to be legible, not loud.
+pub const PROGRESS_BAR_HEIGHT: f64 = 3.0;
+/// Gap between a progress card's label and its bar.
+pub const PROGRESS_BAR_GAP: f64 = 5.0;
+/// Corner radius of the bar. Half its height, so the track reads as a capsule
+/// rather than as a sliver of a rectangle.
+pub const PROGRESS_BAR_RADIUS: f64 = PROGRESS_BAR_HEIGHT / 2.0;
+/// Width of the moving segment of an indeterminate bar, as a fraction of the
+/// track. A task that cannot report a percentage still has to look alive, so
+/// the segment sweeps instead of the fill growing.
+pub const PROGRESS_SWEEP_FRACTION: f64 = 0.3;
+/// One full sweep of an indeterminate bar.
+pub const PROGRESS_SWEEP_PERIOD: std::time::Duration = std::time::Duration::from_millis(1400);
 /// Reasoning is set smaller than body copy, as a multiple of it. Enough to
 /// read as an aside at a glance without becoming unreadable.
 pub const REASONING_SCALE: f32 = 0.92;
@@ -756,7 +927,9 @@ pub fn lay_out_message_reusing(
         // faintest ink; the tool card stays merely muted because it labels
         // live work.
         Role::Reasoning => Some(theme.faint),
-        Role::Tool => Some(theme.muted),
+        // A progress card is the tool card's voice: live status about work in
+        // flight, not something the model said.
+        Role::Tool | Role::Progress => Some(theme.muted),
         _ => None,
     };
     // A failure is the one thing in the transcript that must not be quiet, so
@@ -771,7 +944,9 @@ pub fn lay_out_message_reusing(
                 ..base
             },
             match message.role {
-                Role::Tool => TOOL_INSET,
+                // Both leave room for a drawn object down the left edge: the
+                // spinner for a tool call, the bar's track for a progress card.
+                Role::Tool | Role::Progress => TOOL_INSET,
                 _ => REASONING_INSET,
             },
         ),
@@ -911,12 +1086,17 @@ pub fn lay_out_message_reusing(
         // tint can never crop the text it wraps.
         Role::User => USER_PAD_Y * 2.0,
         Role::Tool | Role::Notice | Role::Edit => TOOL_PAD_Y * 2.0,
+        // The bar is drawn under the label inside the same card, so the card
+        // reserves its height here: measuring it anywhere else would let the
+        // bar paint over the message below.
+        Role::Progress => TOOL_PAD_Y * 2.0 + PROGRESS_BAR_GAP + PROGRESS_BAR_HEIGHT,
         Role::Assistant | Role::Reasoning => 0.0,
     };
     (
         LaidMessage {
             role: message.role,
             delivery: message.delivery,
+            permille: message.permille,
             blocks,
             height,
         },
@@ -1784,6 +1964,107 @@ mod tests {
         assert_eq!(roles, vec![Role::Edit, Role::Tool]);
     }
 
+    /// A ticking task is one card that updates, not one row per tick: a build
+    /// that reports a hundred times must not push the conversation off screen.
+    #[test]
+    fn progress_ticks_refine_one_card() {
+        let mut transcript = Transcript::default();
+        transcript.set_progress("t1", "bash", "10% · compiling", Some(10.0));
+        transcript.set_progress("t1", "bash", "90% · linking", Some(90.0));
+        let cards: Vec<&Message> = transcript
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::Progress)
+            .collect();
+        assert_eq!(cards.len(), 1, "a tick added a row instead of updating one");
+        assert_eq!(cards[0].source, "bash · 90% · linking");
+        assert_eq!(cards[0].fraction(), Some(0.9));
+    }
+
+    /// Two tasks are two bars, in the order they started: collapsing them would
+    /// hide which of several waits is the slow one.
+    #[test]
+    fn several_tasks_keep_their_own_bars_in_start_order() {
+        let mut transcript = Transcript::default();
+        transcript.set_progress("first", "bash", "5%", Some(5.0));
+        transcript.set_progress("second", "swarm", "working", None);
+        transcript.set_progress("first", "bash", "50%", Some(50.0));
+        let ids: Vec<&str> = transcript
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::Progress)
+            .map(|message| message.call_id.as_deref().expect("a task id"))
+            .collect();
+        assert_eq!(ids, vec!["first", "second"]);
+        assert!(transcript.has_indeterminate_progress());
+    }
+
+    /// A finished task retires its own bar and only its own.
+    #[test]
+    fn a_finished_task_retires_only_its_own_bar() {
+        let mut transcript = Transcript::default();
+        transcript.set_progress("a", "bash", "50%", Some(50.0));
+        transcript.set_progress("b", "bash", "20%", Some(20.0));
+        assert!(transcript.clear_progress("a"));
+        assert!(
+            !transcript.clear_progress("a"),
+            "clearing a retired bar reported a change"
+        );
+        let ids: Vec<&str> = transcript
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::Progress)
+            .map(|message| message.call_id.as_deref().expect("a task id"))
+            .collect();
+        assert_eq!(ids, vec!["b"]);
+        assert!(transcript.has_progress());
+        assert!(!transcript.has_indeterminate_progress());
+        transcript.clear_all_progress();
+        assert!(!transcript.has_progress());
+    }
+
+    /// The tail band's order: streamed text above, then the live tool card,
+    /// then the bars, then anything the user queued. A bar that drifts into the
+    /// middle of the conversation would read as history.
+    #[test]
+    fn progress_cards_sit_between_the_tool_card_and_the_queue() {
+        let mut transcript = Transcript::default();
+        transcript.push(Message::user("go"));
+        transcript.set_live_tool("call_1", "wait for the build");
+        transcript.set_progress("t1", "bash", "40%", Some(40.0));
+        transcript.push(Message::queued("and then deploy"));
+        transcript.append_assistant("Building. ");
+        let roles: Vec<Role> = transcript.messages().iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                Role::User,
+                Role::Assistant,
+                Role::Tool,
+                Role::Progress,
+                Role::User,
+            ],
+            "the live status band came apart"
+        );
+    }
+
+    /// An out-of-range percentage is clamped rather than drawn past the track's
+    /// end: a task reporting 420% is a bug in the task, not licence to paint
+    /// over the message below.
+    #[test]
+    fn a_cards_fraction_is_clamped_to_the_track() {
+        let mut transcript = Transcript::default();
+        transcript.set_progress("t1", "bash", "over", Some(420.0));
+        transcript.set_progress("t2", "bash", "under", Some(-5.0));
+        let fractions: Vec<Option<f64>> = transcript
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::Progress)
+            .map(Message::fraction)
+            .collect();
+        assert_eq!(fractions, vec![Some(1.0), Some(0.0)]);
+    }
+
     /// Added and removed lines take their own ink, so a diff is read by
     /// scanning colour rather than by inspecting the first character of every
     /// line. Ink is checked at the span level, since that is what the layout
@@ -2390,6 +2671,27 @@ mod tests {
                 1.75,
             );
             assert!(laid.height >= 0.0);
+        }
+    }
+
+    /// Copying a table pastes usable text. The transcript's rule is "what you
+    /// see is what you paste", so the columns come along, but no line may carry
+    /// trailing padding: pasted into an editor that is what shows up as a
+    /// ragged block of invisible whitespace.
+    #[test]
+    fn copied_table_lines_carry_no_trailing_padding() {
+        let laid = laid("| a | bbbb |\n|---|---|\n| 1 | 2 |\n");
+        let table = laid
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::Table)
+            .expect("no table block");
+        for line in table.source.lines() {
+            assert_eq!(
+                line.trim_end(),
+                line,
+                "copied table line carries trailing padding: {line:?}"
+            );
         }
     }
 

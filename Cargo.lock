@@ -3582,6 +3582,8 @@ name = "jcode-harness-api-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jcode-background-types",
+ "jcode-base",
  "jcode-harness-api",
  "serde",
  "serde_json",

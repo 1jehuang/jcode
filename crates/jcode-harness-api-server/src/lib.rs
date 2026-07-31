@@ -14,6 +14,7 @@
 //! proven, the same translation can move in-process behind a `hello` sniff on
 //! the main socket.
 
+pub mod background_progress;
 pub mod translate;
 
 use anyhow::{Context, Result};

@@ -50,6 +50,16 @@ pub enum HarnessUpdate {
     /// earns a permanent transcript card while a call's status line does not.
     Edit(crate::edits::EditCard),
     TurnDone,
+    /// A background task this session is waiting on: how far along it is, or
+    /// that it finished. Forwarded so a long wait shows a moving bar instead of
+    /// a spinner that only says "still working".
+    Progress {
+        task_id: String,
+        label: String,
+        summary: String,
+        percent: Option<f32>,
+        done: bool,
+    },
     /// The agent took delivery of the user's message. The proof a send landed,
     /// separate from the reply: a turn can think for minutes before its first
     /// token, and until this arrives the app only knows it *wrote* to a socket.
@@ -537,6 +547,20 @@ fn run(
             }
             ApiEvent::MessageAccepted { .. } => send(HarnessUpdate::MessageAccepted),
             ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
+            ApiEvent::BackgroundProgress {
+                task_id,
+                label,
+                summary,
+                percent,
+                done,
+                ..
+            } => send(HarnessUpdate::Progress {
+                task_id,
+                label,
+                summary,
+                percent,
+                done,
+            }),
             ApiEvent::Error { message, .. } => {
                 // A failed request is also the end of the turn it belonged to:
                 // the daemon sends `error` *instead of* `done`, so without this

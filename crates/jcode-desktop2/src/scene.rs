@@ -121,6 +121,63 @@ pub(crate) fn draw_spinner(
     }
 }
 
+/// A background task's progress bar: a faint track with a bright fill.
+///
+/// Two modes, because a task either knows how far along it is or does not, and
+/// pretending otherwise is the one thing a progress indicator must not do. A
+/// reported percentage fills the track from the left; a task that can only say
+/// "still working" gets a segment that sweeps across it, so the bar stays
+/// honest about what is known while still proving the wait is alive.
+pub(crate) fn draw_progress_bar(
+    scene: &mut Scene,
+    track: Rect,
+    fraction: Option<f64>,
+    theme: &crate::theme::Theme,
+    scale: f64,
+    elapsed: std::time::Duration,
+) {
+    let radius = crate::transcript::PROGRESS_BAR_RADIUS;
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        theme.wash,
+        None,
+        &RoundedRect::from_rect(track, radius),
+    );
+    let width = track.width().max(0.0);
+    if width <= 0.0 {
+        return;
+    }
+    let (start, end) = match fraction {
+        Some(fraction) => (0.0, width * fraction.clamp(0.0, 1.0)),
+        None => {
+            let sweep = crate::transcript::PROGRESS_SWEEP_FRACTION * width;
+            let period = crate::transcript::PROGRESS_SWEEP_PERIOD.as_secs_f64();
+            // A bounce rather than a wrap: the segment eases from one end of
+            // the track to the other and back, so it is fully visible at every
+            // phase (including zero, which is what a still capture draws) and
+            // never pops out of existence at the edges.
+            let phase = (elapsed.as_secs_f64() % period) / period;
+            let travel = (1.0 - (std::f64::consts::TAU * phase).cos()) / 2.0;
+            let start = travel * (width - sweep).max(0.0);
+            (start, (start + sweep).min(width))
+        }
+    };
+    if end <= start {
+        return;
+    }
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        theme.muted,
+        None,
+        &RoundedRect::from_rect(
+            Rect::new(track.x0 + start, track.y0, track.x0 + end, track.y1),
+            radius,
+        ),
+    );
+}
+
 /// `grow` scales the whole halftone screen about the box's centre, which is how
 /// the boot reveal brings the donut in: scaling the *box* instead would keep the
 /// fixed dot pitch and simply show fewer dots, i.e. a coarsening blob rather
@@ -456,8 +513,10 @@ fn draw_transcript(
     let streaming_index = laid
         .iter()
         .rposition(|message| {
-            !matches!(message.role, Role::Tool | Role::Notice | Role::Edit)
-                && message.delivery != Some(crate::ack::Delivery::Queued)
+            !matches!(
+                message.role,
+                Role::Tool | Role::Notice | Role::Edit | Role::Progress
+            ) && message.delivery != Some(crate::ack::Delivery::Queued)
         })
         .filter(|_| model.stream.is_revealing())
         .filter(|index| laid[*index].role != Role::User);
@@ -572,6 +631,52 @@ fn draw_transcript(
                     std::time::Instant::now(),
                 );
             }
+        }
+
+        // A background task's progress card: the same wash as the live tool
+        // card (both are live status, not conversation) with a bar under its
+        // label. The bar is drawn rather than written as text because a
+        // fraction the eye reads at a glance is the whole point of waiting on
+        // a long task, and `50% · linking` on its own is a sentence to parse.
+        if placed.message.role == Role::Progress {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.wash,
+                None,
+                &RoundedRect::new(
+                    frame.left,
+                    message_top,
+                    frame.right,
+                    message_top + placed.message.height,
+                    USER_RADIUS,
+                ),
+            );
+            let bar_top = message_top + placed.message.height
+                - crate::transcript::TOOL_PAD_Y
+                - crate::transcript::PROGRESS_BAR_HEIGHT;
+            draw_progress_bar(
+                scene,
+                Rect::new(
+                    // Aligned with the card's label, which is indented by
+                    // `TOOL_INSET`: a bar starting left of the text it belongs
+                    // to reads as furniture rather than as that task's readout.
+                    text_left + crate::transcript::TOOL_INSET,
+                    bar_top,
+                    frame.right - USER_PAD_X,
+                    bar_top + crate::transcript::PROGRESS_BAR_HEIGHT,
+                ),
+                placed.message.fraction(),
+                theme,
+                scale,
+                // The cards' shared clock drives the indeterminate sweep, so
+                // every bar sweeps in step and a still capture (no clock) draws
+                // the segment at its start rather than at a random phase.
+                model
+                    .progress_clock
+                    .map(|started| now.saturating_duration_since(started))
+                    .unwrap_or_default(),
+            );
         }
 
         // An edit card: the change itself, kept in the transcript. Marked by a
@@ -718,7 +823,7 @@ fn draw_transcript(
                     // need the stronger band: the paper-tuned one is nearly
                     // invisible against the card the user's own message is in.
                     let on_wash = is_user
-                        || placed.message.role == Role::Tool
+                        || matches!(placed.message.role, Role::Tool | Role::Progress)
                         || matches!(block.kind, BlockKind::CodeBlock { .. });
                     let band_color = if on_wash {
                         theme.selection_on_wash
