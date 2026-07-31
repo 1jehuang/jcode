@@ -110,7 +110,13 @@ fn latex_rendering_defaults_to_image_and_parses_all_modes() {
         assert_eq!(cfg.display.latex_rendering, expected);
         assert_eq!(LatexRenderingMode::parse(expected.as_str()), Some(expected));
     }
-    assert!(toml::from_str::<Config>("[display]\nlatex_rendering = \"canvas\"\n").is_err());
+    // An unknown mode degrades to the default instead of failing the whole
+    // config parse, which used to silently discard every other setting in
+    // config.toml (issue #689).
+    let cfg: Config = toml::from_str("[display]\ncentered = true\nlatex_rendering = \"canvas\"\n")
+        .expect("an unknown latex mode must not invalidate the config");
+    assert_eq!(cfg.display.latex_rendering, LatexRenderingMode::Image);
+    assert!(cfg.display.centered, "unrelated settings must survive");
 }
 
 #[test]
