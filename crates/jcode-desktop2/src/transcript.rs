@@ -1266,14 +1266,15 @@ fn block_style(kind: &BlockKind, base: ParagraphStyle, theme: &Theme) -> Paragra
     }
 }
 
-/// Heading sizes, as multiples of body copy. Restrained on purpose: an h1 in a
-/// chat reply is a sentence, not a cover page.
+/// Heading sizes, as multiples of body copy. Big enough that a heading reads
+/// as a heading at a glance, but an h1 in a chat reply is still a sentence,
+/// not a cover page.
 fn heading_scale(level: u8) -> f32 {
     match level {
-        1 => 1.32,
-        2 => 1.18,
-        3 => 1.08,
-        _ => 1.0,
+        1 => 1.55,
+        2 => 1.35,
+        3 => 1.18,
+        _ => 1.05,
     }
 }
 
