@@ -471,10 +471,12 @@ impl Agent {
                         }
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        // Only send thinking content if enabled in config
-                        if crate::config::config().display.show_thinking
-                            && !thinking_text.is_empty()
-                        {
+                        // Always stream reasoning to clients. Whether to *render*
+                        // it is a per-client presentation choice (the TUI keys off
+                        // `display.reasoning_display`, the desktops off their own
+                        // mode); gating it here would let one shared daemon config
+                        // decide what every attached client is allowed to see.
+                        if !thinking_text.is_empty() {
                             reasoning_open = true;
                             let _ = event_tx.send(ServerEvent::ReasoningDelta {
                                 text: thinking_text.clone(),
@@ -482,13 +484,10 @@ impl Agent {
                         } else if hidden_activity_last.elapsed()
                             >= std::time::Duration::from_secs(5)
                         {
-                            // Hidden reasoning is real provider activity, but it
-                            // emits nothing over the client socket, so a long
-                            // silent thinking phase looks identical to a dead
-                            // connection and the client stall guard cancels a
-                            // healthy stream (issue #451). Send a throttled
-                            // non-rendered keepalive so clients track provider
-                            // activity, not just displayable events.
+                            // An empty delta carries provider activity but no
+                            // event, so a long silent thinking phase would look
+                            // identical to a dead connection and the client stall
+                            // guard would cancel a healthy stream (issue #451).
                             hidden_activity_last = Instant::now();
                             send_stream_keepalive_mpsc(&event_tx);
                         }
