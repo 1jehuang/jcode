@@ -35,7 +35,7 @@
     "crates/jcode-config-types/src/lib.rs": 1496,
     "crates/jcode-desktop2/src/editor.rs": 1364,
     "crates/jcode-desktop2/src/main.rs": 1640,
-    "crates/jcode-desktop2/src/transcript.rs": 2364,
+    "crates/jcode-desktop2/src/transcript.rs": 2799,
     "crates/jcode-import-core/src/lib.rs": 1645,
     "crates/jcode-plan/src/lib.rs": 1201,
     "crates/jcode-protocol/src/wire.rs": 1450,
