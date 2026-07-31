@@ -12,8 +12,32 @@ pub enum ColorCapability {
 
 static CAPABILITY: OnceLock<ColorCapability> = OnceLock::new();
 
+/// Test-only override for [`color_capability`]. 0 = none, 1 = truecolor.
+///
+/// A `OnceLock` first-init pin is not enough here: in a full test run some
+/// earlier test has usually already initialized `CAPABILITY` from the host
+/// environment, so a later pin would silently no-op. Production code never
+/// writes this.
+static CAPABILITY_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 pub fn color_capability() -> ColorCapability {
+    if CAPABILITY_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) == 1 {
+        return ColorCapability::TrueColor;
+    }
     *CAPABILITY.get_or_init(detect_color_capability)
+}
+
+/// Pin the process-global color capability to truecolor.
+///
+/// Tests that assert on rendered RGB values (palette topology, harmony
+/// scoring) call this so the frame under test does not depend on the host's
+/// `COLORTERM`/`TERM`: a hosted CI runner detects 256-color and quantizes
+/// every rendered color, which breaks family matching in
+/// `role_for_rendered`. The override stays set for the rest of the process,
+/// which is safe for tests (color capability is not what other tests assert)
+/// and unreachable in production, where nothing calls this.
+pub fn pin_truecolor_for_tests() {
+    CAPABILITY_OVERRIDE.store(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Terminals whose GPU glyph atlas corrupts under heavy per-cell *truecolor*
