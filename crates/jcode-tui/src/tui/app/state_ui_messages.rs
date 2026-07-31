@@ -27,7 +27,12 @@ fn display_message_from_stored_message(
                 // Synthetic auto-poke continuations are persisted as user
                 // turns for the model but must not display as user prompts.
                 if crate::todo::is_auto_poke_message(&text) {
-                    Some(DisplayMessage::system(text))
+                    // Gate continuations are written for the model; the user
+                    // only needs to know the check happened.
+                    match crate::todo::auto_poke_display_summary(&text) {
+                        Some(summary) => Some(DisplayMessage::system(summary.to_string())),
+                        None => Some(DisplayMessage::system(text)),
+                    }
                 } else {
                     Some(DisplayMessage::user(text))
                 }

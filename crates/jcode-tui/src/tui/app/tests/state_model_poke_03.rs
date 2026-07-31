@@ -2441,21 +2441,20 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         let summary = &summary;
         assert!(super::commands::is_poke_message(summary));
         assert!(super::commands::is_todo_confidence_summary_message(summary));
-        assert_eq!(summary, crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE);
-        assert!(!summary.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(summary.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
         assert!(summary.contains("completion confidence"));
         // The continuation self-identifies as an automated gate so the model
         // does not mistake it for a user message, but never discloses the
         // numeric threshold.
         assert!(summary.contains("automated todo completion gate"));
         assert!(!summary.to_ascii_lowercase().contains("threshold"));
-        assert!(!summary.contains("Finish risky provider path"));
+        // The model is told exactly which completed todos to recheck.
+        assert!(summary.contains("Finish risky provider path"));
+        assert!(summary.contains("Document straightforward behavior"));
         assert!(
             app.display_messages()
                 .iter()
-                .any(|msg| msg.content.contains(
-                    "marked its work done without strong enough validation"
-                ))
+                .any(|msg| msg.content.contains("Double-checking confidence"))
         );
 
         // Dispatching the follow-up does not disarm the gate. If the model
@@ -2555,14 +2554,16 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.todo_confidence_spike_challenged);
         assert!(app.pending_queued_dispatch);
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE]
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(
+            app.queued_messages[0]
+                .starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         );
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("confidence jumped suddenly")
-        }));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| { msg.content.contains("Double-checking a confidence jump") })
+        );
 
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;

@@ -77,6 +77,21 @@ fn is_auto_poke_user_message(msg: &super::StoredMessage) -> bool {
             .is_some_and(crate::todo::is_auto_poke_message)
 }
 
+/// Short user-facing stand-in for a synthetic gate continuation, when one
+/// exists. `None` means render the stored text as-is.
+fn auto_poke_user_message_display_summary(msg: &super::StoredMessage) -> Option<&'static str> {
+    if !is_auto_poke_user_message(msg) {
+        return None;
+    }
+    msg.content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .and_then(crate::todo::auto_poke_display_summary)
+}
+
 fn stored_message_renders_visible_message(msg: &super::StoredMessage) -> bool {
     if is_internal_system_reminder(msg) {
         return false;
@@ -402,6 +417,19 @@ pub fn render_messages_and_images_with_compacted_history(
                 Role::Assistant => "assistant",
             },
         };
+        // Gate continuations are model-facing instructions naming specific
+        // todos and fields. In the transcript the user only wants to know a
+        // check happened, so replace the body with a one-liner.
+        if let Some(summary) = auto_poke_user_message_display_summary(msg) {
+            rendered.push(RenderedMessage {
+                role: "system".to_string(),
+                content: summary.to_string(),
+                tool_calls: Vec::new(),
+                tool_data: None,
+                stored_index: Some(stored_index),
+            });
+            continue;
+        }
         let message_role = msg.role.clone();
         let mut text = String::new();
         // Reasoning is accumulated separately so it can be rendered *before* the

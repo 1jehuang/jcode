@@ -302,6 +302,91 @@ pub fn build_auto_poke_message(incomplete_count: usize) -> String {
     )
 }
 
+/// Longest list of named todos a gate continuation will spell out, so a big
+/// plan cannot turn one nudge into a wall of text.
+const GATE_NAMED_TODO_LIMIT: usize = 6;
+
+fn quoted_todo_label(todo: &TodoItem) -> String {
+    let content = todo.content.trim();
+    let label: String = if content.chars().count() > 80 {
+        format!("{}…", content.chars().take(79).collect::<String>())
+    } else {
+        content.to_string()
+    };
+    format!("\"{}\"", label)
+}
+
+fn append_named_todos(message: &mut String, lead: &str, todos: &[&TodoItem]) {
+    if todos.is_empty() {
+        return;
+    }
+    message.push_str("\n- ");
+    message.push_str(lead);
+    message.push(' ');
+    let named: Vec<String> = todos
+        .iter()
+        .take(GATE_NAMED_TODO_LIMIT)
+        .map(|todo| quoted_todo_label(todo))
+        .collect();
+    message.push_str(&named.join(", "));
+    if todos.len() > named.len() {
+        message.push_str(&format!(" (and {} more)", todos.len() - named.len()));
+    }
+    message.push('.');
+}
+
+/// Completion-gate continuation naming exactly which completed todos failed the
+/// check, so the model re-validates those items instead of guessing which part
+/// of its work was doubted. Scores and thresholds stay private; only the reason
+/// category per todo is disclosed.
+pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String {
+    let completed: Vec<&TodoItem> = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .collect();
+    let missing: Vec<&TodoItem> = completed
+        .iter()
+        .copied()
+        .filter(|todo| todo.completion_confidence.is_none())
+        .collect();
+    let weak: Vec<&TodoItem> = completed
+        .iter()
+        .copied()
+        .filter(|todo| {
+            todo.completion_confidence
+                .is_some_and(|score| score < QUALITY_GATE_THRESHOLD)
+        })
+        .collect();
+
+    let mut message = String::from(TODO_COMPLETION_CONTINUATION_MESSAGE);
+    if missing.is_empty() && weak.is_empty() {
+        message.push_str(
+            "\n- Taken together the completed work is not validated strongly enough yet: re-verify the finished todos with concrete evidence.",
+        );
+        return message;
+    }
+    append_named_todos(
+        &mut message,
+        "No completion_confidence was recorded for:",
+        &missing,
+    );
+    append_named_todos(
+        &mut message,
+        "The recorded completion_confidence is not strong enough for:",
+        &weak,
+    );
+    message
+}
+
+/// Spike-gate continuation naming the completed todos whose confidence jumped,
+/// so the recheck targets those items.
+pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> String {
+    let spiked = spike_completed_todos(todos);
+    let mut message = String::from(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE);
+    append_named_todos(&mut message, "Recheck the confidence jump on:", &spiked);
+    message
+}
+
 /// True when `message` is a synthetic auto-poke continuation (the
 /// incomplete-todos poke or the todo confidence summary) rather than a real
 /// user prompt.
@@ -327,6 +412,48 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
         || trimmed.starts_with(TODO_GATE_DIGEST_PREFIX)
+}
+
+/// Short, user-facing stand-in for a synthetic auto-poke/gate continuation.
+///
+/// The continuations themselves are written for the model and name specific
+/// todos and required fields. Showing that wall of instructions in the
+/// transcript (on reload/resume, where the live short notice is gone) buries the
+/// conversation, so the UI renders this one-liner instead.
+pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
+    let trimmed = message.trim();
+    if !is_auto_poke_message(trimmed) {
+        return None;
+    }
+    if trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
+    {
+        return Some("🔍 Double-checking a confidence jump for you...");
+    }
+    if trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
+    {
+        return Some("🔍 Double-checking confidence for you...");
+    }
+    if trimmed.starts_with(TODO_GATE_DIGEST_PREFIX) {
+        return Some("🔍 Reviewing the weak points of this turn for you...");
+    }
+    if trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE) {
+        return Some("🔍 Checking the full outcome was owned end to end...");
+    }
+    if trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE) {
+        return Some("🔍 Re-checking the request was understood...");
+    }
+    if trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
+    {
+        return Some("🔍 Asking for a stronger way to verify this work...");
+    }
+    // Incomplete-todos poke: the count is genuinely useful, and it is already
+    // short, so it keeps its own text.
+    None
 }
 
 pub fn load_todos(session_id: &str) -> Result<Vec<TodoItem>> {
@@ -812,6 +939,110 @@ mod tests {
         assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("Validate the completed result"));
         assert!(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.contains("concrete evidence"));
         assert!(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.contains("rose too sharply"));
+    }
+
+    /// The model must be told which items it should recheck, otherwise the
+    /// nudge is a guess-the-weak-spot puzzle. Scores stay private.
+    #[test]
+    fn completion_continuation_names_the_failing_todos() {
+        let mut missing = todo("write the parser", "completed", None);
+        missing.completion_confidence = None;
+        let mut weak = todo("wire up the CLI flag", "completed", None);
+        weak.completion_confidence = Some(70);
+        let mut strong = todo("rename the module", "completed", None);
+        strong.completion_confidence = Some(99);
+        let open = todo("ship it", "in_progress", None);
+
+        let message =
+            build_todo_completion_continuation_message(&[missing, weak, strong.clone(), open]);
+        assert!(message.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE));
+        assert!(message.contains("\"write the parser\""));
+        assert!(message.contains("\"wire up the CLI flag\""));
+        // Passing and unfinished todos are not what the gate is asking about.
+        assert!(!message.contains("\"rename the module\""));
+        assert!(!message.contains("\"ship it\""));
+        for disclosure in ["70", "99", "threshold"] {
+            assert!(!message.contains(disclosure), "disclosed {disclosure}");
+        }
+
+        // Only the weighted average failed: no individual item is nameable, so
+        // the fallback still tells the model what to do.
+        let average_only = build_todo_completion_continuation_message(&[strong]);
+        assert!(average_only.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE));
+        assert!(average_only.contains("re-verify the finished todos"));
+    }
+
+    #[test]
+    fn spike_continuation_names_the_spiked_todos() {
+        let mut spiked = todo("port the tests", "completed", None);
+        spiked.completion_confidence = Some(100);
+        spiked.confidence_history = vec![60, 100];
+        let mut steady = todo("update docs", "completed", None);
+        steady.completion_confidence = Some(99);
+        steady.confidence_history = vec![95, 97, 99];
+
+        let message = build_todo_confidence_spike_continuation_message(&[spiked, steady]);
+        assert!(message.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE));
+        assert!(message.contains("\"port the tests\""));
+        assert!(!message.contains("\"update docs\""));
+    }
+
+    /// A 40-item plan must not turn one gate nudge into a wall of text.
+    #[test]
+    fn completion_continuation_caps_named_todos() {
+        let todos: Vec<TodoItem> = (0..40)
+            .map(|index| {
+                let mut item = todo(&format!("task {index}"), "completed", None);
+                item.completion_confidence = None;
+                item
+            })
+            .collect();
+        let message = build_todo_completion_continuation_message(&todos);
+        assert!(message.contains("\"task 0\""));
+        assert!(!message.contains("\"task 30\""));
+        assert!(message.contains(&format!("(and {} more)", 40 - GATE_NAMED_TODO_LIMIT)));
+    }
+
+    #[test]
+    fn detailed_gate_continuations_are_not_mistaken_for_user_messages() {
+        let mut item = todo("do the thing", "completed", None);
+        item.completion_confidence = Some(50);
+        item.confidence_history = vec![10, 50];
+        let todos = [item];
+        assert!(is_auto_poke_message(
+            &build_todo_completion_continuation_message(&todos)
+        ));
+        assert!(is_auto_poke_message(
+            &build_todo_confidence_spike_continuation_message(&todos)
+        ));
+    }
+
+    /// The transcript must not replay model-facing gate instructions at the
+    /// user; they get a short "we are checking" line instead.
+    #[test]
+    fn gate_continuations_have_short_user_facing_summaries() {
+        let mut item = todo("do the thing", "completed", None);
+        item.completion_confidence = Some(50);
+        item.confidence_history = vec![10, 50];
+        let todos = [item];
+
+        for message in [
+            build_todo_completion_continuation_message(&todos),
+            build_todo_confidence_spike_continuation_message(&todos),
+            TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string(),
+            TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.to_string(),
+            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.to_string(),
+        ] {
+            let summary = auto_poke_display_summary(&message).expect("summary");
+            assert!(summary.chars().count() < 70, "too long: {summary}");
+            assert!(!summary.contains("do the thing"));
+            assert!(!summary.contains("completion_confidence"));
+        }
+
+        // The incomplete-todos poke is already short and its count is useful.
+        assert!(auto_poke_display_summary(&build_auto_poke_message(3)).is_none());
+        // Real user prompts are never rewritten.
+        assert!(auto_poke_display_summary("fix the login bug").is_none());
     }
 
     #[test]

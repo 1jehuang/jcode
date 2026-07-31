@@ -1356,8 +1356,15 @@ fn test_render_messages_shows_auto_poke_continuations_as_system_not_user() {
     assert!(
         system_contents
             .iter()
+            .any(|content| content.contains("Double-checking confidence")),
+        "quality continuation should render as a short system notice: {rendered:?}"
+    );
+    // The model-facing instruction text stays out of the transcript.
+    assert!(
+        !system_contents
+            .iter()
             .any(|content| content.contains("Validate the completed result")),
-        "quality continuation should render as system: {rendered:?}"
+        "quality continuation leaked model-facing instructions: {rendered:?}"
     );
 }
 

@@ -144,17 +144,13 @@ fn strip_blockquote_gutter(text: &str) -> &str {
     }
 }
 
-/// Render a table as ASCII-style lines
-/// max_width: Optional maximum width for the entire table
-pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'static>> {
-    render_table_aligned(rows, max_width, &[])
-}
-
-/// As [`render_table`], honouring the delimiter row's per-column alignment.
+/// Render a table as ASCII-style lines, honouring the delimiter row's
+/// per-column alignment.
 ///
-/// A right-aligned numeric column that renders left-aligned misreads what the
-/// author wrote, and the alignment is the one piece of table structure a
-/// front-end cannot recover from the cells alone.
+/// `max_width` bounds the whole table. `alignments` may be empty, in which case
+/// every column is left-aligned: a right-aligned numeric column that renders
+/// left-aligned misreads what the author wrote, and the alignment is the one
+/// piece of table structure a front-end cannot recover from the cells alone.
 pub(super) fn render_table_aligned(
     rows: &[Vec<String>],
     max_width: Option<usize>,
@@ -365,7 +361,7 @@ fn wrap_long_table_word(word: &str, width: usize) -> Vec<String> {
 
 /// Render a table with a specific max width constraint
 pub fn render_table_with_width(rows: &[Vec<String>], max_width: usize) -> Vec<Line<'static>> {
-    render_table(rows, Some(max_width))
+    render_table_aligned(rows, Some(max_width), &[])
 }
 
 /// Highlight a code block with syntax highlighting (cached)
