@@ -44,6 +44,9 @@ pub fn render_markdown_lazy(
     let mut in_table = false;
     let mut table_row: Vec<String> = Vec::new();
     let mut table_rows: Vec<Vec<String>> = Vec::new();
+    // Per-column alignment from the delimiter row. Carried so a numeric column
+    // the author right-aligned is not silently re-read as left-aligned.
+    let mut table_alignments: Vec<jcode_render_core::Alignment> = Vec::new();
     let mut current_cell = String::new();
     let mut _is_header_row = false;
 
@@ -830,7 +833,15 @@ pub fn render_markdown_lazy(
                 );
             }
 
-            Event::Start(Tag::Table(_)) => {
+            Event::Start(Tag::Table(ref aligns)) => {
+                table_alignments = aligns
+                    .iter()
+                    .map(|align| match align {
+                        pulldown_cmark::Alignment::Right => jcode_render_core::Alignment::Right,
+                        pulldown_cmark::Alignment::Center => jcode_render_core::Alignment::Center,
+                        _ => jcode_render_core::Alignment::Left,
+                    })
+                    .collect();
                 flush_current_line_with_alignment(
                     &mut lines,
                     &mut current_spans,
@@ -847,7 +858,7 @@ pub fn render_markdown_lazy(
             }
             Event::End(TagEnd::Table) => {
                 if !table_rows.is_empty() {
-                    let rendered = render_table(&table_rows, max_width);
+                    let rendered = render_table_aligned(&table_rows, max_width, &table_alignments);
                     lines.extend(rendered);
                     exit_centered_structured_block(&mut centered_blocks, lines.len());
                     if blockquote_depth == 0

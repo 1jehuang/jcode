@@ -2632,12 +2632,10 @@ fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> O
 
 pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
     let summary = todo_confidence_summary(todos);
-    if summary.completion_confidence_needs_validation {
-        TODO_COMPLETION_CONTINUATION_MESSAGE.to_string()
-    } else if summary.confidence_spike_detected {
-        TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_string()
+    if summary.confidence_spike_detected && !summary.completion_confidence_needs_validation {
+        crate::todo::build_todo_confidence_spike_continuation_message(todos)
     } else {
-        TODO_COMPLETION_CONTINUATION_MESSAGE.to_string()
+        crate::todo::build_todo_completion_continuation_message(todos)
     }
 }
 

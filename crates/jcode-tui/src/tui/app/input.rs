@@ -1548,13 +1548,13 @@ impl App {
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
-                    "🛑 The agent marked its work done without strong enough validation. We asked it to double-check."
+                    "🔍 Double-checking confidence for you..."
                 } else {
                     self.todo_confidence_spike_challenged = true;
                     crate::telemetry::record_todo_gate(
                         crate::telemetry::TodoGateKind::ConfidenceSpike,
                     );
-                    "🛑 The agent's confidence jumped suddenly. We asked it to verify that independently."
+                    "🔍 Double-checking a confidence jump for you..."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user

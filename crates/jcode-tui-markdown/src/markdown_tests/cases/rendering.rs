@@ -186,6 +186,47 @@ fn test_table_render_basic() {
 }
 
 #[test]
+fn test_table_columns_follow_the_declared_alignment() {
+    // The delimiter row is the author saying how to read each column, and it is
+    // the one piece of table structure that cannot be recovered from the cells.
+    let md = "| left | right |\n|:--|--:|\n| a | 1 |\n| bbbb | 1000 |";
+    let rendered: Vec<String> = render_markdown(md).iter().map(line_to_string).collect();
+    let short = rendered
+        .iter()
+        .find(|line| line.contains(" a ") || line.starts_with('a'))
+        .expect("no short row");
+    let (left, right) = short.split_once('│').expect("no column separator");
+    assert!(
+        left.trim_end().ends_with('a'),
+        "left-aligned cell was padded on the right side of its text: {short:?}"
+    );
+    assert!(
+        right.trim_end().ends_with('1') && right.starts_with(' '),
+        "right-aligned cell was not padded on the left: {short:?}"
+    );
+}
+
+#[test]
+fn test_lazy_renderer_also_follows_table_alignment() {
+    // The lazy renderer is what a long streamed reply goes through, so it has
+    // its own copy of the table path and can drift from the full one.
+    let md = "| left | right |\n|:--|--:|\n| a | 1 |\n| bbbb | 1000 |";
+    let rendered: Vec<String> = crate::render_markdown_lazy(md, None, 0..100)
+        .iter()
+        .map(line_to_string)
+        .collect();
+    let short = rendered
+        .iter()
+        .find(|line| line.contains('a') && line.contains('1') && !line.contains('┼'))
+        .expect("no short row");
+    let (_, right) = short.split_once('│').expect("no column separator");
+    assert!(
+        right.trim_end().ends_with('1') && right.starts_with(' '),
+        "lazy renderer ignored the right alignment: {short:?}"
+    );
+}
+
+#[test]
 fn test_table_width_wraps_without_truncation() {
     let md = "| Column | Value |\n| - | - |\n| very_long_cell_value | 1234567890 |";
     let lines = render_markdown_with_width(md, Some(20));
