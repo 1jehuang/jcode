@@ -1560,16 +1560,27 @@ fn strip_leading_indent(
     spans
 }
 
-/// Drop the leading terminal quote-bar span from a quoted line.
+/// Drop the *outermost* terminal quote bar from a quoted line.
+///
+/// The desktop draws the outer quote as a real rule down the block's left edge,
+/// so keeping its `│` as well would mark the quote twice. Bars for deeper
+/// nesting are kept: the block carries only one rule, so a quote inside a quote
+/// would otherwise render identically to the quote around it, and "who is being
+/// quoted here" is the whole content of that distinction.
 fn strip_quote_bar(spans: &[jcode_render_core::StyledSpan]) -> Vec<jcode_render_core::StyledSpan> {
     let mut spans = spans.to_vec();
     if spans
         .first()
-        .is_some_and(|first| first.text.contains('\u{2502}'))
+        .is_some_and(|first| first.text.starts_with('\u{2502}'))
     {
         let first = &mut spans[0];
-        first.text = first.text.trim_start_matches(['\u{2502}', ' ']).to_string();
-        if first.text.is_empty() {
+        // Exactly one bar: render-core emits the whole gutter (`│ │ `) as a
+        // single span, and trimming all of them would flatten a nested quote
+        // onto the outer one.
+        let rest = first.text.strip_prefix('\u{2502}').unwrap_or(&first.text);
+        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+        first.text = rest.to_string();
+        if first.text.is_empty() && spans.len() > 1 {
             spans.remove(0);
         }
     }
@@ -2795,6 +2806,30 @@ mod tests {
         assert!(
             text.contains('\u{2610}') && text.contains('\u{2611}'),
             "no checkboxes drawn: {text:?}"
+        );
+    }
+
+    /// A quote inside a quote stays visibly deeper. The block carries one drawn
+    /// rule, so stripping *every* bar flattened the inner quote onto the outer
+    /// one, and "who is being quoted here" is the whole point of the nesting.
+    #[test]
+    fn nested_quotes_keep_their_inner_bars() {
+        let document = parse_markdown("> outer\n> > inner\n");
+        let quote = document
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::BlockQuote)
+            .expect("no quote block");
+        let lines = block_lines(quote, || 80);
+        let text: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
+        assert!(
+            text.iter().any(|line| line.trim() == "outer"),
+            "outer quote kept its bar: {text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains('\u{2502}') && line.contains("inner")),
+            "nested quote lost its depth: {text:?}"
         );
     }
 

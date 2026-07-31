@@ -1086,6 +1086,8 @@ fn markdown_structure() -> Model {
                 "   then dispatch on it.\n\n",
                 "2. read the payload\n\n",
                 "   > A short frame is a protocol error, never a partial read.\n",
+                "   >\n",
+                "   > > and a long one is a bug in the sender.\n",
             )
             .into(),
         )]),
