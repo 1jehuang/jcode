@@ -136,6 +136,19 @@ fn format_model(model: &str) -> String {
     }
 }
 
+/// Combine provider display name and credential route into one metadata piece,
+/// e.g. "OpenAI oauth". Returns `None` when both are blank.
+fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
+    let provider = provider.map(str::trim).filter(|p| !p.is_empty());
+    let auth_method = auth_method.map(str::trim).filter(|m| !m.is_empty());
+    match (provider, auth_method) {
+        (Some(provider), Some(method)) => Some(format!("{provider} {method}")),
+        (Some(provider), None) => Some(provider.to_string()),
+        (None, Some(method)) => Some(method.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Sort rank for stable placement: coordinator first, then everything else.
 fn role_rank(role: Option<&str>) -> u8 {
     match role {
@@ -293,7 +306,9 @@ pub fn render_gallery(
 /// Transcript content deliberately excludes elapsed time, output tails, todos,
 /// tool progress, and animated glyphs. Those fields update frequently and make
 /// old chat rows move while the user is reading them. The dedicated live swarm
-/// page owns the detailed, animated representation instead.
+/// page owns the detailed, animated representation instead. Spawn-time-stable
+/// metadata (model, provider/auth route) is shown since it answers "what is
+/// this agent running on" without churning.
 pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 {
         return Vec::new();
@@ -308,7 +323,27 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
             card_status_glyph(&member.status)
         );
         let label = member.label.clone();
-        let tail = format!(" · {}", card_status_label(&member.status));
+
+        // Stable runtime metadata (model and provider/auth route) is fixed at
+        // spawn time, so it can live on the transcript card without making old
+        // chat rows churn. Drop trailing pieces first when width is tight.
+        let mut metadata = vec![card_status_label(&member.status).to_string()];
+        if let Some(model) = member
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            metadata.push(format_model(model));
+        }
+        if let Some(route) = format_route(member.provider.as_deref(), member.auth_method.as_deref())
+        {
+            metadata.push(route);
+        }
+        let mut tail = format!(" · {}", metadata.join(" · "));
+        while metadata.len() > 1 && disp_w(&lead) + disp_w(&label) + disp_w(&tail) > width {
+            metadata.pop();
+            tail = format!(" · {}", metadata.join(" · "));
+        }
 
         let mut header = vec![
             Span::styled(lead.clone(), Style::default().fg(rgb(255, 200, 100))),
@@ -355,24 +390,8 @@ pub fn render_swarm_live_card(
     {
         metadata.push(format_model(model));
     }
-    if let Some(provider) = member
-        .provider
-        .as_deref()
-        .filter(|provider| !provider.trim().is_empty())
-    {
-        let route = member
-            .auth_method
-            .as_deref()
-            .filter(|method| !method.trim().is_empty())
-            .map(|method| format!("{provider} {method}"))
-            .unwrap_or_else(|| provider.to_string());
+    if let Some(route) = format_route(member.provider.as_deref(), member.auth_method.as_deref()) {
         metadata.push(route);
-    } else if let Some(method) = member
-        .auth_method
-        .as_deref()
-        .filter(|method| !method.trim().is_empty())
-    {
-        metadata.push(method.to_string());
     }
     if let Some(effort) = member
         .effort
@@ -2350,8 +2369,8 @@ mod tests {
             "assigned agent emoji missing: {all}"
         );
         assert!(
-            all.contains("reviewer · Working"),
-            "stable status label missing: {all}"
+            all.contains("reviewer · Working · GPT-5.6 · OpenAI OAuth"),
+            "stable status/model/route metadata missing: {all}"
         );
         assert!(
             STRIP_SPINNER_FRAMES
@@ -2361,7 +2380,6 @@ mod tests {
         );
         assert!(
             !all.contains("00:18")
-                && !all.contains("GPT-5.6")
                 && !all.contains("test token refresh flow")
                 && !all.contains("Run targeted authentication tests")
                 && !all.contains("27/43"),
@@ -2383,6 +2401,43 @@ mod tests {
                 && live.contains("bash · Run targeted authentication tests · 27/43"),
             "live page should retain todo and tool progress: {live}"
         );
+    }
+
+    /// The transcript card's model/route metadata must degrade gracefully:
+    /// narrower widths drop trailing pieces rather than overflowing, and a
+    /// member with no known runtime still renders its status label.
+    #[test]
+    fn chat_card_metadata_degrades_and_is_width_bounded() {
+        let mut worker = member("reviewer", "running", None, &[]);
+        worker.icon = Some("🦕".to_string());
+        worker.model = Some("openai:gpt-5.6-sol".into());
+        worker.provider = Some("OpenAI".into());
+        worker.auth_method = Some("OAuth".into());
+
+        for width in 0..80usize {
+            for line in render_swarm_chat_cards(std::slice::from_ref(&worker), width) {
+                assert!(
+                    disp_w(&plain_line(&line)) <= width,
+                    "chat card exceeded width {width}: {:?}",
+                    plain_line(&line)
+                );
+            }
+        }
+
+        // Wide: everything fits. Narrow: route drops before model, model before
+        // status, and the label always survives.
+        let wide = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&worker), 100)[0]);
+        assert!(wide.contains("Working · GPT-5.6 · OpenAI OAuth"), "{wide}");
+        let mid = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&worker), 34)[0]);
+        assert!(
+            mid.contains("Working") && !mid.contains("OpenAI OAuth"),
+            "{mid}"
+        );
+
+        let mut bare = member("plain", "running", None, &[]);
+        bare.icon = Some("🦕".to_string());
+        let bare_line = plain_line(&render_swarm_chat_cards(std::slice::from_ref(&bare), 100)[0]);
+        assert_eq!(bare_line.trim(), "🦕 ● plain · Working");
     }
 
     #[test]
