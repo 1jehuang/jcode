@@ -248,6 +248,11 @@ impl Config {
                 self.display.active_sessions_manager = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_EXTERNAL_SESSIONS") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.external_sessions = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {

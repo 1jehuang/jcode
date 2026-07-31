@@ -205,6 +205,11 @@ prompt_entry_animation = true
 # command is always available regardless of this setting.
 # active_sessions_manager = false
 
+# Include transcripts from other agent CLIs (Claude Code, Codex, Pi, OpenCode,
+# Cursor) in the session picker so they can be resumed or imported
+# (default: true). Set false to list only jcode's own sessions.
+# external_sessions = true
+
 # Overscroll status line (model/provider/context info below the input):
 #   "overscroll" - elastic reveal when scrolling past the bottom (default)
 #   "on"         - always visible

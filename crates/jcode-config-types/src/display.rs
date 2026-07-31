@@ -109,6 +109,12 @@ pub struct DisplayConfig {
     /// command works regardless of this setting.
     #[serde(default)]
     pub active_sessions_manager: bool,
+    /// Include transcripts discovered from other agent CLIs (Claude Code,
+    /// Codex, Pi, OpenCode, Cursor) in the session picker so they can be
+    /// resumed or imported (default: true). Set false to show only jcode's own
+    /// sessions (issue #674).
+    #[serde(default = "default_true")]
+    pub external_sessions: bool,
     /// When to show the overscroll status line below the input
     /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
@@ -150,6 +156,7 @@ impl Default for DisplayConfig {
             theme: String::new(),
             colors: std::collections::BTreeMap::new(),
             active_sessions_manager: false,
+            external_sessions: true,
             overscroll_status: OverscrollStatusMode::default(),
         }
     }

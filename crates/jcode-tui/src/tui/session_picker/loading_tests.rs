@@ -138,6 +138,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
         sessions_dir,
         scan_limit: session_scan_limit(),
         include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
+        external_sessions: include_external_sessions(),
         server_groups: Vec::new(),
         orphan_sessions: vec![session],
     };
@@ -207,6 +208,67 @@ fn load_sessions_includes_claude_code_sessions_from_external_home() {
     assert_eq!(session.title, "Investigate the login bug");
     assert_eq!(session.message_count, 2);
     assert_eq!(session.working_dir.as_deref(), Some("/tmp/demo-project"));
+}
+
+/// End-to-end counterpart to the unit tests above (issue #674): with
+/// `external_sessions` off, a discoverable Claude Code transcript must not
+/// appear in the picker, while jcode's own sessions still do.
+#[test]
+fn load_sessions_hides_external_sessions_when_opted_out() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _opt_out = EnvVarGuard::set_str("JCODE_EXTERNAL_SESSIONS", "0");
+    crate::config::Config::invalidate_cache();
+    invalidate_session_list_cache();
+
+    let project_dir = temp.path().join("external/.claude/projects/demo-project");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    let transcript_path = project_dir.join("claude-session-456.jsonl");
+    std::fs::write(
+        &transcript_path,
+        "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"hidden\"}}\n",
+    )
+    .expect("write transcript");
+    std::fs::write(
+        project_dir.join("sessions-index.json"),
+        format!(
+            concat!(
+                "{{\"version\":1,\"entries\":[",
+                "{{\"sessionId\":\"claude-session-456\",",
+                "\"fullPath\":\"{}\",",
+                "\"firstPrompt\":\"hidden\",",
+                "\"summary\":\"hidden\",",
+                "\"messageCount\":1,",
+                "\"created\":\"2026-04-04T12:00:00Z\",",
+                "\"modified\":\"2026-04-04T12:05:00Z\",",
+                "\"projectPath\":\"/tmp/demo-project\"",
+                "}}]}}"
+            ),
+            transcript_path.display()
+        ),
+    )
+    .expect("write index");
+
+    let sessions = load_sessions().expect("load sessions");
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session.source != SessionSource::Jcode),
+        "external sessions must be hidden when display.external_sessions is false"
+    );
+
+    // And they come back when the opt-out is lifted.
+    drop(_opt_out);
+    crate::config::Config::invalidate_cache();
+    invalidate_session_list_cache();
+    let sessions = load_sessions().expect("load sessions");
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.source == SessionSource::ClaudeCode),
+        "external sessions must return when the opt-out is lifted"
+    );
 }
 
 #[test]
@@ -1265,4 +1327,75 @@ fn session_matches_picker_query_requires_all_tokens_order_independent() {
     assert!(!session_matches_picker_query(loaded, "deploy staging"));
     // Empty query matches everything.
     assert!(session_matches_picker_query(loaded, "   "));
+}
+
+/// Regression tests for issue #674: the picker must be able to list only
+/// jcode's own sessions, and toggling that must not be masked by either cache.
+mod external_session_opt_out {
+    use super::super::{GroupedSessionListDiskCache, session_list_disk_cache_is_usable};
+    use std::path::{Path, PathBuf};
+
+    fn disk_cache(dir: &Path, external_sessions: bool) -> GroupedSessionListDiskCache {
+        GroupedSessionListDiskCache {
+            version: super::super::SESSION_LIST_DISK_CACHE_VERSION,
+            generated_at: chrono::Utc::now(),
+            sessions_dir: dir.to_path_buf(),
+            scan_limit: 50,
+            include_old_saved_sessions: super::super::include_old_saved_sessions_on_initial_load(),
+            external_sessions,
+            server_groups: Vec::new(),
+            orphan_sessions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn disk_cache_written_with_externals_is_rejected_after_opting_out() {
+        let dir = PathBuf::from("/tmp/jcode-test-sessions");
+        let cache = disk_cache(&dir, true);
+
+        assert!(
+            session_list_disk_cache_is_usable(&cache, &dir, 50, true),
+            "same setting -> reusable"
+        );
+        assert!(
+            !session_list_disk_cache_is_usable(&cache, &dir, 50, false),
+            "opting out must not be served a cache that still contains other CLIs' sessions"
+        );
+    }
+
+    #[test]
+    fn disk_cache_written_without_externals_is_rejected_after_opting_back_in() {
+        let dir = PathBuf::from("/tmp/jcode-test-sessions");
+        let cache = disk_cache(&dir, false);
+
+        assert!(session_list_disk_cache_is_usable(&cache, &dir, 50, false));
+        assert!(
+            !session_list_disk_cache_is_usable(&cache, &dir, 50, true),
+            "opting back in must trigger a rescan"
+        );
+    }
+
+    /// An older cache file has no `external_sessions` field; it was written
+    /// with externals included, so it must deserialize that way.
+    #[test]
+    fn legacy_disk_cache_without_the_field_defaults_to_externals_included() {
+        let json = serde_json::json!({
+            "version": super::super::SESSION_LIST_DISK_CACHE_VERSION,
+            "generated_at": chrono::Utc::now(),
+            "sessions_dir": "/tmp/jcode-test-sessions",
+            "scan_limit": 50,
+            "include_old_saved_sessions": false,
+            "server_groups": [],
+            "orphan_sessions": []
+        });
+        let cache: GroupedSessionListDiskCache =
+            serde_json::from_value(json).expect("legacy cache must still parse");
+        assert!(cache.external_sessions);
+    }
+
+    /// The config default must keep today's behavior (externals shown).
+    #[test]
+    fn external_sessions_default_is_on() {
+        assert!(jcode_config_types::DisplayConfig::default().external_sessions);
+    }
 }
