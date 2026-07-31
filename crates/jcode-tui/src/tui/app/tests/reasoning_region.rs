@@ -492,38 +492,45 @@ fn anchored_trace_never_moves_and_clears_on_next_prompt() {
 
 #[test]
 fn remote_reasoning_delta_burst_is_paced_not_dumped() {
-    // A large provider reasoning burst must reveal over multiple paced frames
-    // (via the segment-aware StreamBuffer), not pop in all at once. This is the
-    // regression test for "reasoning mode feels choppy".
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.is_processing = true;
-    app.status = ProcessingStatus::Streaming;
+    // Pacing only happens when reasoning is actually displayed. The global
+    // default is `Off` (166e4444f), under which the delta is dropped and
+    // nothing is ever buffered, so this must pin `Current` like its sibling
+    // tests do.
+    with_reasoning_current_home(|| {
 
-    let burst = "x".repeat(400);
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ReasoningDelta { text: burst },
-        &mut remote,
-    );
+        // A large provider reasoning burst must reveal over multiple paced frames
+        // (via the segment-aware StreamBuffer), not pop in all at once. This is the
+        // regression test for "reasoning mode feels choppy".
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
 
-    // Only a small paced slice should be visible immediately; the rest stays
-    // buffered and drains on subsequent redraw frames.
-    let visible = app.streaming_text().matches('x').count();
-    assert!(
-        visible < 400,
-        "reasoning burst must not dump in one frame, revealed {visible} chars"
-    );
-    assert!(
-        !app.stream_buffer.is_empty(),
-        "remainder must stay buffered for paced reveal"
-    );
+        let burst = "x".repeat(400);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta { text: burst },
+            &mut remote,
+        );
 
-    // Draining the buffer (as the redraw tick does) eventually reveals it all.
-    let ops = app.stream_buffer.flush();
-    app.apply_stream_ops(ops);
-    assert_eq!(app.streaming_text().matches('x').count(), 400);
+        // Only a small paced slice should be visible immediately; the rest stays
+        // buffered and drains on subsequent redraw frames.
+        let visible = app.streaming_text().matches('x').count();
+        assert!(
+            visible < 400,
+            "reasoning burst must not dump in one frame, revealed {visible} chars"
+        );
+        assert!(
+            !app.stream_buffer.is_empty(),
+            "remainder must stay buffered for paced reveal"
+        );
+
+        // Draining the buffer (as the redraw tick does) eventually reveals it all.
+        let ops = app.stream_buffer.flush();
+        app.apply_stream_ops(ops);
+        assert_eq!(app.streaming_text().matches('x').count(), 400);
+    });
 }
 
 #[test]
@@ -877,4 +884,169 @@ fn answer_text_appended_into_open_region_does_not_glue_next_reasoning() {
         !text.contains(&glued),
         "answer text must not be glued onto reasoning: {text:?}"
     );
+}
+
+/// Regression test for issues #632/#633/#635: a hard panic
+/// (`assertion failed: self.is_char_boundary(new_len)`) inside
+/// `strip_reasoning_partial_tail`.
+///
+/// The live reasoning tail's byte length is recorded against the buffer it was
+/// appended to. When that buffer is replaced wholesale (a reconnect/resume
+/// replays a server-side snapshot), the stale length no longer describes the
+/// contents, and subtracting it lands at an arbitrary byte offset. With
+/// multi-byte UTF-8 text in the buffer that offset falls mid-character and
+/// `String::truncate` panics, killing the whole process.
+#[test]
+fn replace_streaming_text_resets_reasoning_tail_and_never_panics_on_multibyte() {
+    let mut app = create_test_app();
+
+    // Stream a reasoning tail so `reasoning_partial_len` is non-zero.
+    app.open_reasoning_region();
+    app.append_reasoning_text("thinking about the problem");
+    assert!(
+        app.reasoning_partial_len > 0,
+        "expected a live reasoning tail to be recorded"
+    );
+
+    // A reconnect/resume replaces the buffer with a snapshot made of multi-byte
+    // characters, shorter than the recorded tail length.
+    app.replace_streaming_text("\u{6f22}\u{5b57}\u{1f600}".to_string());
+    assert_eq!(
+        app.reasoning_partial_len,
+        0,
+        "replacing the stream must drop the stale reasoning tail length"
+    );
+
+    // Any subsequent reasoning delta strips the tail first. This is the call
+    // that used to panic.
+    app.append_reasoning_text("more thought");
+    // Buffer is still valid UTF-8 and the process survived.
+    assert!(app.streaming_text().contains("more thought"));
+}
+
+/// Directly exercise the boundary-safe truncation: even if a tail length is
+/// somehow inconsistent with the buffer, stripping must not panic.
+#[test]
+fn strip_reasoning_partial_tail_snaps_to_char_boundary() {
+    let mut app = create_test_app();
+    // Two 3-byte characters: 6 bytes total.
+    app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string();
+    // Claim a 2-byte tail so new_len = 4, which is *not* a char boundary.
+    app.reasoning_partial_len = 2;
+    app.strip_reasoning_partial_tail();
+    // Snapped down to 3: the first character survives intact, no panic.
+    assert_eq!(app.streaming_text(), "\u{6f22}");
+    assert_eq!(app.reasoning_partial_len, 0);
+}
+
+/// Sibling of the `strip_reasoning_partial_tail` hazard: `reasoning_block_start`
+/// is also a byte offset recorded against an earlier state of the buffer, and
+/// `split_off` panics on a non-boundary offset just like `truncate` does.
+/// Clamping to the length alone does not prevent landing mid-character.
+#[test]
+fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
+    with_reasoning_current_home(|| {
+        let mut app = create_test_app();
+        // Two 3-byte characters.
+        app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string();
+        // Offset 4 is within the buffer but inside the second character.
+        app.reasoning_block_start = Some(4);
+        app.reasoning_streaming = true;
+        // Used to panic inside `split_off`.
+        app.anchor_current_reasoning_block();
+        // Buffer is still valid UTF-8 and no character was cut in half.
+        assert!(app.streaming_text().is_char_boundary(app.streaming_text().len()));
+    });
+}
+
+/// State-space sweep over the streaming-reasoning operations, guarding the whole
+/// class of bug behind #632/#633/#635 rather than the two instances that were
+/// reported.
+///
+/// Both crashes came from a byte offset (`reasoning_partial_len`,
+/// `reasoning_block_start`) recorded against one state of `streaming_text` and
+/// then used to slice a later state of it. Individual regression tests pin the
+/// two sequences that were actually observed; they cannot show that no *other*
+/// interleaving reaches the same slicing bug.
+///
+/// So drive every operation that reads or writes those offsets in
+/// deterministic pseudo-random order, with heavily multi-byte payloads (so a
+/// wrong offset lands mid-character rather than getting away with it), and
+/// assert the buffer stays valid UTF-8 with the tail length never exceeding it.
+/// A panic here is the failure; the assertions catch corruption that stops short
+/// of panicking.
+#[test]
+fn reasoning_streaming_state_space_never_panics_or_desyncs() {
+    // Multi-byte payloads: any off-by-one byte offset lands inside a character.
+    const PAYLOADS: &[&str] = &[
+        "\u{6f22}\u{5b57}",             // 3-byte CJK
+        "\u{1f600}\u{1f601}",           // 4-byte emoji
+        "caf\u{e9} na\u{ef}ve",         // 2-byte accents
+        "a\u{6f22}b\u{1f600}c",         // mixed widths
+        "line one\nline two",           // newline commits a reasoning line
+        "",                             // empty delta
+        "   ",                          // whitespace-only
+    ];
+
+    let mut app = create_test_app();
+    // xorshift keeps this deterministic: a failure is always reproducible.
+    let mut rng: u64 = 0x9E3779B97F4A7C15;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+
+    for step in 0..4000u32 {
+        let payload = PAYLOADS[(next() % PAYLOADS.len() as u64) as usize];
+        match next() % 7 {
+            0 => app.open_reasoning_region(),
+            1 => app.append_reasoning_text(payload),
+            2 => app.close_reasoning_region(None),
+            3 => app.append_streaming_text(payload),
+            // The operation that caused the real bug: swap the buffer while an
+            // offset into the previous buffer may still be recorded.
+            4 => app.replace_streaming_text(payload.to_string()),
+            5 => {
+                let _ = app.take_streaming_text();
+            }
+            _ => app.strip_reasoning_partial_tail(),
+        }
+
+        // Invariant 1: the buffer is always valid UTF-8 at a character boundary.
+        let text = app.streaming_text();
+        assert!(
+            text.is_char_boundary(text.len()),
+            "step {step}: streaming_text ended mid-character"
+        );
+        // Invariant 2: the recorded tail can never claim more bytes than exist,
+        // which is what made `len() - partial_len` land at a bogus offset.
+        assert!(
+            app.reasoning_partial_len <= text.len(),
+            "step {step}: reasoning_partial_len {} exceeds buffer len {}",
+            app.reasoning_partial_len,
+            text.len()
+        );
+        // Invariant 2b: the tail must describe the *current* buffer, not a
+        // previous one. The slice point it implies has to be a real character
+        // boundary on its own merits. Without this, a stale length survives a
+        // buffer swap and is only rescued by the defensive snap downstream,
+        // which hides the desync instead of preventing it.
+        let implied = text.len() - app.reasoning_partial_len;
+        assert!(
+            text.is_char_boundary(implied),
+            "step {step}: tail len {} implies non-boundary slice at {implied} in {text:?}",
+            app.reasoning_partial_len
+        );
+        // Invariant 3: a recorded block start must be a real boundary in the
+        // current buffer, since `anchor_current_reasoning_block` splits there.
+        if let Some(start) = app.reasoning_block_start {
+            assert!(
+                start <= text.len(),
+                "step {step}: reasoning_block_start {start} exceeds buffer len {}",
+                text.len()
+            );
+        }
+    }
 }

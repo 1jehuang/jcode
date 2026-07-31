@@ -321,3 +321,122 @@ fn test_initialize_result() {
     assert_eq!(result.protocol_version, "2024-11-05");
     assert!(result.server_info.is_some());
 }
+
+#[test]
+fn http_entry_does_not_displace_a_working_stdio_server_of_the_same_name() {
+    // A `type: http` entry from a lower-precedence config used to overwrite the
+    // stdio definition and then get dropped by the non-stdio filter, silently
+    // losing a working server (issue #653).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"type":"stdio","command":"npx","args":["-y","mcp-remote"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    let github = config
+        .servers
+        .get("github")
+        .expect("stdio github server must survive the http entry");
+    assert_eq!(github.command, "npx");
+    assert!(github.is_stdio());
+}
+
+#[test]
+fn stdio_entry_still_overrides_an_existing_http_entry() {
+    // The precedence guard is one-directional: a runnable stdio definition must
+    // still win over a non-runnable http one from an earlier config.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"type":"http","url":"https://example.invalid/mcp/"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"type":"stdio","command":"npx"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    assert_eq!(config.servers.get("github").unwrap().command, "npx");
+}
+
+#[test]
+fn stdio_entry_of_same_transport_still_overrides_by_precedence() {
+    // Same-transport collisions keep the existing last-writer-wins behavior.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        r#"{"servers":{"github":{"command":"old-bin"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        r#"{"mcpServers":{"github":{"command":"new-bin"}}}"#,
+    )
+    .unwrap();
+
+    let config = McpConfig::load_project_locals(project);
+    assert_eq!(config.servers.get("github").unwrap().command, "new-bin");
+}
+
+#[test]
+fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
+    // The exact configuration from issue #653: `github` is stdio in
+    // ~/.jcode/mcp.json and http in ~/.claude.json. The http entry used to win
+    // the merge and then be dropped by the non-stdio filter, so a working
+    // server vanished with no indication it had been overwritten.
+    let _guard = crate::storage::lock_test_env();
+    let original_cwd = std::env::current_dir().expect("current cwd");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::env::set_current_dir(project.path()).expect("set project cwd");
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"mcpServers":{"github":{"type":"stdio","command":"npx","args":["-y","mcp-remote"]}}}"#,
+    )
+    .expect("write jcode mcp config");
+    // `user_home_path()` maps external configs under JCODE_HOME to an
+    // `external/` subdirectory, so this is where ~/.claude.json is read from.
+    let external = home.path().join("external");
+    std::fs::create_dir_all(&external).expect("create external dir");
+    std::fs::write(
+        external.join(".claude.json"),
+        r#"{"mcpServers":{"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}}}"#,
+    )
+    .expect("write claude config");
+
+    let result = std::panic::catch_unwind(|| {
+        let merged = McpConfig::load_for_dir(Some(project.path()));
+        let github = merged
+            .servers
+            .get("github")
+            .expect("the stdio github server must survive the http entry");
+        assert_eq!(github.command, "npx");
+        assert!(github.is_stdio());
+    });
+
+    std::env::set_current_dir(original_cwd).expect("restore cwd");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("issue #653 merge assertions");
+}

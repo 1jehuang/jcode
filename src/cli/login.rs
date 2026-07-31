@@ -11,7 +11,9 @@ use crate::provider_catalog::{
 
 use super::provider_init::{ProviderChoice, login_provider_for_choice, save_named_api_key};
 
+mod existing_key_notice;
 mod jcode_device;
+mod next_step;
 mod scriptable;
 use scriptable::*;
 
@@ -821,6 +823,9 @@ fn login_openai_compatible_flow(
 
     let auth_method = if resolved.requires_api_key {
         eprintln!("API key env variable: {}\n", resolved.api_key_env);
+        if options.openai_compatible_api_key.is_none() {
+            existing_key_notice::announce_existing_api_key(&resolved);
+        }
         let key = match options.openai_compatible_api_key.as_deref() {
             Some(value) => value.trim().to_string(),
             None => {
@@ -894,24 +899,7 @@ fn login_openai_compatible_flow(
     };
 
     if !resolved.requires_api_key && resolved.default_model.is_none() {
-        match resolved.id.as_str() {
-            "ollama" => {
-                eprintln!(
-                    "Next step: install a model with `ollama pull llama3.2`, then run `jcode --provider ollama --model llama3.2 run 'hello'`."
-                );
-            }
-            "lmstudio" => {
-                eprintln!(
-                    "Next step: load a chat model in LM Studio's Local Server, then run jcode with that exact model id, for example `jcode --provider lmstudio --model <model-id> run 'hello'`."
-                );
-            }
-            _ => {
-                eprintln!(
-                    "Next step: run jcode with a model available on this endpoint, for example `jcode --provider {} --model <model-id> run 'hello'`.",
-                    resolved.id
-                );
-            }
-        }
+        eprintln!("{}", next_step::local_endpoint_hint(&resolved.id));
     }
 
     eprintln!(

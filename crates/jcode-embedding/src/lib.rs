@@ -8,8 +8,9 @@ use tract_hir::infer::Factoid as _;
 use tract_hir::prelude::*;
 
 pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
-type RunnableEmbeddingModel =
-    SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+// tract 0.23 renamed the runnable plan alias and dropped its third (model)
+// type parameter. `into_runnable` now hands back an `Arc<RunnableModel<..>>`.
+type RunnableEmbeddingModel = std::sync::Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
 
 #[derive(Debug)]
 struct TopKItem<T> {
@@ -205,7 +206,7 @@ impl Embedder {
 
         let outputs = self.model.run(inputs)?;
 
-        let output = outputs[0].to_array_view::<f32>()?.to_owned();
+        let output = outputs[0].to_plain_array_view::<f32>()?.to_owned();
 
         let shape = output.shape();
         if shape.len() == 3 {
@@ -336,7 +337,7 @@ impl CrossEncoder {
             encoding.get_type_ids(),
         )?;
         let outputs = self.model.run(inputs)?;
-        let view = outputs[0].to_array_view::<f32>()?;
+        let view = outputs[0].to_plain_array_view::<f32>()?;
         // logits shape is [1, 1] (relevance) or [1, N]; take the first/primary.
         view.iter()
             .next()
@@ -514,6 +515,58 @@ mod tests {
             "expected related ({sim_rel:.3}) >> unrelated ({sim_unrel:.3}) for {}",
             model_dir.display()
         );
+    }
+
+    /// Guard the numeric stability of the embedding output across inference-engine
+    /// upgrades.
+    ///
+    /// Persisted memory embeddings are keyed by `model_id`, which stays
+    /// `all-MiniLM-L6-v2` across a `tract` bump, so `memory.rs`'s
+    /// model-mismatch check cannot notice a numeric change. If a new tract
+    /// produced different vectors for the same text, every stored embedding
+    /// would silently become incomparable with freshly computed ones, and
+    /// "related still beats unrelated" would not detect it.
+    ///
+    /// These reference values were captured on tract 0.21.10 and reproduced on
+    /// 0.23.4, where the largest per-component difference was 1e-6 (float32
+    /// rounding), i.e. a worst-case cosine deviation around 2e-10. The tolerance
+    /// below is deliberately far tighter than any retrieval threshold, so a real
+    /// change in model behaviour fails while rounding does not.
+    ///
+    /// Skipped when the model is not present locally, like the tests above.
+    #[test]
+    fn minilm_embedding_is_numerically_stable_across_inference_engines() {
+        let dir = std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".jcode/models/all-MiniLM-L6-v2"))
+            .filter(|d| is_model_available(d));
+        let Some(dir) = dir else {
+            eprintln!("skip: MiniLM model not present locally");
+            return;
+        };
+        let e = Embedder::load_from_dir(&dir).expect("load model");
+
+        // Captured on tract 0.21.10, first 8 of 384 dimensions.
+        let expected: [f32; 8] = [
+            0.040730, 0.103227, 0.065710, 0.032524, -0.012075, 0.005709, 0.029490, -0.038528,
+        ];
+        let got = e
+            .embed("how do I set the cargo build profile")
+            .expect("embed");
+
+        assert_eq!(got.len(), 384, "MiniLM must stay 384-dimensional");
+        let norm: f32 = got.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-4,
+            "output must stay L2-normalised, got norm {norm}"
+        );
+        for (i, want) in expected.iter().enumerate() {
+            let diff = (got[i] - want).abs();
+            assert!(
+                diff < 1e-4,
+                "dim {i} drifted beyond float32 rounding: expected {want}, got {}, diff {diff:e}",
+                got[i]
+            );
+        }
     }
 
     /// Regression test for the input-binding fix: the real MiniLM model must

@@ -99,6 +99,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Termux (Android) kernels implement ELF TLS Variant 1 while glibc
+      # expects Variant 2, so native __thread variables are zero-initialized at
+      # runtime and Tokio's runtime detection false-positives and panics.
+      # Building the aarch64 glibc binary with emulated TLS
+      # (pthread_getspecific) sidesteps kernel TLS entirely. That needs
+      # nightly (-Z tls-model, -Z build-std) with rust-src.
+      - name: Install nightly for emulated TLS (aarch64 only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-unknown-linux-gnu
+          components: rust-src
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
         continue-on-error: true
@@ -125,12 +138,21 @@ jobs:
           [target.x86_64-unknown-linux-gnu]
           linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          [target.aarch64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Z", "tls-model=emulated"]
           EOF
           fi
           if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
             export RUSTC_WRAPPER=sccache
           fi
-          cargo build --release --target ${{ matrix.target }}
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            # Rebuild std with emulated TLS too; see the nightly install step
+            # above for why Termux needs this.
+            cargo +nightly build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}

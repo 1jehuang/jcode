@@ -824,3 +824,82 @@ fn unsigned_tool_history() -> Vec<Message> {
         },
     ]
 }
+
+#[test]
+fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
+    // Gemini rejects the whole generateContent request with HTTP 400 when a
+    // `required` entry names a property the same object does not define
+    // ("required fields ['label'] are not defined in the schema properties"),
+    // which broke every tool-enabled request (issue #655).
+    let defs = vec![ToolDefinition {
+        name: "swarm".to_string(),
+        description: "Coordinate agents".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string" },
+                "label": { "type": "string" }
+            },
+            "required": ["action"],
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["action", "label"],
+                    "properties": {
+                        "action": { "type": "string", "enum": ["spawn"] }
+                    }
+                }
+            ]
+        }),
+    }];
+
+    let built = build_tools(&defs).expect("gemini tools");
+    let parameters = &built[0].function_declarations[0].parameters;
+
+    assert_eq!(
+        parameters["anyOf"][0]["required"],
+        json!(["action"]),
+        "the undefined `label` requirement must be pruned from the branch"
+    );
+    // Requirements that are actually defined are preserved.
+    assert_eq!(parameters["required"], json!(["action"]));
+    assert_eq!(parameters["properties"]["label"]["type"], json!("string"));
+}
+
+#[test]
+fn build_tools_drops_a_required_array_left_empty_after_pruning() {
+    let defs = vec![ToolDefinition {
+        name: "noop".to_string(),
+        description: "noop".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": { "a": { "type": "string" } },
+            "required": ["missing"]
+        }),
+    }];
+
+    let built = build_tools(&defs).expect("gemini tools");
+    let parameters = &built[0].function_declarations[0].parameters;
+    assert!(
+        parameters.get("required").is_none(),
+        "an empty `required` array is itself invalid for Gemini: {parameters}"
+    );
+}
+
+#[test]
+fn build_tools_keeps_required_when_the_object_declares_no_properties() {
+    // Without a local `properties` map there is nothing to validate against, and
+    // Gemini does not reject it, so leave such schemas untouched.
+    let defs = vec![ToolDefinition {
+        name: "passthrough".to_string(),
+        description: "passthrough".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["anything"]
+        }),
+    }];
+
+    let built = build_tools(&defs).expect("gemini tools");
+    let parameters = &built[0].function_declarations[0].parameters;
+    assert_eq!(parameters["required"], json!(["anything"]));
+}
