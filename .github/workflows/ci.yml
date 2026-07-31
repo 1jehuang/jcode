@@ -240,8 +240,12 @@ jobs:
         # looks-green-but-never-ran shape as the warning budget and the stdin
         # detector (#651). These tests fork a pty, so they cannot run on the
         # Windows runner; everywhere else they take about a second.
+        #
+        # 600s, not 300s: the budget is dominated by cold-compiling the
+        # jcode-base lib test harness, which exceeded 300s on a hosted macOS
+        # runner (run 30591536707) while the cohort itself runs in a second.
         run: |
-          python3 .github/scripts/run_with_timeout.py 300 \
+          python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
