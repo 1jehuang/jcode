@@ -175,5 +175,8 @@ fn switching_sessions_drops_the_bars() {
     app.attach_focused_session();
 
     assert!(cards(&app).is_empty(), "a bar followed the session switch");
-    assert_eq!(app.model.progress_clock, None, "the bars' clock kept running");
+    assert_eq!(
+        app.model.progress_clock, None,
+        "the bars' clock kept running"
+    );
 }

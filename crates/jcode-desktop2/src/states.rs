@@ -812,7 +812,12 @@ fn background_progress_many() -> Model {
     use crate::transcript::{Message, Transcript};
     let mut transcript = Transcript::default();
     transcript.push(Message::user("build, test, and deploy the preview"));
-    transcript.set_progress("build-1", "bash", "88% · Compiling jcode-app-core", Some(88.0));
+    transcript.set_progress(
+        "build-1",
+        "bash",
+        "88% · Compiling jcode-app-core",
+        Some(88.0),
+    );
     transcript.set_progress("test-1", "bash", "12/96 crates", Some(12.5));
     transcript.set_progress("swarm-1", "swarm", "working · waiting on 3 workers", None);
     transcript.set_live_tool("call_4", "wait for the plan to resolve");

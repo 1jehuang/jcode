@@ -565,7 +565,8 @@ impl Transcript {
     /// session switch), so bars belonging to the session being left must not
     /// be shown against the one being opened.
     pub fn clear_all_progress(&mut self) {
-        self.messages.retain(|message| message.role != Role::Progress);
+        self.messages
+            .retain(|message| message.role != Role::Progress);
     }
 
     /// Whether any background task's bar is on the page. Drives the one clock

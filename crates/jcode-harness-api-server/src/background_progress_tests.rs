@@ -63,10 +63,10 @@ fn a_percent_over_a_hundred_is_clamped() {
 /// API client's progress bar off, and nothing would fail.
 #[test]
 fn the_daemons_own_formatter_round_trips() {
-    use jcode_base::bus::BackgroundTaskProgressEvent;
     use jcode_background_types::{
         BackgroundTaskProgress, BackgroundTaskProgressKind, BackgroundTaskProgressSource,
     };
+    use jcode_base::bus::BackgroundTaskProgressEvent;
 
     let event = BackgroundTaskProgressEvent {
         session_id: "s1".into(),
