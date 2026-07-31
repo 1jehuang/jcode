@@ -117,6 +117,16 @@ pub fn update_state(running: Option<SystemTime>, channels: &[Option<SystemTime>]
     }
 }
 
+/// Whether the running binary is one the installer manages.
+///
+/// A self-dev or `cargo run` binary lives in a target directory and is never
+/// written by the installer, so comparing it against `~/.jcode/builds` is
+/// meaningless: any later CLI install looks like a pending desktop update and
+/// the banner nags forever. Pure so the rule is testable.
+pub fn is_managed_install(running: &Path, builds: &Path) -> bool {
+    running.starts_with(builds)
+}
+
 /// Format the account label from an auth store's active provider and email.
 /// Pure so the display rules are tested without touching `~/.jcode/auth.json`.
 pub fn account_label(provider: Option<&str>, email: Option<&str>) -> Option<String> {
@@ -137,21 +147,27 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 }
 
 fn detect_update_state() -> UpdateState {
-    let running = std::env::current_exe().ok().as_deref().and_then(mtime);
     let Some(home) = home() else {
         return UpdateState::Unknown;
     };
+    let builds = home.join(".jcode/builds");
+    // Resolve symlinks: the channel dirs point into `builds/versions/<sha>`.
+    let Some(exe) = std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+    else {
+        return UpdateState::Unknown;
+    };
+    // A dev build outside the install tree has no channel to compare against.
+    if !is_managed_install(&exe, &std::fs::canonicalize(&builds).unwrap_or(builds.clone())) {
+        return UpdateState::Unknown;
+    }
+    let running = mtime(&exe);
+    // Only the desktop payload counts; a CLI-only reinstall is not a desktop
+    // update, and treating it as one made the banner permanent.
     let channels: Vec<Option<SystemTime>> = ["current", "stable"]
         .iter()
-        .map(|channel| {
-            mtime(
-                &home
-                    .join(".jcode/builds")
-                    .join(channel)
-                    .join("jcode-desktop2"),
-            )
-            .or_else(|| mtime(&home.join(".jcode/builds").join(channel).join("jcode")))
-        })
+        .map(|channel| mtime(&builds.join(channel).join("jcode-desktop2")))
         .collect();
     update_state(running, &channels)
 }
@@ -274,6 +290,28 @@ mod tests {
     fn detect_never_panics_and_always_reports_a_version() {
         let meta = Meta::detect();
         assert!(!meta.version.is_empty());
+    }
+
+    /// Regression: a self-dev desktop binary was compared against the CLI
+    /// payload in `~/.jcode/builds/current`, so every CLI install left the
+    /// desktop permanently claiming "update ready: restart to apply".
+    #[test]
+    fn a_dev_build_outside_the_install_tree_is_not_managed() {
+        let builds = Path::new("/home/u/.jcode/builds");
+        assert!(!is_managed_install(
+            Path::new("/home/u/jcode/target/selfdev/jcode-desktop2"),
+            builds
+        ));
+        assert!(is_managed_install(
+            Path::new("/home/u/.jcode/builds/versions/abc123/jcode-desktop2"),
+            builds
+        ));
+    }
+
+    /// A dev build must report Unknown, which `alert()` keeps silent.
+    #[test]
+    fn a_dev_build_does_not_nag_about_updates() {
+        assert_eq!(detect_update_state(), UpdateState::Unknown);
     }
 }
 
