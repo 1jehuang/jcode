@@ -446,9 +446,10 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         // Linux has the same failure class (issue #504, Kali/X11): wl-copy fails
         // outside Wayland, and many terminals (xterm, older VTE) silently ignore
         // OSC 52 while the stdout write still "succeeds", so the arboard fallback
-        // never ran. Prefer native clipboards when a display is available: wl-copy
-        // (Wayland), then arboard (X11), and only then OSC 52 for genuinely
-        // headless/remote sessions (SSH, Docker, tmux) where both native paths
+        // never ran. Prefer native clipboards when a display is available:
+        // wl-copy (Wayland), then xclip/xsel (X11, which keep owning the
+        // selection), then arboard, and only then OSC 52 for genuinely
+        // headless/remote sessions (SSH, Docker, tmux) where the native paths
         // fail fast for lack of a display server.
         #[cfg(not(any(windows, target_os = "macos")))]
         {

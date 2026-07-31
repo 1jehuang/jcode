@@ -81,3 +81,80 @@ fn configured_colors_survive_a_real_config_file_round_trip() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+/// The exact `[display]` block from issue #689 must work through a real config
+/// file, and the user-visible `/config` summary must reflect it.
+///
+/// The unit tests in `jcode-config-types` cover lenient enum parsing in
+/// isolation. This covers the path the reporter actually took: hand-written
+/// `~/.jcode/config.toml`, loaded through the same global cache the running
+/// process uses, then read back through the summary they would check. The
+/// original bug was invisible at the field level precisely because it happened
+/// during whole-file parsing, so it needs a file-level test.
+#[test]
+fn reported_display_config_survives_a_real_config_file_round_trip() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = Config::path().expect("config path");
+    std::fs::write(
+        &path,
+        concat!(
+            "[display]\n",
+            "centered = true\n",
+            "idle_animation = true\n",
+            "show_thinking = true\n",
+            "reasoning_display = \"current\"\n",
+            "diagram_mode = \"inline\"\n",
+        ),
+    )
+    .expect("write user config");
+    Config::invalidate_cache();
+
+    let loaded = crate::config::config();
+    assert!(loaded.display.centered, "centered must apply");
+    assert!(loaded.display.idle_animation, "idle_animation must apply");
+    assert!(loaded.display.show_thinking, "show_thinking must apply");
+    assert_eq!(
+        loaded.display.reasoning_display(),
+        jcode_config_types::ReasoningDisplayMode::Current
+    );
+    // "inline" is the inline-only mode: no dedicated diagram widget.
+    assert_eq!(
+        loaded.display.diagram_mode,
+        jcode_config_types::DiagramDisplayMode::None
+    );
+
+    // The summary the user reads must agree, or the setting looks ignored.
+    let summary = loaded.display_string();
+    assert!(
+        summary.contains("Centered: true"),
+        "config summary should report the centered setting: {summary}"
+    );
+
+    // A genuinely unknown value degrades only itself.
+    std::fs::write(
+        &path,
+        "[display]\ncentered = true\nidle_animation = true\ndiagram_mode = \"nonsense\"\n",
+    )
+    .expect("write user config");
+    Config::invalidate_cache();
+    let loaded = crate::config::config();
+    assert!(
+        loaded.display.centered && loaded.display.idle_animation,
+        "one unknown enum value must not discard the rest of the file"
+    );
+    assert_eq!(
+        loaded.display.diagram_mode,
+        jcode_config_types::DiagramDisplayMode::default()
+    );
+
+    match prev_home {
+        Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    Config::invalidate_cache();
+}

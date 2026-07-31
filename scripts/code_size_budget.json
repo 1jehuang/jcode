@@ -62,7 +62,7 @@
     "crates/jcode-tui/src/tui/app/auth_account_picker.rs": 1220,
     "crates/jcode-tui/src/tui/app/commands.rs": 3494,
     "crates/jcode-tui/src/tui/app/debug_bench.rs": 1284,
-    "crates/jcode-tui/src/tui/app/helpers.rs": 1505,
+    "crates/jcode-tui/src/tui/app/helpers.rs": 1506,
     "crates/jcode-tui/src/tui/app/inline_interactive.rs": 4209,
     "crates/jcode-tui/src/tui/app/input.rs": 3881,
     "crates/jcode-tui/src/tui/app/model_context.rs": 1945,
