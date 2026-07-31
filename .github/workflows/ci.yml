@@ -331,6 +331,15 @@ jobs:
         # on a headless runner (verified with DISPLAY/WAYLAND_DISPLAY unset).
         # They were the tests most worth running, since they cover the copy path
         # end to end. Tracked in #592.
+        #
+        # COLORTERM: the runner's headless shell advertises no color support,
+        # so capability detection falls back to 256-color and every RGB cell
+        # quantizes to `Indexed`. The palette-topology measurement identifies
+        # roles by their rendered RGB, and quantization error pushes some roles
+        # outside the matcher's family radius ("got 4 edges", run 30617961697).
+        # Declaring truecolor tests the code path users overwhelmingly run.
+        env:
+          COLORTERM: truecolor
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
