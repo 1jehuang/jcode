@@ -322,10 +322,10 @@ test("the daily series returns one row per day in date order", () => {
   assert.equal(rows[1].sessions, 2);
 });
 
-test("the daily series counts distinct users and value per user", () => {
+test("the daily series counts distinct users", () => {
   const db = makeDb();
   insertPrice(db, { model: "m", input: 10, output: 0, cacheRead: 0 });
-  // Three sessions from two distinct users: $30 over 2 users is $15 each.
+  // Three sessions from two distinct users.
   insertSession(db, { model: "m", input: 1_000_000, user: "a" });
   insertSession(db, { model: "m", input: 1_000_000, user: "a" });
   insertSession(db, { model: "m", input: 1_000_000, user: "b" });
@@ -334,7 +334,8 @@ test("the daily series counts distinct users and value per user", () => {
   assert.equal(row.usd, 30);
   assert.equal(row.sessions, 3);
   assert.equal(row.users, 2);
-  assert.equal(row.usd_per_user, 15);
+  // Deliberately no per-user dollar column: it duplicated tokens-per-user.
+  assert.equal(row.usd_per_user, undefined);
 });
 
 test("the daily series agrees with the token-value panel for the same day", () => {

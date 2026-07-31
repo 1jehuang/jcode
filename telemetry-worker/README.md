@@ -155,9 +155,11 @@ npm run token-value:daily      # just the per-day series, in date order
 ```
 
 `npm run token-value:daily` is the plain time series when all you want is
-"dollars per day": one row per day with the tokens, sessions, distinct users,
-and value per user behind it. `usd_per_user` is the figure that stays
-comparable as the fleet grows, since the raw total mostly tracks user count.
+"dollars per day": one row per day with the tokens, sessions, and distinct
+users behind it. There is deliberately no per-user dollar column, because it
+tracked tokens-per-user almost exactly (coefficient of variation 0.147 vs
+0.142 over a 10-day sample): the blended rate per million tokens barely moves,
+so it was the same series twice in different units.
 
 `scripts/sync-model-prices.mjs` reads the model labels actually observed in
 telemetry (`events.model_end` on `session_end` rows) and matches each one to a
