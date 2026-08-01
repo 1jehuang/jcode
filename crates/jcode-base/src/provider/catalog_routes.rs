@@ -1459,6 +1459,55 @@ mod tests {
         );
     }
 
+    /// Issue #694 across both route sources. The picker is fed either by the
+    /// server-built catalog (named profile routes) or, before that frame
+    /// arrives, by the client-side fallback. Neither may attach a Copilot
+    /// route to a custom profile model, otherwise the label flickers to
+    /// Copilot and the selected id becomes a copilot-prefixed id.
+    #[test]
+    fn custom_config_profile_model_never_gets_a_copilot_route_from_either_source() {
+        let _guard = EnvGuard::new();
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            "[providers.omlx]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:18000/v1\"\ndefault_model = \"KAT-Coder-V2.5-Dev-OptiQ-4bit\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let model = "KAT-Coder-V2.5-Dev-OptiQ-4bit";
+
+        // Source 1: the named-profile routes the server contributes.
+        let named = named_provider_profile_routes(
+            "omlx",
+            crate::config::config()
+                .providers
+                .get("omlx")
+                .expect("omlx profile"),
+        );
+        assert!(
+            named
+                .iter()
+                .any(|route| route.model == model && route.api_method == "openai-compatible:omlx"),
+            "server catalog must offer the profile route: {named:?}"
+        );
+
+        // Source 2: the client-side fallback, including the lightweight
+        // variant used while route details are still refreshing.
+        for routes in [
+            remote_model_routes_fallback(Some("omlx"), &[model.to_string()]),
+            remote_model_routes_lightweight_fallback(Some("omlx"), &[model.to_string()], model),
+        ] {
+            assert!(!routes.is_empty(), "fallback must offer the model");
+            assert!(
+                routes.iter().all(|route| {
+                    !route.api_method.contains("copilot") && route.provider != "Copilot"
+                }),
+                "no source may attach a Copilot route: {routes:?}"
+            );
+        }
+    }
+
     #[test]
     fn remote_compatible_route_uses_live_cache_and_does_not_mark_fallback() {
         let guard = EnvGuard::new();

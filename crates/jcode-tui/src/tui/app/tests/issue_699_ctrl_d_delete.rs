@@ -59,3 +59,59 @@ fn test_ctrl_d_deletes_multibyte_character() {
 
     assert_eq!(app.input, "hllo");
 }
+
+// The normal `jcode` TUI runs as a remote client (`is_remote = true`), so the
+// remote key path is the one real users hit. Cover it explicitly rather than
+// trusting that it mirrors the local handler.
+
+#[test]
+fn test_remote_ctrl_d_deletes_character_under_cursor() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        app.input = "hello".to_string();
+        app.cursor_pos = 1;
+
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .expect("Ctrl+D should be handled in the remote path");
+
+        assert_eq!(app.input, "hllo");
+        assert!(
+            app.quit_pending.is_none(),
+            "Ctrl+D with text in the input must not arm quit in a remote session"
+        );
+    });
+}
+
+#[test]
+fn test_remote_ctrl_d_on_empty_input_still_requests_quit() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        assert!(app.input.is_empty());
+
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .expect("Ctrl+D should be handled in the remote path");
+
+        assert!(
+            app.quit_pending.is_some() || app.cancel_requested,
+            "Ctrl+D on an empty remote line keeps interrupt/quit behavior"
+        );
+    });
+}
