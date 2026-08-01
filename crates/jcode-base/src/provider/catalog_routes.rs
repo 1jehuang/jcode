@@ -1166,6 +1166,50 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             cheapness: None,
         });
     }
+    named_provider_profile_route_for_model(model)
+}
+
+/// Route for `model` when it belongs to a user-defined `[providers.<name>]`
+/// profile from config.toml.
+///
+/// Built-in OpenAI-compatible profiles are handled above; without this, a
+/// bare model id from a custom profile (e.g. a local MLX server) matches no
+/// known provider and falls through to the Copilot heuristic, which then
+/// labels it `Copilot` and builds a `copilot:<model>` id that no runtime can
+/// resolve (issue #694).
+fn named_provider_profile_route_for_model(model: &str) -> Option<ModelRoute> {
+    named_provider_profile_route_for_model_in(model, &crate::config::config().providers)
+}
+
+fn named_provider_profile_route_for_model_in(
+    model: &str,
+    providers: &std::collections::BTreeMap<String, crate::config::NamedProviderConfig>,
+) -> Option<ModelRoute> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    for (profile_name, profile_config) in providers {
+        if !named_provider_profile_routes(profile_name, profile_config)
+            .iter()
+            .any(|route| route.model == model)
+        {
+            continue;
+        }
+        let detail = if profile_config.base_url.trim().is_empty() {
+            "configured provider profile".to_string()
+        } else {
+            profile_config.base_url.trim().to_string()
+        };
+        return Some(ModelRoute {
+            model: model.to_string(),
+            provider: profile_name.clone(),
+            api_method: format!("openai-compatible:{}", profile_name),
+            available: true,
+            detail,
+            cheapness: None,
+        });
+    }
     None
 }
 
@@ -1278,6 +1322,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #694: a bare model id from a user-defined `[providers.<name>]`
+    /// profile must resolve to that profile, not fall through to the Copilot
+    /// heuristic (which mislabels it and builds an unresolvable `copilot:` id).
+    #[test]
+    fn named_provider_profile_model_routes_to_its_own_profile() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "omlx".to_string(),
+            crate::config::NamedProviderConfig {
+                base_url: "http://127.0.0.1:18000/v1".to_string(),
+                default_model: Some("KAT-Coder-V2.5-Dev-OptiQ-4bit".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let route =
+            named_provider_profile_route_for_model_in("KAT-Coder-V2.5-Dev-OptiQ-4bit", &providers)
+                .expect("custom profile model must resolve to its profile");
+        assert_eq!(route.provider, "omlx");
+        assert_eq!(route.api_method, "openai-compatible:omlx");
+        assert_eq!(route.detail, "http://127.0.0.1:18000/v1");
+        assert!(!route.api_method.starts_with("copilot"));
+        assert!(matches!(
+            route.api_method_kind(),
+            jcode_provider_core::ModelRouteApiMethod::OpenAiCompatible { .. }
+        ));
+    }
+
+    #[test]
+    fn unknown_model_does_not_match_named_provider_profiles() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "omlx".to_string(),
+            crate::config::NamedProviderConfig {
+                base_url: "http://127.0.0.1:18000/v1".to_string(),
+                default_model: Some("KAT-Coder-V2.5-Dev-OptiQ-4bit".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            named_provider_profile_route_for_model_in("some-other-model", &providers).is_none()
+        );
+        assert!(named_provider_profile_route_for_model_in("", &providers).is_none());
     }
 
     #[test]
