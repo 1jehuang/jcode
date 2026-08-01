@@ -1952,6 +1952,14 @@ mod tests {
                 .output
                 .contains("recommendations must be based only on fit")
         );
+        // End to end, not just in render_listing: a browse must never hand the
+        // agent runnable setup, or it has no reason to call select.
+        assert!(
+            !output.output.contains("npx agentcard-mcp"),
+            "browse leaked setup instructions: {}",
+            output.output
+        );
+        assert!(output.output.contains("action `select`"));
         let title = output.title.unwrap();
         assert_eq!(title, "payments", "{title}");
         let meta = output.metadata.unwrap();
