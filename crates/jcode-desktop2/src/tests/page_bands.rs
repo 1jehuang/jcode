@@ -77,7 +77,9 @@ fn nothing_draws_in_the_gap_above_the_composer() {
 /// The session strip is the one sanctioned exception, and only when there is
 /// more than one session to move between, so it is excluded by *its own
 /// reserved band* rather than by relaxing the threshold: anything drawn above
-/// the transcript outside that band still fails.
+/// the transcript outside that band still fails. The settings gear is the
+/// other, and it is excluded the same way: by its own hit box, so a gear that
+/// grew or moved would fail this test rather than quietly widen the licence.
 #[test]
 #[ignore = "requires a GPU"]
 fn the_top_of_the_page_is_clear() {
@@ -91,7 +93,8 @@ fn the_top_of_the_page_is_clear() {
             Some((_, strip_bottom)) => strip_bottom + 1.0,
             None => 0.0,
         };
-        let darkest = r.darkest_in(0.0, top, f.width - 1.0, f.body_top - 2.0);
+        // Everything left of the gear's box: the gear owns its own corner.
+        let darkest = r.darkest_in(0.0, top, f.gear().x0 - 2.0, f.body_top - 2.0);
         assert!(
             darkest > 0.9,
             "{name}: ink ({darkest:.3} luma) above the transcript"

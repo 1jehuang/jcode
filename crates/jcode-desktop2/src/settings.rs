@@ -172,7 +172,15 @@ impl Settings {
 
     /// Persist. A failure must never break the app, but it is reported:
     /// silently forgetting a choice looks like the toggle not working.
+    ///
+    /// Never writes under `cfg(test)`: the dispatch tests drive the real
+    /// toggles, and a test run must not rewrite the developer's own saved
+    /// preferences as a side effect. [`Self::try_save`] is still tested
+    /// directly, so the writing path is not left uncovered.
     pub fn save(&self) {
+        if cfg!(test) {
+            return;
+        }
         if let Err(error) = self.try_save() {
             eprintln!("settings: not saved: {error}");
         }
@@ -290,6 +298,18 @@ mod tests {
             }
             assert_eq!(settings, start, "{row:?} did not cycle evenly");
         }
+    }
+
+    #[test]
+    fn saving_reports_failure_instead_of_silently_dropping_it() {
+        let previous = std::env::var_os("HOME");
+        // SAFETY: single-threaded test; restored below.
+        unsafe { std::env::remove_var("HOME") };
+        let result = Settings::default().try_save();
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("HOME", previous) };
+        }
+        assert!(result.is_err(), "a save with nowhere to write reported success");
     }
 
     #[test]
