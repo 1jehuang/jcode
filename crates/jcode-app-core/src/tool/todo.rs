@@ -822,7 +822,14 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("feedback loop should describe requirement-to-check coverage");
-        assert!(feedback_description.contains("requirement-to-check"));
+        // Case-insensitive: the schema text starts the sentence with
+        // "Requirement-to-check", so an exact-case check is a false negative.
+        assert!(
+            feedback_description
+                .to_ascii_lowercase()
+                .contains("requirement-to-check"),
+            "feedback loop description omitted requirement-to-check: {feedback_description}"
+        );
         assert!(feedback_description.contains("explicit observation or check"));
         for required_concept in [
             "reports back on each requirement",
@@ -1170,6 +1177,86 @@ mod tests {
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    /// Issue #695, end to end through the real tool: finish task one, then
+    /// start task two. What the todos panel renders (stored todos + goals) must
+    /// describe task two only, with no leftovers from task one.
+    #[tokio::test]
+    async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "issue-695-new-task";
+        let tool = TodoTool::new();
+
+        // Task one, completed. `end_to_end_ownership` clears the completion
+        // gate so the write is actually stored.
+        tool.execute(
+            json!({
+                "todos": [{
+                    "content": "task one",
+                    "status": "completed",
+                    "priority": "high",
+                    "id": "t1",
+                    "group": "first task",
+                    "confidence": 90,
+                    "completion_confidence": 97,
+                }],
+                "plan": {"user_intention": "do task one", "understands_user_intent": 97},
+                "goals": [{
+                    "group": "first task",
+                    "closed_feedback_loop": 97,
+                    "end_to_end_ownership": 97,
+                    "feedback_loop": "ran the checks",
+                }],
+            }),
+            test_ctx(session),
+        )
+        .await
+        .expect("first task write should succeed");
+        assert_eq!(load_goals(session).expect("goals").len(), 1);
+
+        // Task two: a fresh todo list in a new group.
+        tool.execute(
+            json!({
+                "todos": [{
+                    "content": "task two",
+                    "status": "in_progress",
+                    "priority": "high",
+                    "id": "t2",
+                    "group": "second task",
+                    "confidence": 70,
+                }],
+                "goals": [{
+                    "group": "second task",
+                    "closed_feedback_loop": 80,
+                    "feedback_loop": "run the new checks",
+                }],
+            }),
+            test_ctx(session),
+        )
+        .await
+        .expect("second task write should succeed");
+
+        let todos = load_todos(session).expect("todos");
+        assert_eq!(todos.len(), 1, "panel must show only the current task");
+        assert_eq!(todos[0].group.as_deref(), Some("second task"));
+
+        let goals = load_goals(session).expect("goals");
+        assert_eq!(
+            goals.len(),
+            1,
+            "the finished task's goal must not linger in the panel: {goals:?}"
+        );
+        assert_eq!(goals[0].group.as_deref(), Some("second task"));
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
         }
     }
 
