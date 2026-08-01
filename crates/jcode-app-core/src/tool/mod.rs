@@ -11,6 +11,7 @@ mod computer;
 mod conversation_search;
 mod debug_socket;
 mod discover;
+mod discover_secrets;
 mod edit;
 mod gmail;
 mod goal;
