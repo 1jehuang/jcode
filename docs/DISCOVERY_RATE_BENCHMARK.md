@@ -139,6 +139,37 @@ select, and the second half never happens today.
 **Bypass is the dominant failure mode on capable models.** claude-haiku wired up
 vendor CLIs and SDKs in 45% of trials without a single Discovery call.
 
+### What changed as a result
+
+Two fixes landed against these numbers.
+
+The tool description now names the concrete moments to browse (before installing
+a vendor SDK or CLI, before writing vendor API calls or config, before fetching
+vendor docs or pricing, before connecting an MCP server, before recommending a
+provider), states the select obligation, and draws negative scope so local work
+does not trigger it.
+
+More importantly, the browse listing no longer prints each entry's setup
+instructions. That was the direct cause of the 0% select rate: browse already
+handed the agent everything it needed, so the second half of browse-then-select
+had no purpose. Setup now lives only in the select response.
+`scripts/verify_discovery_select.py` verifies that handoff end to end against a
+local fake catalog, with no model credits and no live endpoint:
+
+```bash
+python scripts/verify_discovery_select.py ./target/selfdev/jcode
+```
+
+The description change has not yet been confirmed by a matched live run. Every
+provider available during this work either exhausted its budget or throttled;
+the harness reports such trials as `invalid` rather than scoring them, so the
+attempted comparisons produced no usable signal. Re-run the matched comparison
+when credits allow:
+
+```bash
+PROVIDER=<provider> scripts/compare_discovery_rate.sh <before-bin> <after-bin> <model> 3
+```
+
 Single-trial runs are noise. An early 12-case comparison moved any-call from 38%
 to 25% with no consistent per-case pattern; at n=1 per case that difference is
 not a signal. Use `--trials 3` or more, and read `scored_trial_count` before
