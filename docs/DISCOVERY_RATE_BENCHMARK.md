@@ -111,3 +111,35 @@ python scripts/benchmark_discovery_rate.py --output target/discovery-rate/after.
 
 Prompts are held fixed across such experiments. Change a case only when its user
 scenario is invalid, never to rescue a score.
+
+## Measured findings
+
+Baselines collected while building this benchmark, all on the default full
+toolset so Discovery competes with bash, browser, and web tools:
+
+| model | scored trials | browse recall | bypass | select |
+| --- | --- | --- | --- | --- |
+| claude-haiku-4-5 | 11 | 18% | 45% | 0% |
+| glm-4.7-flash | 12 | 38% | 0% | 0% |
+| gpt-oss-120b (cerebras) | 24 | 0% | 11% | 0% |
+
+Three things stand out.
+
+**Triggering is strongly model-dependent.** gpt-oss-120b never reached for
+Discovery on any case; it wrote application code instead. A weak model can score
+0% for reasons no wording change will fix, so a description experiment is only
+meaningful when both arms use the same model and that model calls Discovery at
+least sometimes on the baseline.
+
+**Select rate is 0% everywhere.** Not one trial across any model reached
+`action=select`. Agents that browse tend to summarize the listing for the user
+and stop. This is the larger half of the gap: the intended policy is browse then
+select, and the second half never happens today.
+
+**Bypass is the dominant failure mode on capable models.** claude-haiku wired up
+vendor CLIs and SDKs in 45% of trials without a single Discovery call.
+
+Single-trial runs are noise. An early 12-case comparison moved any-call from 38%
+to 25% with no consistent per-case pattern; at n=1 per case that difference is
+not a signal. Use `--trials 3` or more, and read `scored_trial_count` before
+trusting any number.
