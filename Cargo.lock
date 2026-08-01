@@ -3542,6 +3542,7 @@ dependencies = [
  "parley",
  "pollster",
  "serde_json",
+ "syntect",
  "unicode-width",
  "vello",
  "winit",

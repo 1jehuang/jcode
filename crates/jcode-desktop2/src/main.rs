@@ -43,6 +43,7 @@ mod states;
 mod stream;
 mod stream_bench;
 mod strip;
+mod syntax;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -1252,6 +1253,16 @@ impl App {
             // an accidentally-opened panel still lands in the message.
             Action::ToggleSettings => {
                 self.model.panel.toggle();
+            }
+
+            // The palette, on a key. The notice names what it landed on, so
+            // the chord is self-documenting the first time it is hit by
+            // accident and there is no doubt about which of the three the
+            // window is now following.
+            Action::ToggleTheme => {
+                self.toggle_theme();
+                let label = self.model.settings.value(crate::settings::Row::Theme);
+                self.model.set_notice(format!("theme: {label}"));
             }
 
             // A view choice, applied live: the notice is the only feedback the

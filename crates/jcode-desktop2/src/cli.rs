@@ -507,7 +507,25 @@ fn run_capture(args: &[String]) -> Result<()> {
     const SCALE: f64 = 2.0;
     const WIDTH: u32 = 2200;
     const HEIGHT: u32 = 1440;
-    let node = args.first().map(String::as_str).unwrap_or("all");
+    // Nodes pin the light palette so a capture cannot depend on the machine
+    // that ran it. Dark is still a shipped theme, and a state nobody can
+    // render is a state nobody reviews, so `--dark` re-tints the node after
+    // it is built. It stays an explicit flag rather than reading the system
+    // preference, for the same determinism reason.
+    let dark = args.iter().any(|arg| arg == "--dark");
+    let positional: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| !arg.starts_with("--"))
+        .collect();
+    let node = positional.first().copied().unwrap_or("all");
+    let retint = move |mut model: Model| -> Model {
+        if dark {
+            model.theme = crate::theme::Theme::print_dark();
+            model.theme_preference = crate::theme::ThemeMode::Dark;
+        }
+        model
+    };
     let mut painter = paint::Painter::default();
     let mut render_node = |name: &str, model: &Model, path: &std::path::Path| -> Result<()> {
         let mut scene = Scene::new();
@@ -517,23 +535,24 @@ fn run_capture(args: &[String]) -> Result<()> {
         Ok(())
     };
     if node == "all" {
-        let dir = std::path::PathBuf::from(args.get(1).map(String::as_str).unwrap_or("captures"));
+        let dir = std::path::PathBuf::from(positional.get(1).copied().unwrap_or("captures"));
         std::fs::create_dir_all(&dir)?;
         for name in states::names() {
-            let model = states::by_name(name).expect("listed node");
+            let model = retint(states::by_name(name).expect("listed node"));
             render_node(name, &model, &dir.join(format!("{name}.png")))?;
         }
         return Ok(());
     }
-    let Some(model) = states::by_name(node) else {
+    let Some(model) = states::by_name(node).map(retint) else {
         anyhow::bail!(
             "unknown node '{node}'; available: {}",
             states::names().join(", ")
         );
     };
     let out = std::path::PathBuf::from(
-        args.get(1)
-            .cloned()
+        positional
+            .get(1)
+            .map(|path| (*path).to_string())
             .unwrap_or_else(|| format!("{node}.png")),
     );
     render_node(node, &model, &out)

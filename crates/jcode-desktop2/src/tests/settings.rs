@@ -25,7 +25,8 @@ fn app() -> App {
     // does not see a different starting state than one whose is light.
     app.model.theme_preference = ThemeMode::Light;
     app.model.theme = crate::theme::Theme::print_light();
-    app.model.transcript
+    app.model
+        .transcript
         .set_reasoning_mode(crate::reasoning::ReasoningMode::Current);
     app.model.donut = Some(crate::donut::Donut::new(crate::DONUT_GRID));
     app
@@ -39,10 +40,7 @@ fn click(app: &mut App, x: f64, y: f64) -> bool {
 
 fn gear_centre(app: &App) -> (f64, f64) {
     let gear = app.frame.gear();
-    (
-        gear.x0 + gear.width() / 2.0,
-        gear.y0 + gear.height() / 2.0,
-    )
+    (gear.x0 + gear.width() / 2.0, gear.y0 + gear.height() / 2.0)
 }
 
 #[test]
@@ -64,7 +62,10 @@ fn a_click_off_the_panel_only_dismisses_it() {
     app.model.panel.open();
     let (x, y) = (app.frame.left + 4.0, app.frame.composer_top + 4.0);
     assert!(click(&mut app, x, y), "the dismiss click was not consumed");
-    assert!(!app.model.panel.is_open(), "the panel survived a click off it");
+    assert!(
+        !app.model.panel.is_open(),
+        "the panel survived a click off it"
+    );
 }
 
 #[test]

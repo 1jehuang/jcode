@@ -105,6 +105,28 @@ impl Rendered {
         }
     }
 
+    /// Strongest contrast against the page inside a logical-unit rect: how
+    /// legible the boldest ink in that region is.
+    ///
+    /// `darkest_in` cannot answer this, because it assumes ink is dark. In the
+    /// dark theme the page *is* the darkest thing on screen and text is the
+    /// bright thing, so a "darkest pixel" floor passes trivially there and the
+    /// theme goes untested. Contrast against the page is the property that
+    /// actually means "a person can read this", in either theme.
+    pub(super) fn contrast_in(&self, page: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+        let s = self.frame.scale;
+        let to_px = |v: f64, max: u32| (v * s).round().clamp(0.0, f64::from(max - 1)) as u32;
+        let (px0, py0) = (to_px(x0, self.width), to_px(y0, self.height));
+        let (px1, py1) = (to_px(x1, self.width), to_px(y1, self.height));
+        let mut best = 0.0f64;
+        for y in py0..=py1 {
+            for x in px0..=px1 {
+                best = best.max((self.luma(x, y) - page).abs());
+            }
+        }
+        best
+    }
+
     /// Vertical extent, in logical units, of the composer wash as actually
     /// drawn. Sampled on a column just inside the right edge of the measure
     /// column, where only the well can ink, so prompt glyphs cannot be
@@ -222,6 +244,58 @@ fn body_text_has_readable_contrast() {
             darkest < 0.65,
             "{name}: transcript is too faint to read (darkest {darkest:.3})"
         );
+    }
+}
+
+/// Every step of sending a prompt has to stay readable, in both themes.
+///
+/// The bug this pins: a user message not yet acknowledged is drawn through a
+/// layer at [`crate::ack::PENDING_TONE`], and that alpha was tuned against
+/// white paper. On black, the same alpha pushed the user's own words toward
+/// the page instead of away from it, so a prompt arrived nearly invisible and
+/// stayed that way until the daemon acked. Every state a prompt passes through
+/// is walked here, in both themes, against the *page* rather than against an
+/// assumed-white background, because the light-only floor above could never
+/// have seen it.
+#[test]
+#[ignore = "requires a GPU"]
+fn a_prompt_stays_readable_through_every_step_of_its_lifecycle() {
+    // The send lifecycle, in order: typed, sent-not-yet-acked, held back
+    // behind a running turn, the reply arriving, the turn over.
+    const LIFECYCLE: &[&str] = &[
+        "mid_input",
+        "message_sent",
+        "queued_message",
+        "streaming",
+        "turn_done",
+    ];
+    for theme in [
+        crate::theme::Theme::print_light(),
+        crate::theme::Theme::print_dark(),
+    ] {
+        let page = {
+            let [r, g, b, _] = theme.background.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for name in LIFECYCLE {
+            let mut model = states::by_name(name).expect("node");
+            model.theme = theme;
+            model.theme_preference = theme.mode;
+            if model.transcript.is_empty() {
+                continue;
+            }
+            let Some(r) = Rendered::new(&model) else {
+                return;
+            };
+            let f = r.frame;
+            let contrast = r.contrast_in(page, f.left, f.body_top, f.right, f.body_bottom);
+            assert!(
+                contrast > 0.5,
+                "{name} in {:?}: a prompt in this state is too faint to read \
+                 (best contrast against the page {contrast:.3})",
+                theme.mode
+            );
+        }
     }
 }
 

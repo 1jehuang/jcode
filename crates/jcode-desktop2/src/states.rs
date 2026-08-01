@@ -38,7 +38,9 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("background_progress_many", background_progress_many),
     ("edit_card", edit_card),
     ("edit_cards_many", edit_cards_many),
+    ("edit_card_large", edit_card_large),
     ("working", working),
+    ("message_sent", message_sent),
     ("queued_message", queued_message),
     ("turn_done", turn_done),
     ("transcript_selection", transcript_selection),
@@ -945,6 +947,33 @@ fn edit_cards_many() -> Model {
     }
 }
 
+/// A rewrite big enough that the card cannot show all of it, over a file whose
+/// language is not one the highlighter knows. Both are the cases where a diff
+/// card most easily goes wrong: it either swallows the page or renders as a
+/// wall of one colour.
+fn edit_card_large() -> Model {
+    use crate::edits::EditCard;
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("port the config loader to the new schema"));
+    let mut diff = String::new();
+    for line in 1..=60usize {
+        diff.push_str(&format!("{line}- old_key_{line} = \"value {line}\"\n"));
+        diff.push_str(&format!("{line}+ new.key.{line} = \"value {line}\"\n"));
+    }
+    transcript.push_edit(&EditCard {
+        intent: Some("move every key under the new namespace".into()),
+        files: vec!["config/defaults.toml".into()],
+        diff,
+        added: 60,
+        removed: 60,
+    });
+    Model {
+        transcript,
+        ..attached_empty()
+    }
+}
+
 fn streaming() -> Model {
     Model {
         transcript: conversation(vec![(
@@ -977,6 +1006,24 @@ fn working() -> Model {
             std::time::Duration::from_secs(42),
             Some("running the desktop2 test suite"),
         ),
+        ..attached_empty()
+    }
+}
+
+/// The first frame after Enter: the message is on the page and out the socket,
+/// but nothing has confirmed it landed. This is the longest-lived state of the
+/// send lifecycle on a slow link, and the one where the user is most likely to
+/// be staring at their own words, so it gets a node of its own: the tone here
+/// is what made a prompt unreadable in dark mode.
+fn message_sent() -> Model {
+    let mut transcript = crate::transcript::Transcript::default();
+    transcript.push(crate::transcript::Message::sent(
+        "explain the harness API handshake",
+    ));
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(0, std::time::Duration::ZERO, None),
         ..attached_empty()
     }
 }

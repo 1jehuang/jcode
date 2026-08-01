@@ -113,6 +113,11 @@ pub enum Action {
     /// Close the field without switching.
     OverviewCancel,
 
+    /// Ctrl+Shift+D: flip the window between light and dark without opening
+    /// anything. The panel is where a setting is *found*; a palette is the one
+    /// setting people change often enough to want it on a key.
+    ToggleTheme,
+
     /// Ctrl+comma: open or shut the settings panel. The chord every desktop
     /// app puts preferences on, so it needs no discovering.
     ToggleSettings,
@@ -366,6 +371,11 @@ pub const PORTED: &[Ported] = &[
         chord: "ctrl+shift+a",
         action: Action::SelectAll,
         tui: "web: select all (alias)",
+    },
+    Ported {
+        chord: "ctrl+shift+d",
+        action: Action::ToggleTheme,
+        tui: "light/dark theme",
     },
     Ported {
         chord: "ctrl+,",
@@ -738,6 +748,9 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     'j' => return Some(Action::ScrollDown),
                     'c' => return Some(Action::Copy),
                     'a' => return Some(Action::SelectAll),
+                    // Ctrl+Shift+D: light/dark. Shifted so it cannot collide
+                    // with a plain Ctrl+D, which is interrupt-or-quit.
+                    'd' => return Some(Action::ToggleTheme),
                     // Ctrl+Shift+R: how much thinking is shown. Shifted so it
                     // cannot collide with a future plain Ctrl+R (recovery in
                     // the TUI), and grouped with the other view chords.

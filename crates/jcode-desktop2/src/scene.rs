@@ -790,25 +790,10 @@ fn draw_transcript(
             );
         }
 
-        // An edit card: the change itself, kept in the transcript. Marked by a
-        // rule down its left edge rather than a wash, because the diff's own
-        // code block already carries one and a card inside a card reads as two
-        // nested quotes. The rule is body ink: the edit is something that
-        // happened to the user's files, not an aside.
-        if placed.message.role == Role::Edit {
-            scene.fill(
-                vello::peniko::Fill::NonZero,
-                Affine::scale(scale),
-                theme.rule,
-                None,
-                &Rect::new(
-                    frame.left + USER_PAD_X,
-                    message_top,
-                    frame.left + USER_PAD_X + frame.hairline() * 2.0,
-                    message_top + placed.message.height,
-                ),
-            );
-        }
+        // An edit card carries no furniture down its left edge. The diff body
+        // is already the loudest object on the page (a wash, per-row bands,
+        // and hue), and a rule beside it only narrowed the measure while
+        // saying a second time what the colour had already said.
 
         // A failure notice: a rule down its left edge, no wash. A washed card
         // is the user's own message in this theme, and dressing an error as
@@ -922,6 +907,41 @@ fn draw_transcript(
                         text_left + inset_x + wash.x1,
                         block_top + inset_y + wash.y1,
                         crate::transcript::INLINE_CODE_RADIUS,
+                    ),
+                );
+            }
+            // Diff row bands, under everything else in the block: they say
+            // which side a row is on across the card's full measure, so the
+            // shape of a change is visible before a single word is read. Drawn
+            // to the card's edges rather than to the text, or the band would
+            // be as ragged as the code and stop being a shape at all.
+            for band in &block.diff_bands {
+                let color = match (band.change, band.emphasis) {
+                    (crate::edits::Change::Added, false) => theme.added_wash,
+                    (crate::edits::Change::Removed, false) => theme.removed_wash,
+                    (crate::edits::Change::Added, true) => theme.added_mark,
+                    (crate::edits::Change::Removed, true) => theme.removed_mark,
+                };
+                // A row band spans the card; an emphasis band hugs the glyphs
+                // it marks, because *that* is the thing it is pointing at.
+                let (x0, x1) = if band.emphasis {
+                    (
+                        text_left + inset_x + band.rect.x0,
+                        text_left + inset_x + band.rect.x1,
+                    )
+                } else {
+                    (block_left, frame.right - USER_PAD_X)
+                };
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    Affine::scale(scale),
+                    color,
+                    None,
+                    &Rect::new(
+                        x0,
+                        block_top + inset_y + band.rect.y0,
+                        x1,
+                        block_top + inset_y + band.rect.y1,
                     ),
                 );
             }
