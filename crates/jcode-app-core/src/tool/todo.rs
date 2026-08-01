@@ -158,6 +158,28 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
     merged
 }
 
+/// Drop retained goals whose todo group no longer exists in `todos`.
+///
+/// `merge_goals` deliberately keeps goals a write does not mention, so a
+/// goals-only or partial update cannot erase assessments. But when the agent
+/// moves on to a new task and replaces the todo list wholesale, goals from the
+/// finished task have no todos left to describe and were shown indefinitely in
+/// the todos panel (issue #695). Goals whose group still has a todo, and the
+/// ungrouped goal for a flat list, are always kept.
+fn prune_orphaned_goals(goals: Vec<TodoGoal>, todos: &[TodoItem]) -> Vec<TodoGoal> {
+    if todos.is_empty() {
+        return goals;
+    }
+    let live_groups: std::collections::HashSet<Option<String>> = todos
+        .iter()
+        .map(|todo| goal_group_key(todo.group.as_deref()))
+        .collect();
+    goals
+        .into_iter()
+        .filter(|goal| live_groups.contains(&goal_group_key(goal.group.as_deref())))
+        .collect()
+}
+
 fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> Vec<TodoGoalField> {
     let mut fields = Vec::new();
     if before.and_then(|goal| goal.closed_feedback_loop)
@@ -609,7 +631,7 @@ impl Tool for TodoTool {
             (|| {
                 let stored_goals = load_goals(&ctx.session_id).unwrap_or_default();
                 let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
-                let goals = merge_goals(&stored_goals, params.goals);
+                let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
                 if !newly_completed_groups_have_sufficient_ownership(&previous, &todos, &goals) {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
@@ -1008,6 +1030,45 @@ mod tests {
             understands_user_intent: Some(100),
             understands_user_intent_history: vec![100],
         }
+    }
+
+    fn todo_in_group(group: Option<&str>, id: &str) -> TodoItem {
+        TodoItem {
+            content: format!("task {id}"),
+            status: "pending".to_string(),
+            priority: "medium".to_string(),
+            id: id.to_string(),
+            group: group.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// Issue #695: after the agent moves to a new task and replaces the todo
+    /// list, goals from the finished task must not keep showing in the panel.
+    #[test]
+    fn prune_orphaned_goals_drops_goals_without_live_todos() {
+        let goals = vec![goal(Some("old task"), 40), goal(Some("new task"), 80)];
+        let todos = vec![todo_in_group(Some("new task"), "1")];
+
+        let pruned = prune_orphaned_goals(goals, &todos);
+
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].group.as_deref(), Some("new task"));
+    }
+
+    #[test]
+    fn prune_orphaned_goals_keeps_ungrouped_goal_for_flat_list() {
+        let goals = vec![goal(None, 50)];
+        let todos = vec![todo_in_group(None, "1")];
+
+        assert_eq!(prune_orphaned_goals(goals, &todos).len(), 1);
+    }
+
+    #[test]
+    fn prune_orphaned_goals_keeps_everything_when_todo_list_is_empty() {
+        // A goals-only write with no stored todos must not lose assessments.
+        let goals = vec![goal(Some("a"), 10), goal(None, 20)];
+        assert_eq!(prune_orphaned_goals(goals, &[]).len(), 2);
     }
 
     #[test]
