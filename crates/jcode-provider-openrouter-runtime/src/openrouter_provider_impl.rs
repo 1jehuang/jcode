@@ -731,6 +731,20 @@ impl Provider for OpenRouterProvider {
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
+        // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
+        // default 4096) and silently truncates anything longer, so a model's
+        // advertised trained window is not a safe budget. Until the native-API
+        // probe populates the catalog above, assume the conservative server
+        // default rather than over-budgeting and losing conversation history.
+        //
+        // This must outrank the static open-weight family table below: that
+        // table is what reported 262K for `qwen3:*` on Ollama while the server
+        // was actually serving 4K. It stays *below* the live catalog and the
+        // user's explicit per-model `context_window`, both of which are real
+        // evidence about this endpoint.
+        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
+            return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
+        }
         if let Some(profile_id) = self.profile_id.as_deref()
             && let Some(limit) =
                 jcode_base::provider_catalog::openai_compatible_profile_context_limit(
@@ -738,14 +752,6 @@ impl Provider for OpenRouterProvider {
                 )
         {
             return limit;
-        }
-        // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
-        // default 4096) and silently truncates anything longer, so a model's
-        // advertised trained window is not a safe budget. Until the native-API
-        // probe populates the catalog, assume the conservative server default
-        // rather than over-budgeting and losing conversation history.
-        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
-            return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
         }
         jcode_provider_core::context_limit_for_model_with_provider(&model_id, Some(self.name()))
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
