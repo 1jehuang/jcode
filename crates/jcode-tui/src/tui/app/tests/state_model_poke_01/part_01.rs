@@ -640,11 +640,11 @@ fn test_diagram_focus_toggle_and_pan() {
     crate::tui::mermaid::clear_active_diagrams();
 }
 
-/// Ctrl+L is the view-only clear: display messages go away, but provider
-/// context, the input draft, and queued messages all survive so the model
-/// still remembers the conversation. (It used to be a deliberate no-op.)
+/// Ctrl+L is a terminal-style "clean prompt": it snaps to the bottom of the
+/// chat and resumes tail-follow. The transcript, provider context, draft,
+/// and queue are all untouched (/cls does the actual view wipe).
 #[test]
-fn test_ctrl_l_clears_view_but_keeps_context() {
+fn test_ctrl_l_scrolls_to_bottom_without_clearing_anything() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Off;
     app.input = "draft message".to_string();
@@ -659,38 +659,28 @@ fn test_ctrl_l_clears_view_but_keeps_context() {
     app.queued_messages.push("queued".to_string());
     app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
     app.bump_display_messages_version();
+    app.scroll_offset = 25;
+    app.auto_scroll_paused = true;
     let session_messages_before = app.session.messages.len();
-    let provider_view_before = app.materialized_provider_messages().len();
-    let session_id_before = app.session.id.clone();
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
         .unwrap();
 
-    assert!(app.display_messages().is_empty(), "view should be cleared");
-    // Local provider context is materialized from session.messages, so the
-    // session transcript surviving means the model keeps its memory.
+    assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
+    assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
     assert_eq!(
-        app.session.messages.len(),
-        session_messages_before,
-        "provider context must survive"
+        app.display_messages().len(),
+        1,
+        "transcript must NOT be cleared (that is /cls)"
     );
-    assert_eq!(
-        app.materialized_provider_messages().len(),
-        provider_view_before,
-        "materialized provider view must survive"
-    );
+    assert_eq!(app.session.messages.len(), session_messages_before);
     assert_eq!(app.input(), "draft message", "input draft must survive");
-    assert_eq!(app.cursor_pos(), "draft message".len());
     assert_eq!(app.queued_messages.len(), 1, "queue must survive");
-    assert_eq!(
-        app.session.id, session_id_before,
-        "Ctrl+L must not start a fresh session (that is /clear)"
-    );
     assert!(!app.diagram_focus);
     assert!(!app.diff_pane_focus);
 }
 
-/// `/cls` is the slash-command form of the Ctrl+L view-only clear.
+/// `/cls` is the view-only clear: display goes away, context survives.
 #[test]
 fn test_cls_command_clears_view_but_keeps_context() {
     let mut app = create_test_app();
