@@ -1834,7 +1834,7 @@ fn handle_disconnected_key_internal(
                 return Ok(());
             }
             KeyCode::Char('l') if !app.diff_pane_visible() => {
-                app.clear_view_keep_context();
+                app.follow_chat_bottom();
                 return Ok(());
             }
             _ => {
@@ -1880,6 +1880,11 @@ fn handle_disconnected_key_internal(
             }
             KeyCode::Char('v') => {
                 app.paste_from_clipboard();
+                return Ok(());
+            }
+            // Cmd+L mirrors Ctrl+L: snap to the bottom of the chat.
+            KeyCode::Char('l') => {
+                app.follow_chat_bottom();
                 return Ok(());
             }
             _ => {}
