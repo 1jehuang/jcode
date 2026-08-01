@@ -374,10 +374,11 @@ impl App {
         }
     }
 
-    /// View-only clear (Ctrl+L, `/cls`): wipe the rendered transcript while
+    /// View-only clear (`/cls`): wipe the rendered transcript while
     /// keeping provider context, queued messages, and the input draft intact,
     /// so the model still remembers everything. Contrast with `/clear`
-    /// (`reset_current_session`), which discards context too.
+    /// (`reset_current_session`), which discards context too, and Ctrl+L,
+    /// which merely snaps to the bottom of the chat.
     pub(super) fn clear_view_keep_context(&mut self) {
         self.clear_display_messages();
         // The rendered transcript is gone, so every entry in the

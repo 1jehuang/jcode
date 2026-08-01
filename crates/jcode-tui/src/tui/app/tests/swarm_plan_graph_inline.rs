@@ -920,9 +920,10 @@ fn test_swarm_plan_pushes_no_plan_graph_message_when_mermaid_disabled() {
 // messages leak until ACTIVE_DIAGRAMS_MAX eviction - a pinned tradeoff:
 //   2. local `/rewind N` (commands.rs) and `/rewind undo` (commands.rs)
 //   3. local session recovery (conversation_state.rs)
-//   (Ctrl+L everywhere and `/cls` are now the shared view-only clear
-//   `clear_view_keep_context`, which DOES clear the registry: the user asked
-//   for an empty view, so the pinned diagram pane empties with it. On
+//   (`/cls` is the view-only clear `clear_view_keep_context`, which DOES
+//   clear the registry: the user asked for an empty view, so the pinned
+//   diagram pane empties with it. Ctrl+L / Cmd+L merely snap to the chat
+//   bottom and touch neither the transcript nor the registry. On
 //   reconnect a restored transcript may reuse cached bodies without
 //   re-registering its diagrams - an accepted cosmetic tradeoff; new renders
 //   re-register normally.)
@@ -1228,14 +1229,11 @@ fn test_remote_clear_command_clears_active_diagrams_but_keeps_swarm_plan_state()
     crate::tui::mermaid::clear_active_diagrams();
 }
 
-/// Path 5: Ctrl+L is now the shared view-only clear
-/// (`clear_view_keep_context`): it wipes the display transcript AND the
-/// orphaned diagram registry, but keeps queued messages and provider
-/// context. The disconnected handler (remote.rs), the connected-remote
-/// branch (key_handling.rs), and the local branch (input.rs) all route
-/// through the same helper.
+/// Path 5: Ctrl+L (all connection states) now only snaps to the chat bottom
+/// via `follow_chat_bottom`; the transcript, queue, diagram registry, and
+/// swarm plan snapshot are all untouched. `/cls` is the view-only clear.
 #[test]
-fn test_disconnected_ctrl_l_clears_view_but_keeps_queue_and_swarm_plan_state() {
+fn test_disconnected_ctrl_l_only_scrolls_and_touches_nothing() {
     let _render_lock = scroll_render_test_lock();
     let _mode_guard = DiagramModeOverrideGuard::pinned();
     let mut app = create_test_app();
@@ -1248,16 +1246,25 @@ fn test_disconnected_ctrl_l_clears_view_but_keeps_queue_and_swarm_plan_state() {
 
     let _stale_hash = seed_rendered_plan_graph(&mut app, &mut remote);
     app.queued_messages.push("queued".to_string());
+    let messages_before = app.display_messages().len();
+    app.scroll_offset = 10;
+    app.auto_scroll_paused = true;
 
     super::remote::handle_disconnected_key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL)
         .expect("disconnected Ctrl+L should succeed");
-    assert_eq!(
-        app.queued_messages.len(),
-        1,
-        "view-only clear keeps queued messages (context is untouched)"
-    );
 
-    assert_full_discard_clears_diagrams_but_keeps_plan_state(&mut app, "disconnected Ctrl+L");
+    assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
+    assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
+    assert_eq!(
+        app.display_messages().len(),
+        messages_before,
+        "transcript is untouched (that is /cls)"
+    );
+    assert_eq!(app.queued_messages.len(), 1, "queue is untouched");
+    assert!(
+        !crate::tui::mermaid::get_active_diagrams().is_empty(),
+        "diagram registry is untouched"
+    );
 
     crate::tui::mermaid::clear_active_diagrams();
 }

@@ -291,8 +291,13 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
     );
     out.push(KnownHotkey::new(
         ctrl('l'),
-        "clear_view",
-        "clear the view, keeping context (/cls)",
+        "follow_bottom",
+        "jump to the bottom of the chat (/cls wipes the view)",
+    ));
+    out.push(KnownHotkey::new(
+        key(KeyCode::Char('l'), KeyModifiers::SUPER),
+        "follow_bottom",
+        "jump to the bottom of the chat (/cls wipes the view)",
     ));
 
     // Built-in readline-style editing chords.
