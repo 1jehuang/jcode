@@ -615,6 +615,9 @@ async fn handle_remote_key_internal(
                 }
                 return Ok(());
             }
+            KeyCode::Char('d') if input::try_ctrl_d_forward_delete(app) => {
+                return Ok(());
+            }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
                     remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;

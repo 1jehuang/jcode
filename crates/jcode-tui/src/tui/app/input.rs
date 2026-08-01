@@ -1896,6 +1896,29 @@ pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
     }
 }
 
+/// Readline semantics for Ctrl+D: delete the character under the cursor when
+/// there is text to delete, and only fall through to interrupt/quit on an
+/// empty input line (issue #699). Every other terminal tool binds Ctrl+D to
+/// forward-delete, so quitting mid-edit loses work and surprises users.
+///
+/// Returns true when the key was consumed as a forward delete.
+pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
+    if app.is_processing || app.input.is_empty() {
+        return false;
+    }
+    if app.cursor_pos >= app.input.len() {
+        // Cursor at end of a non-empty line: nothing to delete forward, but
+        // quitting here would still be a surprise while text is pending.
+        return true;
+    }
+    let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
+    app.remember_input_undo_state();
+    app.input.drain(app.cursor_pos..next);
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    true
+}
+
 pub(super) fn delete_input_word_back(app: &mut App) {
     let start = app.find_word_boundary_back();
     if start < app.cursor_pos {
@@ -2433,6 +2456,7 @@ pub(super) fn handle_global_control_shortcuts(
     }
 
     match code {
+        KeyCode::Char('d') if try_ctrl_d_forward_delete(app) => true,
         KeyCode::Char('c') | KeyCode::Char('d') => {
             if app.is_processing {
                 app.cancel_requested = true;
