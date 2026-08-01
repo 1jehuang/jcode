@@ -101,6 +101,27 @@ pub const DONUT_DOT_BLEED: f64 = 3.0;
 /// the renderer and the hit test keep it as their floor so a degenerate box
 /// can never paint speckle.
 pub const DONUT_MIN_SIDE: f64 = 100.0;
+/// The settings gear's hit target, in logical units. A square in the top
+/// margin's trailing corner: the one place on the page that is empty at every
+/// window size, and the corner every desktop app already puts its chrome in.
+pub const GEAR_SIZE: f64 = 18.0;
+/// Radius of the gear's body, as a fraction of its box. The teeth and the hub
+/// are drawn around this, so the whole mark scales from one number.
+pub const GEAR_RADIUS: f64 = 0.30;
+/// Number of teeth. Six reads as a gear at 18 logical pixels; more turns into
+/// a blurred ring at this size.
+pub const GEAR_TEETH: usize = 6;
+/// The settings panel the gear opens: one row per setting, hanging under the
+/// gear and aligned to its trailing edge like any menu.
+pub const PANEL_WIDTH: f64 = 190.0;
+pub const PANEL_ROW_HEIGHT: f64 = 26.0;
+pub const PANEL_PAD: f64 = 6.0;
+pub const PANEL_RADIUS: f64 = 6.0;
+/// Gap between the gear and the panel below it.
+pub const PANEL_GAP: f64 = 6.0;
+/// Inset from the panel's edge to a row's text.
+pub const PANEL_TEXT_PAD: f64 = 10.0;
+
 /// Vertical breathing room between regions.
 pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
 /// Fraction of the page height the input box is centred on. 0.5 puts the
@@ -430,6 +451,63 @@ impl Frame {
             ),
             tagline_top: donut_top + side - bleed + HERO_GAP,
         })
+    }
+
+    /// The settings gear's box: the trailing end of the page's top margin.
+    ///
+    /// The margin is the one band that is empty at every window size and in
+    /// every state (hero, transcript, strip), so the gear costs no reading
+    /// space and never moves as the conversation grows. It is centred in the
+    /// margin rather than pinned to the window edge, so it keeps the same
+    /// optical relationship to the text column as everything else on the page.
+    pub fn gear(&self) -> vello::kurbo::Rect {
+        let centre_y = self.body_top / 2.0;
+        let x1 = self.right;
+        let y0 = (centre_y - GEAR_SIZE / 2.0).max(0.0);
+        vello::kurbo::Rect::new(x1 - GEAR_SIZE, y0, x1, y0 + GEAR_SIZE)
+    }
+
+    /// Whether a logical point is on the gear. The whole box, not the drawn
+    /// silhouette: an 18-pixel mark with tooth-accurate hit testing is a mark
+    /// you have to aim at.
+    pub fn hits_gear(&self, x: f64, y: f64) -> bool {
+        self.gear().contains(vello::kurbo::Point::new(x, y))
+    }
+
+    /// The settings panel's box, for `rows` rows. Hangs under the gear,
+    /// aligned to the column's trailing edge so it opens along the same line
+    /// the gear sits on, and is clamped into the window so a short page shows
+    /// the whole panel rather than half of it.
+    pub fn panel(&self, rows: usize) -> vello::kurbo::Rect {
+        let height = rows as f64 * PANEL_ROW_HEIGHT + PANEL_PAD * 2.0;
+        let gear = self.gear();
+        let x1 = gear.x1;
+        let x0 = (x1 - PANEL_WIDTH).max(0.0);
+        let top = (gear.y1 + PANEL_GAP).min((self.height - height).max(0.0));
+        vello::kurbo::Rect::new(x0, top, x1, top + height)
+    }
+
+    /// Which panel row a logical point is on, or `None` when it is off the
+    /// panel entirely. One definition shared by the renderer's highlight and
+    /// the click handler, so the row that lights up is the row that fires.
+    pub fn panel_row_at(&self, rows: usize, x: f64, y: f64) -> Option<usize> {
+        let panel = self.panel(rows);
+        if !panel.contains(vello::kurbo::Point::new(x, y)) {
+            return None;
+        }
+        let offset = y - panel.y0 - PANEL_PAD;
+        if offset < 0.0 {
+            return None;
+        }
+        let index = (offset / PANEL_ROW_HEIGHT) as usize;
+        (index < rows).then_some(index)
+    }
+
+    /// The box of one panel row, for drawing its highlight.
+    pub fn panel_row(&self, rows: usize, index: usize) -> vello::kurbo::Rect {
+        let panel = self.panel(rows);
+        let top = panel.y0 + PANEL_PAD + index as f64 * PANEL_ROW_HEIGHT;
+        vello::kurbo::Rect::new(panel.x0, top, panel.x1, top + PANEL_ROW_HEIGHT)
     }
 
     /// Whether a logical point is inside the donut, used for drag hit-testing.

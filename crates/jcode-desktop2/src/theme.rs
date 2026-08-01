@@ -145,7 +145,7 @@ impl Theme {
 /// this is one read at startup, not a protocol relationship, and a zbus
 /// dependency tree is a lot to carry for one integer. No answer means light,
 /// which matches the website.
-fn system_prefers_dark() -> bool {
+pub fn system_prefers_dark() -> bool {
     // `busctl call` prints `v u 1` for prefer-dark, `v u 2` for prefer-light,
     // and `v u 0` for no preference.
     let portal = std::process::Command::new("busctl")

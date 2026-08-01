@@ -37,6 +37,7 @@ mod scroll;
 mod scroll_bench;
 mod scroll_profile;
 mod select;
+mod settings;
 mod states;
 mod stream;
 mod stream_bench;
@@ -327,6 +328,11 @@ pub struct Model {
     /// function of the model (a pinned capture passes its own `now`) and so
     /// several bars sweep in step rather than each starting its own phase.
     pub progress_clock: Option<std::time::Instant>,
+    /// The user's settings, and the gear panel that edits them. In the model
+    /// rather than in `App` so a frame stays a pure function of the model and
+    /// every state of the panel is capturable.
+    pub settings: settings::Settings,
+    pub panel: settings::Panel,
     /// Live RAM readout for this window and the daemon, drawn on the trailing
     /// end of the top chrome row. `None` until the first sample, and always
     /// `None` in pinned captures, so frames stay deterministic.
@@ -357,9 +363,14 @@ impl ModelId {
 
 impl Default for Model {
     fn default() -> Self {
+        // One source of truth: the saved settings decide the palette, the
+        // thinking display, and whether the hero animates, so a fresh window
+        // opens the way the last one was left rather than the way the
+        // environment happened to be exported.
+        let settings = settings::Settings::load();
         Self {
-            theme: theme::Theme::from_env(),
-            theme_preference: theme::Theme::preference_from_env(),
+            theme: theme::Theme::for_mode(settings.theme, theme::system_prefers_dark()),
+            theme_preference: settings.theme,
             meta: meta::Meta::detect(),
             status: "starting...".into(),
             session_id: None,
@@ -368,7 +379,7 @@ impl Default for Model {
                 // once here rather than consulted per delta: a mid-turn config
                 // edit must not change what the transcript on screen means.
                 let mut transcript = transcript::Transcript::default();
-                transcript.set_reasoning_mode(reasoning::ReasoningMode::from_env());
+                transcript.set_reasoning_mode(settings.reasoning);
                 transcript
             },
             editor: editor::Editor::default(),
@@ -380,7 +391,7 @@ impl Default for Model {
             selection: None,
             notice: None,
             failure: None,
-            donut: (!donut_disabled()).then(|| donut::Donut::new(DONUT_GRID)),
+            donut: settings.motion.then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
             hint: hints::arbitrary_index(),
             stream: stream::Stream::default(),
@@ -392,6 +403,8 @@ impl Default for Model {
             model: None,
             boot: boot::Boot::default(),
             progress_clock: None,
+            settings,
+            panel: settings::Panel::default(),
             mem: None,
         }
     }
@@ -406,7 +419,7 @@ pub const DONUT_GRID: usize = 152;
 
 /// Escape hatch: `JCODE_DESKTOP2_DONUT=0` turns the animation off for users who
 /// do not want motion, and for benchmarking the rest of the frame.
-fn donut_disabled() -> bool {
+pub(crate) fn donut_disabled() -> bool {
     matches!(
         std::env::var("JCODE_DESKTOP2_DONUT").as_deref(),
         Ok("0") | Ok("off") | Ok("false")
@@ -769,6 +782,41 @@ impl App {
         }
         self.geometry.save();
         self.geometry_saved = Some((now, self.geometry.sanitized()));
+    }
+
+    /// The scale every logical coordinate in the app is resolved against: the
+    /// window's own DPI scaling times the user's zoom. One function, because
+    /// the renderer and pointer hit-testing must never disagree about how big
+    /// a logical pixel is.
+    fn effective_scale(&self) -> f64 {
+        let window = self
+            .state
+            .as_ref()
+            .map(|state| state.scale_factor())
+            .unwrap_or(1.0);
+        window * self.geometry.sanitized().zoom
+    }
+
+    /// Grow, shrink, or reset the UI zoom. Returns whether anything moved, so
+    /// the caller can say "already at the largest size" instead of silently
+    /// doing nothing.
+    fn set_zoom(&mut self, zoom: f64) -> bool {
+        let clamped = zoom.clamp(window_state::MIN_ZOOM, window_state::MAX_ZOOM);
+        if (clamped - self.geometry.zoom).abs() < f64::EPSILON {
+            return false;
+        }
+        self.geometry.zoom = clamped;
+        // A zoom change is a layout change for every cached message, and the
+        // cache keys off the measured geometry rather than off this number, so
+        // nothing here needs invalidating: the next frame measures at the new
+        // scale and misses the cache by itself.
+        //
+        // Only a real window persists: a headless test or capture driving the
+        // same action must not rewrite the user's saved window state.
+        if self.state.is_some() {
+            self.save_geometry(true);
+        }
+        true
     }
 
     /// Whether a logical point is inside the composer well.
@@ -1282,6 +1330,26 @@ impl App {
                 None => self.model.set_notice("clipboard is empty"),
             },
 
+            // Zoom: the whole UI, not just the transcript, so the composer,
+            // chrome, and hit-testing stay in proportion. Reported as a notice
+            // because the step is small enough to be hard to see on one press.
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
+                let current = self.geometry.zoom;
+                let target = match action {
+                    Action::ZoomIn => current * window_state::ZOOM_STEP,
+                    Action::ZoomOut => current / window_state::ZOOM_STEP,
+                    _ => 1.0,
+                };
+                if self.set_zoom(target) {
+                    self.model
+                        .set_notice(format!("zoom {:.0}%", self.geometry.zoom * 100.0));
+                } else if matches!(action, Action::ZoomReset) {
+                    self.model.set_notice("zoom 100%");
+                } else {
+                    self.model.set_notice("zoom limit reached");
+                }
+            }
+
             // In a multi-line input, Up/Down move between lines first and only
             // fall through to history recall at the edges, like a normal
             // multi-line composer.
@@ -1413,6 +1481,9 @@ impl ApplicationHandler for App {
                 self.save_geometry(false);
             }
             WindowEvent::Moved(position) => {
+                // Window position is a platform fact, so it is converted with
+                // the platform's scale factor only: the user's zoom must not
+                // move the window when it changes.
                 let scale = self
                     .state
                     .as_ref()
@@ -1423,11 +1494,7 @@ impl ApplicationHandler for App {
                 self.save_geometry(false);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = self
-                    .state
-                    .as_ref()
-                    .map(|state| state.scale_factor())
-                    .unwrap_or(1.0);
+                let scale = self.effective_scale();
                 self.pointer = (position.x / scale, position.y / scale);
                 // A keystroke ends the reveal at once: an animation that eats
                 // the user's first character, or makes them watch it finish, is
@@ -1594,8 +1661,8 @@ impl ApplicationHandler for App {
                 }
                 let mut scene = Scene::new();
                 self.frame_meter.start();
+                let scale = self.effective_scale();
                 if let Some(state) = self.state.as_mut() {
-                    let scale = state.scale_factor();
                     let size = state.size();
                     // Record the geometry the frame was built with, so pointer
                     // hit-testing uses exactly what the user sees. Measured
@@ -1613,7 +1680,6 @@ impl ApplicationHandler for App {
                 // lookup rather than a relayout.
                 self.observe_stream_growth();
                 if let Some(state) = self.state.as_mut() {
-                    let scale = state.scale_factor();
                     let size = state.size();
                     build_scene(&mut scene, &mut self.painter, &self.model, size, scale);
                     self.frame_meter.end_build();

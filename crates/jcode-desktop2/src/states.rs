@@ -148,6 +148,15 @@ fn connecting() -> Model {
         // Settled: a node renders the window after the boot reveal, so every
         // existing capture is unchanged by it. The reveal has its own nodes.
         boot: crate::boot::Boot::default(),
+        // Pinned, not loaded: a capture must not depend on the developer's own
+        // saved preferences. The panel is shut, so every existing node is
+        // pixel-identical; `settings_panel` is the node that opens it.
+        settings: crate::settings::Settings {
+            theme: crate::theme::ThemeMode::Light,
+            reasoning: crate::reasoning::ReasoningMode::Current,
+            motion: true,
+        },
+        panel: crate::settings::Panel::default(),
     }
 }
 
@@ -262,6 +271,15 @@ fn attached_empty() -> Model {
         // Settled: a node renders the window after the boot reveal, so every
         // existing capture is unchanged by it. The reveal has its own nodes.
         boot: crate::boot::Boot::default(),
+        // Pinned, not loaded: a capture must not depend on the developer's own
+        // saved preferences. The panel is shut, so every existing node is
+        // pixel-identical; `settings_panel` is the node that opens it.
+        settings: crate::settings::Settings {
+            theme: crate::theme::ThemeMode::Light,
+            reasoning: crate::reasoning::ReasoningMode::Current,
+            motion: true,
+        },
+        panel: crate::settings::Panel::default(),
     }
 }
 

@@ -15,6 +15,15 @@ pub const MIN_SIZE: (f64, f64) = (480.0, 360.0);
 /// Largest size we will restore, guarding against absurd saved values.
 const MAX_SIZE: f64 = 30_000.0;
 
+/// UI zoom bounds. Below the floor the text is unreadable, above the ceiling a
+/// single line does not fit the window, so a saved value outside this range is
+/// treated as corrupt rather than restored.
+pub const MIN_ZOOM: f64 = 0.5;
+pub const MAX_ZOOM: f64 = 3.0;
+/// One Ctrl+plus / Ctrl+minus step. Multiplicative, so a step feels the same
+/// size at every zoom level, like a browser's.
+pub const ZOOM_STEP: f64 = 1.1;
+
 /// Minimum gap between writes, so dragging a window edge does not write the
 /// file on every resize event.
 pub const SAVE_THROTTLE: std::time::Duration = std::time::Duration::from_millis(750);
@@ -26,6 +35,10 @@ pub struct Geometry {
     pub height: f64,
     /// Position, when the platform reported one.
     pub position: Option<(f64, f64)>,
+    /// UI zoom, multiplied into the window's scale factor. 1.0 is the
+    /// platform's own scaling. Persisted with the geometry because it is the
+    /// same kind of fact: how this window was left.
+    pub zoom: f64,
 }
 
 impl Default for Geometry {
@@ -34,6 +47,7 @@ impl Default for Geometry {
             width: DEFAULT_SIZE.0,
             height: DEFAULT_SIZE.1,
             position: None,
+            zoom: 1.0,
         }
     }
 }
@@ -58,6 +72,11 @@ impl Geometry {
             width: usable(self.width, MIN_SIZE.0, DEFAULT_SIZE.0),
             height: usable(self.height, MIN_SIZE.1, DEFAULT_SIZE.1),
             position,
+            zoom: if self.zoom.is_finite() && (MIN_ZOOM..=MAX_ZOOM).contains(&self.zoom) {
+                self.zoom
+            } else {
+                1.0
+            },
         }
     }
 
@@ -68,6 +87,7 @@ impl Geometry {
         if let Some((x, y)) = self.position {
             out.push_str(&format!("x={x}\ny={y}\n"));
         }
+        out.push_str(&format!("zoom={}\n", self.zoom));
         out
     }
 
@@ -88,6 +108,7 @@ impl Geometry {
                 "height" => geometry.height = value,
                 "x" => x = Some(value),
                 "y" => y = Some(value),
+                "zoom" => geometry.zoom = value,
                 _ => {}
             }
         }
@@ -166,6 +187,7 @@ mod tests {
             width: 1234.0,
             height: 900.5,
             position: Some((42.0, -17.0)),
+            zoom: 1.0,
         };
         assert_eq!(Geometry::parse(&geometry.serialize()), geometry);
     }
@@ -176,6 +198,7 @@ mod tests {
             width: 800.0,
             height: 600.0,
             position: None,
+            zoom: 1.0,
         };
         assert_eq!(Geometry::parse(&geometry.serialize()), geometry);
     }
@@ -214,6 +237,7 @@ mod tests {
             width: 4.0,
             height: 4.0,
             position: None,
+            zoom: 1.0,
         }
         .sanitized();
         assert_eq!((geometry.width, geometry.height), DEFAULT_SIZE);
@@ -225,6 +249,7 @@ mod tests {
             width: 5_000_000.0,
             height: 900.0,
             position: None,
+            zoom: 1.0,
         }
         .sanitized();
         assert_eq!(geometry.width, DEFAULT_SIZE.0);
@@ -238,6 +263,7 @@ mod tests {
             width: 1100.0,
             height: 720.0,
             position: Some((-1920.0, 0.0)),
+            zoom: 1.0,
         }
         .sanitized();
         assert_eq!(geometry.position, Some((-1920.0, 0.0)));
@@ -249,6 +275,7 @@ mod tests {
             width: 1100.0,
             height: 720.0,
             position: Some((f64::NAN, 0.0)),
+            zoom: 1.0,
         }
         .sanitized();
         assert_eq!(geometry.position, None);
@@ -268,6 +295,7 @@ mod tests {
             width: 3.0,
             height: 900.0,
             position: Some((f64::INFINITY, 1.0)),
+            zoom: 1.0,
         };
         let once = geometry.sanitized();
         assert_eq!(once, once.sanitized());
@@ -304,6 +332,7 @@ mod tests {
             width: 900.0,
             height: 700.0,
             position: None,
+            zoom: 1.0,
         };
         let changed = Geometry {
             width: 901.0,
@@ -326,6 +355,7 @@ mod tests {
             width: 900.0,
             height: 700.0,
             position: Some((5.0, 5.0)),
+            zoom: 1.0,
         };
         assert!(
             !geometry.should_save(Some((now - SAVE_THROTTLE * 10, geometry)), now),

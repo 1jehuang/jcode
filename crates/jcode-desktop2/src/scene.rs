@@ -384,6 +384,117 @@ fn draw_strip(
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
 
+/// Draw the settings gear in the top margin's trailing corner.
+///
+/// A drawn gear rather than a glyph: the app ships no icon font, and a "⚙"
+/// from whatever the system happens to have installed renders at a different
+/// weight and baseline on every machine. Six teeth around a ring, built as one
+/// path so it is a single fill, in the same faint ink as the other chrome so
+/// it waits to be looked for rather than competing with the conversation.
+fn draw_gear(scene: &mut Scene, box_: Rect, ink: Color, scale: f64) {
+    let cx = box_.x0 + box_.width() / 2.0;
+    let cy = box_.y0 + box_.height() / 2.0;
+    let side = box_.width().min(box_.height());
+    let radius = side * layout::GEAR_RADIUS;
+    // Teeth first, as stubby spokes poking out of the ring: drawn as strokes
+    // rather than as a star polygon, so the tooth width stays legible at 18
+    // logical pixels instead of collapsing into the ring's own thickness.
+    let tooth = vello::kurbo::Stroke::new(side * 0.11);
+    for index in 0..layout::GEAR_TEETH {
+        let angle = std::f64::consts::TAU * index as f64 / layout::GEAR_TEETH as f64;
+        let (sin, cos) = angle.sin_cos();
+        let mut spoke = BezPath::new();
+        spoke.move_to((cx + cos * radius * 0.75, cy + sin * radius * 0.75));
+        spoke.line_to((cx + cos * radius * 1.55, cy + sin * radius * 1.55));
+        scene.stroke(&tooth, Affine::scale(scale), ink, None, &spoke);
+    }
+    // The ring, with a hole: the hub is what makes the mark read as a gear
+    // rather than as a sun.
+    scene.stroke(
+        &vello::kurbo::Stroke::new(side * 0.14),
+        Affine::scale(scale),
+        ink,
+        None,
+        &Circle::new((cx, cy), radius),
+    );
+}
+
+/// Draw the settings panel the gear opens: one row per setting, each a label
+/// on the left and its current value on the right.
+///
+/// Values rather than checkboxes or switches, because every setting here has
+/// more than two states and a row that says `theme   dark` answers "what is it
+/// now" and "what will clicking do" in the same three words.
+fn draw_settings_panel(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    frame: &layout::Frame,
+    scale: f64,
+) {
+    let theme = &model.theme;
+    let rows = crate::settings::ROWS;
+    let panel = frame.panel(rows.len());
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        theme.field,
+        None,
+        &RoundedRect::from_rect(panel, layout::PANEL_RADIUS),
+    );
+    scene.stroke(
+        &vello::kurbo::Stroke::new(layout::COMPOSER_BORDER),
+        Affine::scale(scale),
+        theme.field_border,
+        None,
+        &RoundedRect::from_rect(panel, layout::PANEL_RADIUS),
+    );
+    for (index, row) in rows.iter().enumerate() {
+        let band = frame.panel_row(rows.len(), index);
+        if model.panel.hover() == Some(index) {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.wash,
+                None,
+                &RoundedRect::from_rect(band, layout::PANEL_RADIUS / 2.0),
+            );
+        }
+        // Both captions sit on one baseline inside the row, so the label and
+        // its value read as one sentence rather than as two columns.
+        let baseline = band.y0 + (band.height() - f64::from(layout::CAPTION_SIZE) * 1.4) / 2.0;
+        let width = (band.width() - layout::PANEL_TEXT_PAD * 2.0).max(1.0) as f32;
+        let left = band.x0 + layout::PANEL_TEXT_PAD;
+        text.draw_paragraph_scaled(
+            scene,
+            row.label(),
+            (left, baseline),
+            width,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: theme.muted,
+                letter_spacing_em: 0.1,
+                ..Default::default()
+            },
+            scale,
+        );
+        text.draw_paragraph_scaled(
+            scene,
+            model.settings.value(*row),
+            (left, baseline),
+            width,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: theme.text,
+                letter_spacing_em: 0.1,
+                align: text::Align::End,
+                ..Default::default()
+            },
+            scale,
+        );
+    }
+}
+
 /// Body paragraph style for transcript prose. One definition, so measuring in
 /// [`crate::viewport`] and drawing here can never disagree.
 pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
@@ -969,6 +1080,20 @@ pub fn build_scene(
         draw_strip(scene, model, band, &frame, scale);
     }
 
+    // The settings gear, in the margin above the column's trailing edge. Faint
+    // until the panel is open, when it takes full ink so the mark and the menu
+    // it opened read as one thing.
+    draw_gear(
+        scene,
+        frame.gear(),
+        if model.panel.is_open() {
+            theme.text
+        } else {
+            theme.faint
+        },
+        scale,
+    );
+
     // Composer: a real input field. Paper fill plus a hairline border, rather
     // than a grey slab: a filled block reads as disabled or as a code block,
     // while an outlined field reads as somewhere to type. The border thickens
@@ -1192,6 +1317,13 @@ pub fn build_scene(
             },
             scale,
         );
+    }
+
+    // The settings panel sits over the page, under the overview: it is a
+    // menu hanging off the gear, so it is drawn after the content it covers
+    // and before the mode that would replace the whole window.
+    if model.panel.is_open() {
+        draw_settings_panel(scene, text, model, &frame, scale);
     }
 
     // The session overview sits over everything: it is a mode, not a panel,

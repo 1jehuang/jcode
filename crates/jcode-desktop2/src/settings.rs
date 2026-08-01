@@ -1,0 +1,319 @@
+//! User settings, and the little panel the gear opens.
+//!
+//! Three things a user actually wants to change while the app is running:
+//! which palette it wears, how much of the model's thinking the transcript
+//! keeps, and whether the hero animates. Everything else the app decides for
+//! itself, because a settings panel that mirrors every constant is a way of
+//! refusing to make a decision.
+//!
+//! The state is pure and file-backed in the same line-oriented format as
+//! `window_state`: no dependency, and a corrupt file degrades to defaults
+//! rather than failing to start. Panel geometry lives in `layout`, drawing in
+//! `scene`, so this module stays testable without a GPU.
+
+use crate::reasoning::ReasoningMode;
+use crate::theme::ThemeMode;
+use std::path::PathBuf;
+
+/// One toggleable setting: what it is called, and what it currently says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    Theme,
+    Reasoning,
+    Motion,
+}
+
+/// Every row, in the order the panel draws them.
+pub const ROWS: &[Row] = &[Row::Theme, Row::Reasoning, Row::Motion];
+
+impl Row {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Theme => "theme",
+            Self::Reasoning => "thinking",
+            Self::Motion => "motion",
+        }
+    }
+}
+
+/// The user's choices. Every field is a cycle rather than a free value, so a
+/// click can never put the app in a state a keyboard cannot get it out of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settings {
+    pub theme: ThemeMode,
+    pub reasoning: ReasoningMode,
+    /// Whether the hero donut animates. Off is the reduced-motion choice.
+    pub motion: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: ThemeMode::System,
+            reasoning: ReasoningMode::default(),
+            motion: true,
+        }
+    }
+}
+
+impl Settings {
+    /// The value shown beside a row's label.
+    pub fn value(&self, row: Row) -> &'static str {
+        match row {
+            Row::Theme => match self.theme {
+                ThemeMode::Light => "light",
+                ThemeMode::Dark => "dark",
+                ThemeMode::System => "system",
+            },
+            Row::Reasoning => self.reasoning.label(),
+            Row::Motion => {
+                if self.motion {
+                    "on"
+                } else {
+                    "off"
+                }
+            }
+        }
+    }
+
+    /// Advance a row to its next value. Cycling rather than opening a submenu:
+    /// three values is fewer than the clicks a menu would cost.
+    pub fn cycle(&mut self, row: Row) {
+        match row {
+            Row::Theme => {
+                self.theme = match self.theme {
+                    ThemeMode::System => ThemeMode::Light,
+                    ThemeMode::Light => ThemeMode::Dark,
+                    ThemeMode::Dark => ThemeMode::System,
+                }
+            }
+            Row::Reasoning => self.reasoning = self.reasoning.cycle(),
+            Row::Motion => self.motion = !self.motion,
+        }
+    }
+
+    /// Defaults from the environment, so a user who already exports
+    /// `JCODE_DESKTOP2_THEME` and friends sees the panel agree with the window
+    /// on first run instead of contradicting it.
+    pub fn from_env() -> Self {
+        Self {
+            theme: crate::theme::Theme::preference_from_env(),
+            reasoning: ReasoningMode::from_env(),
+            motion: !crate::donut_disabled(),
+        }
+    }
+
+    pub fn serialize(&self) -> String {
+        format!(
+            "theme={}\nthinking={}\nmotion={}\n",
+            self.value(Row::Theme),
+            self.value(Row::Reasoning),
+            self.value(Row::Motion),
+        )
+    }
+
+    /// Parse the format written by [`Self::serialize`], over `base` so a file
+    /// that only pins one key leaves the rest as the environment left them.
+    pub fn parse_over(base: Self, text: &str) -> Self {
+        let mut settings = base;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "theme" => match value {
+                    "light" => settings.theme = ThemeMode::Light,
+                    "dark" => settings.theme = ThemeMode::Dark,
+                    "system" => settings.theme = ThemeMode::System,
+                    _ => {}
+                },
+                "thinking" => {
+                    if let Some(mode) = ReasoningMode::parse(value) {
+                        settings.reasoning = mode;
+                    }
+                }
+                "motion" => match value {
+                    "on" | "true" | "1" => settings.motion = true,
+                    "off" | "false" | "0" => settings.motion = false,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        settings
+    }
+
+    pub fn path() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join(".jcode")
+                .join("desktop2-settings.conf"),
+        )
+    }
+
+    /// Load the saved settings over the environment's defaults. A missing file
+    /// is normal; any other failure is reported rather than hidden.
+    pub fn load() -> Self {
+        let base = Self::from_env();
+        let Some(path) = Self::path() else {
+            return base;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::parse_over(base, &text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => base,
+            Err(error) => {
+                eprintln!("settings: cannot read {}: {error}", path.display());
+                base
+            }
+        }
+    }
+
+    /// Persist. A failure must never break the app, but it is reported:
+    /// silently forgetting a choice looks like the toggle not working.
+    pub fn save(&self) {
+        if let Err(error) = self.try_save() {
+            eprintln!("settings: not saved: {error}");
+        }
+    }
+
+    fn try_save(&self) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no HOME to store settings in")
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.serialize())
+    }
+}
+
+/// The panel's own state: open or shut, and which row the pointer or the
+/// keyboard is on. Separate from [`Settings`] because it is view state, and
+/// mixing the two would persist "the panel was open" to disk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Panel {
+    open: bool,
+    hover: Option<usize>,
+}
+
+impl Panel {
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn open(&mut self) {
+        self.open = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.hover = None;
+    }
+
+    /// Returns whether the panel is now open.
+    pub fn toggle(&mut self) -> bool {
+        if self.open {
+            self.close();
+        } else {
+            self.open();
+        }
+        self.open
+    }
+
+    pub fn hover(&self) -> Option<usize> {
+        self.hover.filter(|_| self.open)
+    }
+
+    /// Point the highlight at a row. Returns whether anything changed, so the
+    /// caller only repaints on a real move.
+    pub fn set_hover(&mut self, row: Option<usize>) -> bool {
+        let row = row.filter(|index| *index < ROWS.len());
+        if self.hover == row {
+            return false;
+        }
+        self.hover = row;
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_through_the_saved_format() {
+        let settings = Settings {
+            theme: ThemeMode::Dark,
+            reasoning: ReasoningMode::Off,
+            motion: false,
+        };
+        assert_eq!(
+            Settings::parse_over(Settings::default(), &settings.serialize()),
+            settings
+        );
+    }
+
+    #[test]
+    fn corrupt_content_keeps_the_defaults() {
+        for text in ["garbage", "theme=", "=x", "\0\0", "motion=maybe"] {
+            assert_eq!(
+                Settings::parse_over(Settings::default(), text),
+                Settings::default(),
+                "parsed {text:?} into something other than the defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_file_leaves_the_other_keys_alone() {
+        let base = Settings {
+            theme: ThemeMode::Dark,
+            reasoning: ReasoningMode::Full,
+            motion: false,
+        };
+        let parsed = Settings::parse_over(base, "theme=light\n");
+        assert_eq!(parsed.theme, ThemeMode::Light);
+        assert_eq!(parsed.reasoning, ReasoningMode::Full);
+        assert!(!parsed.motion);
+    }
+
+    #[test]
+    fn every_row_cycles_back_to_where_it_started() {
+        for row in ROWS {
+            let start = Settings::default();
+            let mut settings = start;
+            for _ in 0..12 {
+                settings.cycle(*row);
+                assert!(!settings.value(*row).is_empty());
+            }
+            assert_eq!(settings, start, "{row:?} did not cycle evenly");
+        }
+    }
+
+    #[test]
+    fn the_saved_path_lives_under_the_jcode_directory() {
+        if let Some(path) = Settings::path() {
+            assert!(path.to_string_lossy().contains("/.jcode/"));
+        }
+    }
+
+    #[test]
+    fn the_panel_forgets_its_highlight_when_it_closes() {
+        let mut panel = Panel::default();
+        panel.open();
+        panel.set_hover(Some(1));
+        assert_eq!(panel.hover(), Some(1));
+        panel.close();
+        assert_eq!(panel.hover(), None);
+    }
+
+    #[test]
+    fn a_hover_past_the_last_row_is_ignored() {
+        let mut panel = Panel::default();
+        panel.open();
+        assert!(!panel.set_hover(Some(99)));
+        assert_eq!(panel.hover(), None);
+    }
+}
