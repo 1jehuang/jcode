@@ -2368,3 +2368,81 @@ fn test_rewind_targets_match_rendered_transcript_numbering() {
         "sanity: raw stored counting diverges, which is why rewind must not use it"
     );
 }
+
+/// Issue #688: `/rewind N` after an undo must honour the new N, not repeat the
+/// previous rewind's target.
+///
+/// The reporter described the second `/rewind N` in a session ignoring its
+/// argument and landing wherever the first one did. #432 covered the *first*
+/// rewind's numbering; nothing covered rewind -> undo -> rewind, which is the
+/// sequence that loses transcript if the target list is computed once and
+/// reused. Drive the real agent-side operations so the whole cycle is pinned.
+#[test]
+fn test_rewind_after_undo_uses_the_new_target_not_the_previous_one() {
+    let mut session = Session::create_with_id(
+        "session_rewind_repeat_test".to_string(),
+        None,
+        Some("rewind repeat".to_string()),
+    );
+    for turn in 1..=6 {
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("prompt-{turn}"),
+                cache_control: None,
+            }],
+        );
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: format!("answer-{turn}"),
+                cache_control: None,
+            }],
+        );
+    }
+
+    let numbered = |session: &Session| -> Vec<String> {
+        render_messages(session)
+            .into_iter()
+            .filter(|m| matches!(m.role.as_str(), "user" | "assistant"))
+            .map(|m| m.content)
+            .collect()
+    };
+
+    let full = numbered(&session);
+    assert_eq!(full.len(), 12);
+    let before_rewind = session.messages.clone();
+
+    // First rewind: to entry 4 ("answer-2").
+    let targets = session.rewind_target_stored_indices();
+    session.truncate_messages(targets[4 - 1] + 1);
+    assert_eq!(numbered(&session).len(), 4);
+    assert_eq!(numbered(&session).last().unwrap(), "answer-2");
+
+    // Undo restores the full transcript, exactly as `Agent::undo_rewind` does.
+    session.replace_messages(before_rewind);
+    assert_eq!(
+        numbered(&session),
+        full,
+        "undo must restore the original transcript"
+    );
+
+    // Second rewind to a *different, larger* N. The bug report says this lands
+    // back on the first rewind's target; it must honour 11.
+    let targets = session.rewind_target_stored_indices();
+    assert_eq!(
+        targets.len(),
+        12,
+        "targets must be recomputed against the restored transcript"
+    );
+    session.truncate_messages(targets[11 - 1] + 1);
+
+    let after = numbered(&session);
+    assert_eq!(
+        after.len(),
+        11,
+        "rewind 11 must keep 11 entries, not fall back to the earlier target of 4"
+    );
+    assert_eq!(after.last().unwrap(), "prompt-6");
+    assert_eq!(session.rewind_target_count(), 11);
+}
