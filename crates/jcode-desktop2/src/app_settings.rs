@@ -53,21 +53,24 @@ impl App {
         let Some(row) = ROWS.get(index).copied() else {
             return;
         };
-        self.model.settings.cycle(row);
-        self.apply_settings(row);
+        // The desktop's own preference is part of the answer for the theme
+        // row, so it is read once here and handed down rather than consulted
+        // twice with a chance of disagreeing between the step and the resolve.
+        let system_dark = crate::theme::system_prefers_dark();
+        self.model.settings.cycle(row, system_dark);
+        self.apply_settings(row, system_dark);
         // Persisted per change, so a crash cannot lose a choice the user has
         // already seen take effect. The file is three lines.
         self.model.settings.save();
     }
 
     /// Push one setting into the running model.
-    fn apply_settings(&mut self, row: Row) {
+    fn apply_settings(&mut self, row: Row, system_dark: bool) {
         match row {
             Row::Theme => {
                 let mode = self.model.settings.theme;
                 self.model.theme_preference = mode;
-                self.model.theme =
-                    crate::theme::Theme::for_mode(mode, crate::theme::system_prefers_dark());
+                self.model.theme = crate::theme::Theme::for_mode(mode, system_dark);
             }
             Row::Reasoning => {
                 let mode = self.model.settings.reasoning;
@@ -85,6 +88,29 @@ impl App {
                     .then(|| crate::donut::Donut::new(crate::DONUT_GRID));
             }
         }
+    }
+
+    /// Set the palette outright, for the keyboard chord and any future menu
+    /// item that names a mode rather than stepping through them.
+    ///
+    /// Shares the persist-and-apply path with the panel, so a theme changed by
+    /// keyboard is remembered exactly like one changed by clicking, and the
+    /// panel's own row updates to match rather than showing a stale value.
+    pub(crate) fn set_theme(&mut self, mode: crate::theme::ThemeMode) {
+        self.model.settings.theme = mode;
+        self.apply_settings(Row::Theme, crate::theme::system_prefers_dark());
+        self.model.settings.save();
+    }
+
+    /// Flip between light and dark, the way the chord and the row both mean
+    /// it: away from whatever is currently *on screen*, so `system` resolves
+    /// before it is stepped and the window always visibly changes.
+    pub(crate) fn toggle_theme(&mut self) {
+        let next = self
+            .model
+            .settings
+            .next_theme(crate::theme::system_prefers_dark());
+        self.set_theme(next);
     }
 
     /// Keep the two ways of changing the thinking display in step: the

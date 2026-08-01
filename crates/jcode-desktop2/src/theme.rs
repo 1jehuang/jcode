@@ -63,6 +63,22 @@ pub struct Theme {
     /// rather than as a terminal.
     pub added: Color,
     pub removed: Color,
+    /// Fill behind a whole added line of a diff, and behind a removed one.
+    ///
+    /// The ink alone marks a line only where there are glyphs, so a diff read
+    /// at a glance is a ragged comb of colour whose left edge is the *text*
+    /// rather than the change. A band across the row makes the shape of the
+    /// change the thing you see first, which is how a diff is actually read.
+    /// Faint enough that highlighted code still sits on top of it.
+    pub added_wash: Color,
+    pub removed_wash: Color,
+    /// Fill behind the part of a diff row that actually differs from its
+    /// counterpart. One step stronger than the row's own wash: the row colour
+    /// says a line changed, and this says *which characters*, which on a long
+    /// line is the difference between reading the diff and re-reading the
+    /// file.
+    pub added_mark: Color,
+    pub removed_mark: Color,
 }
 
 impl Theme {
@@ -85,6 +101,10 @@ impl Theme {
             selection_on_wash: Color::from_rgb8(0xc4, 0xc4, 0xc4),
             added: Color::from_rgb8(0x1a, 0x6b, 0x3a),
             removed: Color::from_rgb8(0x9b, 0x22, 0x26),
+            added_wash: Color::from_rgb8(0xe4, 0xf3, 0xe8),
+            removed_wash: Color::from_rgb8(0xfb, 0xe9, 0xe9),
+            added_mark: Color::from_rgb8(0xb4, 0xe4, 0xc4),
+            removed_mark: Color::from_rgb8(0xf6, 0xc4, 0xc4),
         }
     }
 
@@ -107,6 +127,10 @@ impl Theme {
             selection_on_wash: Color::from_rgb8(0x4c, 0x4c, 0x4c),
             added: Color::from_rgb8(0x6d, 0xd4, 0x92),
             removed: Color::from_rgb8(0xf0, 0x8b, 0x8b),
+            added_wash: Color::from_rgb8(0x10, 0x24, 0x18),
+            removed_wash: Color::from_rgb8(0x2a, 0x14, 0x16),
+            added_mark: Color::from_rgb8(0x1d, 0x4a, 0x30),
+            removed_mark: Color::from_rgb8(0x53, 0x22, 0x26),
         }
     }
 
@@ -294,6 +318,49 @@ mod tests {
                 "the washed band is weaker than the paper band in {:?}",
                 theme.mode
             );
+        }
+    }
+
+    /// The three densities a diff row is drawn at have to stay ordered, in
+    /// both modes: the page, then the row's wash, then the mark on the part
+    /// that changed. If any pair inverts or collapses, the row stops saying
+    /// which side it is on or the mark stops pointing at anything. Diff ink
+    /// must also stay readable on top of both.
+    #[test]
+    fn diff_surfaces_are_ordered_and_readable() {
+        let luma = |color: Color| {
+            let [r, g, b, _] = color.components;
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        for theme in [Theme::print_light(), Theme::print_dark()] {
+            let page = luma(theme.background);
+            for (side, wash, mark) in [
+                ("added", theme.added_wash, theme.added_mark),
+                ("removed", theme.removed_wash, theme.removed_mark),
+            ] {
+                let wash = luma(wash);
+                let mark = luma(mark);
+                assert!(
+                    (wash - page).abs() > 0.005,
+                    "the {side} row wash is invisible in {:?}",
+                    theme.mode
+                );
+                assert!(
+                    (mark - page).abs() > (wash - page).abs(),
+                    "the {side} mark is no stronger than its row in {:?}",
+                    theme.mode
+                );
+            }
+            for (side, ink, mark) in [
+                ("added", theme.added, theme.added_mark),
+                ("removed", theme.removed, theme.removed_mark),
+            ] {
+                assert!(
+                    (luma(ink) - luma(mark)).abs() > 0.15,
+                    "{side} text is unreadable on its own mark in {:?}",
+                    theme.mode
+                );
+            }
         }
     }
 

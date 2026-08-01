@@ -27,6 +27,52 @@ pub struct EditCard {
     pub removed: usize,
 }
 
+impl EditCard {
+    /// The language to highlight this card's diff as, taken from the first
+    /// file's extension. One language per card: an edit tool call touches one
+    /// file in every case but a patch, and a patch's files are near always the
+    /// same kind.
+    pub fn language(&self) -> Option<&str> {
+        self.files
+            .first()
+            .and_then(|file| crate::syntax::language_for(file))
+    }
+
+    /// The diff as rows, in order. Parsed on demand rather than stored,
+    /// because the diff arrives as the tool's own text and one parser is what
+    /// keeps the counts, the ink, and the copied text from disagreeing.
+    pub fn rows(&self) -> Vec<DiffRow> {
+        self.diff.lines().filter_map(parse_row).collect()
+    }
+}
+
+/// One line of a diff: which side it is on, the file line it is at, and what
+/// it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffRow {
+    pub number: Option<u32>,
+    pub change: Change,
+    pub text: String,
+}
+
+/// Split one diff line into its number, its side, and its content.
+fn parse_row(line: &str) -> Option<DiffRow> {
+    let change = classify(line)?;
+    let line = line.trim_start();
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let number = line[..digits].parse::<u32>().ok();
+    // Past the digits and the one-byte sign. The single separating space is
+    // punctuation rather than indentation, so it is dropped while the code's
+    // own leading whitespace is kept.
+    let rest = &line[digits + 1..];
+    let text = rest.strip_prefix(' ').unwrap_or(rest);
+    Some(DiffRow {
+        number,
+        change,
+        text: text.to_string(),
+    })
+}
+
 /// Whether a tool name is one that writes to files. Only these are inspected
 /// for a diff: a `bash` call whose output happens to contain a `-` line must
 /// not be dressed up as an edit.

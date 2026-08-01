@@ -78,17 +78,48 @@ impl Settings {
 
     /// Advance a row to its next value. Cycling rather than opening a submenu:
     /// three values is fewer than the clicks a menu would cost.
-    pub fn cycle(&mut self, row: Row) {
+    ///
+    /// `system_dark` is what the desktop currently asks for, and it only
+    /// affects the theme row: see [`Self::next_theme`].
+    pub fn cycle(&mut self, row: Row, system_dark: bool) {
         match row {
-            Row::Theme => {
-                self.theme = match self.theme {
-                    ThemeMode::System => ThemeMode::Light,
-                    ThemeMode::Light => ThemeMode::Dark,
-                    ThemeMode::Dark => ThemeMode::System,
-                }
-            }
+            Row::Theme => self.theme = self.next_theme(system_dark),
             Row::Reasoning => self.reasoning = self.reasoning.cycle(),
             Row::Motion => self.motion = !self.motion,
+        }
+    }
+
+    /// The theme one step on from this one.
+    ///
+    /// The ring is `system -> the opposite of what is on screen -> the one the
+    /// desktop asks for -> system`. Two properties it has to have, and a fixed
+    /// light/dark rotation has neither:
+    ///
+    /// - The first click always repaints. On a light desktop `system -> light`
+    ///   stores a new value and changes not one pixel, and a brand-new control
+    ///   doing nothing visible reads as a broken control.
+    /// - `system` stays reachable. Stepping only between the two explicit
+    ///   modes strands anyone who wants the window to follow the desktop
+    ///   again, with no way back except editing the file.
+    ///
+    /// So the step is defined against what is *rendered* rather than against a
+    /// fixed order, and it comes home to `system` from whichever explicit mode
+    /// already agrees with the desktop.
+    pub fn next_theme(&self, system_dark: bool) -> ThemeMode {
+        let follows_desktop = if system_dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        };
+        match self.theme {
+            // Away from what the desktop is showing, so the click is visible.
+            ThemeMode::System if system_dark => ThemeMode::Light,
+            ThemeMode::System => ThemeMode::Dark,
+            // Back to following the desktop, once the explicit mode the user
+            // is on is the one the desktop would have picked anyway.
+            mode if mode == follows_desktop => ThemeMode::System,
+            ThemeMode::Dark => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
         }
     }
 
@@ -288,15 +319,92 @@ mod tests {
     }
 
     #[test]
-    fn every_row_cycles_back_to_where_it_started() {
+    fn every_row_returns_to_where_it_started() {
+        // Cycling has to be a ring, or a setting can be one the user cannot
+        // get back to without editing the file.
         for row in ROWS {
-            let start = Settings::default();
-            let mut settings = start;
-            for _ in 0..12 {
-                settings.cycle(*row);
-                assert!(!settings.value(*row).is_empty());
+            for system_dark in [false, true] {
+                let start = Settings::default();
+                let mut settings = start;
+                let mut returned = false;
+                for _ in 0..12 {
+                    settings.cycle(*row, system_dark);
+                    assert!(!settings.value(*row).is_empty());
+                    returned |= settings == start;
+                }
+                assert!(
+                    returned,
+                    "{row:?} never returned to its starting value \
+                     (system_dark={system_dark}), so it is a setting the user \
+                     cannot undo without editing the file"
+                );
             }
-            assert_eq!(settings, start, "{row:?} did not cycle evenly");
+        }
+    }
+
+    #[test]
+    fn the_first_theme_click_always_changes_what_is_on_screen() {
+        // The dead-click bug this order exists to prevent: on a light desktop
+        // `system -> light` stores a new value and repaints nothing.
+        for system_dark in [false, true] {
+            let settings = Settings {
+                theme: ThemeMode::System,
+                ..Settings::default()
+            };
+            let next = settings.next_theme(system_dark);
+            let before = crate::theme::Theme::for_mode(settings.theme, system_dark);
+            let after = crate::theme::Theme::for_mode(next, system_dark);
+            assert_ne!(
+                before.background,
+                after.background,
+                "the first click on a {} desktop repainted nothing",
+                if system_dark { "dark" } else { "light" }
+            );
+        }
+    }
+
+    #[test]
+    fn following_the_desktop_again_is_always_reachable() {
+        // Stranding the user on an explicit palette with no way back to
+        // "follow my desktop" is the failure this ring is shaped to avoid.
+        for system_dark in [false, true] {
+            for start in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+                let mut settings = Settings {
+                    theme: start,
+                    ..Settings::default()
+                };
+                let mut seen = vec![settings.theme];
+                for _ in 0..3 {
+                    settings.cycle(Row::Theme, system_dark);
+                    seen.push(settings.theme);
+                }
+                assert!(
+                    seen.contains(&ThemeMode::System),
+                    "from {start:?} (system_dark={system_dark}) the user could \
+                     never get back to following the desktop: {seen:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_palettes_are_reachable_from_anywhere_in_two_clicks() {
+        for system_dark in [false, true] {
+            for start in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+                let mut settings = Settings {
+                    theme: start,
+                    ..Settings::default()
+                };
+                let mut seen = vec![settings.theme];
+                for _ in 0..2 {
+                    settings.cycle(Row::Theme, system_dark);
+                    seen.push(settings.theme);
+                }
+                assert!(
+                    seen.contains(&ThemeMode::Light) && seen.contains(&ThemeMode::Dark),
+                    "from {start:?} the user could not reach both palettes: {seen:?}"
+                );
+            }
         }
     }
 
@@ -309,7 +417,10 @@ mod tests {
         if let Some(previous) = previous {
             unsafe { std::env::set_var("HOME", previous) };
         }
-        assert!(result.is_err(), "a save with nowhere to write reported success");
+        assert!(
+            result.is_err(),
+            "a save with nowhere to write reported success"
+        );
     }
 
     #[test]
