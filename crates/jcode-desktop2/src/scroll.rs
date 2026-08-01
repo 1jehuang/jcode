@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 /// Time constant of the scroll ease, in seconds. One notch should land in
 /// well under a tenth of a second: this is smoothing, not an animation the
 /// user has to wait out.
-const TAU: f64 = 0.055;
+const TAU: f64 = 0.075;
 
 /// Time constant of the kinetic friction that bleeds a fling away, in seconds.
 ///
@@ -29,7 +29,13 @@ const TAU: f64 = 0.055;
 /// page fling lands in. The 0.18 this replaced measured 4x, and read as a page
 /// that stops the moment you let go: a flick should cross a long reply, not
 /// just finish the stroke.
-const FRICTION_TAU: f64 = 0.32;
+const FRICTION_TAU: f64 = 0.8;
+
+/// Constant deceleration applied on top of the exponential friction, in
+/// logical pixels per second squared. See [`Smooth::advance`]: this is what
+/// lets `FRICTION_TAU` be long enough for a flick to cross a long reply
+/// without the coast turning into a creep at the end.
+const FRICTION_BRAKE: f64 = 2_000.0;
 
 /// Below this speed, in logical pixels per second, a fling is over.
 ///
@@ -39,7 +45,7 @@ const FRICTION_TAU: f64 = 0.32;
 /// about a quarter of a line a second: slow enough that the tail of a fling
 /// still drifts the way a browser's does, fast enough that the stop is not a
 /// creep.
-const MIN_VELOCITY: f64 = 60.0;
+const MIN_VELOCITY: f64 = 30.0;
 
 /// Ceiling on fling speed, in logical pixels per second. A frantic swipe should
 /// travel far, not teleport past everything the user wanted to read.
@@ -310,6 +316,13 @@ impl Smooth {
         };
         if !gesturing && self.velocity != 0.0 {
             self.velocity *= (-dt / FRICTION_TAU).exp();
+            // Plus a constant deceleration, so the tail of a coast ends
+            // instead of creeping: exponential friction alone either stops a
+            // flick early (short tau) or leaves it sliding for seconds (long
+            // tau). The linear term dominates at low speed and is negligible
+            // at high speed, which is the shape a browser fling has.
+            let braked = self.velocity.abs() - FRICTION_BRAKE * dt;
+            self.velocity = self.velocity.signum() * braked.max(0.0);
             if self.velocity.abs() < MIN_VELOCITY {
                 self.stop();
             } else {
