@@ -1419,6 +1419,46 @@ mod tests {
         }
     }
 
+    /// Issue #694 through the real path a user hits: a custom
+    /// `[providers.<name>]` profile in config.toml. The picker must route the
+    /// model to that profile, and must not offer it a Copilot route.
+    #[test]
+    fn custom_config_profile_model_is_routed_and_not_offered_a_copilot_route() {
+        let _guard = EnvGuard::new();
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            "[providers.omlx]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:18000/v1\"\ndefault_model = \"KAT-Coder-V2.5-Dev-OptiQ-4bit\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let model = "KAT-Coder-V2.5-Dev-OptiQ-4bit";
+        let route = remote_openai_compatible_route_for_model(model)
+            .expect("custom config profile model must be routed to its profile");
+        assert_eq!(route.provider, "omlx");
+        assert_eq!(route.api_method, "openai-compatible:omlx");
+        assert!(
+            !remote_model_should_offer_copilot_route(model),
+            "a custom profile's model must never be offered a Copilot route"
+        );
+
+        // The full fallback builder (what the picker renders) agrees.
+        let routes = remote_model_routes_fallback(Some("omlx"), &[model.to_string()]);
+        assert!(
+            routes
+                .iter()
+                .all(|route| !route.api_method.contains("copilot")),
+            "picker routes must not contain a copilot route: {routes:?}"
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.api_method == "openai-compatible:omlx"),
+            "picker routes must include the profile route: {routes:?}"
+        );
+    }
+
     #[test]
     fn remote_compatible_route_uses_live_cache_and_does_not_mark_fallback() {
         let guard = EnvGuard::new();
