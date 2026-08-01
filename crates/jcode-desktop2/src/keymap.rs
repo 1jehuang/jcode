@@ -117,6 +117,13 @@ pub enum Action {
     /// keeps (`current` -> `full` -> `off`). A view choice, so it is a
     /// keypress rather than a config edit and a restart.
     CycleReasoningDisplay,
+
+    /// Ctrl+plus / Ctrl+minus / Ctrl+0: grow, shrink, or reset the UI zoom.
+    /// The browser's chords, because "the text is too small" is a browser-
+    /// shaped problem and everyone already has the muscle memory.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 impl Action {
@@ -515,6 +522,21 @@ pub const PORTED: &[Ported] = &[
         action: Action::SessionDown,
         tui: "no TUI equivalent: desktop-only session strip",
     },
+    Ported {
+        chord: "ctrl+=",
+        action: Action::ZoomIn,
+        tui: "no TUI equivalent: the terminal owns font size there",
+    },
+    Ported {
+        chord: "ctrl+-",
+        action: Action::ZoomOut,
+        tui: "no TUI equivalent: the terminal owns font size there",
+    },
+    Ported {
+        chord: "ctrl+0",
+        action: Action::ZoomReset,
+        tui: "no TUI equivalent: the terminal owns font size there",
+    },
 ];
 
 /// TUI chords deliberately **not** ported, with the reason. Keeps the scope
@@ -680,6 +702,19 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
         },
         Key::Character(text) => {
             let ch = text.chars().next().map(|c| c.to_ascii_lowercase())?;
+            // Zoom first: the chord is Ctrl plus a punctuation key whose glyph
+            // depends on the layout and on whether Shift is held (`+` vs `=`,
+            // `_` vs `-`), so every spelling is accepted rather than only the
+            // unshifted one. Checked before the shifted and Alt blocks so
+            // Ctrl+Shift+= cannot be swallowed on the way past.
+            if cmd && !alt {
+                match ch {
+                    '+' | '=' => return Some(Action::ZoomIn),
+                    '-' | '_' => return Some(Action::ZoomOut),
+                    '0' => return Some(Action::ZoomReset),
+                    _ => {}
+                }
+            }
             if (ctrl || sup || alt) && shift {
                 match ch {
                     // Ctrl+Shift+Z is redo everywhere on the web.
