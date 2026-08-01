@@ -57,6 +57,8 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("overview_preview", overview_preview),
     ("overview_single_session", overview_single_session),
     ("overview_many_sessions", overview_many_sessions),
+    ("settings_panel", settings_panel),
+    ("settings_panel_hover", settings_panel_hover),
     ("notice", notice),
     ("error", error),
     ("offline", offline),
@@ -684,6 +686,34 @@ fn overview_preview() -> Model {
             Some("session_harbor_1785128881021_9f0b21d"),
         ),
         ..session_strip()
+    }
+}
+
+/// The settings panel, open on an empty session: the state a user lands in
+/// the moment they click the gear.
+fn settings_panel() -> Model {
+    let mut panel = crate::settings::Panel::default();
+    panel.open();
+    Model {
+        panel,
+        ..attached_empty()
+    }
+}
+
+/// The same panel with a row highlighted, so the hover band is a capture
+/// rather than something only visible with a mouse in hand.
+fn settings_panel_hover() -> Model {
+    let mut panel = crate::settings::Panel::default();
+    panel.open();
+    panel.set_hover(Some(1));
+    Model {
+        panel,
+        settings: crate::settings::Settings {
+            theme: crate::theme::ThemeMode::Light,
+            reasoning: crate::reasoning::ReasoningMode::Full,
+            motion: false,
+        },
+        ..attached_empty()
     }
 }
 

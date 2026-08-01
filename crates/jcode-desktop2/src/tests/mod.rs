@@ -16,6 +16,7 @@ mod page_bands;
 mod progress;
 mod scheduling;
 mod selection_visual;
+mod settings;
 mod strip_visual;
 mod transcript_selection;
 mod visual;

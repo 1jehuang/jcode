@@ -113,6 +113,10 @@ pub enum Action {
     /// Close the field without switching.
     OverviewCancel,
 
+    /// Ctrl+comma: open or shut the settings panel. The chord every desktop
+    /// app puts preferences on, so it needs no discovering.
+    ToggleSettings,
+
     /// Ctrl+Shift+R: cycle how much of the model's thinking the transcript
     /// keeps (`current` -> `full` -> `off`). A view choice, so it is a
     /// keypress rather than a config edit and a restart.
@@ -362,6 +366,11 @@ pub const PORTED: &[Ported] = &[
         chord: "ctrl+shift+a",
         action: Action::SelectAll,
         tui: "web: select all (alias)",
+    },
+    Ported {
+        chord: "ctrl+,",
+        action: Action::ToggleSettings,
+        tui: "settings panel",
     },
     Ported {
         chord: "ctrl+shift+z",
@@ -709,6 +718,10 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
             // Ctrl+Shift+= cannot be swallowed on the way past.
             if cmd && !alt {
                 match ch {
+                    // Preferences, on the chord the whole desktop uses. Both
+                    // spellings, because a shifted comma is `<` on most
+                    // layouts and the user's finger does not know that.
+                    ',' | '<' => return Some(Action::ToggleSettings),
                     '+' | '=' => return Some(Action::ZoomIn),
                     '-' | '_' => return Some(Action::ZoomOut),
                     '0' => return Some(Action::ZoomReset),

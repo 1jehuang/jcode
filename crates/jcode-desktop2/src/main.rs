@@ -9,6 +9,7 @@ mod activity;
 mod app_harness;
 mod app_overview;
 mod app_selection;
+mod app_settings;
 mod boot;
 mod capture;
 mod caret;
@@ -713,6 +714,12 @@ impl App {
             }
             return;
         }
+        // The gear and its panel sit above the page, so they get first look
+        // at a press: a menu that the click behind it also acted on is a menu
+        // you cannot safely dismiss.
+        if self.settings_press(x, y) {
+            return;
+        }
         let hit = self.composer_offset_at(x, y);
         if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
             eprintln!(
@@ -863,7 +870,14 @@ impl App {
     /// the input box looks editable before it is clicked.
     fn update_cursor_icon(&mut self) {
         let (x, y) = self.pointer;
-        let wanted = if self.in_composer(x, y) {
+        let panel_rows = crate::settings::ROWS.len();
+        let wanted = if self.frame.hits_gear(x, y)
+            || (self.model.panel.is_open() && self.frame.panel_row_at(panel_rows, x, y).is_some())
+        {
+            // A pointing hand over the gear and its rows, so the one clickable
+            // chrome in the window says so before it is clicked.
+            winit::window::CursorIcon::Pointer
+        } else if self.in_composer(x, y) {
             winit::window::CursorIcon::Text
         } else if self.in_transcript(x, y) {
             // The transcript is selectable, so it must say so before it is
@@ -911,6 +925,9 @@ impl App {
             self.model.spin.drag_to(self.pointer.0);
             self.request_redraw();
             return;
+        }
+        if self.settings_hover(self.pointer.0, self.pointer.1) {
+            self.request_redraw();
         }
         self.update_cursor_icon();
         if self.selecting {
@@ -1230,12 +1247,19 @@ impl App {
             Action::OverviewCommit => self.close_overview(true),
             Action::OverviewCancel => self.close_overview(false),
 
+            // The gear's chord. Opening it moves no focus and takes no
+            // keystrokes: the composer keeps the keyboard, so typing through
+            // an accidentally-opened panel still lands in the message.
+            Action::ToggleSettings => {
+                self.model.panel.toggle();
+            }
+
             // A view choice, applied live: the notice is the only feedback the
             // user gets when the mode change has no immediate visible effect
             // (nothing is thinking right now).
             Action::CycleReasoningDisplay => {
                 let next = self.model.transcript.reasoning_mode().cycle();
-                self.model.transcript.set_reasoning_mode(next);
+                self.set_reasoning_from_keyboard(next);
                 self.model.set_notice(format!("thinking: {}", next.label()));
             }
 
@@ -1389,6 +1413,12 @@ impl App {
             // Escape never quits: it cancels, then clears, then re-follows the
             // tail, matching the TUI.
             Action::Cancel => {
+                // An open menu is the most recent thing the user opened, so
+                // Escape shuts it before it reaches anything behind it.
+                if self.model.panel.is_open() {
+                    self.model.panel.close();
+                    return true;
+                }
                 // A visible highlight is the most recent thing the user did,
                 // so Escape dismisses that first rather than reaching past it
                 // to clear typed work.
