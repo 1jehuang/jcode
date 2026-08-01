@@ -47,6 +47,7 @@ include!("tests/issue_496_input_routing.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
+include!("tests/issue_699_ctrl_d_delete.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
