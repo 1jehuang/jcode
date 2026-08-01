@@ -136,7 +136,13 @@ jobs:
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    # 35 minutes covers a normal push (~12 min with a warm Swatinem cache) but
+    # not a *rerun*, where the cache is cold: three consecutive reruns of a
+    # known-good commit were cancelled at the cap, each getting further through
+    # the same green steps (#693). A rerun is exactly what you reach for after a
+    # concurrency cancellation, so the old cap made healthy commits look red.
+    # 75 still bounds a genuinely hung job well under the windows job's 150.
+    timeout-minutes: 75
     # Some dependencies (e.g. convert_case 0.10.0 via derive_more/crossterm, and
     # proc-macro2/quote) accidentally ship a `rust-toolchain.toml` *inside their
     # published crate*. When cargo builds such a crate its CWD is that crate dir,
