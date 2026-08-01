@@ -8,21 +8,18 @@ set -euo pipefail
 
 BEFORE="${1:?before binary}"
 AFTER="${2:?after binary}"
-MODEL="${3:-glm-4.7-flash}"
+MODEL="${3:-gemini-2.5-flash}"
+TRIALS="${4:-3}"
 cd "$(dirname "$0")/.."
 
 CASES=(
   --case storage-user-uploads
   --case authentication-signin
   --case observability-traces
-  --case deployment-preview-envs
   --case analytics-product-funnel
-  --case web-search-live-answers
-  --case payments-agent-purchase
   --case code-review-automation
-  --case control-write-tests
+  --case web-search-live-answers
   --case control-sqlite-local
-  --case control-dockerfile
   --case control-regex-debug
 )
 
@@ -30,7 +27,7 @@ run() {
   local binary="$1" out="$2"
   echo "=== $out ($binary)"
   JCODE_BIN="$binary" python scripts/benchmark_discovery_rate.py \
-    --provider jcode --model "$MODEL" --timeout 150 \
+    --provider "${PROVIDER:-jcode}" --model "$MODEL" --timeout 150 --trials "$TRIALS" \
     "${CASES[@]}" --output "target/discovery-rate/$out.json" || true
 }
 

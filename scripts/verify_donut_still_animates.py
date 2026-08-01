@@ -87,6 +87,11 @@ def main() -> int:
         "JCODE_DEBUG_CONTROL": "1", "JCODE_TEMP_SERVER": "1",
         "JCODE_SERVER_OWNER_PID": str(os.getpid()), "JCODE_PERF_TIER": "full",
         "JCODE_THEME": "dark",
+        # The donut is opt-in since the config default flipped to false
+        # (17e075fb2), and this verifier's temp JCODE_HOME gets the default
+        # config. Without the explicit opt-in the "animation expected" half of
+        # this verifier silently verifies nothing.
+        "JCODE_IDLE_ANIMATION": "1",
     })
     env.setdefault("ANTHROPIC_API_KEY", "sk-ant-donut-verify")
     debug_sock = run / "jcode-debug.sock"
@@ -150,7 +155,15 @@ def main() -> int:
         print(f"  moving rows  : {len(churn)}")
         print(f"  partial/s    : {partial_rate:.1f}")
 
-        if after["donut_active"]:
+        if not after["donut_active"]:
+            # This is the one screen where the donut is *expected*. An inactive
+            # donut here means the verifier proved nothing about the animation,
+            # which is exactly how the deep-idle dormancy bug (notice-only
+            # transcript treated as an abandoned session) shipped unnoticed.
+            failures.append("the donut is not active on the welcome screen: "
+                            "the 'animation expected' half of this verifier "
+                            "did not run")
+        else:
             if not after["area"]:
                 failures.append("donut is active on the welcome screen but no "
                                 "animation rectangle was published")

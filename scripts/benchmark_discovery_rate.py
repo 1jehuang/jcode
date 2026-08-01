@@ -158,6 +158,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-recall", type=float, default=0.8, help="Required browse rate on `call` cases.")
     parser.add_argument("--min-precision", type=float, default=0.9, help="Required clean rate on `no-call` controls.")
     parser.add_argument("--retry-delay", type=float, default=0.5)
+    parser.add_argument(
+        "--invalid-retries",
+        type=int,
+        default=3,
+        help="Retries when a trial never reached the model (rate limits, transient provider errors).",
+    )
+    parser.add_argument(
+        "--invalid-backoff",
+        type=float,
+        default=20.0,
+        help="Seconds to wait before retrying an invalid trial; grows linearly per retry.",
+    )
     parser.add_argument("--list", action="store_true", help="Print the suite and exit.")
     args = parser.parse_args()
     if args.trials < 1 or args.timeout <= 0:
@@ -508,7 +520,23 @@ def main() -> int:
                 trials: list[TrialResult] = []
                 for trial_index in range(1, args.trials + 1):
                     print(f"[{case.id}] trial {trial_index}/{args.trials} ({case.expect})", flush=True)
-                    trials.append(run_trial(args, case, trial_index, socket_path, root))
+                    # A trial that never reached the model measures nothing.
+                    # Retry it with backoff so a transient rate limit does not
+                    # silently shrink the sample.
+                    trial = run_trial(args, case, trial_index, socket_path, root)
+                    for retry in range(1, args.invalid_retries + 1):
+                        if trial.valid:
+                            break
+                        wait = args.invalid_backoff * retry
+                        print(
+                            f"[{case.id}] trial {trial_index} invalid "
+                            f"({trial.invalid_reason}); retry {retry}/{args.invalid_retries} "
+                            f"in {wait:.0f}s",
+                            flush=True,
+                        )
+                        time.sleep(wait)
+                        trial = run_trial(args, case, trial_index, socket_path, root)
+                    trials.append(trial)
                     done += 1
                     progress(done, total, "trials", f"{case.id} trial {trial_index}: {trials[-1].outcome}")
                     if args.retry_delay:
