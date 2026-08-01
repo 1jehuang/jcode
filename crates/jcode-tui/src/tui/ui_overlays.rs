@@ -495,8 +495,8 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(key_entry("Ctrl+H / Ctrl+L", "Focus chat / diagram / diffs"));
     lines.push(key_entry(
-        "Ctrl+L",
-        "Clear the view, keep context (/cls; no pane focused)",
+        "Ctrl+L / Cmd+L",
+        "Jump to bottom of chat (no pane focused); /cls clears the view",
     ));
     lines.push(key_entry(
         "Ctrl+Left / Right",

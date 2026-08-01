@@ -532,6 +532,11 @@ async fn handle_remote_key_internal(
                 app.paste_from_clipboard();
                 return Ok(());
             }
+            // Cmd+L mirrors Ctrl+L: snap to the bottom of the chat.
+            KeyCode::Char('l') => {
+                app.follow_chat_bottom();
+                return Ok(());
+            }
             _ => {}
         }
     }
@@ -632,9 +637,11 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('l') => {
-                // Terminal-style view clear (context kept); the diagram/diff
-                // focus handler above wins while a side pane is available.
-                app.clear_view_keep_context();
+                // Terminal-style "clean prompt": snap to the chat bottom and
+                // resume tail-follow. /cls does the actual view wipe. The
+                // diagram/diff focus handler above wins while a pane is
+                // available.
+                app.follow_chat_bottom();
                 return Ok(());
             }
             KeyCode::Char('u') => {
