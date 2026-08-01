@@ -1,3 +1,4 @@
+use super::discover_secrets::contains_recognizable_secret;
 use super::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -351,192 +352,6 @@ fn has_sufficient_detail(value: &str, field: &str) -> bool {
     words.len() >= min_words && unique.len() >= min_unique
 }
 
-/// A deliberately high-confidence last-line defense before model-authored
-/// Discovery text leaves the client. This complements, rather than replaces,
-/// the schema instruction to summarize the need instead of copying user data.
-fn contains_recognizable_secret(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if (lower.contains("-----begin ") && lower.contains("private key-----"))
-        || contains_credential_assignment(&lower)
-        || contains_email_address(value)
-        || contains_ssn(value)
-        || contains_credential_url(value)
-        || contains_international_phone_number(value)
-    {
-        return true;
-    }
-
-    if contains_prefixed_secret(value) || contains_payment_card_sequence(value) {
-        return true;
-    }
-
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| {
-            matches!(
-                c,
-                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
-            )
-        });
-        looks_like_jwt(token)
-    }) || contains_bearer_token(&lower)
-}
-
-fn contains_prefixed_secret(value: &str) -> bool {
-    const SECRET_PREFIXES: &[&str] = &[
-        "sk_live_",
-        "rk_live_",
-        "sk_test_",
-        "rk_test_",
-        "sk-proj-",
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "xoxa-",
-        "xoxr-",
-        "npm_",
-        "jck_live_",
-    ];
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && !"_-".contains(c));
-        let lower = token.to_ascii_lowercase();
-        SECRET_PREFIXES
-            .iter()
-            .any(|prefix| lower.starts_with(prefix) && token.len() >= prefix.len() + 8)
-            || (token.starts_with("AKIA") && token.len() == 20)
-            || (token.starts_with("AIza") && token.len() >= 35)
-    })
-}
-
-fn contains_credential_assignment(lower: &str) -> bool {
-    const LABELS: &[&str] = &[
-        "api_key",
-        "api-key",
-        "apikey",
-        "access_token",
-        "auth_token",
-        "client_secret",
-        "secret_key",
-        "password",
-        "passwd",
-    ];
-    LABELS.iter().any(|label| {
-        lower.match_indices(label).any(|(index, _)| {
-            let rest = &lower[index + label.len()..];
-            let rest = rest.trim_start();
-            let Some(rest) = rest.strip_prefix(['=', ':']) else {
-                return false;
-            };
-            let candidate =
-                rest.trim_start_matches(|c: char| c.is_whitespace() || "'\"`".contains(c));
-            candidate
-                .split(|c: char| c.is_whitespace() || "'\"`,;".contains(c))
-                .next()
-                .is_some_and(|token| token.len() >= 8)
-        })
-    })
-}
-
-fn contains_bearer_token(lower: &str) -> bool {
-    lower.match_indices("bearer ").any(|(index, _)| {
-        lower[index + "bearer ".len()..]
-            .split_whitespace()
-            .next()
-            .is_some_and(|token| token.trim_matches(|c: char| ",;.'\"`".contains(c)).len() >= 12)
-    })
-}
-
-fn contains_email_address(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| ",;:()[]{}<>\"'`".contains(c));
-        let Some((local, domain)) = token.split_once('@') else {
-            return false;
-        };
-        !local.is_empty()
-            && domain
-                .rsplit_once('.')
-                .is_some_and(|(host, suffix)| !host.is_empty() && suffix.len() >= 2)
-    })
-}
-
-fn contains_ssn(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '-');
-        let parts: Vec<&str> = token.split('-').collect();
-        parts.len() == 3
-            && parts[0].len() == 3
-            && parts[1].len() == 2
-            && parts[2].len() == 4
-            && parts
-                .iter()
-                .all(|part| part.chars().all(|c| c.is_ascii_digit()))
-    })
-}
-
-fn contains_credential_url(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let Some((_, rest)) = token.split_once("://") else {
-            return false;
-        };
-        let authority = rest.split('/').next().unwrap_or_default();
-        authority.contains('@')
-            && authority
-                .split('@')
-                .next()
-                .is_some_and(|user| user.contains(':'))
-    })
-}
-
-fn contains_international_phone_number(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        if !token.starts_with('+') {
-            return false;
-        }
-        let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
-        (10..=15).contains(&digits)
-            && token
-                .chars()
-                .all(|c| c.is_ascii_digit() || "+-().".contains(c))
-    })
-}
-
-fn looks_like_jwt(token: &str) -> bool {
-    token.len() >= 40 && token.starts_with("eyJ") && token.matches('.').count() == 2
-}
-
-fn contains_payment_card_sequence(value: &str) -> bool {
-    value
-        .split(|c: char| !c.is_ascii_digit() && c != '-' && c != ' ')
-        .any(|candidate| looks_like_payment_card(candidate.trim()))
-}
-
-fn looks_like_payment_card(candidate: &str) -> bool {
-    let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
-    if !(13..=19).contains(&digits.len())
-        || candidate
-            .chars()
-            .any(|c| !c.is_ascii_digit() && c != '-' && c != ' ')
-    {
-        return false;
-    }
-    let mut sum = 0u32;
-    let parity = digits.len() % 2;
-    for (index, byte) in digits.bytes().enumerate() {
-        let mut digit = u32::from(byte - b'0');
-        if index % 2 == parity {
-            digit *= 2;
-            if digit > 9 {
-                digit -= 9;
-            }
-        }
-        sum += digit;
-    }
-    sum.is_multiple_of(10)
-}
-
 #[async_trait]
 impl Tool for DiscoverToolsTool {
     fn name(&self) -> &str {
@@ -544,9 +359,28 @@ impl Tool for DiscoverToolsTool {
     }
 
     fn description(&self) -> &str {
-        "Call this before using any product, service, dev tool, API, or data source you \
-         don't already have a tool for. Tools in this catalog are vetted integrations \
-         partnered with this harness to ensure quality and seamless one-call setup."
+        "Find and set up an external product, service, dev tool, API, or data source you \
+         do not already have a tool for. Catalog entries are vetted for one-call setup, so \
+         going through this tool is usually faster than wiring a vendor up by hand.\n\
+         \n\
+         Call it in two places:\n\
+         1. browse, BEFORE the first step that assumes an external provider. Concretely: \
+         before installing a vendor SDK or CLI, before writing vendor API calls or \
+         vendor-specific config, before fetching a vendor's docs, signup, or pricing page, \
+         before connecting an MCP server, and before telling the user which provider to \
+         use. Browsing is cheap, read-only, and commits to nothing.\n\
+         2. select, once you settle on one entry, before you act on it. Setup instructions \
+         live in the select response, so skipping it means working from guesses.\n\
+         \n\
+         Do not call it for work that stays inside this machine and this repo: editing or \
+         refactoring code, running tests or builds, local files and local databases, git, \
+         shell one-liners, writing docs or copy, or answering from knowledge. It is also \
+         unnecessary when an existing tool already covers the need.\n\
+         \n\
+         If nothing in the listing fits, say so and continue with your own approach; \
+         action=suggest records the gap. Recommend the entry that actually fits the task. \
+         Some providers share revenue with Jcode, and that never makes an entry the right \
+         answer."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -559,7 +393,7 @@ impl Tool for DiscoverToolsTool {
                 "action": {
                     "type": "string",
                     "enum": ["browse", "select", "suggest"],
-                    "description": "Phase. Defaults to select when `tool` is set, else browse. Suggest only after browse fails."
+                    "description": "browse to compare; select the one you commit to (it carries setup); suggest if none fit."
                 },
                 "category": {
                     "type": "string",
@@ -1361,17 +1195,15 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
         if let Some(url) = tool.get("url").and_then(|v| v.as_str()) {
             out.push_str(&format!(" ({url})"));
         }
-        if let Some(setup) = tool.get("setup").and_then(|v| v.as_str()) {
-            out.push_str(&format!("\n  setup: {setup}"));
-        }
     }
     out.push_str(
-        "\n\nOnly select one of these if it is genuinely the best option for the task. \
-         To get a tool's setup instructions, call discover_tools again with action `select` \
-         and `tool` set to its name. If none is suitable, call it with action `suggest` and \
-         the browse request ID below so maintainers receive the catalog gap. Consequential \
-         actions (signups, spending) must note the partnership in the confirmation \
-         shown to the user.",
+        "\n\nNext step: pick the entry that best fits the task and call discover_tools with \
+         action `select` and `tool` set to its name. Setup instructions are only in that \
+         select response, so do not install, configure, or describe an entry from this \
+         listing alone. Pick on fit only. If none fits, say so and call action `suggest` \
+         with the browse request ID below so maintainers receive the catalog gap. \
+         Consequential actions (signups, spending) must note the partnership in the \
+         confirmation shown to the user.",
     );
     out.push_str(&format!("\n\nBrowse request ID: `{request_id}`"));
     Ok(out)
@@ -1475,6 +1307,36 @@ mod tests {
         assert!(out.contains("recommendations must be based only on fit"));
     }
 
+    /// The browse listing must not carry setup instructions. When it did, the
+    /// agent had everything it needed and never called `select`: measured
+    /// select rate was 0% across every model (docs/DISCOVERY_RATE_BENCHMARK.md).
+    /// Withholding setup is what makes the second half of browse-then-select
+    /// happen at all.
+    #[test]
+    fn render_listing_withholds_setup_and_directs_to_select() {
+        let listing = json!({
+            "tools": [
+                {
+                    "name": "agentcard",
+                    "blurb": "virtual payment cards",
+                    "url": "https://agentcard.example",
+                    "setup": "npx -y agentcard-mcp@1.0.0 then export AGENTCARD_KEY",
+                },
+            ]
+        });
+        let out =
+            render_listing("payments", &listing, "11111111-2222-4333-8444-555555555555").unwrap();
+        assert!(
+            !out.contains("agentcard-mcp@1.0.0"),
+            "browse must not leak setup instructions: {out}"
+        );
+        assert!(!out.contains("AGENTCARD_KEY"));
+        assert!(!out.contains("setup:"));
+        assert!(out.contains("Next step"));
+        assert!(out.contains("action `select`"));
+        assert!(out.contains("Setup instructions are only in that select response"));
+    }
+
     #[test]
     fn render_listing_rejects_missing_tools() {
         assert!(
@@ -1571,12 +1433,38 @@ mod tests {
     fn schema_is_compact_and_self_contained() {
         let tool = DiscoverToolsTool::new();
         let description = tool.description();
-        assert!(description.starts_with("Call this before using any product"));
-        assert!(description.contains("don't already have a tool for"));
-        assert!(description.contains("vetted integrations"));
-        assert!(description.contains("partnered with this harness"));
+        // The trigger policy lives only here: Discovery is deliberately absent
+        // from the system prompt (see jcode_base::prompt_tests). These assert
+        // the contract the description must carry, not its exact phrasing.
+        assert!(description.contains("do not already have a tool for"));
+        assert!(description.contains("vetted for one-call setup"));
+
+        // Both call sites must be spelled out, plus the concrete "before X"
+        // triggers, or the agent wires vendors up without ever browsing.
+        assert!(description.contains("browse, BEFORE"));
+        assert!(description.contains("select, once you settle"));
+        for trigger in [
+            "installing a vendor SDK or CLI",
+            "vendor API calls",
+            "signup, or pricing page",
+            "connecting an MCP server",
+            "which provider to use",
+        ] {
+            assert!(
+                description.contains(trigger),
+                "description must name the {trigger:?} trigger"
+            );
+        }
+
+        // Negative scope keeps precision up on purely local work.
+        assert!(description.contains("stays inside this machine and this repo"));
+        assert!(description.contains("an existing tool already covers the need"));
+
+        // Disclosure and the no-bias rule stay agent-visible.
+        assert!(description.contains("share revenue"));
+        assert!(description.contains("never makes an entry the right answer"));
         assert!(
-            description.len() < 300,
+            description.len() < 1_600,
             "discovery description should stay compact, got {} bytes",
             description.len()
         );
@@ -1596,6 +1484,7 @@ mod tests {
         );
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
+        assert!(schema.contains("select the one you commit to (it carries setup)"));
         assert!(schema.contains("May be shared with partners"));
         assert!(schema.contains("never secrets or personal data"));
         assert!(schema.contains("Why the selection fits"));
