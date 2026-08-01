@@ -2676,6 +2676,10 @@ mod openrouter_sse_stream;
 mod tests;
 
 #[cfg(test)]
+#[path = "ollama_context_tests.rs"]
+mod ollama_context_tests;
+
+#[cfg(test)]
 #[path = "openrouter_catalog_merge_tests.rs"]
 mod openrouter_catalog_merge_tests;
 

@@ -764,6 +764,9 @@ codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"
+# Used by tests/context_window_matrix.rs to assert the shared context-window
+# resolution invariants directly, without going through a live provider.
+jcode-provider-core = { path = "crates/jcode-provider-core" }
 # Enables the downstream test-support helpers (storage::lock_test_env,
 # auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, the
 # ExternalAuthReviewCandidate read accessors) for the root crate's own cli test
