@@ -68,6 +68,51 @@ pub fn append_config_edit_notice(body: &mut String, path: &Path, before: &str, a
     }
 }
 
+/// Read the config file, treating "absent or unreadable" as empty.
+///
+/// An absent config file is the normal pre-state for the write that creates
+/// it, and an unreadable one is reported by the change summary itself, so
+/// there is no error here worth propagating: empty is the meaningful value.
+fn read_config_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Watches the active config file across a whole tool invocation.
+///
+/// Tools that touch several files, or write through several code paths (patch
+/// application, moves, deletes), cannot easily thread before/after content to
+/// the place that builds the result string. This captures the config file
+/// content up front and re-reads it at the end, so a config edit is reported
+/// no matter which path produced it.
+pub struct ConfigEditWatch {
+    path: Option<std::path::PathBuf>,
+    before: String,
+}
+
+impl ConfigEditWatch {
+    /// Snapshot the active config file before a tool runs.
+    pub fn begin() -> Self {
+        let path = crate::config::Config::path();
+        let before = match path.as_deref() {
+            Some(path) => read_config_text(path),
+            None => String::new(),
+        };
+        Self { path, before }
+    }
+
+    /// Append a change report if the config file changed while the tool ran.
+    pub fn finish(self, body: &mut String) {
+        let Some(path) = self.path else {
+            return;
+        };
+        let after = read_config_text(&path);
+        if after == self.before {
+            return;
+        }
+        append_config_edit_notice(body, &path, &self.before, &after);
+    }
+}
+
 #[cfg(test)]
 #[path = "config_edit_notice_tests.rs"]
 mod tests;

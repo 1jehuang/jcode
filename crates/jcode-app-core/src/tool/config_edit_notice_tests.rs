@@ -191,3 +191,47 @@ async fn the_write_tool_reports_config_changes_end_to_end() {
 
     restore_jcode_home(prev);
 }
+
+/// `apply_patch` reaches config.toml through its own write paths, so it gets
+/// the same report as write/edit.
+#[tokio::test]
+async fn apply_patch_reports_config_changes() {
+    use crate::tool::{Tool, ToolContext};
+
+    let _guard = crate::storage::lock_test_env();
+    let (dir, prev) = temp_jcode_home();
+
+    let path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+    std::fs::write(&path, "[display]\ncentered = false\n").expect("seed config");
+    assert!(!crate::config::config().display.centered);
+
+    let ctx = ToolContext {
+        session_id: "test".to_string(),
+        message_id: "test".to_string(),
+        tool_call_id: "test".to_string(),
+        working_dir: Some(dir.path().to_path_buf()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    };
+
+    let patch_text = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@\n-centered = false\n+centered = true\n*** End Patch\n",
+        path.display()
+    );
+    let output = crate::tool::apply_patch::ApplyPatchTool
+        .execute(serde_json::json!({ "patch_text": patch_text }), ctx)
+        .await
+        .expect("patch should apply");
+
+    let body = output.output;
+    assert!(body.contains("display.centered"), "{body}");
+    assert!(body.contains("live now"), "{body}");
+    assert!(
+        crate::config::config().display.centered,
+        "the patched setting should be live immediately"
+    );
+
+    restore_jcode_home(prev);
+}
