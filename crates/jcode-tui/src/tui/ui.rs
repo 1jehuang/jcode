@@ -194,6 +194,11 @@ static LAST_DIFF_PANE_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
 /// put instead of teleporting to the new absolute top).
 #[cfg(not(test))]
 static LAST_TOTAL_WRAPPED_LINES: AtomicUsize = AtomicUsize::new(0);
+/// Height (rows) of the chat messages viewport on the most recent frame.
+/// Terminal-style clear (Ctrl+L) sizes its blank spacer block from this so the
+/// visible screen ends up exactly empty.
+#[cfg(not(test))]
+static LAST_CHAT_VIEWPORT_HEIGHT: AtomicUsize = AtomicUsize::new(0);
 /// The chat scroll offset the renderer actually used on the most recent frame
 /// (after clamping and after resolving any pending history anchor). Scroll
 /// handlers adopt this so manual scrolling resumes from the on-screen position.
@@ -225,6 +230,7 @@ thread_local! {
     static TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_DIFF_PANE_MAX_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_TOTAL_WRAPPED_LINES: Cell<usize> = const { Cell::new(0) };
+    static TEST_LAST_CHAT_VIEWPORT_HEIGHT: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
@@ -423,6 +429,31 @@ pub(crate) fn set_last_total_wrapped_lines(value: usize) {
     #[cfg(not(test))]
     {
         LAST_TOTAL_WRAPPED_LINES.store(value, Ordering::Relaxed);
+    }
+}
+
+/// Height (rows) of the chat messages viewport on the most recent frame.
+/// Returns 0 if no frame has been rendered yet.
+pub(crate) fn last_chat_viewport_height() -> usize {
+    #[cfg(test)]
+    {
+        return TEST_LAST_CHAT_VIEWPORT_HEIGHT.with(Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        LAST_CHAT_VIEWPORT_HEIGHT.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) fn set_last_chat_viewport_height(value: usize) {
+    #[cfg(test)]
+    {
+        TEST_LAST_CHAT_VIEWPORT_HEIGHT.with(|cell| cell.set(value));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        LAST_CHAT_VIEWPORT_HEIGHT.store(value, Ordering::Relaxed);
     }
 }
 
