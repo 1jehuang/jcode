@@ -8,6 +8,7 @@ mod browser;
 mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
+mod config_edit_notice;
 mod conversation_search;
 mod debug_socket;
 mod discover;
