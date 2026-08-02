@@ -122,6 +122,7 @@ toolset so Discovery competes with bash, browser, and web tools:
 | claude-haiku-4-5 | 11 | 18% | 45% | 0% |
 | glm-4.7-flash | 12 | 38% | 0% | 0% |
 | gpt-oss-120b (cerebras) | 24 | 0% | 11% | 0% |
+| gemini-2.5-flash-lite | 9 | 44% | 0% | 0% |
 
 Three things stand out.
 
@@ -163,12 +164,28 @@ python scripts/verify_discovery_select.py ./target/selfdev/jcode
 The description change has not yet been confirmed by a matched live run. Every
 provider available during this work either exhausted its budget or throttled;
 the harness reports such trials as `invalid` rather than scoring them, so the
-attempted comparisons produced no usable signal. Re-run the matched comparison
-when credits allow:
+attempted comparisons produced no usable signal.
+
+The one usable pre-change arm is preserved at
+`target/discovery-rate/flash-lite-before.json` (gemini-2.5-flash-lite, 9 scored
+trials, 44% browse recall, 0% select). Because that arm is already measured,
+finishing the comparison only needs the post-change arm, which halves the quota
+cost:
 
 ```bash
-PROVIDER=<provider> scripts/compare_discovery_rate.sh <before-bin> <after-bin> <model> 3
+JCODE_BIN=<after-bin> python scripts/benchmark_discovery_rate.py \
+  --provider gemini-api --model gemini-2.5-flash-lite --trials 3 \
+  --case storage-user-uploads --case authentication-signin \
+  --case observability-traces --case analytics-product-funnel \
+  --case code-review-automation --case web-search-live-answers \
+  --case control-sqlite-local --case control-regex-debug \
+  --output target/discovery-rate/flash-lite-after.json
 ```
+
+Compare `summary.recall_browse_rate` and `summary.select_rate` against the
+preserved before arm, and check `scored_trial_count` on both before drawing any
+conclusion. Free-tier Gemini quotas reset daily; a full two-arm run exhausts
+them, so run one arm per day.
 
 Single-trial runs are noise. An early 12-case comparison moved any-call from 38%
 to 25% with no consistent per-case pattern; at n=1 per case that difference is
