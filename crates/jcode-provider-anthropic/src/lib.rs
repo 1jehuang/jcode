@@ -1243,3 +1243,7 @@ mod trailing_assistant_repair_tests;
 #[cfg(test)]
 #[path = "duplicate_tool_result_tests.rs"]
 mod duplicate_tool_result_tests;
+
+#[cfg(test)]
+#[path = "wedge_fixture_check.rs"]
+mod wedge_fixture_check;
