@@ -3264,6 +3264,7 @@ dependencies = [
  "jcode-provider-antigravity-runtime",
  "jcode-provider-claude-cli-runtime",
  "jcode-provider-copilot-runtime",
+ "jcode-provider-core",
  "jcode-provider-cursor-runtime",
  "jcode-provider-doctor",
  "jcode-provider-gemini-runtime",
