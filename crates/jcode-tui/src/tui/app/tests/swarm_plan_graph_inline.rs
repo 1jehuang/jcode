@@ -922,8 +922,9 @@ fn test_swarm_plan_pushes_no_plan_graph_message_when_mermaid_disabled() {
 //   3. local session recovery (conversation_state.rs)
 //   (`/cls` is the view-only clear `clear_view_keep_context`, which DOES
 //   clear the registry: the user asked for an empty view, so the pinned
-//   diagram pane empties with it. Ctrl+L / Cmd+L merely snap to the chat
-//   bottom and touch neither the transcript nor the registry. On
+//   diagram pane empties with it. Ctrl+L / Cmd+L are terminal-style: they
+//   append a blank spacer and touch neither the transcript nor the registry.
+//   On
 //   reconnect a restored transcript may reuse cached bodies without
 //   re-registering its diagrams - an accepted cosmetic tradeoff; new renders
 //   re-register normally.)
@@ -1229,11 +1230,12 @@ fn test_remote_clear_command_clears_active_diagrams_but_keeps_swarm_plan_state()
     crate::tui::mermaid::clear_active_diagrams();
 }
 
-/// Path 5: Ctrl+L (all connection states) now only snaps to the chat bottom
-/// via `follow_chat_bottom`; the transcript, queue, diagram registry, and
-/// swarm plan snapshot are all untouched. `/cls` is the view-only clear.
+/// Path 5: Ctrl+L (all connection states) is a terminal-style clear: it
+/// appends a blank spacer and snaps to the bottom. The transcript, queue,
+/// diagram registry, and swarm plan snapshot are all untouched. `/cls` is
+/// the view-only clear.
 #[test]
-fn test_disconnected_ctrl_l_only_scrolls_and_touches_nothing() {
+fn test_disconnected_ctrl_l_only_adds_spacer_and_touches_nothing() {
     let _render_lock = scroll_render_test_lock();
     let _mode_guard = DiagramModeOverrideGuard::pinned();
     let mut app = create_test_app();
@@ -1255,10 +1257,9 @@ fn test_disconnected_ctrl_l_only_scrolls_and_touches_nothing() {
 
     assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
     assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
-    assert_eq!(
-        app.display_messages().len(),
-        messages_before,
-        "transcript is untouched (that is /cls)"
+    assert!(
+        app.display_messages().len() >= messages_before,
+        "transcript content is untouched (a spacer may be appended)"
     );
     assert_eq!(app.queued_messages.len(), 1, "queue is untouched");
     assert!(

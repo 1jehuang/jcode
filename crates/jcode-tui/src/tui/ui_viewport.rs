@@ -401,6 +401,7 @@ pub(super) fn draw_messages(
     // tick can adopt the exact on-screen position after a prepend.
     super::set_last_total_wrapped_lines(total_lines);
     super::set_last_resolved_chat_scroll(scroll);
+    super::set_last_chat_viewport_height(viewport_height);
 
     let prompt_preview_lines = if crate::config::config().display.prompt_preview && scroll > 0 {
         compute_prompt_preview_line_count(
