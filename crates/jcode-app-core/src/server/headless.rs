@@ -35,6 +35,12 @@ pub(super) async fn create_headless_session(
     effort_override: Option<String>,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
+    // Isolate this session's memory into throwaway test storage. True only for
+    // debug-socket admin sessions, where isolation is the point. Real
+    // swarm-spawned workers must keep real project/global memory scoped to
+    // their working directory, otherwise they can never see what the session
+    // that spawned them remembered (#729).
+    isolate_memory: bool,
 ) -> Result<String> {
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
@@ -53,7 +59,9 @@ pub(super) async fn create_headless_session(
     let provider = provider_template.fork();
     let registry = Registry::new(provider.clone()).await;
 
-    registry.enable_memory_test_mode().await;
+    if isolate_memory {
+        registry.enable_memory_test_mode().await;
+    }
 
     if selfdev_requested {
         registry.register_selfdev_tools().await;
