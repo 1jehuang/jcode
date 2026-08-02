@@ -621,6 +621,10 @@ impl crate::tui::TuiState for App {
         self.auto_scroll_paused
     }
 
+    fn terminal_clear_collapsed(&self) -> bool {
+        self.terminal_clear_collapsed()
+    }
+
     fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
         self.pending_history_anchor
             .map(|anchor| anchor.lines_from_bottom)

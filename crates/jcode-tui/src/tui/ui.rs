@@ -3113,8 +3113,23 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.total_wrapped_lines().max(1) as u16;
 
+    // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
+    // transcript row blank, so a normal bottom-anchored layout would park the
+    // status line and numbered prompt at the *bottom* of a screenful of
+    // blanks. Collapse the messages area instead, exactly like a terminal
+    // after `clear`: the prompt sits at the top and the history is one scroll
+    // away. Scrolling up, new output, or streaming all end the state (see
+    // `terminal_clear_collapsed`) and restore the normal layout.
+    let terminal_clear_collapsed = !swarm_page_active && app.terminal_clear_collapsed();
+    let content_height = if terminal_clear_collapsed {
+        0
+    } else {
+        content_height
+    };
+
     // Use packed layout when content fits, scrolling layout otherwise
-    let use_packed = !swarm_page_active && content_height + fixed_height <= available_height;
+    let use_packed = terminal_clear_collapsed
+        || (!swarm_page_active && content_height + fixed_height <= available_height);
 
     // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).
@@ -3122,16 +3137,20 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         .direction(Direction::Vertical)
         .constraints(if use_packed {
             vec![
-                Constraint::Length(content_height.max(1)), // 0 Messages (exact height)
-                Constraint::Length(queued_height),         // 1 Queued messages (above status)
-                Constraint::Length(swarm_strip_height),    // 2 Swarm strip (above status)
-                Constraint::Length(1),                     // 3 Status line
-                Constraint::Length(notification_height),   // 4 Notification line
-                Constraint::Length(inline_block_height),   // 5 Inline UI
-                Constraint::Length(inline_ui_gap_height),  // 6 Inline UI/input spacing
-                Constraint::Length(input_height),          // 7 Input
-                Constraint::Length(overscroll_height),     // 8 Overscroll status line
-                Constraint::Length(donut_height),          // 9 Donut animation
+                Constraint::Length(if terminal_clear_collapsed {
+                    0
+                } else {
+                    content_height.max(1)
+                }), // 0 Messages (exact height; 0 when terminal-cleared)
+                Constraint::Length(queued_height), // 1 Queued messages (above status)
+                Constraint::Length(swarm_strip_height), // 2 Swarm strip (above status)
+                Constraint::Length(1),             // 3 Status line
+                Constraint::Length(notification_height), // 4 Notification line
+                Constraint::Length(inline_block_height), // 5 Inline UI
+                Constraint::Length(inline_ui_gap_height), // 6 Inline UI/input spacing
+                Constraint::Length(input_height),  // 7 Input
+                Constraint::Length(overscroll_height), // 8 Overscroll status line
+                Constraint::Length(donut_height),  // 9 Donut animation
             ]
         } else {
             vec![
@@ -3269,6 +3288,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             right_widths: Vec::new(),
             left_widths: Vec::new(),
             centered: false,
+            ..Default::default()
+        }
+    } else if terminal_clear_collapsed {
+        // Collapsed terminal-style clear: the messages chunk is zero-height, so
+        // there is nothing to draw. Deliberately skip `draw_messages` so it does
+        // not publish a zero-height viewport/max-scroll geometry that the scroll
+        // handlers would then resolve against; the last real geometry stays
+        // authoritative until the first scroll-up restores the full layout.
+        info_widget::Margins {
+            right_widths: Vec::new(),
+            left_widths: Vec::new(),
+            centered: app.centered_mode(),
             ..Default::default()
         }
     } else {
