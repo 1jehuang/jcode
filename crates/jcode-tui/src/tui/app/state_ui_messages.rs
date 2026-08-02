@@ -74,6 +74,18 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
 impl App {
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
         compact_display_message_tool_data(&mut message);
+        // A trailing Ctrl+L spacer only exists to keep the screen clear while
+        // idle. The moment real content arrives, drop it so the transcript
+        // stays contiguous instead of keeping a screenful of blank rows
+        // embedded in the scrollback.
+        if message.role != "spacer"
+            && self
+                .display_messages
+                .last()
+                .is_some_and(|last| last.role == "spacer")
+        {
+            self.display_messages.pop();
+        }
         if self.try_coalesce_repeated_display_message(&message) {
             return;
         }
@@ -393,6 +405,23 @@ impl App {
             self.push_display_message(DisplayMessage::spacer(rows));
         }
         self.follow_chat_bottom();
+    }
+
+    /// Whether the view is in the terminal-style cleared state: the transcript
+    /// ends in a Ctrl+L spacer, the viewport is pinned to the bottom, and no
+    /// new output has arrived since. In that state every visible transcript row
+    /// is blank, so the renderer collapses the messages area and the numbered
+    /// prompt sits at the top of the screen like a terminal after `clear`.
+    /// Any new message, stream, or scroll-up immediately ends it.
+    pub(crate) fn terminal_clear_collapsed(&self) -> bool {
+        !self.auto_scroll_paused
+            && self.pending_history_anchor.is_none()
+            && !self.is_processing
+            && self.streaming.streaming_text.is_empty()
+            && self
+                .display_messages
+                .last()
+                .is_some_and(|message| message.role == "spacer")
     }
 
     /// View-only clear (`/cls`): wipe the rendered transcript while
