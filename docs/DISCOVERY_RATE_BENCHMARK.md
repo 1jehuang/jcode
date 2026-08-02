@@ -166,9 +166,9 @@ provider available during this work either exhausted its budget or throttled;
 the harness reports such trials as `invalid` rather than scoring them, so the
 attempted comparisons produced no usable signal.
 
-The one usable pre-change arm is preserved at
-`target/discovery-rate/flash-lite-before.json` (gemini-2.5-flash-lite, 9 scored
-trials, 44% browse recall, 0% select). Because that arm is already measured,
+The one usable pre-change arm is preserved in the repo at
+`docs/discovery-baselines/flash-lite-before.json` (gemini-2.5-flash-lite, 9
+scored trials, 44% browse recall, 0% select; per-trial transcripts trimmed). Because that arm is already measured,
 finishing the comparison only needs the post-change arm, which halves the quota
 cost:
 
