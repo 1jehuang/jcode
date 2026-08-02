@@ -139,6 +139,16 @@ on 83% of capability-gap cases while leaving every control clean, so the first
 half of the policy is in reasonable shape. Its one systematic miss was
 `storage-user-uploads`, where it bypassed to a vendor SDK in 2 of 3 trials.
 
+**Installed skills can preempt Discovery.** Claude's only systematic miss was
+`storage-user-uploads`. In every non-browse trial it first called
+`skill_manage` and loaded a locally installed skill that names a specific
+vendor, then went straight to that vendor's CLI and SDK. Discovery never got a
+chance. Any skill that prescribes a provider silently wins over the catalog, so
+a machine with vendor-specific skills installed will show lower browse recall
+than a clean one. Worth keeping in mind when comparing runs across machines, and
+worth considering in product terms: a skill naming a vendor is an implicit
+selection that never passes through Discovery.
+
 **Triggering is strongly model-dependent.** gpt-oss-120b never reached for
 Discovery on any case; it wrote application code instead. A weak model can score
 0% for reasons no wording change will fix, so a description experiment is only

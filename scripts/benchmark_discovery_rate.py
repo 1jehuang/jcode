@@ -82,9 +82,14 @@ VENDOR_CLIS = (
     "vercel|stripe|supabase|neonctl|railway|flyctl|heroku|wrangler|doctl|netlify|"
     "planetscale|pscale|sentry-cli|datadog-ci|clerk|auth0|twilio|sendgrid|resend"
 )
+# A package install only counts when a package name follows. `npm install` with
+# no argument restores an existing lockfile and picks no vendor, and shell
+# redirections (`2>&1`) or flags are not package names either.
+_PKG_ARG = r"\b(?:{mgr})\s+(?:{verb})\s+(?![-.]|\d*[<>|&])[A-Za-z@][\w@/.-]*"
+
 BYPASS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("package-install", re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:add|install)\s+(?![-.]|$)\S", re.I)),
-    ("package-install", re.compile(r"\b(?:pip|pip3|uv)\s+(?:install|add)\s+(?![-.]|$)\S", re.I)),
+    ("package-install", re.compile(_PKG_ARG.format(mgr="npm|pnpm|yarn|bun", verb="add|install"), re.I)),
+    ("package-install", re.compile(_PKG_ARG.format(mgr="pip|pip3|uv", verb="install|add"), re.I)),
     ("package-install", re.compile(r"\bcargo\s+add\s+\w", re.I)),
     ("package-install", re.compile(r"\bgo\s+get\s+\w+\.\w", re.I)),
     ("vendor-cli", re.compile(_CMD_HEAD + rf"(?:{VENDOR_CLIS})\s+[a-z]", re.I | re.M)),

@@ -26,6 +26,8 @@ class DetectBypassTests(unittest.TestCase):
             ("bash", '{"command": "npm install @vercel/blob"}', "package-install"),
             ("bash", '{"command": "pip install stripe"}', "package-install"),
             ("bash", '{"command": "cargo add aws-sdk-s3"}', "package-install"),
+            ("bash", '{"command": "uv add httpx"}', "package-install"),
+            ("bash", '{"command": "npm install @vercel/blob 2>&1"}', "package-install"),
             ("bash", '{"command": "cd app && vercel deploy --prod"}', "vendor-cli"),
             ("bash", '{"command": "npx wrangler r2 bucket create uploads"}', "vendor-cli"),
             ("webfetch", '{"url": "https://api.stripe.com/v1/charges"}', "vendor-endpoint"),
@@ -41,6 +43,11 @@ class DetectBypassTests(unittest.TestCase):
             ("bash", '{"command": "ls -la"}'),
             ("bash", '{"command": "python -m pytest -q"}'),
             ("bash", '{"command": "npm install"}'),  # restore existing lockfile, no vendor chosen
+            # A redirection is not a package name. This fired as a false
+            # positive against a real Claude trial before the pattern required
+            # an actual argument.
+            ("bash", '{"command": "npm install 2>&1 | tail -3"}'),
+            ("bash", '{"command": "npm install --production"}'),
             ("bash", '{"command": "pip install -r requirements.txt"}'),
             ("bash", '{"command": "command -v vercel neonctl psql node"}'),
             ("bash", '{"command": "git log --oneline -5"}'),
