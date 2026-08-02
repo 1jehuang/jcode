@@ -33,6 +33,13 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
 
         loop {
+            // Do not start another provider request once a cancel has been
+            // observed; the loop is re-entered by several recovery paths
+            // (issue #732, regression of #428).
+            if self.is_graceful_shutdown() {
+                logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
             let repaired = self.repair_missing_tool_outputs();
             if repaired > 0 {
                 logging::warn(&format!(

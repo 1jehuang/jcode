@@ -98,6 +98,16 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
 
         loop {
+            // Never open a new provider request after a cancel. Several paths
+            // `continue` this loop (compaction retry, incomplete/stranded
+            // continuation, empty-response recovery, soft-interrupt injection),
+            // and without this check an Esc that landed during a stream could
+            // be followed by another full request, which looks to the user like
+            // the interrupt was ignored (issue #732, regression of #428).
+            if self.is_graceful_shutdown() {
+                logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
             let repaired = self.repair_missing_tool_outputs();
             if repaired > 0 {
                 logging::warn(&format!(
