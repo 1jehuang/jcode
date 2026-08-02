@@ -1572,6 +1572,16 @@ fn render_message_into(
                 acc.push_auto(align_if_unset(line, align));
             }
         }
+        // Terminal-style clear spacer (Ctrl+L): N blank rows that push the
+        // prior transcript up out of the viewport while keeping it in
+        // scrollback. The separator blank already pushed above counts toward
+        // the requested height.
+        "spacer" => {
+            let rows: usize = msg.content.trim().parse().unwrap_or(0);
+            for _ in 0..rows.saturating_sub(1) {
+                acc.push_blank();
+            }
+        }
         "reasoning" => {
             let content_width = width.saturating_sub(4);
             let cached = get_cached_message_lines(

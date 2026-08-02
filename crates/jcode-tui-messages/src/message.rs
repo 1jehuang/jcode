@@ -190,6 +190,21 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a display-only spacer used by the terminal-style clear (Ctrl+L):
+    /// renders as `rows` blank lines so the prior transcript sits just above
+    /// the viewport, exactly like a terminal's clear-with-scrollback. Not part
+    /// of provider/model context.
+    pub fn spacer(rows: usize) -> Self {
+        Self {
+            role: "spacer".to_string(),
+            content: rows.to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        }
+    }
+
     /// Create a display-only collapsing reasoning trace ("current" mode). The
     /// content is sentinel-wrapped dim/italic markup; this message height-collapses
     /// toward a one-line summary and is excluded from provider/model context.

@@ -1892,10 +1892,11 @@ pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
             paste_from_clipboard(app);
             true
         }
-        // Cmd+L mirrors Ctrl+L: snap to the bottom of the chat (terminals
-        // that forward Command report it as Super+L).
+        // Cmd+L mirrors Ctrl+L: terminal-style clear (blank spacer pushes
+        // the transcript up into scrollback; terminals that forward Command
+        // report it as Super+L).
         KeyCode::Char('l') => {
-            app.follow_chat_bottom();
+            app.clear_view_terminal_style();
             true
         }
         _ => false,
@@ -2488,13 +2489,14 @@ pub(super) fn handle_global_control_shortcuts(
             app.copy_chat_viewport_context_to_clipboard();
             true
         }
-        // Ctrl+L: terminal-style "give me a clean prompt" - snap to the
-        // bottom of the chat and resume tail-follow. The transcript stays;
-        // use /cls for an actual view wipe. Only reachable when no side pane
-        // claimed 'l' for focus (handle_diagram_ctrl_key runs first and wins
-        // while a diagram or diff pane is available).
+        // Ctrl+L: terminal-style clear - a viewport-height blank spacer
+        // pushes the transcript up into scrollback, leaving a clean prompt.
+        // Nothing is deleted; scroll up to see history, /cls actually wipes
+        // the view. Only reachable when no side pane claimed 'l' for focus
+        // (handle_diagram_ctrl_key runs first and wins while a diagram or
+        // diff pane is available).
         KeyCode::Char('l') => {
-            app.follow_chat_bottom();
+            app.clear_view_terminal_style();
             true
         }
         _ => handle_control_key(app, code),

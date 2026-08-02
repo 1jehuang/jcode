@@ -36,6 +36,42 @@ fn test_scroll_cmd_j_k_fallback_in_app() {
     assert!(app.scroll_offset <= after_up);
 }
 
+/// Terminal-style Ctrl+L: after the clear the rendered messages area shows no
+/// transcript body (the spacer fills the viewport; only the sticky
+/// previous-prompt preview band may remain at the top), and scrolling up
+/// brings the old content back, exactly like a terminal's
+/// clear-with-scrollback.
+#[test]
+fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+
+    // Seed viewport geometry (viewport height, max scroll) with a real frame.
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        before.contains("Intro line"),
+        "sanity: transcript body is visible before Ctrl+L"
+    );
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    let after = render_and_snap(&app, &mut terminal);
+    assert!(
+        !after.contains("Intro line"),
+        "after Ctrl+L no transcript body is visible:\n{after}"
+    );
+
+    // History is still there: scroll up a page and the content returns.
+    for _ in 0..12 {
+        app.scroll_up(3);
+    }
+    let scrolled = render_and_snap(&app, &mut terminal);
+    assert!(
+        scrolled.contains("Intro line"),
+        "scrolling up reveals the pre-clear transcript:\n{scrolled}"
+    );
+}
+
 #[test]
 fn test_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();

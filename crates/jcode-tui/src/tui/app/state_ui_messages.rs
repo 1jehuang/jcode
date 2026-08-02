@@ -374,6 +374,27 @@ impl App {
         }
     }
 
+    /// Terminal-style clear (Ctrl+L): append a viewport-height blank spacer
+    /// and snap to the bottom, so the screen shows a clean prompt while the
+    /// whole transcript stays one scroll-up away, exactly like a terminal's
+    /// clear-with-scrollback. Nothing is deleted; context, queue, and draft
+    /// are untouched. Contrast with `/cls` (`clear_view_keep_context`), which
+    /// actually wipes the rendered transcript.
+    pub(super) fn clear_view_terminal_style(&mut self) {
+        let rows = super::super::ui::last_chat_viewport_height();
+        // Pressing Ctrl+L repeatedly (or on an already-empty screen) should
+        // not stack blank pages: with a trailing spacer and nothing after it,
+        // the viewport is already visually clear, so just re-snap.
+        let already_clear = self
+            .display_messages
+            .last()
+            .is_some_and(|message| message.role == "spacer");
+        if rows > 0 && !already_clear && !self.display_messages.is_empty() {
+            self.push_display_message(DisplayMessage::spacer(rows));
+        }
+        self.follow_chat_bottom();
+    }
+
     /// View-only clear (`/cls`): wipe the rendered transcript while
     /// keeping provider context, queued messages, and the input draft intact,
     /// so the model still remembers everything. Contrast with `/clear`
