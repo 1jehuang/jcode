@@ -231,6 +231,29 @@ fn openai_compatible_keyword(key: &str, value: &Value) -> Value {
     }
 }
 
+/// Whether a schema declares enough type information for OpenAI strict mode.
+/// An "empty" schema like `{"description": "..."}` accepts any instance in JSON
+/// Schema, but OpenAI's strict subset requires a concrete type keyword.
+fn schema_has_type_info(schema: &Value) -> bool {
+    match schema {
+        Value::Bool(_) => false,
+        Value::Object(map) => [
+            "type",
+            "enum",
+            "const",
+            "$ref",
+            "anyOf",
+            "oneOf",
+            "allOf",
+            "properties",
+            "items",
+        ]
+        .iter()
+        .any(|key| map.contains_key(*key)),
+        _ => true,
+    }
+}
+
 pub fn schema_supports_strict(schema: &Value) -> bool {
     fn check_map(map: &serde_json::Map<String, Value>) -> bool {
         let is_object_typed = match map.get("type") {
@@ -252,6 +275,16 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
                 return false;
             }
             if matches!(map.get("additionalProperties"), Some(Value::Object(_))) {
+                return false;
+            }
+        }
+
+        // A property carrying no type information at all (e.g. only a
+        // `description`) is valid JSON Schema, but strict normalization turns it
+        // into an untyped `anyOf` branch that makes OpenAI reject the entire tool
+        // catalog. Fall back to non-strict instead. See issue #713.
+        if let Some(Value::Object(props)) = map.get("properties") {
+            if props.values().any(|prop| !schema_has_type_info(prop)) {
                 return false;
             }
         }
@@ -590,6 +623,33 @@ mod tests {
         assert!(schema_supports_strict(&json!({
             "type": "object",
             "properties": { "x": { "type": "string" } },
+            "additionalProperties": false
+        })));
+    }
+
+    /// Regression test for issue #713: an MCP tool property with only a
+    /// `description` (no type keyword) made OpenAI reject the whole tool catalog.
+    #[test]
+    fn schema_supports_strict_rejects_untyped_properties() {
+        assert!(!schema_supports_strict(&json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "value": { "description": "JSON type depends on the key." }
+            },
+            "additionalProperties": false
+        })));
+        assert!(!schema_supports_strict(&json!({
+            "type": "object",
+            "properties": { "value": true },
+            "additionalProperties": false
+        })));
+        assert!(schema_supports_strict(&json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "value": { "enum": ["a", "b"] }
+            },
             "additionalProperties": false
         })));
     }
