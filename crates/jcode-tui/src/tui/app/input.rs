@@ -2711,6 +2711,11 @@ impl App {
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        // Pick up config.toml keybinding edits before this key is matched.
+        // The idle tick refreshes too, but it can run as slowly as the 5s
+        // deep-idle cadence, which would leave the first keystroke after an
+        // edit matched against the old chords.
+        self.refresh_keybindings_if_config_reloaded();
         self.handle_key_core(
             event.code,
             event.modifiers,
