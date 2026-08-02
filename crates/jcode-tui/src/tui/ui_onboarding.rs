@@ -6,20 +6,14 @@
 //!
 //! Layout, top to bottom, vertically centered in the chat area:
 //!   1. Grayed telemetry notice header.
-//!   2. The animated donut (attention grab).
-//!   3. "Welcome to jcode onboarding" title.
-//!   4. The login / getting-started prompt with suggestions.
-//!
-//! The donut is drawn as a live widget (not part of the cached transcript) so
-//! it animates every frame, matching the idle-donut behavior elsewhere.
+//!   2. "Welcome to jcode onboarding" title.
+//!   3. The login / getting-started prompt with suggestions.
 
-use super::animations;
 use super::dim_color;
 use crate::tui::TuiState;
 use crate::tui::color_support::rgb;
 use ratatui::{prelude::*, widgets::Paragraph};
 
-const DONUT_HEIGHT: u16 = 18;
 const TELEMETRY_LINES: u16 = 4;
 const GAP: u16 = 1;
 
@@ -382,7 +376,7 @@ fn telemetry_header_lines(width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Welcome title line, rendered just above the donut.
+/// Welcome title line, rendered above the phase body.
 fn welcome_title_line() -> Line<'static> {
     Line::from(Span::styled(
         "Welcome to jcode onboarding",
@@ -393,7 +387,7 @@ fn welcome_title_line() -> Line<'static> {
     .alignment(Alignment::Center)
 }
 
-/// Short keyboard hint rendered just below the donut on guided phases. Replaces
+/// Short keyboard hint rendered on guided phases. Replaces
 /// the old multi-line instruction prose: the interactive pills/rows already show
 /// what is selectable, so a one-liner is enough.
 fn keyboard_hint_line() -> Line<'static> {
@@ -404,9 +398,8 @@ fn keyboard_hint_line() -> Line<'static> {
     .alignment(Alignment::Center)
 }
 
-/// The phase-specific body of the welcome screen (everything below the donut and
-/// keyboard hint). The title now lives above the donut, so this no longer emits
-/// it.
+/// The phase-specific body of the welcome screen (everything below the title and
+/// keyboard hint), so this no longer emits the title itself.
 fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
     let align = Alignment::Center;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -672,9 +665,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
 /// Draw the full onboarding welcome screen into `area`.
 ///
 /// Vertical structure (top to bottom):
-///   telemetry header, gap, title, donut, keyboard hint, gap, phase body.
-/// The title sits directly above the donut and a one-line keyboard hint sits
-/// directly below it, so the phase body underneath can stay lean.
+///   telemetry header, gap, title, keyboard hint, gap, phase body.
 pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.width < 4 || area.height < 6 {
         // Too small for the full treatment: fall back to a minimal welcome.
@@ -688,31 +679,24 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
     let body = welcome_body_lines(app);
     let telemetry_h = (telemetry.len() as u16).min(TELEMETRY_LINES);
     let body_h = body.len() as u16;
-    // Title above the donut, keyboard hint below it. Both are single lines and
-    // only shown when there is room for the donut treatment.
     const TITLE_H: u16 = 1;
     const HINT_H: u16 = 1;
 
-    // Donut shrinks if the area is short so the welcome text always fits. The
-    // title + hint lines that hug the donut are part of the reserved chrome.
-    let donut_h = DONUT_HEIGHT.min(
-        area.height
-            .saturating_sub(telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2 + 1),
-    );
-    let show_donut_block = donut_h > 0;
+    // The title/hint block is dropped first when the area is short so the
+    // phase body (the actionable part) always fits.
+    let show_title_block = area.height >= telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2 + 1;
 
-    let used = if show_donut_block {
-        telemetry_h + GAP + TITLE_H + donut_h + HINT_H + GAP + body_h
+    let used = if show_title_block {
+        telemetry_h + GAP + TITLE_H + HINT_H + GAP + body_h
     } else {
         telemetry_h + GAP + body_h
     };
     let pad_top = area.height.saturating_sub(used) / 2;
 
     let mut constraints = vec![Constraint::Length(pad_top), Constraint::Length(telemetry_h)];
-    if show_donut_block {
+    if show_title_block {
         constraints.push(Constraint::Length(GAP));
         constraints.push(Constraint::Length(TITLE_H));
-        constraints.push(Constraint::Length(donut_h));
         constraints.push(Constraint::Length(HINT_H));
     }
     constraints.push(Constraint::Length(GAP));
@@ -724,23 +708,20 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
         .constraints(constraints)
         .split(area);
 
-    // chunks[0] = top pad, [1] = telemetry, then optional gap/title/donut/hint,
-    // gap, body.
+    // chunks[0] = top pad, [1] = telemetry, then optional gap/title/hint, gap, body.
     frame.render_widget(
         Paragraph::new(telemetry).alignment(Alignment::Center),
         chunks[1],
     );
 
     let mut idx = 2;
-    if show_donut_block {
+    if show_title_block {
         idx += 1; // skip gap chunk
         frame.render_widget(
             Paragraph::new(welcome_title_line()).alignment(Alignment::Center),
             chunks[idx],
         );
-        idx += 1; // title -> donut
-        animations::draw_idle_animation(frame, app, chunks[idx]);
-        idx += 1; // donut -> hint
+        idx += 1; // title -> hint
         frame.render_widget(
             Paragraph::new(keyboard_hint_line()).alignment(Alignment::Center),
             chunks[idx],
