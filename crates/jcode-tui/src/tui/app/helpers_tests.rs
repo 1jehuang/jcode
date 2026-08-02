@@ -227,35 +227,18 @@ fn resume_spawn_is_compiled_on_every_platform_with_platform_neutral_args() {
     );
 }
 
-/// #715, the behavioral half. `spawn_in_new_terminal` deliberately short-
-/// circuits under `cfg!(test)` so unit tests never pop real windows, so this
-/// drives the layer immediately below that guard: the exact
-/// `TerminalCommand` + launcher call the fixed function performs.
+/// #715, the behavioral half. The compile-time guard above proves
+/// `spawn_in_new_terminal` exists on every target; this proves the invocation
+/// it builds actually reaches a launcher and gets spawned.
 ///
-/// The configured spawn hook is the injectable seam in that path, so pointing
-/// it at a recording script proves the resume invocation really reaches a
-/// launcher and that the launcher reports success, rather than only proving
-/// the function is compiled.
+/// Drives `spawn_command_in_new_terminal_with`, the injectable seam the real
+/// path bottoms out in, and records what the spawner was handed. Using the
+/// injected closure rather than the configured spawn hook keeps this
+/// deterministic: the hook is read through the process-wide cached config, so a
+/// hook-based test passes or fails depending on whether config was already
+/// loaded by an earlier test in the same binary.
 #[test]
 fn resume_invocation_reaches_the_launcher_and_reports_success() {
-    let dir = std::env::temp_dir().join(format!("jcode-715-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let record = dir.join("spawned.txt");
-    let hook = dir.join("hook.sh");
-    let _ = std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
-            record.display()
-        ),
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755));
-    }
-
-    // Build exactly what spawn_in_new_terminal forwards.
     let args = resume_invocation_args("ses_715_behavioral", None);
     let command = crate::terminal_launch::TerminalCommand::new(
         std::path::Path::new("/usr/bin/true"),
@@ -263,29 +246,27 @@ fn resume_invocation_reaches_the_launcher_and_reports_success() {
     )
     .title(resumed_window_title("ses_715_behavioral"));
 
-    // SAFETY: single-threaded test; the hook var is removed immediately after.
-    unsafe { std::env::set_var("JCODE_SPAWN_HOOK", &hook) };
-    let spawned = crate::terminal_launch::spawn_command_in_new_terminal(&command, &dir);
-    unsafe { std::env::remove_var("JCODE_SPAWN_HOOK") };
-
-    for _ in 0..50 {
-        if record.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let recorded = std::fs::read_to_string(&record).unwrap_or_default();
-    let _ = std::fs::remove_file(&record);
-    let _ = std::fs::remove_file(&hook);
-    let _ = std::fs::remove_dir(&dir);
-
-    assert!(
-        matches!(spawned, Ok(true)),
-        "launcher reported no terminal for the resume invocation: {spawned:?}"
+    let mut spawned: Vec<String> = Vec::new();
+    let result = crate::terminal_launch::spawn_command_in_new_terminal_with(
+        &command,
+        std::path::Path::new("/tmp"),
+        |cmd| {
+            spawned.push(cmd.get_program().to_string_lossy().into_owned());
+            for arg in cmd.get_args() {
+                spawned.push(arg.to_string_lossy().into_owned());
+            }
+            Ok(())
+        },
     );
+
     assert!(
-        recorded.contains("--resume") && recorded.contains("ses_715_behavioral"),
-        "launcher never received the resume invocation, got: {recorded:?}"
+        matches!(result, Ok(true)),
+        "launcher reported no terminal for the resume invocation: {result:?}"
+    );
+    let joined = spawned.join(" ");
+    assert!(
+        joined.contains("--resume") && joined.contains("ses_715_behavioral"),
+        "launcher never received the resume invocation, got: {joined:?}"
     );
 }
 
