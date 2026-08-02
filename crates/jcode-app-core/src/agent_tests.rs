@@ -1583,3 +1583,58 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
         "the recovered turn must deliver the model's real completion, got {text:?}"
     );
 }
+
+/// Regression: the missing tool-output repair must not synthesize a
+/// placeholder result for a tool call that is still executing. Doing so
+/// produced a duplicate `tool_result` once the real output landed, and
+/// Anthropic then rejected every later request for that session with
+/// "unexpected `tool_use_id` found in `tool_result` blocks".
+#[tokio::test]
+async fn repair_skips_tool_calls_that_are_still_executing() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let tool_id = "toolu_still_running_regression";
+    agent.session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "run it".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: tool_id.to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "sleep 300"}),
+            thought_signature: None,
+        }],
+    );
+
+    let in_flight = crate::tool::inflight::mark_tool_in_flight(tool_id).expect("guard");
+    assert_eq!(
+        agent.repair_missing_tool_outputs(),
+        0,
+        "a running tool must not be repaired"
+    );
+    assert!(
+        !agent.session.messages.iter().any(|m| m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))),
+        "no synthetic tool_result may be inserted while the tool runs"
+    );
+
+    // Once the tool finishes without delivering a result (a genuine
+    // interruption), repair is allowed to step in.
+    drop(in_flight);
+    agent.reset_tool_output_tracking();
+    assert_eq!(
+        agent.repair_missing_tool_outputs(),
+        1,
+        "a finished-but-unanswered tool must still be repaired"
+    );
+}
