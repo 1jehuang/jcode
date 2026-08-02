@@ -122,6 +122,15 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         note: "Frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
+        aliases: &["claude-opus-5", "opus-5", "opus 5", "claude opus 5"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
+    },
+    CuratedModel {
         id: "claude-sonnet-4-6",
         display_name: "Claude Sonnet 4.6",
         aliases: &[
@@ -511,6 +520,7 @@ mod tests {
 
     const EXPECTED_PLUS_MODELS: &[&str] = &[
         "claude-opus-4-8",
+        "claude-opus-5",
         "claude-sonnet-4-6",
         "gpt-5.5",
         "gpt-5.6-sol",
@@ -613,7 +623,7 @@ mod tests {
                 .iter()
                 .all(|model| model.min_tier != JcodeTier::Flagship)
         );
-        assert_eq!(CURATED_MODELS.len(), 19);
+        assert_eq!(CURATED_MODELS.len(), 20);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
         assert!(find_curated_model("llama-4-maverick").is_none());
