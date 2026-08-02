@@ -455,3 +455,74 @@ fn test_remote_copy_badge_shortcut_supported() {
         text
     );
 }
+
+/// Ctrl+L collapses the (entirely blank) messages viewport so the numbered
+/// prompt indicator lands at the *top* of the screen, exactly like a terminal
+/// after `clear`, instead of floating at the bottom under a screenful of
+/// blanks. Scrolling up drops the spacer and immediately brings the transcript
+/// back with the normal bottom-anchored layout.
+#[test]
+fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    let mut messages = Vec::new();
+    for prompt in 0..4 {
+        messages.push(DisplayMessage::user(format!("prompt number {prompt}")));
+        messages.push(DisplayMessage::assistant(
+            (0..15)
+                .map(|line| format!("resp {prompt} line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+    }
+    app.display_messages = messages;
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+
+    let backend = ratatui::backend::TestBackend::new(80, 25);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        before.contains("resp 3 line 14"),
+        "sanity: transcript is visible before Ctrl+L:\n{before}"
+    );
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(
+        app.terminal_clear_collapsed(),
+        "Ctrl+L enters the collapsed terminal-clear state"
+    );
+
+    let after = render_and_snap(&app, &mut terminal);
+    let rows: Vec<&str> = after.lines().collect();
+    let prompt_row = rows
+        .iter()
+        .position(|row| row.trim_end().ends_with('>'))
+        .unwrap_or_else(|| panic!("no prompt indicator row found:\n{after}"));
+    assert!(
+        prompt_row <= 2,
+        "prompt indicator should sit at the top after Ctrl+L, found on row \
+         {prompt_row}:\n{after}"
+    );
+    assert!(
+        !after.contains("resp 3 line 14"),
+        "the transcript is cleared from the screen:\n{after}"
+    );
+
+    // Scrolling up leaves the collapsed state and brings history straight back
+    // without first travelling through a viewport of blank spacer rows.
+    app.scroll_up(5);
+    assert!(
+        !app.terminal_clear_collapsed(),
+        "scrolling up exits the collapsed state"
+    );
+    let scrolled = render_and_snap(&app, &mut terminal);
+    assert!(
+        scrolled.contains("prompt number 0"),
+        "scrolling up reveals the pre-clear transcript:\n{scrolled}"
+    );
+}
