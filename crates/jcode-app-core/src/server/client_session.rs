@@ -120,6 +120,12 @@ async fn rename_shutdown_signal(
     }
     drop(signals);
     rename_background_tool_signal(old_session_id, new_session_id);
+    // In-flight turns are registered in the process-global cancel registry by
+    // session id. Attaching to / resuming a session renames it underneath a
+    // still-streaming turn, so the registration must follow, or a later Esc
+    // finds no active-turn signal for the new id and the model keeps
+    // generating (issue #732, regression of issue #428).
+    crate::turn_cancel_registry::rename_active_turns(old_session_id, new_session_id);
 }
 
 #[allow(clippy::too_many_arguments)]
