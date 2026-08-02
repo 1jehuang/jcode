@@ -1,0 +1,5183 @@
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }} */
+// trailing brace at EOL {
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* note {{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+/* note }}} */
+// comment with }
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+// trailing brace at EOL {
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// comment with }
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note { */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/* note }}} */
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{ */
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{{ */
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+/* note {{{ */
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+// trailing brace at EOL {
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/* note } */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+/* note }} */
+// comment with }
+/* note }} */
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{ */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }}} */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+// comment with {{
+/* note {{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{ */
+// comment with }
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note } */
+// comment with {{
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+// comment with }
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// comment with }
+// comment with {{
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }}} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* note { */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// trailing brace at EOL {
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+/*
+ multi {
+ line }
+*/
+// comment with }
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note { */
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }} */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+// comment with {{
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+/* note {{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/* note }} */
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+// comment with }
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+/* note {{{ */
+// comment with }
+// comment with }
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{ */
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note } */
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+/* note } */
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{ */
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+/* note {{{ */
+// trailing brace at EOL {
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+/*
+ multi {
+ line }
+*/
+/* note }}} */
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{{ */
+// trailing brace at EOL {
+/* note { */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+// comment with {{
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+// comment with {{
+/* note } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+/* balanced { } */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note { */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+/* note { */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }} */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* note {{ */
+// trailing brace at EOL {
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{ */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }} */
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* note {{{ */
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* note { */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{ */
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+// comment with {{
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+// comment with {{
+/* note {{{ */
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+/* note }}} */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+// comment with {{
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+/* note {{ */
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/* note {{ */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+/*
+ multi {
+ line }
+*/
+// comment with {{
+// comment with {{
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+// comment with {{
+/* note }} */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note } */
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }} */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note {{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+// comment with {{
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{ */
+// trailing brace at EOL {
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+/* note } */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/* note {{{ */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note } */
+/* note {{{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+// comment with {{
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+// trailing brace at EOL {
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/* note }} */
+/* note } */
+/* note }}} */
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+// comment with }
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+// trailing brace at EOL {
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }}} */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+// comment with }
+/* balanced { } */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* note }} */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/* note {{ */
+/* note {{{ */
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+// comment with }
+// trailing brace at EOL {
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/* balanced { } */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note } */
+// comment with }
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+/* balanced { } */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note } */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+/* note { */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note { */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+// trailing brace at EOL {
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+// comment with }
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }} */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+// comment with {{
+/* balanced { } */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+// trailing brace at EOL {
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+/* note }} */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note { */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+// trailing brace at EOL {
+/* note {{ */
+/* note } */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+/* note }}} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+// comment with }
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+/* note }}} */
+// comment with {{
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+// trailing brace at EOL {
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note { */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+/* balanced { } */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+/* note {{{ */
+// comment with }
+/* note } */
+// comment with {{
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note { */
+/*
+ multi {
+ line }
+*/
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+// comment with }
+/* note { */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }} */
+/* note }}} */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* note { */
+/* note { */
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }}} */
+/* note }}} */
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note } */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/* note {{ */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// comment with }
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{ */
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+/* note { */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+/* note {{{ */
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/* balanced { } */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{{ */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }} */
+/* balanced { } */
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note { */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/* balanced { } */
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+/* note }} */
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+/* note } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note {{ */
+/* balanced { } */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+/* note {{ */
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/* balanced { } */
+/* note } */
+// comment with }
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }}} */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+// comment with {{
+/* note }}} */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note { */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+// comment with {{
+/* balanced { } */
+// comment with {{
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* note }}} */
+/* note { */
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+// trailing brace at EOL {
+/* note }} */
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+/* note }} */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+/* note }} */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+/* note {{ */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+// comment with }
+/*
+ multi {
+ line }
+*/
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* note }} */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }}} */
+/* note } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// trailing brace at EOL {
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/* balanced { } */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{ */
+/* note }}} */
+/* note {{ */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/* balanced { } */
+/* note { */
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* balanced { } */
+// comment with {{
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+// comment with }
+/* note {{ */
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note } */
+// comment with }
+// trailing brace at EOL {
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note { */
+// trailing brace at EOL {
+/* note {{ */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+// comment with }
+/* balanced { } */
+/* note {{ */
+// comment with {{
+/*
+ multi {
+ line }
+*/
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note }} */
+/* note { */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+// comment with {{
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+/* note }} */
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/* note }} */
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{{ */
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note }}} */
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+/* balanced { } */
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note { */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* note {{{ */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note {{ */
+/* note { */
+// comment with }
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+/* note }} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// trailing brace at EOL {
+// trailing brace at EOL {
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/* balanced { } */
+// comment with {{
+/* balanced { } */
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/* note } */
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+/* note { */
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note }}} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+/* note { */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }}} */
+// comment with }
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+// comment with {{
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with {{
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// trailing brace at EOL {
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* balanced { } */
+/* note {{{ */
+// comment with }
+// comment with {{
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note }} */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/* note {{ */
+/-binds {
+    Mod+T { spawn "x"; }
+}
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/* note {{{ */
+// comment with {{
+/* note } */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// comment with }
+// trailing brace at EOL {
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with }
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* balanced { } */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+/*
+ multi {
+ line }
+*/
+/* note }}} */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+/*
+ multi {
+ line }
+*/
+/* balanced { } */
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo { }"; }
+}
+// comment with }
+/-binds {
+    Mod+T { spawn "x"; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}
+// comment with {{
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with }
+/*
+ multi {
+ line }
+*/
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+recent-windows {
+    binds {
+        Mod+Tab { previous-window; }
+    }
+}
+// trailing brace at EOL {
+/* note {{ */
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/*
+ multi {
+ line }
+*/
+/* note { */
+recent-windows {
+    binds {
+        Mod+Tab { next-window; }
+    }
+}
+/*
+ multi {
+ line }
+*/
+// trailing brace at EOL {
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+/-binds {
+    Mod+T { spawn "x"; }
+}
+/*
+ multi {
+ line }
+*/
+/*
+ multi {
+ line }
+*/
+binds {
+    Mod+Return { spawn "sh" "-c" "echo \" {"; }
+}
+// comment with {{
+// comment with }
+binds {
+    Mod+Return { spawn "sh" "-c" r#"echo { p\"#; }
+}

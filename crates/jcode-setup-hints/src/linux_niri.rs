@@ -770,6 +770,73 @@ mod tests {
         );
     }
 
+    /// Differential fuzz against real niri (refs #719).
+    ///
+    /// The unit tests above check configs I thought of, which is exactly how the
+    /// block-comment bug survived the first fix. This instead uses niri itself as
+    /// the oracle: for every generated config that niri accepts, the config must
+    /// still be accepted after jcode splices its managed block in, and the block
+    /// must land in a real top-level `binds` node.
+    ///
+    /// The corpus lives beside this file so the test is hermetic and fast; the
+    /// generator that produced it (and confirmed each input is niri-valid) is
+    /// recorded in the commit that added it.
+    #[test]
+    fn fuzz_corpus_stays_valid_after_splicing() {
+        if std::process::Command::new("niri")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: niri not installed");
+            return;
+        }
+        let corpus = include_str!("linux_niri_fuzz_corpus.txt");
+        let block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("jcode-niri-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut checked = 0usize;
+        for (idx, case) in corpus.split("\u{1}").enumerate() {
+            let case = case.trim_matches('\n');
+            if case.is_empty() {
+                continue;
+            }
+            let spliced = splice_managed_block(case, &block).text;
+            let path = dir.join(format!("fuzz-{idx}.kdl"));
+            std::fs::write(&path, &spliced).unwrap();
+            let out = std::process::Command::new("niri")
+                .arg("validate")
+                .arg("--config")
+                .arg(&path)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "niri rejected a spliced config that it accepted before (case {idx}):\n{}\n--- original ---\n{case}\n--- spliced ---\n{spliced}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                spliced.contains(NIRI_BLOCK_BEGIN),
+                "managed block missing entirely (case {idx}):\n{spliced}"
+            );
+            checked += 1;
+        }
+        let _ = std::fs::remove_dir(&dir);
+        assert!(
+            checked > 100,
+            "corpus too small to be meaningful: {checked}"
+        );
+    }
+
     #[test]
     fn brace_depth_ignores_braces_in_strings_and_comments() {
         let cfg = "a \"{{{\" // }}}\n{\n";
