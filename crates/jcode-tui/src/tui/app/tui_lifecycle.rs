@@ -112,6 +112,10 @@ impl App {
         self.fallback_switch_key = keybind::load_fallback_switch_key();
         self.scroll_keys = keybind::load_scroll_keys();
         crate::logging::info("KEYBINDINGS: reloaded from config change");
+        // Confirm the pickup to the user. Without this, an edit that is
+        // already live is indistinguishable from one that silently did
+        // nothing, which is the main source of "did that actually apply?".
+        self.set_status_notice("Config reloaded from disk");
         true
     }
 
