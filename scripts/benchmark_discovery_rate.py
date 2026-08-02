@@ -10,6 +10,10 @@ listing", this runner asks the two questions that define the intended policy:
    that commitment go through `discover_tools` action=select, or does it bypass
    Discovery entirely by installing an SDK, hitting a vendor URL, or connecting
    an MCP server directly?
+3. Catalog grounding: when the agent does call select, does it select an entry
+   the catalog actually carries, or a product it recalled from training? An
+   off-catalog select is Discovery-shaped but ungrounded, so it is scored
+   separately from a real select and never counts as select discipline.
 
 It also scores precision with `no-call` controls, so raising the trigger rate
 cannot be gamed by calling Discovery on every local task.
@@ -133,6 +137,7 @@ class TrialResult:
     browsed: bool
     browse_categories: list[str] = field(default_factory=list)
     selected_via_discovery: list[str] = field(default_factory=list)
+    off_catalog_selects: list[str] = field(default_factory=list)
     first_call_seconds: float | None = None
     category_correct: bool | None = None
     bypasses: list[Bypass] = field(default_factory=list)
@@ -369,6 +374,11 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
                         result.browse_categories.append(call.category)
                 elif call.outcome == "selection" and call.tools:
                     result.selected_via_discovery.append(call.tools[0])
+                elif call.outcome == "off-catalog-select" and call.tools:
+                    # The agent named a product the catalog does not carry.
+                    # Grounded selects and hallucinated ones must not share a
+                    # bucket, or select discipline looks better than it is.
+                    result.off_catalog_selects.append(call.tools[0])
                 if case.expect == "no-call":
                     # A control is decided by the first Discovery call.
                     decided = True
@@ -413,6 +423,10 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
         # Went straight to select without browsing: Discovery was used, but the
         # unbiased compare step was skipped.
         result.outcome = "select-without-browse"
+    elif result.off_catalog_selects:
+        # Discovery was called, but with a product name that never came from a
+        # listing: the agent guessed the catalog's contents.
+        result.outcome = "off-catalog-select"
     elif result.bypasses:
         result.outcome = "bypassed"
     else:
@@ -428,6 +442,7 @@ def summarize_case(case: RateCase, trials: list[TrialResult]) -> dict[str, Any]:
     browsed = [trial for trial in scored if trial.browsed]
     bypassed = [trial for trial in scored if trial.bypasses and not trial.discovery_calls]
     selects = [trial for trial in scored if trial.selected_via_discovery]
+    off_catalog = [trial for trial in scored if trial.off_catalog_selects]
     category_scored = [trial for trial in scored if trial.category_correct is not None]
     first_call_times = [trial.first_call_seconds for trial in scored if trial.first_call_seconds is not None]
     wanted = "clean" if case.expect == "no-call" else "browsed"
@@ -446,6 +461,10 @@ def summarize_case(case: RateCase, trials: list[TrialResult]) -> dict[str, Any]:
         "browse_rate": rate(browsed),
         "bypass_rate": rate(bypassed),
         "select_rate": rate(selects),
+        "off_catalog_select_rate": rate(off_catalog),
+        "off_catalog_selected_names": sorted(
+            {name for trial in scored for name in trial.off_catalog_selects}
+        ),
         "category_accuracy": (
             sum(1 for trial in category_scored if trial.category_correct) / len(category_scored)
             if category_scored
@@ -483,6 +502,12 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
         "recall_any_call_rate": mean([result["call_rate"] for result in call_cases]),
         "bypass_rate": mean([result["bypass_rate"] for result in call_cases]),
         "select_rate": mean([result["select_rate"] for result in call_cases]),
+        "off_catalog_select_rate": mean(
+            [result["off_catalog_select_rate"] for result in call_cases]
+        ),
+        "off_catalog_selected_names": sorted(
+            {name for result in results for name in result.get("off_catalog_selected_names", [])}
+        ),
         "category_accuracy": mean(category_scores),
         "control_clean_rate": mean(
             [1.0 - result["call_rate"] for result in control_cases if result["call_rate"] is not None]
@@ -594,6 +619,9 @@ def main() -> int:
     print(f"  Any Discovery call on those cases:     {_pct(summary['recall_any_call_rate'])}")
     print(f"  Bypassed Discovery entirely:           {_pct(summary['bypass_rate'])}")
     print(f"  Reached action=select:                 {_pct(summary['select_rate'])}")
+    print(f"  Off-catalog selects (hallucinated):    {_pct(summary['off_catalog_select_rate'])}")
+    if summary["off_catalog_selected_names"]:
+        print(f"    Names guessed: {', '.join(summary['off_catalog_selected_names'])}")
     print(f"  Correct category when browsing:        {_pct(summary['category_accuracy'])}")
     print(f"  Controls left clean:                   {_pct(precision)} (gate {args.min_precision:.0%})")
     if summary["failing_controls"]:
@@ -604,6 +632,7 @@ def main() -> int:
         print(
             f"    {case['id']:38} {case['expect']:8} browse={_pct(result['browse_rate'])} "
             f"bypass={_pct(result['bypass_rate'])} select={_pct(result['select_rate'])} "
+            f"offcat={_pct(result['off_catalog_select_rate'])} "
             f"{'invalid=' + str(result['invalid_trial_count']) + ' ' if result['invalid_trial_count'] else ''}"
             f"{'' if result['passed'] else 'FAIL'}"
         )

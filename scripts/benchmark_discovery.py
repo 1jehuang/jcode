@@ -38,6 +38,10 @@ BENCHMARK_HEADER = "x-jcode-discovery-benchmark"
 LISTING_RE = re.compile(r"Discoverable tools in '([^']+)'")
 EMPTY_RE = re.compile(r"No discoverable tools in category '([^']+)'")
 SELECTION_RE = re.compile(r"Selected '([^']+)' from '([^']+)'")
+# The agent selected a product name that the catalog does not carry. This is
+# the hallucinated-selection signal: the agent skipped or ignored browse and
+# committed to a product it remembered instead.
+OFF_CATALOG_RE = re.compile(r"'([^']+)' is not in the Jcode catalog for '([^']+)'")
 TOOL_RE = re.compile(r"^- ([^:\n]+):", re.MULTILINE)
 RUNTIME_ERROR_RE = re.compile(
     r"\b(error|failed|failure|timed out|timeout|did not start|exited before startup)\b",
@@ -237,6 +241,7 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
     listing = LISTING_RE.search(output)
     empty = EMPTY_RE.search(output)
     selection = SELECTION_RE.search(output)
+    off_catalog = OFF_CATALOG_RE.search(output)
     category = (
         listing.group(1)
         if listing
@@ -244,6 +249,8 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         if empty
         else selection.group(2)
         if selection
+        else off_catalog.group(2)
+        if off_catalog
         else None
     )
     tools = (
@@ -251,6 +258,8 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         if listing
         else [selection.group(1).strip().lower()]
         if selection
+        else [off_catalog.group(1).strip().lower()]
+        if off_catalog
         else []
     )
     if listing:
@@ -259,6 +268,8 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         outcome = "empty"
     elif selection:
         outcome = "selection"
+    elif off_catalog:
+        outcome = "off-catalog-select"
     elif output.startswith("Error:"):
         outcome = "error"
     else:

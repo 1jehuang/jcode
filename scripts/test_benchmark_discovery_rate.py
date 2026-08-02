@@ -196,6 +196,44 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(1.0, summary["recall_browse_rate"])
         self.assertEqual(1, summary["invalid_trial_count"])
 
+    def test_off_catalog_select_is_scored_apart_from_a_real_select(self) -> None:
+        """A hallucinated select must not be credited as select discipline."""
+        summary = rate.summarize_case(
+            self._case(),
+            [
+                self._trial(
+                    outcome="off-catalog-select",
+                    browsed=False,
+                    off_catalog_selects=["stripe"],
+                    discovery_calls=[{"outcome": "off-catalog-select"}],
+                )
+            ],
+        )
+        self.assertFalse(summary["passed"])
+        self.assertEqual(0.0, summary["select_rate"])
+        self.assertEqual(1.0, summary["off_catalog_select_rate"])
+        self.assertEqual(["stripe"], summary["off_catalog_selected_names"])
+        self.assertEqual(1.0, rate.aggregate([summary])["off_catalog_select_rate"])
+
+
+class DiscoveryOutputParsingTests(unittest.TestCase):
+    """The benchmark can only measure what the tool output makes distinguishable."""
+
+    def test_off_catalog_rejection_is_recognized(self) -> None:
+        output = (
+            "Error: 'stripe' is not in the Jcode catalog for 'payments'. Only entries returned "
+            "by action `browse` can be selected"
+        )
+        call = rate.parse_discovery_output(output, 1.0)
+        self.assertEqual("off-catalog-select", call.outcome)
+        self.assertEqual("payments", call.category)
+        self.assertEqual(["stripe"], call.tools)
+
+    def test_real_selection_still_parses_as_selection(self) -> None:
+        call = rate.parse_discovery_output("Selected 'agentcard' from 'payments' (...)", 1.0)
+        self.assertEqual("selection", call.outcome)
+        self.assertEqual(["agentcard"], call.tools)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

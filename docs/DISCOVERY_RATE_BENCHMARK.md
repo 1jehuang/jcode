@@ -56,8 +56,15 @@ Per case and in aggregate:
   no Discovery call at all: installing a vendor SDK, driving a vendor CLI,
   fetching a vendor API or signup page, or connecting an MCP server directly.
   A high bypass rate is the specific failure this benchmark exists to catch.
-- **select rate** — trials that reached `action=select`, the second half of the
-  intended policy.
+- **select rate** — trials that reached `action=select` on an entry the catalog
+  actually carries, the second half of the intended policy.
+- **off-catalog select rate** — trials where the agent called `action=select`
+  with a product name the catalog does not carry. This is a Discovery-shaped
+  but ungrounded commitment: the agent skipped or ignored the browse listing
+  and selected a product it recalled from training. It is scored separately and
+  never counts toward the select rate, so select discipline cannot be inflated
+  by hallucinated names. The guessed names are reported in
+  `summary.off_catalog_selected_names`, which doubles as catalog demand data.
 - **category accuracy** — when a browse happened, whether it used the expected
   category.
 - **control clean rate** — controls that finished with no Discovery call.
@@ -207,6 +214,13 @@ local fake catalog, with no model credits and no live endpoint:
 ```bash
 python scripts/verify_discovery_select.py ./target/selfdev/jcode
 ```
+
+That script also covers off-catalog selects. The endpoint signals "no such
+entry" either with a 404 or with a 200 carrying an empty entry; both are
+reported to the agent as a distinct, actionable error naming `action=suggest`,
+rather than as a generic endpoint failure it might retry or route around. The
+same distinction is recorded in telemetry as
+`outcome=off_catalog_select` / `failure_reason=off_catalog_select`.
 
 The description change has not yet been confirmed by a matched live run. Every
 provider available during this work either exhausted its budget or throttled;

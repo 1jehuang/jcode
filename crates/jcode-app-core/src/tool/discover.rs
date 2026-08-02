@@ -31,6 +31,34 @@ const DISCOVERY_QUERY_MAX_CHARS: usize = 500;
 const DISCOVERY_REASON_MIN_CHARS: usize = 40;
 const DISCOVERY_REASON_MAX_CHARS: usize = 2_000;
 
+/// Telemetry reason for a `select` naming an entry the catalog does not carry.
+/// Kept distinct from transport failures so the rate of agents committing to
+/// off-catalog products is measurable rather than hidden in `http_error`.
+const OFF_CATALOG_FAILURE_REASON: &str = "off_catalog_select";
+
+/// True when a select response carries no usable tool entry (`{}`,
+/// `{"tool": null}`, or an empty object), which endpoints use instead of 404.
+fn listing_has_no_tool_entry(listing: &Value) -> bool {
+    match listing.get("tool") {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(entry)) => entry.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// Error shown when a select names something outside the catalog. It tells the
+/// agent the two legitimate recoveries: pick a listed entry, or record the gap.
+fn off_catalog_select_error(category: &str, tool_name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "'{tool_name}' is not in the Jcode catalog for '{category}'. Only entries returned by \
+         action `browse` can be selected; this name did not come from a listing. Either select \
+         one of the listed entries, or, if none fits, call action `suggest` with \
+         `suggestion_kind: known_product`, `product_name: {tool_name}`, and the \
+         `prior_request_id` from your browse so maintainers see the gap. Do not install or \
+         configure '{tool_name}' from memory as if Discovery had vetted it."
+    )
+}
+
 fn discovery_benchmark_run() -> bool {
     std::env::var(DISCOVERY_BENCHMARK_ENV)
         .ok()
@@ -658,6 +686,29 @@ impl Tool for DiscoverToolsTool {
             let fetched = match fetch_listing(&discovery_request, Some(&tool_name)).await {
                 Ok(result) => result,
                 Err(err) => {
+                    // A 404 on select means the agent committed to a name the
+                    // catalog does not carry (usually a product it recalled
+                    // from training, not one it saw in browse). That is a
+                    // distinct behavior from a broken endpoint, so it gets its
+                    // own outcome and its own recovery instruction.
+                    if err.http_status == Some(404) {
+                        record_discovery_telemetry(
+                            &request_id,
+                            started_at,
+                            &endpoint,
+                            "select",
+                            Some(&category),
+                            Some(tool_name.as_str()),
+                            "off_catalog_select",
+                            Some(OFF_CATALOG_FAILURE_REASON),
+                            err.http_status,
+                            err.response_bytes,
+                            Some(0),
+                            query_present,
+                            reason_present,
+                        );
+                        return Err(off_catalog_select_error(&category, &tool_name));
+                    }
                     record_discovery_telemetry(
                         &request_id,
                         started_at,
@@ -676,6 +727,26 @@ impl Tool for DiscoverToolsTool {
                     return Err(err.into());
                 }
             };
+            // Endpoints may also answer 200 with an empty entry. Same meaning:
+            // the selected name is not in the catalog.
+            if listing_has_no_tool_entry(&fetched.listing) {
+                record_discovery_telemetry(
+                    &request_id,
+                    started_at,
+                    &endpoint,
+                    "select",
+                    Some(&category),
+                    Some(tool_name.as_str()),
+                    "off_catalog_select",
+                    Some(OFF_CATALOG_FAILURE_REASON),
+                    Some(fetched.http_status),
+                    Some(fetched.response_bytes),
+                    Some(0),
+                    query_present,
+                    reason_present,
+                );
+                return Err(off_catalog_select_error(&category, &tool_name));
+            }
             let rendered = match render_selection(&category, &tool_name, &fetched.listing) {
                 Ok(rendered) => rendered,
                 Err(err) => {
@@ -1427,6 +1498,29 @@ mod tests {
                 args: vec!["-y".to_string(), "agentmail-mcp@1.0.0".to_string()],
             }]
         );
+    }
+
+    /// A select naming something the catalog does not carry is a distinct
+    /// behavior (the agent committed to a remembered product) and must not be
+    /// reported as a generic endpoint failure.
+    #[test]
+    fn empty_select_response_is_off_catalog() {
+        assert!(listing_has_no_tool_entry(&json!({})));
+        assert!(listing_has_no_tool_entry(&json!({"tool": null})));
+        assert!(listing_has_no_tool_entry(&json!({"tool": {}})));
+        assert!(!listing_has_no_tool_entry(&json!({"tool": {"name": "x"}})));
+    }
+
+    #[test]
+    fn off_catalog_error_names_both_recoveries() {
+        let message = off_catalog_select_error("payments", "stripe").to_string();
+        assert!(message.contains("not in the Jcode catalog"));
+        assert!(message.contains("stripe"));
+        assert!(message.contains("action `suggest`"));
+        assert!(message.contains("known_product"));
+        assert!(message.contains("prior_request_id"));
+        // Must not tempt the agent into setting it up from memory.
+        assert!(message.contains("Do not install"));
     }
 
     #[test]

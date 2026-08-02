@@ -8,6 +8,9 @@ live endpoint:
 - browse lists entries and never leaks setup instructions;
 - browse names `select` as the next step;
 - select returns the setup instructions that browse withheld.
+- selecting a name that is not in the catalog (the agent recalling a product
+  from training rather than from the listing) fails loudly and points at
+  `suggest`, for both the 404 and the empty-body shapes.
 
 Usage: python scripts/verify_discovery_select.py [path/to/jcode]
 """
@@ -40,6 +43,10 @@ TOOLS = [
     },
 ]
 
+# Selecting this name returns a 200 with an empty entry instead of a 404, so
+# both "not in the catalog" response shapes are exercised.
+NULL_ENTRY_TOOL = "demo-null"
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
@@ -47,7 +54,12 @@ class Handler(BaseHTTPRequestHandler):
         selected = query.get("tool", [None])[0]
         if selected:
             match = next((tool for tool in TOOLS if tool["name"] == selected), None)
-            payload = {"tool": match} if match else {"tool": None}
+            if match is None and selected != NULL_ENTRY_TOOL:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            payload = {"tool": match}
         else:
             payload = {"tools": TOOLS}
         body = json.dumps(payload).encode()
@@ -61,7 +73,9 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def run_tool(jcode: str, socket: Path, session: str, payload: dict, env: dict) -> str:
+def run_tool(
+    jcode: str, socket: Path, session: str, payload: dict, env: dict, expect_error: bool = False
+) -> str:
     result = subprocess.run(
         [
             jcode,
@@ -78,9 +92,14 @@ def run_tool(jcode: str, socket: Path, session: str, payload: dict, env: dict) -
         env=env,
         timeout=60,
     )
-    if result.returncode != 0:
+    if result.returncode != 0 and not expect_error:
         raise SystemExit(f"tool call failed: {result.stderr or result.stdout}")
-    return str(json.loads(result.stdout)["output"])
+    try:
+        return str(json.loads(result.stdout)["output"])
+    except (json.JSONDecodeError, KeyError):
+        if expect_error:
+            return result.stdout + result.stderr
+        raise SystemExit(f"unparseable tool response: {result.stdout or result.stderr}")
 
 
 def main() -> int:
@@ -169,6 +188,31 @@ def main() -> int:
             print(select)
             if "demo-cards-mcp@2.1.0" not in select:
                 failures.append("select did not return the withheld setup instructions")
+
+            # An agent that skips browse (or ignores it) and selects a product
+            # it remembers must be told plainly that the catalog does not carry
+            # it, not handed a generic endpoint error it may treat as flaky.
+            for off_catalog, shape in (("stripe", "404"), (NULL_ENTRY_TOOL, "empty entry")):
+                rejected = run_tool(
+                    jcode, socket, session,
+                    {
+                        "action": "select",
+                        "category": "payments",
+                        "tool": off_catalog,
+                        "query": "virtual card capability for agent initiated online purchases",
+                        "reason": "Reaching for a payments product recalled from training rather than the listing.",
+                    },
+                    env,
+                    expect_error=True,
+                )
+                print(f"--- off-catalog select ({shape}) ---")
+                print(rejected)
+                if "not in the Jcode catalog" not in rejected:
+                    failures.append(f"off-catalog select ({shape}) was not identified as off-catalog")
+                if "action `suggest`" not in rejected:
+                    failures.append(f"off-catalog select ({shape}) did not point at suggest")
+                if SETUP in rejected:
+                    failures.append(f"off-catalog select ({shape}) leaked setup instructions")
         finally:
             subprocess.run(
                 [jcode, "--socket", str(socket), "server", "stop"],
@@ -182,7 +226,10 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print("\nOK: browse withholds setup, names select, and select delivers it.")
+    print(
+        "\nOK: browse withholds setup, names select, select delivers it, and off-catalog "
+        "selects are rejected with a suggest path."
+    )
     return 0
 
 
