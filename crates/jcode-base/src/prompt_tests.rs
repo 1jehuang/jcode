@@ -427,3 +427,32 @@ fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
     assert!(prompt.contains("selfdev build target=desktop2"));
     assert!(!prompt.contains("launched from the TUI/root jcode context"));
 }
+
+#[test]
+fn project_system_prompt_file_replaces_default_base_prompt() {
+    use crate::prompt::load_base_system_prompt;
+
+    let dir = std::env::temp_dir().join(format!("jcode-sysprompt-{}", std::process::id()));
+    let jcode_dir = dir.join(".jcode");
+    std::fs::create_dir_all(&jcode_dir).unwrap();
+    std::fs::write(
+        jcode_dir.join("system-prompt.md"),
+        "You are a custom agent.\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        load_base_system_prompt(Some(&dir)),
+        "You are a custom agent."
+    );
+
+    let (prompt, _info) = build_system_prompt_full(None, &[], false, None, Some(&dir));
+    assert!(prompt.contains("You are a custom agent."));
+    assert!(!prompt.contains("Jcode is open source"));
+
+    // Empty override falls back to the built-in default.
+    std::fs::write(jcode_dir.join("system-prompt.md"), "   \n").unwrap();
+    assert_eq!(load_base_system_prompt(Some(&dir)), DEFAULT_SYSTEM_PROMPT);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
