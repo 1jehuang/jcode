@@ -649,6 +649,55 @@ mod tests {
         assert!(res.text.contains("Mod+Tab { next-window; }"));
     }
 
+    /// End-to-end guard for #719: feed the spliced config to the real `niri`
+    /// parser. The unit tests above assert *where* the block lands; only niri
+    /// itself can confirm the result is a config it will actually load, which
+    /// is the property the reporter cared about.
+    ///
+    /// Skipped when niri is not installed, so this stays a bonus signal in CI
+    /// while being a hard check on a niri machine.
+    #[test]
+    fn spliced_config_is_accepted_by_the_real_niri_parser() {
+        if std::process::Command::new("niri")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: niri not installed");
+            return;
+        }
+
+        let original = "recent-windows {\n    binds {\n        Mod+Tab { next-window; }\n    }\n}\n\nbinds {\n    Mod+Return { spawn \"kitty\"; }\n}\n";
+        let block = render_niri_block(
+            &[hk("cmd+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+        let spliced = splice_managed_block(original, &block).text;
+
+        let dir = std::env::temp_dir().join(format!("jcode-niri-719-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.kdl");
+        std::fs::write(&path, &spliced).unwrap();
+
+        let out = std::process::Command::new("niri")
+            .arg("validate")
+            .arg("--config")
+            .arg(&path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+
+        assert!(
+            out.status.success(),
+            "niri rejected the spliced config:\n{}\n--- config ---\n{spliced}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn brace_depth_ignores_braces_in_strings_and_comments() {
         let cfg = "a \"{{{\" // }}}\n{\n";
