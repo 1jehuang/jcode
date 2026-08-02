@@ -67,6 +67,9 @@ impl Tool for PatchTool {
             return Err(anyhow::anyhow!("No valid patches found in input"));
         }
 
+        // Watch config.toml across the whole invocation so an edit that lands
+        // on it is reported regardless of which patch produced it.
+        let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
         let mut results = Vec::new();
 
         for patch in patches {
@@ -84,7 +87,9 @@ impl Tool for PatchTool {
             }
         }
 
-        Ok(ToolOutput::new(results.join("\n\n")))
+        let mut body = results.join("\n\n");
+        config_watch.finish(&mut body);
+        Ok(ToolOutput::new(body))
     }
 }
 
