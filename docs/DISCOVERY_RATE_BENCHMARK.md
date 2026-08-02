@@ -164,6 +164,29 @@ strongest model tested the second half never happened once.
 **Bypass is the dominant failure mode on capable models.** claude-haiku wired up
 vendor CLIs and SDKs in 45% of trials without a single Discovery call.
 
+### Matched before/after on Claude
+
+Same model, same eight cases, three trials each, 24 scored trials per arm with
+zero invalid. Preserved in `docs/discovery-baselines/claude-fable-5-{before,after}.json`.
+
+| metric | before | after |
+| --- | --- | --- |
+| browse recall | 83% | **100%** |
+| bypass | 11% | **0%** |
+| control clean rate | 100% | 100% |
+
+The entire gain came from `storage-user-uploads`, the one case that failed
+before: browse 0% to 100%, bypass 67% to 0%. Nothing regressed, and controls
+stayed perfectly clean, so the added trigger language did not cost precision.
+
+**Select needs a populated catalog.** Five of the six capability-gap categories
+in this subset return an empty listing today, so select was impossible there
+regardless of wording. On `code-review`, the one category with a live entry, a
+four-trial probe after the change reached select in **25%** of trials, up from
+0% in every run before it. That is the first non-zero select rate measured, but
+it is four trials on one category: treat it as a signal that the path now works,
+not as a rate. Re-measure once more categories carry listings.
+
 ### What changed as a result
 
 Two fixes landed against these numbers.
