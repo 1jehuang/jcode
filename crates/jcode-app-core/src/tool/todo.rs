@@ -822,8 +822,18 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("feedback loop should describe requirement-to-check coverage");
-        assert!(feedback_description.contains("requirement-to-check"));
-        assert!(feedback_description.contains("explicit observation or check"));
+        // Case-insensitive: the description opens the sentence with
+        // "Requirement-to-check", so a case-sensitive match broke when the
+        // wording moved to the front of the string (issue #730).
+        let feedback_description_lower = feedback_description.to_ascii_lowercase();
+        assert!(
+            feedback_description_lower.contains("requirement-to-check"),
+            "feedback_loop description omitted the requirement-to-check framing: {feedback_description}"
+        );
+        assert!(
+            feedback_description_lower.contains("explicit observation or check"),
+            "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
+        );
         for required_concept in [
             "reports back on each requirement",
             "run tests, verify, or review count only",
