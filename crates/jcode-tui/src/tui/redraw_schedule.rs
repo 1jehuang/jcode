@@ -64,15 +64,10 @@ fn idle_donut_active_with_policy(
         return false;
     }
 
-    // The onboarding welcome screen draws the same live donut, but it also
-    // shows a welcome/login card so `display_messages()` is not empty.  Keep the
-    // animation loop running smoothly while that screen is up (even past the
-    // deep-idle threshold) so the donut spins as an attention grab instead of
-    // only repainting on input events.
+    // The onboarding welcome screen is static (no decorative animation), so it
+    // does not need to keep the animation loop running.
     if state.onboarding_welcome_active() {
-        return policy.enable_decorative_animations
-            && crate::config::config().display.idle_animation
-            && policy.tier.idle_animation_enabled();
+        return false;
     }
 
     // The idle donut is decorative.  Leaving many dormant tabs/sessions open
@@ -455,7 +450,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
-        && !state.onboarding_welcome_active()
         && !swarm_spinner_redraw_active(state)
         && !session_picker_spinner_redraw_active(state)
     {
@@ -600,7 +594,6 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
         && crate::build::read_build_progress().is_none()
-        && !state.onboarding_welcome_active()
         && !swarm_spinner_redraw_active(state)
         && !session_picker_spinner_redraw_active(state)
     {
