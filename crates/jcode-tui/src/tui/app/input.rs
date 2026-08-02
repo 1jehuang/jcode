@@ -1130,10 +1130,19 @@ pub(super) fn handle_multiline_input_navigation(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if !modifiers.is_empty()
-        || !matches!(code, KeyCode::Up | KeyCode::Down)
-        || !app.input.contains('\n')
-    {
+    if !modifiers.is_empty() || !matches!(code, KeyCode::Up | KeyCode::Down) {
+        return false;
+    }
+
+    // Prefer true visual-row movement: with soft wrapping a single logical
+    // line can occupy several rows, and Up/Down should follow what the user
+    // sees. Falls through to history recall at the first/last visual row.
+    if let Some(target) = visual_line_move_in_composer(app, code) {
+        app.cursor_pos = target;
+        return true;
+    }
+
+    if !app.input.contains('\n') {
         return false;
     }
 
@@ -1174,6 +1183,36 @@ pub(super) fn handle_multiline_input_navigation(
 
     app.cursor_pos = target;
     true
+}
+
+/// Visual (wrapped-row) cursor movement using the composer's current render
+/// width. Returns `None` when the width is unknown or the cursor is already on
+/// the first/last visual row.
+fn visual_line_move_in_composer(app: &App, code: KeyCode) -> Option<usize> {
+    use crate::tui::ui::input_ui;
+
+    let width = composer_area_width()?;
+    let state: &dyn crate::tui::TuiState = app;
+    let next_prompt = input_ui::next_input_prompt_number(state);
+    let line_width = input_ui::composer_line_width(state, width, next_prompt)?;
+    let delta = match code {
+        KeyCode::Up => -1,
+        KeyCode::Down => 1,
+        _ => return None,
+    };
+    input_ui::visual_line_move(&app.input, app.cursor_pos, line_width, delta)
+}
+
+fn composer_area_width() -> Option<u16> {
+    if let Some(area) = crate::tui::ui::last_layout_snapshot().and_then(|l| l.input_area)
+        && area.width > 0
+    {
+        return Some(area.width);
+    }
+    crossterm::terminal::size()
+        .ok()
+        .map(|(w, _)| w)
+        .filter(|w| *w > 0)
 }
 
 /// True when `modifiers` is exactly one of Ctrl, Alt(Option) or Cmd(Super),
