@@ -114,6 +114,10 @@ scenario is invalid, never to rescue a score.
 
 ## Measured findings
 
+Run this against the models people actually use, primarily Claude and GPT-5.6.
+Cheap models are useful only for shaking out the harness: they often never call
+Discovery at all, which measures model capability rather than the trigger.
+
 Baselines collected while building this benchmark, all on the default full
 toolset so Discovery competes with bash, browser, and web tools:
 
