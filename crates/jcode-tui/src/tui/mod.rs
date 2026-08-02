@@ -221,6 +221,16 @@ pub trait TuiState {
     fn scroll_offset(&self) -> usize;
     /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
     fn auto_scroll_paused(&self) -> bool;
+    /// Whether the screen is currently in the terminal-style cleared state
+    /// produced by Ctrl+L / Cmd+L: the transcript ends in a blank spacer, the
+    /// view is pinned to the bottom, and nothing is streaming. In that state
+    /// the renderer collapses the (entirely blank) messages viewport so the
+    /// status line and numbered prompt sit at the *top* of the screen, exactly
+    /// like a terminal after `clear`, instead of floating at the bottom under
+    /// a screenful of blanks.
+    fn terminal_clear_collapsed(&self) -> bool {
+        false
+    }
     /// When older compacted history is being loaded in, this is the reader's
     /// captured distance (in wrapped lines) from the bottom of the transcript.
     /// The renderer uses it to keep the viewport anchored to the same content as

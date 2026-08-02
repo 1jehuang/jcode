@@ -698,6 +698,37 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     crate::tui::ui::set_last_chat_viewport_height(0);
 }
 
+/// The Ctrl+L spacer is a screen-state artifact, not transcript content: as
+/// soon as a real message arrives it is dropped, so no blank block is ever
+/// embedded in the scrollback history.
+#[test]
+fn test_ctrl_l_spacer_dropped_when_new_content_arrives() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::system("old chat".to_string())];
+    app.bump_display_messages_version();
+    crate::tui::ui::set_last_chat_viewport_height(20);
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.display_messages().len(), 2);
+    assert_eq!(app.display_messages()[1].role, "spacer");
+
+    app.push_display_message(DisplayMessage::user("new prompt"));
+
+    let roles: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .map(|m| m.role.as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        vec!["system", "user"],
+        "spacer must be dropped when real content arrives (no blank block in history)"
+    );
+
+    crate::tui::ui::set_last_chat_viewport_height(0);
+}
+
 /// Cmd+L (Super+L, from macOS terminals that forward Command) performs the
 /// same terminal-style clear as Ctrl+L.
 #[test]
