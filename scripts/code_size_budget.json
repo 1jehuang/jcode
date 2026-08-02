@@ -101,7 +101,7 @@
     "src/cli/commands.rs": 3378,
     "src/cli/dispatch.rs": 1404,
     "src/cli/login.rs": 1389,
-    "src/cli/provider_init.rs": 1831
+    "src/cli/provider_init.rs": 1836
   },
   "version": 1
 }

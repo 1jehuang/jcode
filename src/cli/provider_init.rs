@@ -1211,6 +1211,11 @@ fn disable_subscription_runtime_mode_preserving_active_provider_profile() {
 }
 
 pub fn apply_login_provider_profile_env(provider: LoginProviderDescriptor) {
+    // #712: the arms below clear an explicitly selected named profile, which
+    // made auth-test probe (and false-negative) the generic compatible slot.
+    if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
+        return;
+    }
     match provider.target {
         LoginProviderTarget::OpenAiCompatible(profile) => {
             force_apply_openai_compatible_profile_env(Some(profile));
