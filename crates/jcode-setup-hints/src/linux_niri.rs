@@ -697,6 +697,10 @@ mod tests {
             "/* TODO: revisit the { nesting here */\nbinds {\n    Mod+Return { spawn \"kitty\"; }\n}\n",
             // Brace inside a quoted string.
             "binds {\n    Mod+Return { spawn \"sh\" \"-c\" \"echo { }\"; }\n}\n",
+            // Escaped quote then a brace, still inside the string.
+            "binds {\n    Mod+Return { spawn \"sh\" \"-c\" \"echo \\\" {\"; }\n}\n",
+            // KDL raw string: backslash is not an escape there.
+            "binds {\n    Mod+Return { spawn \"sh\" \"-c\" r#\"echo { path\\\"#; }\n}\n",
             // No binds node at all: one must be appended.
             "output \"eDP-1\" {\n    scale 2\n}\n",
         ];
