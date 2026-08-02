@@ -783,7 +783,13 @@ fn resumed_window_title(session_id: &str) -> String {
     )
 }
 
-#[cfg(unix)]
+/// Open `session_id` in a new terminal window.
+///
+/// Routes through `terminal_launch` on every platform. This used to be a
+/// hardcoded `Ok(false)` off Unix, which made `/judge`, `/fork`, `/review`,
+/// `/transfer` and crash-restore silently print "No terminal found" on Windows
+/// even though the launcher already had Windows Terminal / Alacritty / WezTerm
+/// detection plus a `cmd /C start` fallback (see #715).
 pub(super) fn spawn_in_new_terminal(
     exe: &Path,
     session_id: &str,
@@ -793,16 +799,6 @@ pub(super) fn spawn_in_new_terminal(
     let title = resumed_window_title(session_id);
     let args = resume_invocation_args(session_id, socket);
     spawn_command_in_new_terminal(exe, &args, &title, cwd)
-}
-
-#[cfg(not(unix))]
-pub(super) fn spawn_in_new_terminal(
-    _exe: &Path,
-    _session_id: &str,
-    _cwd: &Path,
-    _socket: Option<&str>,
-) -> anyhow::Result<bool> {
-    Ok(false)
 }
 
 #[cfg(test)]
