@@ -55,7 +55,7 @@
     "crates/jcode-render-core/src/math.rs": 1234,
     "crates/jcode-setup-hints/src/lib.rs": 2635,
     "crates/jcode-telemetry-core/src/lib.rs": 2165,
-    "crates/jcode-terminal-launch/src/lib.rs": 1216,
+    "crates/jcode-terminal-launch/src/lib.rs": 1219,
     "crates/jcode-tui-mermaid/src/lib.rs": 1496,
     "crates/jcode-tui-mermaid/src/mermaid_cache_render.rs": 1467,
     "crates/jcode-tui-mermaid/src/mermaid_viewport.rs": 1953,
