@@ -89,3 +89,41 @@ fn nested_tables_and_arrays_flatten_to_dotted_keys() {
     assert_eq!(changes[0].key, "providers.mine.models");
     assert_eq!(changes[0].liveness, Liveness::Live);
 }
+
+/// The restart-required list is a claim about how the code consumes each
+/// section, so it must stay small and deliberate. If a section is added or
+/// removed, that is a behavioural change to every config edit report and
+/// should be an explicit decision rather than a drive-by edit.
+#[test]
+fn the_restart_required_list_is_the_reviewed_set() {
+    assert_eq!(
+        RESTART_REQUIRED_SECTIONS,
+        &["gateway", "acp", "launch_hotkeys"],
+        "changing which sections need a restart changes what users are told; \
+         confirm the consuming code really snapshots the value at startup"
+    );
+}
+
+/// Sections that are read through `config()` on every use are live by
+/// definition. Spot-check the ones users change most often, so a careless
+/// addition to the restart list cannot silently start telling people to
+/// restart for a setting that already applies.
+#[test]
+fn commonly_edited_sections_are_live() {
+    for key in [
+        "keybindings.scroll_up",
+        "display.centered",
+        "features.thinking",
+        "provider.openai_reasoning_effort",
+        "agents.swarm_spawn_mode",
+        "tools.profile",
+        "websearch.engine",
+        "notifications.enabled",
+    ] {
+        assert_eq!(
+            liveness_for_key(key),
+            Liveness::Live,
+            "{key} is re-read through the config cache and should report as live"
+        );
+    }
+}
