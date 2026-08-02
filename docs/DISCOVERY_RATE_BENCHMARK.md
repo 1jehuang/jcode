@@ -127,8 +127,17 @@ toolset so Discovery competes with bash, browser, and web tools:
 | glm-4.7-flash | 12 | 38% | 0% | 0% |
 | gpt-oss-120b (cerebras) | 24 | 0% | 11% | 0% |
 | gemini-2.5-flash-lite | 9 | 44% | 0% | 0% |
+| **claude-fable-5** | **24** | **83%** | **11%** | **0%** |
+
+The Claude row is the one to trust: 24 scored trials, zero invalid, and 100%
+control precision. It reframes the problem.
 
 Three things stand out.
+
+**On a capable model the browse trigger already mostly works.** Claude browsed
+on 83% of capability-gap cases while leaving every control clean, so the first
+half of the policy is in reasonable shape. Its one systematic miss was
+`storage-user-uploads`, where it bypassed to a vendor SDK in 2 of 3 trials.
 
 **Triggering is strongly model-dependent.** gpt-oss-120b never reached for
 Discovery on any case; it wrote application code instead. A weak model can score
@@ -136,10 +145,11 @@ Discovery on any case; it wrote application code instead. A weak model can score
 meaningful when both arms use the same model and that model calls Discovery at
 least sometimes on the baseline.
 
-**Select rate is 0% everywhere.** Not one trial across any model reached
-`action=select`. Agents that browse tend to summarize the listing for the user
-and stop. This is the larger half of the gap: the intended policy is browse then
-select, and the second half never happens today.
+**Select rate is 0% everywhere, including Claude.** Not one trial across any
+model reached `action=select`, even when Claude browsed successfully on 20 of 24
+trials. Agents that browse summarize the listing and stop. This, not the browse
+trigger, is the real gap: the intended policy is browse then select, and on the
+strongest model tested the second half never happened once.
 
 **Bypass is the dominant failure mode on capable models.** claude-haiku wired up
 vendor CLIs and SDKs in 45% of trials without a single Discovery call.
