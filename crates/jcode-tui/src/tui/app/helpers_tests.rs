@@ -1,7 +1,7 @@
 use super::{
     build_resume_command, effort_display_label, extract_bracketed_system_message,
     format_countdown_until, gather_ambient_info_inner, inferred_reasoning_efforts,
-    partition_queued_messages, resume_invocation_args,
+    partition_queued_messages, resume_invocation_args, resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -194,7 +194,6 @@ fn shell_command_quotes_single_quotes_for_handterm_exec() {
     );
 }
 
-#[test]
 /// #715: `spawn_in_new_terminal` was `#[cfg(not(unix))] -> Ok(false)`, so every
 /// in-app spawn (`/judge`, `/fork`, `/review`, `/transfer`, crash-restore)
 /// silently printed "No terminal found" on Windows while the launcher below it
@@ -228,6 +227,69 @@ fn resume_spawn_is_compiled_on_every_platform_with_platform_neutral_args() {
     );
 }
 
+/// #715, the behavioral half. `spawn_in_new_terminal` deliberately short-
+/// circuits under `cfg!(test)` so unit tests never pop real windows, so this
+/// drives the layer immediately below that guard: the exact
+/// `TerminalCommand` + launcher call the fixed function performs.
+///
+/// The configured spawn hook is the injectable seam in that path, so pointing
+/// it at a recording script proves the resume invocation really reaches a
+/// launcher and that the launcher reports success, rather than only proving
+/// the function is compiled.
+#[test]
+fn resume_invocation_reaches_the_launcher_and_reports_success() {
+    let dir = std::env::temp_dir().join(format!("jcode-715-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let record = dir.join("spawned.txt");
+    let hook = dir.join("hook.sh");
+    let _ = std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+            record.display()
+        ),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755));
+    }
+
+    // Build exactly what spawn_in_new_terminal forwards.
+    let args = resume_invocation_args("ses_715_behavioral", None);
+    let command = crate::terminal_launch::TerminalCommand::new(
+        std::path::Path::new("/usr/bin/true"),
+        args.clone(),
+    )
+    .title(resumed_window_title("ses_715_behavioral"));
+
+    // SAFETY: single-threaded test; the hook var is removed immediately after.
+    unsafe { std::env::set_var("JCODE_SPAWN_HOOK", &hook) };
+    let spawned = crate::terminal_launch::spawn_command_in_new_terminal(&command, &dir);
+    unsafe { std::env::remove_var("JCODE_SPAWN_HOOK") };
+
+    for _ in 0..50 {
+        if record.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+    let _ = std::fs::remove_file(&record);
+    let _ = std::fs::remove_file(&hook);
+    let _ = std::fs::remove_dir(&dir);
+
+    assert!(
+        matches!(spawned, Ok(true)),
+        "launcher reported no terminal for the resume invocation: {spawned:?}"
+    );
+    assert!(
+        recorded.contains("--resume") && recorded.contains("ses_715_behavioral"),
+        "launcher never received the resume invocation, got: {recorded:?}"
+    );
+}
+
+#[test]
 fn resume_invocation_args_includes_socket_when_present() {
     let args = resume_invocation_args("ses_123", Some("/tmp/jcode-test.sock"));
     assert_eq!(
