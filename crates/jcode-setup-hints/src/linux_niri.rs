@@ -352,17 +352,27 @@ fn binds_block_insert_point(config: &str) -> Option<usize> {
 }
 
 /// KDL brace nesting depth at byte offset `upto`, ignoring braces inside
-/// double-quoted strings and `//` line comments.
+/// double-quoted strings, `//` line comments, and `/* */` block comments.
+///
+/// Block comments matter and are easy to miss: they may contain *unbalanced*
+/// braces, which real niri accepts. Counting those would make every following
+/// node look nested and hide the genuine top-level `binds` node.
 fn brace_depth_before(config: &str, upto: usize) -> i32 {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escaped = false;
     let mut in_comment = false;
+    let mut in_block_comment = false;
     let bytes = config.as_bytes();
     let mut i = 0;
     while i < upto.min(bytes.len()) {
         let c = bytes[i] as char;
-        if in_comment {
+        if in_block_comment {
+            if c == '*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block_comment = false;
+                i += 1;
+            }
+        } else if in_comment {
             if c == '\n' {
                 in_comment = false;
             }
@@ -378,6 +388,9 @@ fn brace_depth_before(config: &str, upto: usize) -> i32 {
             in_string = true;
         } else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             in_comment = true;
+            i += 1;
+        } else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            in_block_comment = true;
             i += 1;
         } else if c == '{' {
             depth += 1;
@@ -667,7 +680,6 @@ mod tests {
             return;
         }
 
-        let original = "recent-windows {\n    binds {\n        Mod+Tab { next-window; }\n    }\n}\n\nbinds {\n    Mod+Return { spawn \"kitty\"; }\n}\n";
         let block = render_niri_block(
             &[hk("cmd+;", "/home/u", "home", false)],
             "/bin/jcode",
@@ -675,26 +687,82 @@ mod tests {
             "    ",
         )
         .unwrap();
-        let spliced = splice_managed_block(original, &block).text;
+
+        // Each of these is accepted by real niri on its own, and each stresses a
+        // different part of the insert-point scan.
+        let originals = [
+            // Nested compositor binds before the real one (the reported bug).
+            "recent-windows {\n    binds {\n        Mod+Tab { next-window; }\n    }\n}\n\nbinds {\n    Mod+Return { spawn \"kitty\"; }\n}\n",
+            // Unbalanced brace inside a block comment.
+            "/* TODO: revisit the { nesting here */\nbinds {\n    Mod+Return { spawn \"kitty\"; }\n}\n",
+            // Brace inside a quoted string.
+            "binds {\n    Mod+Return { spawn \"sh\" \"-c\" \"echo { }\"; }\n}\n",
+            // No binds node at all: one must be appended.
+            "output \"eDP-1\" {\n    scale 2\n}\n",
+        ];
 
         let dir = std::env::temp_dir().join(format!("jcode-niri-719-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.kdl");
-        std::fs::write(&path, &spliced).unwrap();
 
-        let out = std::process::Command::new("niri")
-            .arg("validate")
-            .arg("--config")
-            .arg(&path)
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_file(&path);
+        for (idx, original) in originals.iter().enumerate() {
+            let spliced = splice_managed_block(original, &block).text;
+            let path = dir.join(format!("config-{idx}.kdl"));
+            std::fs::write(&path, &spliced).unwrap();
+
+            let out = std::process::Command::new("niri")
+                .arg("validate")
+                .arg("--config")
+                .arg(&path)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(&path);
+
+            assert!(
+                out.status.success(),
+                "niri rejected the spliced config (case {idx}):\n{}\n--- config ---\n{spliced}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
         let _ = std::fs::remove_dir(&dir);
+    }
 
+    /// KDL block comments (`/* */`) may contain *unbalanced* braces, and real
+    /// niri accepts that. The depth scanner only understood `//` line comments,
+    /// so a single stray `{` in a block comment made every following node look
+    /// nested, and the genuine top-level `binds` node was skipped.
+    ///
+    /// Found by probing real niri for constructs the scanner had not been
+    /// written against, rather than by re-testing what it already handled.
+    #[test]
+    fn unbalanced_braces_in_a_block_comment_do_not_hide_the_binds_node() {
+        let block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+
+        let cfg = "/* TODO: revisit the { nesting here */\nbinds {\n    Mod+Return { spawn \"kitty\"; }\n}\n";
+        let res = splice_managed_block(cfg, &block);
+
+        assert_eq!(
+            res.text.matches("binds {").count(),
+            1,
+            "appended a duplicate binds node instead of using the real one:\n{}",
+            res.text
+        );
+        let begin = res.text.find(NIRI_BLOCK_BEGIN).unwrap();
+        let binds = res.text.find("binds {").unwrap();
         assert!(
-            out.status.success(),
-            "niri rejected the spliced config:\n{}\n--- config ---\n{spliced}",
-            String::from_utf8_lossy(&out.stderr)
+            begin > binds,
+            "managed block landed outside the binds node:\n{}",
+            res.text
+        );
+        assert!(
+            res.text.contains("Mod+Return"),
+            "existing bind was lost:\n{}",
+            res.text
         );
     }
 
