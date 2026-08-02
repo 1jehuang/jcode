@@ -539,4 +539,77 @@ mod tests {
             crate::env::remove_var("JCODE_HOME");
         }
     }
+
+    /// Issue #729 regression, behavioral rather than structural.
+    ///
+    /// `create_headless_session` used to call `enable_memory_test_mode()`
+    /// unconditionally, so real swarm-spawned workers got throwaway storage and
+    /// could never read what the session that spawned them remembered. The fix
+    /// makes isolation an explicit per-caller choice, but the property that
+    /// actually matters to a user is this: with the same working directory, a
+    /// default registry's memory tool sees what was written, and a test-mode
+    /// one does not.
+    ///
+    /// Driving `Tool::execute` (rather than inspecting a flag) means this stays
+    /// honest even if the internals are refactored.
+    #[tokio::test]
+    async fn swarm_worker_memory_sees_the_spawning_session_only_without_isolation() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        // The session that spawns a worker records something project-scoped.
+        let spawner = MemoryTool::new();
+        spawner
+            .execute(
+                json!({
+                    "action": "remember",
+                    "content": "issue-729-spawner-note",
+                    "scope": "project"
+                }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("spawner remember should succeed");
+
+        // A worker that kept real memory (the fixed path) must see it.
+        let worker = MemoryTool::new();
+        let seen = worker
+            .execute(
+                json!({ "action": "list", "scope": "project" }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("worker list should succeed");
+        assert!(
+            seen.output.contains("issue-729-spawner-note"),
+            "a swarm worker must see the spawning session's project memory, got: {}",
+            seen.output
+        );
+
+        // A worker forced into test mode (the pre-fix path) cannot, no matter
+        // that it has the identical working directory. This is the defect.
+        let isolated = MemoryTool::new_test();
+        let blind = isolated
+            .execute(
+                json!({ "action": "list", "scope": "project" }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("isolated list should succeed");
+        assert!(
+            !blind.output.contains("issue-729-spawner-note"),
+            "test mode unexpectedly saw real project memory, so this test cannot \
+             distinguish the two paths: {}",
+            blind.output
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 }
