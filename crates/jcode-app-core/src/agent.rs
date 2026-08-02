@@ -803,9 +803,20 @@ impl Agent {
             let mut missing_for_message = Vec::new();
             for id in tool_uses {
                 self.tool_call_ids.insert(id.clone());
-                if !self.tool_result_ids.contains(&id) {
-                    missing_for_message.push(id);
+                if self.tool_result_ids.contains(&id) {
+                    continue;
                 }
+                // A tool that is still executing is not an interrupted tool:
+                // its real result is on the way, and synthesizing a
+                // placeholder now produces a duplicate tool_result that
+                // Anthropic rejects outright. See `tool::inflight`.
+                if crate::tool::inflight::is_tool_in_flight(&id) {
+                    logging::info(&format!(
+                        "Skipping missing tool-output repair for {id}: tool is still executing"
+                    ));
+                    continue;
+                }
+                missing_for_message.push(id);
             }
             if !missing_for_message.is_empty() {
                 missing_repairs.push((index, missing_for_message));
