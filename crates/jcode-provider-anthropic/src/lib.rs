@@ -299,6 +299,14 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
 /// definitions in OAuth mode. These keep their hand-tuned schemas/descriptions
 /// (which the Anthropic subscription endpoint expects) instead of the raw
 /// registry definitions; every other tool is forwarded as-is (see #409).
+/// Local tool names that already have a hand-tuned curated OAuth definition
+/// above, so the registry pass must not forward them a second time.
+///
+/// `schedule` is deliberately absent: its curated `ScheduleWakeup` schema had
+/// drifted from the real tool (it advertised `delaySeconds`/`reason`/`prompt`
+/// while the handler requires `task` + `wake_in_minutes`/`wake_at`), so every
+/// call failed with "task is required for action=create" (#706). Forwarding the
+/// real schema under the remapped name keeps the two in sync by construction.
 const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "subagent",
     "bash",
@@ -306,7 +314,6 @@ const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "read",
-    "schedule",
     "skill_manage",
     "write",
 ];
@@ -412,7 +419,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Bash".to_string(),
                     description: "Executes a given bash command and returns its output."
                         .to_string(),
-                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"}},"required":["command"],"additionalProperties":false}),
+                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"},"justification":{"type":"string","description":"Only when re-issuing a command the destructive gate refused; explain which user request it serves."}},"required":["command"],"additionalProperties":false}),
                     cache_control: None,
                 },
             ),
@@ -449,15 +456,6 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     name: "Read".to_string(),
                     description: "Reads a file from the local filesystem.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["schedule"],
-                ApiTool {
-                    name: "ScheduleWakeup".to_string(),
-                    description: "Schedule when to resume work in /loop dynamic mode.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"delaySeconds":{"type":"number"},"reason":{"type":"string"},"prompt":{"type":"string"}},"required":["delaySeconds","reason","prompt"],"additionalProperties":false}),
                     cache_control: None,
                 },
             ),
@@ -1108,7 +1106,7 @@ mod cache_prefix_invariant_tests {
         let formatted = format_tools(&registry, true, false);
         let names: Vec<&str> = formatted.iter().map(|t| t.name.as_str()).collect();
 
-        for ghost in ["Agent", "Glob", "Grep", "ScheduleWakeup", "Skill"] {
+        for ghost in ["Agent", "Glob", "Grep", "Skill"] {
             assert!(
                 !names.contains(&ghost),
                 "advertised ghost builtin {ghost} without a backing registry tool: {names:?}"
@@ -1136,6 +1134,10 @@ mod cache_prefix_invariant_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_tool_schema_tests.rs"]
+mod oauth_tool_schema_tests;
 
 #[cfg(test)]
 #[path = "trailing_assistant_repair_tests.rs"]
