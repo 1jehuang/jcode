@@ -9,6 +9,7 @@
 
 mod actions;
 mod delivery;
+mod editor_selection;
 mod failures;
 mod hero_visual;
 mod overview_gesture;
