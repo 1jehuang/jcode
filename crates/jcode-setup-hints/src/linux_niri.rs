@@ -247,6 +247,19 @@ pub(crate) struct SpliceResult {
 pub(crate) fn splice_managed_block(config: &str, block: &str) -> SpliceResult {
     // 1) Replace an existing managed region if present.
     if let (Some(begin_idx), Some(end_line_end)) = find_managed_region(config) {
+        // A managed region written by an older version may sit inside a nested
+        // `binds` node (see #719). Relocating it is the only way to recover:
+        // strip it here and fall through to the normal top-level insert.
+        if brace_depth_before(config, begin_idx) > 1 {
+            let mut without = String::with_capacity(config.len());
+            without.push_str(&config[..begin_idx]);
+            without.push_str(&config[end_line_end..]);
+            let relocated = splice_managed_block(&without, block);
+            return SpliceResult {
+                text: relocated.text,
+                changed: true,
+            };
+        }
         // begin_idx is the byte offset of the start of the BEGIN line; the
         // managed region runs through the end of the END line (including its
         // trailing newline). Re-emit `block` plus that newline so the result is
@@ -316,6 +329,13 @@ fn find_managed_region(config: &str) -> (Option<usize>, Option<usize>) {
 /// `binds {` block exists.
 fn binds_block_insert_point(config: &str) -> Option<usize> {
     for (idx, line) in line_offsets(config) {
+        // Only a *top-level* `binds { }` node holds global launch bindings.
+        // A nested one (e.g. `recent-windows { binds { ... } }`) accepts a
+        // different, much smaller action set, and niri rejects the whole
+        // config when a `spawn` action lands there (see #719).
+        if brace_depth_before(config, idx) != 0 {
+            continue;
+        }
         let trimmed = line.trim_start();
         if trimmed.starts_with("binds") && trimmed.trim_end().ends_with('{') {
             // Insert right after this line's terminating newline.
@@ -329,6 +349,44 @@ fn binds_block_insert_point(config: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// KDL brace nesting depth at byte offset `upto`, ignoring braces inside
+/// double-quoted strings and `//` line comments.
+fn brace_depth_before(config: &str, upto: usize) -> i32 {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let bytes = config.as_bytes();
+    let mut i = 0;
+    while i < upto.min(bytes.len()) {
+        let c = bytes[i] as char;
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+            }
+        } else if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            in_comment = true;
+            i += 1;
+        } else if c == '{' {
+            depth += 1;
+        } else if c == '}' {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    depth
 }
 
 /// Iterate `(byte_offset, line_without_newline)` pairs.
@@ -508,6 +566,93 @@ mod tests {
         assert!(res.changed);
         assert!(res.text.contains("binds {"));
         assert!(res.text.contains(NIRI_BLOCK_BEGIN));
+    }
+
+    #[test]
+    fn splice_skips_nested_binds_and_appends_a_top_level_block() {
+        // Regression for #719: a nested `recent-windows.binds` node only accepts
+        // next-window/previous-window, so niri rejects an injected `spawn` there.
+        let cfg = "recent-windows {\n    binds {\n        Mod+Tab { next-window; }\n    }\n}\n\ninclude \"binds.kdl\"\n";
+        let block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+        let res = splice_managed_block(cfg, &block);
+        assert!(res.changed);
+
+        let begin_idx = res.text.find(NIRI_BLOCK_BEGIN).unwrap();
+        let nested_close = res.text.find("Mod+Tab").unwrap();
+        assert!(
+            begin_idx > nested_close,
+            "managed block landed inside recent-windows:\n{}",
+            res.text
+        );
+        assert!(res.text.contains("Mod+Tab { next-window; }"));
+        // Depth 0 at the managed block means it is a top-level binds node.
+        assert_eq!(brace_depth_before(&res.text, begin_idx), 1);
+    }
+
+    #[test]
+    fn splice_prefers_a_top_level_binds_block_over_an_earlier_nested_one() {
+        let cfg = "recent-windows {\n    binds {\n        Mod+Tab { next-window; }\n    }\n}\n\nbinds {\n    Alt+Tab { focus-window-previous; }\n}\n";
+        let block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+        let res = splice_managed_block(cfg, &block);
+        let begin_idx = res.text.find(NIRI_BLOCK_BEGIN).unwrap();
+        let top_binds = res.text.find("Alt+Tab").unwrap();
+        assert!(begin_idx < top_binds, "{}", res.text);
+        assert!(begin_idx > res.text.find("Mod+Tab").unwrap());
+    }
+
+    #[test]
+    fn splice_relocates_a_managed_block_previously_written_into_a_nested_node() {
+        let block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "        ",
+        )
+        .unwrap();
+        // Simulate the broken v1 output: managed region inside recent-windows.
+        let broken = format!(
+            "recent-windows {{\n    binds {{\n{block}\n        Mod+Tab {{ next-window; }}\n    }}\n}}\n"
+        );
+        let fixed_block = render_niri_block(
+            &[hk("alt+;", "/home/u", "home", false)],
+            "/bin/jcode",
+            "kitty",
+            "    ",
+        )
+        .unwrap();
+        let res = splice_managed_block(&broken, &fixed_block);
+        assert!(res.changed);
+        assert_eq!(
+            res.text.matches(NIRI_BLOCK_BEGIN).count(),
+            1,
+            "managed region duplicated:\n{}",
+            res.text
+        );
+        let begin_idx = res.text.find(NIRI_BLOCK_BEGIN).unwrap();
+        assert!(
+            begin_idx > res.text.find("Mod+Tab").unwrap(),
+            "still nested:\n{}",
+            res.text
+        );
+        assert!(res.text.contains("Mod+Tab { next-window; }"));
+    }
+
+    #[test]
+    fn brace_depth_ignores_braces_in_strings_and_comments() {
+        let cfg = "a \"{{{\" // }}}\n{\n";
+        assert_eq!(brace_depth_before(cfg, cfg.len()), 1);
     }
 
     #[test]
