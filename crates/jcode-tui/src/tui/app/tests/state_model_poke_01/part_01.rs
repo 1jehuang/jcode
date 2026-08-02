@@ -698,6 +698,29 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     crate::tui::ui::set_last_chat_viewport_height(0);
 }
 
+/// Cmd+L (Super+L, from macOS terminals that forward Command) performs the
+/// same terminal-style clear as Ctrl+L.
+#[test]
+fn test_cmd_l_terminal_clear_matches_ctrl_l() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::system("visible chat".to_string())];
+    app.bump_display_messages_version();
+    app.scroll_offset = 12;
+    app.auto_scroll_paused = true;
+    crate::tui::ui::set_last_chat_viewport_height(24);
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::SUPER)
+        .unwrap();
+
+    assert_eq!(app.scroll_offset, 0, "Cmd+L snaps to the bottom");
+    assert!(!app.auto_scroll_paused, "Cmd+L resumes tail-follow");
+    assert_eq!(app.display_messages().len(), 2);
+    assert_eq!(app.display_messages()[1].role, "spacer");
+    assert_eq!(app.display_messages()[1].content, "24");
+
+    crate::tui::ui::set_last_chat_viewport_height(0);
+}
+
 /// `/cls` is the view-only clear: display goes away, context survives.
 #[test]
 fn test_cls_command_clears_view_but_keeps_context() {
