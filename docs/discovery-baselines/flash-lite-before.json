@@ -1,0 +1,233 @@
+{
+  "benchmark": "discovery-call-rate",
+  "config": {
+    "cases_file": "/home/jeremy/jcode/scripts/discovery_rate_cases.json",
+    "min_precision": 0.9,
+    "min_recall": 0.8,
+    "model": "gemini-2.5-flash-lite",
+    "provider": "gemini-api",
+    "timeout_seconds": 150.0,
+    "trials": 3
+  },
+  "note": "Pre-change Discovery call-rate baseline, captured before the tool description rewrite and the browse-withholds-setup fix. Per-trial transcripts are dropped; keep the metrics so the post-change arm can be compared without re-running this arm.",
+  "results": [
+    {
+      "browse_rate": 0.0,
+      "bypass_kinds": [],
+      "bypass_rate": 0.0,
+      "call_rate": 0.0,
+      "case": {
+        "expect": "call",
+        "expected_category": "code-review",
+        "id": "code-review-automation",
+        "prompt": "Every pull request in this repo should get an automated, repository-aware review with inline findings. Propose the setup before changing anything.",
+        "tags": [
+          "capability-gap",
+          "ci"
+        ]
+      },
+      "category_accuracy": null,
+      "invalid_trial_count": 0,
+      "outcomes": {
+        "no-call": 3
+      },
+      "passed": false,
+      "scored_trial_count": 3,
+      "select_rate": 0.0,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": 0.6666666666666666,
+      "bypass_kinds": [],
+      "bypass_rate": 0.0,
+      "call_rate": 0.6666666666666666,
+      "case": {
+        "expect": "call",
+        "expected_category": "observability",
+        "id": "observability-traces",
+        "prompt": "Our production service has mystery latency spikes. I want distributed traces and alerting wired up so I can see which downstream call is slow.",
+        "tags": [
+          "capability-gap"
+        ]
+      },
+      "category_accuracy": 1.0,
+      "invalid_trial_count": 0,
+      "outcomes": {
+        "browsed": 2,
+        "no-call": 1
+      },
+      "passed": false,
+      "scored_trial_count": 3,
+      "select_rate": 0.0,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": 0.6666666666666666,
+      "bypass_kinds": [],
+      "bypass_rate": 0.0,
+      "call_rate": 0.6666666666666666,
+      "case": {
+        "expect": "call",
+        "expected_category": "authentication",
+        "id": "authentication-signin",
+        "prompt": "Add real user sign-in to this app with email and Google login, sessions, and a hosted user database. Do not write throwaway auth code.",
+        "tags": [
+          "capability-gap"
+        ]
+      },
+      "category_accuracy": 1.0,
+      "invalid_trial_count": 0,
+      "outcomes": {
+        "browsed": 2,
+        "no-call": 1
+      },
+      "passed": false,
+      "scored_trial_count": 3,
+      "select_rate": 0.0,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": null,
+      "bypass_kinds": [],
+      "bypass_rate": null,
+      "call_rate": null,
+      "case": {
+        "expect": "call",
+        "expected_category": "storage",
+        "id": "storage-user-uploads",
+        "prompt": "Users need to upload large video files from the browser and get back permanent URLs. I do not want the files touching my server disk.",
+        "tags": [
+          "capability-gap"
+        ]
+      },
+      "category_accuracy": null,
+      "invalid_trial_count": 3,
+      "outcomes": {
+        "invalid": 3
+      },
+      "passed": false,
+      "scored_trial_count": 0,
+      "select_rate": null,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": null,
+      "bypass_kinds": [],
+      "bypass_rate": null,
+      "call_rate": null,
+      "case": {
+        "expect": "call",
+        "expected_category": "analytics",
+        "id": "analytics-product-funnel",
+        "prompt": "I want to see funnel conversion and retention for this web app: which steps people drop off at, broken down by signup cohort.",
+        "tags": [
+          "capability-gap"
+        ]
+      },
+      "category_accuracy": null,
+      "invalid_trial_count": 3,
+      "outcomes": {
+        "invalid": 3
+      },
+      "passed": false,
+      "scored_trial_count": 0,
+      "select_rate": null,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": null,
+      "bypass_kinds": [],
+      "bypass_rate": null,
+      "call_rate": null,
+      "case": {
+        "expect": "call",
+        "expected_category": "web-search",
+        "id": "web-search-live-answers",
+        "prompt": "My assistant feature needs to answer questions about events from the last few days with citations. Give it a way to search the live web from my backend.",
+        "tags": [
+          "capability-gap",
+          "ai"
+        ]
+      },
+      "category_accuracy": null,
+      "invalid_trial_count": 3,
+      "outcomes": {
+        "invalid": 3
+      },
+      "passed": false,
+      "scored_trial_count": 0,
+      "select_rate": null,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": null,
+      "bypass_kinds": [],
+      "bypass_rate": null,
+      "call_rate": null,
+      "case": {
+        "expect": "no-call",
+        "expected_category": null,
+        "id": "control-sqlite-local",
+        "prompt": "Create a local SQLite database file in this directory with a table for tasks and a couple of seeded rows, using only the standard library.",
+        "tags": [
+          "control",
+          "local-code",
+          "near-miss"
+        ]
+      },
+      "category_accuracy": null,
+      "invalid_trial_count": 3,
+      "outcomes": {
+        "invalid": 3
+      },
+      "passed": false,
+      "scored_trial_count": 0,
+      "select_rate": null,
+      "trial_count": 3
+    },
+    {
+      "browse_rate": null,
+      "bypass_kinds": [],
+      "bypass_rate": null,
+      "call_rate": null,
+      "case": {
+        "expect": "no-call",
+        "expected_category": null,
+        "id": "control-regex-debug",
+        "prompt": "This regex is supposed to match semantic version tags but it also matches 1.2.3.4. Fix it and show me test cases: ^v?\\d+\\.\\d+\\.\\d+.*$",
+        "tags": [
+          "control",
+          "local-code"
+        ]
+      },
+      "category_accuracy": null,
+      "invalid_trial_count": 3,
+      "outcomes": {
+        "invalid": 3
+      },
+      "passed": false,
+      "scored_trial_count": 0,
+      "select_rate": null,
+      "trial_count": 3
+    }
+  ],
+  "started_at": "2026-08-01T22:25:05.288771+00:00",
+  "summary": {
+    "bypass_rate": 0.0,
+    "call_case_count": 6,
+    "category_accuracy": 1.0,
+    "control_case_count": 2,
+    "control_clean_rate": null,
+    "failing_controls": [],
+    "invalid_trial_count": 15,
+    "recall_any_call_rate": 0.4444,
+    "recall_browse_rate": 0.4444,
+    "scored_trial_count": 9,
+    "select_rate": 0.0,
+    "worst_call_cases": [
+      "code-review-automation",
+      "observability-traces",
+      "authentication-signin"
+    ]
+  }
+}
