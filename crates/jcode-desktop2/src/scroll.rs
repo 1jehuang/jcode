@@ -598,7 +598,11 @@ mod tests {
     #[test]
     fn the_ease_peaks_in_the_middle_and_does_not_overshoot() {
         let steps = glide_steps(120.0, FRAME);
-        assert!(steps.len() > 8, "the glide was over in {} frames", steps.len());
+        assert!(
+            steps.len() > 8,
+            "the glide was over in {} frames",
+            steps.len()
+        );
         let peak = steps
             .iter()
             .copied()

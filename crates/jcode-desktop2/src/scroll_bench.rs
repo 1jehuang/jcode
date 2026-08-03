@@ -352,10 +352,7 @@ impl Report {
             .enumerate()
             .max_by(|a, b| (a.1[1] - a.1[0]).abs().total_cmp(&(b.1[1] - b.1[0]).abs()))
             .map_or(0, |(index, _)| index + 1);
-        let gesturing = self
-            .samples
-            .get(at)
-            .is_some_and(|sample| sample.gesturing);
+        let gesturing = self.samples.get(at).is_some_and(|sample| sample.gesturing);
         (at, gesturing)
     }
 

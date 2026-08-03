@@ -268,7 +268,14 @@ const BACKGROUND_FRAME: std::time::Duration = std::time::Duration::from_millis(1
 /// is the GTK, Chromium and Firefox default). Moving one line per notch is the
 /// single loudest reason wheel scrolling here felt like wading, because it
 /// makes a page of transcript cost thirty notches.
-pub(crate) const WHEEL_LINES: f64 = 3.0;
+/// Transcript travel for one discrete mouse-wheel notch.
+pub(crate) const WHEEL_LINES: f64 = 4.0;
+
+/// Transcript travel for one keyboard scroll action, measured in body lines.
+const KEYBOARD_SCROLL_LINES: f64 = 2.0;
+
+/// High-resolution wheels and trackpads otherwise feel slower than native pages.
+const PIXEL_SCROLL_SENSITIVITY: f64 = 1.35;
 
 /// UI model: what the frame is built from.
 pub struct Model {
@@ -1336,7 +1343,7 @@ impl App {
         // A page is the region minus one line of overlap, so scrolling keeps
         // a row of context rather than jumping blind.
         let page = (self.transcript_region_height() - self.frame.body_line_height()).max(1.0);
-        let line = self.frame.body_line_height();
+        let line = self.frame.body_line_height() * KEYBOARD_SCROLL_LINES;
         self.model.notice = None;
         match action {
             Action::Insert => {
@@ -1780,7 +1787,7 @@ impl ApplicationHandler for App {
                             winit::event::TouchPhase::Started | winit::event::TouchPhase::Moved
                         );
                         self.model.smooth.gesture_held(held);
-                        let pixels = pos.y / self.frame.scale;
+                        let pixels = pos.y / self.frame.scale * PIXEL_SCROLL_SENSITIVITY;
                         if pixels != 0.0 {
                             let max = self.max_scroll();
                             let now = std::time::Instant::now();
