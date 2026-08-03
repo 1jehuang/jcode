@@ -83,6 +83,51 @@ pub enum ApiRequest {
         decision: PermissionDecision,
     },
 
+    /// List the models this session can switch to.
+    ///
+    /// A client that cannot enumerate models cannot offer a model picker, so
+    /// it is stuck on whatever the daemon defaulted to. Served from the
+    /// catalog the daemon already reports on attach.
+    ListModels { session_id: String },
+
+    /// Switch the session to a different model.
+    ///
+    /// `model` is an id from `ListModels`, e.g. `claude-opus-5`. A route
+    /// suffix like `claude-opus-4-6[1m]` selects a specific context variant.
+    SetModel { session_id: String, model: String },
+
+    /// Set how much the model deliberates before answering.
+    ///
+    /// The cost/quality dial: `minimal`, `low`, `medium`, `high`, `xhigh`, or
+    /// `max`, depending on what the provider supports. Providers that do not
+    /// support it answer with an error rather than silently ignoring it.
+    SetReasoningEffort { session_id: String, effort: String },
+
+    /// Summarize the transcript so far, freeing context.
+    ///
+    /// Without this a long-lived client eventually hits the context limit and
+    /// has no recourse but to clear the conversation and lose everything.
+    Compact { session_id: String },
+
+    /// Set a session's title, or clear it to restore the generated one.
+    RenameSession {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+
+    /// Restore the history that the last `Rewind` removed.
+    ///
+    /// `Rewind` is destructive, so without an undo a client cannot offer it
+    /// safely: a mis-click costs the user their conversation.
+    RewindUndo { session_id: String },
+
+    /// Drop soft interrupts that have been queued but not yet delivered.
+    ///
+    /// The counterpart to `SoftInterrupt`: a client that lets a user queue a
+    /// follow-up must also let them take it back before it lands.
+    CancelSoftInterrupts { session_id: String },
+
     /// Liveness check.
     Ping,
 

@@ -17,9 +17,16 @@ const REQUIRES_ATTACH: &[&str] = &[
     "send_message",
     "cancel",
     "soft_interrupt",
+    "cancel_soft_interrupts",
     "clear",
     "rewind",
+    "rewind_undo",
     "get_history",
+    "list_models",
+    "set_model",
+    "set_reasoning_effort",
+    "compact",
+    "rename_session",
 ];
 
 /// Flatten a stored message's `content` to plain text.
@@ -78,6 +85,16 @@ pub struct BridgeState {
     known_sessions: Vec<String>,
     /// Working directory per session, as far as it is known.
     session_dirs: std::collections::BTreeMap<String, String>,
+    /// Models the daemon last reported for this session.
+    ///
+    /// The daemon volunteers the catalog on attach and again whenever it
+    /// changes, so `list_models` is answered from here rather than by asking
+    /// again: a picker that opens instantly is the difference between a usable
+    /// model switcher and a spinner.
+    available_models: Vec<String>,
+    /// Model currently serving the session, tracked alongside the catalog so
+    /// a picker can mark the active entry.
+    current_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +102,14 @@ enum SimpleKind {
     Ping,
     History,
     Ok,
+    /// Awaiting `model_changed`, which carries its own error field.
+    Model,
+    /// Awaiting `reasoning_effort_changed`.
+    ReasoningEffort,
+    /// Awaiting `compacted_history`.
+    Compact,
+    /// Awaiting the catalog reply that answers `list_models`.
+    Models,
 }
 
 impl BridgeState {
@@ -313,6 +338,97 @@ impl BridgeState {
                     ApiEvent::Sessions { sessions },
                 ))]
             }
+            // Answered from the cached catalog. The daemon pushes it on attach
+            // and on every change, so asking again would add a round trip to
+            // an interaction (opening a picker) that must feel instant.
+            "list_models" => {
+                // Attach pushes the catalog, but a client that asks in the
+                // same breath as attaching can beat it. Returning an empty
+                // list would look like "no models exist", so ask the daemon
+                // and answer when the catalog lands.
+                if self.available_models.is_empty() {
+                    let id = self.legacy_id();
+                    self.pending_simple.push((id, api_id, SimpleKind::Models));
+                    return vec![Outbound::Legacy(
+                        json!({"type": "get_model_catalog", "id": id}),
+                    )];
+                }
+                vec![Outbound::Reply(ServerFrame::reply(
+                    api_id,
+                    ApiEvent::Models {
+                        session_id: self.session_id.clone().unwrap_or_default(),
+                        models: self.available_models.clone(),
+                        current: self.current_model.clone(),
+                    },
+                ))]
+            }
+            "set_model" => {
+                let model = request["model"].as_str().unwrap_or("");
+                if model.is_empty() {
+                    return vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: "set_model needs a non-empty `model`".into(),
+                        },
+                    ))];
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Model));
+                vec![Outbound::Legacy(json!({
+                    "type": "set_model",
+                    "id": id,
+                    "model": model,
+                }))]
+            }
+            "set_reasoning_effort" => {
+                let effort = request["effort"].as_str().unwrap_or("");
+                if effort.is_empty() {
+                    return vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: "set_reasoning_effort needs a non-empty `effort`".into(),
+                        },
+                    ))];
+                }
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ReasoningEffort));
+                vec![Outbound::Legacy(json!({
+                    "type": "set_reasoning_effort",
+                    "id": id,
+                    "effort": effort,
+                }))]
+            }
+            "compact" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Compact));
+                vec![Outbound::Legacy(json!({"type": "compact", "id": id}))]
+            }
+            "rename_session" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                let mut rename = json!({"type": "rename_session", "id": id});
+                // An absent title clears it and restores the generated one, so
+                // null and "" must stay distinguishable on the wire.
+                if let Some(title) = request["title"].as_str() {
+                    rename["title"] = json!(title);
+                }
+                vec![Outbound::Legacy(rename)]
+            }
+            "rewind_undo" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(json!({"type": "rewind_undo", "id": id}))]
+            }
+            "cancel_soft_interrupts" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(
+                    json!({"type": "cancel_soft_interrupts", "id": id}),
+                )]
+            }
             "detach_session" => vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok))],
             "permission_response" => {
                 // The legacy protocol does not surface permission prompts on
@@ -450,7 +566,21 @@ impl BridgeState {
                 // carries no messages: it is model identity, not transcript.
                 if self.pending_model_probe == Some(id) {
                     self.pending_model_probe = None;
+                    self.note_models(event);
                     return vec![ServerFrame::event(self.model_info(session(self), event))];
+                }
+                // A `list_models` that arrived before the catalog did: the
+                // client asked too early, so answer it now that it is here.
+                if let Some(api_id) = self.take_simple(id, SimpleKind::Models) {
+                    self.note_models(event);
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Models {
+                            session_id: session(self),
+                            models: self.available_models.clone(),
+                            current: self.current_model.clone(),
+                        },
+                    )];
                 }
                 let Some(api_id) = self.take_simple(id, SimpleKind::History) else {
                     return vec![];
@@ -478,16 +608,97 @@ impl BridgeState {
             // The model can change mid-session (`/model`, a cycle, or an auth
             // change re-resolving the route), so both pushes are forwarded.
             "model_changed" => {
-                if event["error"].is_string() {
-                    return vec![];
+                let id = event["id"].as_u64().unwrap_or(0);
+                let reply_to = self.take_simple(id, SimpleKind::Model);
+                // The daemon reports a rejected switch in-band, as an `error`
+                // field on the success event rather than as an error frame.
+                // Relayed as a real error so a client sees a failed request
+                // instead of a silent no-op that leaves the picker wrong.
+                if let Some(error) = event["error"].as_str() {
+                    let frame = ApiEvent::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: error.to_string(),
+                    };
+                    return match reply_to {
+                        Some(api_id) => vec![ServerFrame::reply(api_id, frame)],
+                        None => vec![],
+                    };
                 }
-                vec![ServerFrame::event(ApiEvent::ModelInfo {
+                if let Some(model) = event["model"].as_str() {
+                    self.current_model = Some(model.to_string());
+                }
+                let info = ApiEvent::ModelInfo {
                     session_id: session(self),
                     provider: event["provider_name"].as_str().map(str::to_string),
                     model: event["model"].as_str().map(str::to_string),
+                };
+                // Both a reply and a broadcast: the caller needs its request
+                // resolved, and every other client watching the session needs
+                // to know the model moved under them.
+                match reply_to {
+                    Some(api_id) => vec![
+                        ServerFrame::reply(api_id, ApiEvent::Ok),
+                        ServerFrame::event(info),
+                    ],
+                    None => vec![ServerFrame::event(info)],
+                }
+            }
+            "reasoning_effort_changed" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::ReasoningEffort) else {
+                    return vec![];
+                };
+                match event["error"].as_str() {
+                    Some(error) => vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: error.to_string(),
+                        },
+                    )],
+                    None => vec![ServerFrame::reply(api_id, ApiEvent::Ok)],
+                }
+            }
+            // Compaction is scheduled, not performed inline, and the daemon
+            // reports refusal via `success: false` with a reason rather than
+            // an error frame. Relayed as a real error so a client is not told
+            // "done" about work that never happened.
+            "compact_result" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::Compact) else {
+                    return vec![];
+                };
+                let message = event["message"].as_str().unwrap_or("").to_string();
+                if event["success"].as_bool() == Some(false) {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message,
+                        },
+                    )];
+                }
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::Compacted {
+                        session_id: session(self),
+                        message,
+                    },
+                )]
+            }
+            "session_renamed" => {
+                let session_id = event["session_id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| session(self));
+                vec![ServerFrame::event(ApiEvent::SessionRenamed {
+                    session_id,
+                    title: event["title"].as_str().map(str::to_string),
+                    display_title: event["display_title"].as_str().unwrap_or("").to_string(),
                 })]
             }
             "available_models_updated" => {
+                self.note_models(event);
                 vec![ServerFrame::event(self.model_info(session(self), event))]
             }
             // Background-task traffic reaches clients as a notification whose
@@ -554,6 +765,25 @@ impl BridgeState {
     /// Read provider/model identity out of any legacy event that carries the
     /// `provider_name`/`provider_model` pair (the catalog reply and the
     /// available-models push both do).
+    /// Remember the catalog carried by any legacy event that has one.
+    ///
+    /// The daemon reports models on attach and on every change; caching here
+    /// is what lets `list_models` answer without a round trip.
+    fn note_models(&mut self, event: &Value) {
+        if let Some(models) = event["available_models"].as_array() {
+            let names: Vec<String> = models
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
+            if !names.is_empty() {
+                self.available_models = names;
+            }
+        }
+        if let Some(model) = event["provider_model"].as_str() {
+            self.current_model = Some(model.to_string());
+        }
+    }
+
     fn model_info(&self, session_id: String, event: &Value) -> ApiEvent {
         ApiEvent::ModelInfo {
             session_id,

@@ -6,6 +6,7 @@ import net from "node:net";
 import { EventEmitter } from "node:events";
 import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath } from "./sockets.js";
+import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import {
   API_VERSION_MAJOR,
   type AnyApiEvent,
@@ -156,7 +157,51 @@ export class JcodeClient extends EventEmitter {
     transport.onClose((error) => this.handleClose(error));
   }
 
-  /** Dial the harness and complete the version handshake. */
+  /** Set when this client owns a private instance, so `close()` stops it. */
+  private instance?: LaunchedInstance;
+
+  /** State directory of the instance this client launched, if any. */
+  get instanceHome(): string | undefined {
+    return this.instance?.jcodeHome;
+  }
+
+  /**
+   * Start a private jcode instance and connect to it.
+   *
+   * This is the entry point for embedding jcode as an agent engine. The
+   * instance has its own state directory, its own sessions, and its own
+   * sockets, so it cannot see or disturb the jcode the user runs
+   * interactively. `close()` shuts it down.
+   *
+   * Provider logins are inherited from the user by default, because an
+   * instance without credentials cannot reach a model at all. Pass
+   * `inheritLogins: false` to start empty.
+   */
+  static async launch(options: LaunchOptions & ConnectOptions = {}): Promise<JcodeClient> {
+    const instance = await launchInstance(options);
+    try {
+      const client = await JcodeClient.connect({
+        ...options,
+        socketPath: instance.socketPath,
+      });
+      client.instance = instance;
+      return client;
+    } catch (error) {
+      // A launched instance whose client never connected is a stray daemon
+      // holding a temp directory open, so tear it down before rethrowing.
+      await instance.shutdown();
+      throw error;
+    }
+  }
+
+  /**
+   * Connect to the jcode already running on this machine.
+   *
+   * Use this to automate the user's own jcode: an editor plugin, a status
+   * dashboard, a hotkey tool. It shares the user's live sessions, so anything
+   * done here is visible in their terminal. To embed jcode as an engine
+   * instead, use {@link JcodeClient.launch}.
+   */
   static async connect(options: ConnectOptions = {}): Promise<JcodeClient> {
     const transport =
       options.transport ?? (await unixSocketTransport(options.socketPath ?? apiSocketPath()));
@@ -404,6 +449,67 @@ export class JcodeClient extends EventEmitter {
     });
   }
 
+  /**
+   * Models this session can switch to, and which one is serving it.
+   *
+   * Answered from the catalog the daemon pushes on attach, so opening a model
+   * picker does not cost a round trip.
+   */
+  async listModels(sessionId: string): Promise<{ models: string[]; current?: string }> {
+    const frame = await this.expectReply({ req: "list_models", session_id: sessionId }, "models");
+    return { models: frame.models ?? [], current: frame.current };
+  }
+
+  /**
+   * Switch the session to a different model.
+   *
+   * `model` is an id from `listModels`. Rejects with `invalid_request` when
+   * the model is unknown or the provider refuses it, rather than silently
+   * leaving the session on the old one.
+   */
+  async setModel(sessionId: string, model: string): Promise<void> {
+    await this.requestOk({ req: "set_model", session_id: sessionId, model });
+  }
+
+  /**
+   * Set how much the model deliberates before answering.
+   *
+   * Typically "minimal" | "low" | "medium" | "high" | "xhigh" | "max", but the
+   * accepted set is per-provider, so this takes a string and reports what the
+   * provider says rather than guessing at a union that would go stale.
+   */
+  async setReasoningEffort(sessionId: string, effort: string): Promise<void> {
+    await this.requestOk({ req: "set_reasoning_effort", session_id: sessionId, effort });
+  }
+
+  /**
+   * Schedule compaction of the transcript so far, freeing context.
+   *
+   * Not synchronous: the daemon summarizes at the next safe point rather than
+   * interrupting a turn, so this resolving means the request was accepted. Read
+   * the history afterwards to see the result. A refusal (nothing to compact, a
+   * turn in flight) rejects with `invalid_request` and the reason.
+   */
+  async compact(sessionId: string): Promise<string> {
+    const frame = await this.expectReply({ req: "compact", session_id: sessionId }, "compacted");
+    return frame.message;
+  }
+
+  /** Set a session's title. Omit `title` to restore the generated one. */
+  async renameSession(sessionId: string, title?: string): Promise<void> {
+    await this.requestOk({ req: "rename_session", session_id: sessionId, title });
+  }
+
+  /** Restore the history the last `rewind` removed. */
+  async rewindUndo(sessionId: string): Promise<void> {
+    await this.requestOk({ req: "rewind_undo", session_id: sessionId });
+  }
+
+  /** Drop soft interrupts that are queued but not yet delivered. */
+  async cancelSoftInterrupts(sessionId: string): Promise<void> {
+    await this.requestOk({ req: "cancel_soft_interrupts", session_id: sessionId });
+  }
+
   async ping(): Promise<void> {
     await this.requestOk({ req: "ping" });
   }
@@ -539,8 +645,17 @@ export class JcodeClient extends EventEmitter {
     return result;
   }
 
-  close(): void {
+  /**
+   * Disconnect, and stop the instance if this client launched one.
+   *
+   * Returns a promise so a launched instance can be awaited to a stop; for a
+   * plain `connect()` client it resolves immediately and can be ignored.
+   */
+  close(): Promise<void> {
     this.transport.close();
+    const instance = this.instance;
+    this.instance = undefined;
+    return instance ? instance.shutdown() : Promise.resolve();
   }
 }
 
