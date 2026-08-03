@@ -373,16 +373,34 @@ pub(super) fn is_git_checkout() -> bool {
 }
 
 pub(super) fn is_ci() -> bool {
-    [
+    // Vendor-specific markers. `CI` alone misses several providers that only
+    // set their own variable, which let CI runners land in the headline DAU
+    // as if they were people.
+    const CI_MARKERS: [&str; 16] = [
         "CI",
+        "CONTINUOUS_INTEGRATION",
+        "BUILD_NUMBER",
         "GITHUB_ACTIONS",
         "BUILDKITE",
         "JENKINS_URL",
         "GITLAB_CI",
         "CIRCLECI",
-    ]
-    .iter()
-    .any(|key| std::env::var(key).is_ok())
+        "TRAVIS",
+        "TEAMCITY_VERSION",
+        "TF_BUILD",
+        "CODEBUILD_BUILD_ID",
+        "DRONE",
+        "APPVEYOR",
+        "WOODPECKER",
+        "BITBUCKET_BUILD_NUMBER",
+    ];
+    if CI_MARKERS.iter().any(|key| std::env::var(key).is_ok()) {
+        return true;
+    }
+    // Test harnesses are automation too: a `cargo test` / nextest run that
+    // exercises telemetry mints a throwaway id per process and never reaches
+    // session_end, which is exactly the traffic shape that inflated DAU.
+    std::env::var("NEXTEST").is_ok() || std::env::var("JCODE_E2E_BIN").is_ok()
 }
 
 pub(super) fn ran_from_cargo() -> bool {

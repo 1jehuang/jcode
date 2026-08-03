@@ -89,11 +89,23 @@ fn test_is_ci_detects_ci_env() {
     // Clear any inherited CI markers so the baseline is deterministic.
     for key in [
         "CI",
+        "CONTINUOUS_INTEGRATION",
+        "BUILD_NUMBER",
         "GITHUB_ACTIONS",
         "BUILDKITE",
         "JENKINS_URL",
         "GITLAB_CI",
         "CIRCLECI",
+        "TRAVIS",
+        "TEAMCITY_VERSION",
+        "TF_BUILD",
+        "CODEBUILD_BUILD_ID",
+        "DRONE",
+        "APPVEYOR",
+        "WOODPECKER",
+        "BITBUCKET_BUILD_NUMBER",
+        "NEXTEST",
+        "JCODE_E2E_BIN",
     ] {
         jcode_core::env::remove_var(key);
     }
@@ -107,6 +119,21 @@ fn test_is_ci_detects_ci_env() {
         "CI env var should mark the run as CI (gates install skip)"
     );
     jcode_core::env::remove_var("CI");
+    assert!(!is_ci());
+
+    // Vendor-specific markers count on their own: several providers never set
+    // the generic `CI` variable, and those runners used to look like people.
+    for key in ["TEAMCITY_VERSION", "TF_BUILD", "DRONE", "BITBUCKET_BUILD_NUMBER"] {
+        jcode_core::env::set_var(key, "1");
+        assert!(is_ci(), "{key} should mark the run as CI");
+        jcode_core::env::remove_var(key);
+        assert!(!is_ci());
+    }
+
+    // Test harnesses are automation: they mint a throwaway id per process.
+    jcode_core::env::set_var("NEXTEST", "1");
+    assert!(is_ci(), "nextest runs should be tagged as automation");
+    jcode_core::env::remove_var("NEXTEST");
     assert!(!is_ci());
 }
 
