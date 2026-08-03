@@ -63,6 +63,12 @@ impl App {
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
                 }
+                harness::HarnessUpdate::Models { models, current } => {
+                    self.model.model_picker.set_models(models, current);
+                }
+                harness::HarnessUpdate::ModelSelected(model) => {
+                    self.model.model_picker.mark_selected(model);
+                }
                 harness::HarnessUpdate::Text(text) => {
                     self.model.transcript.append_assistant(&text);
                     // Chase the new length rather than jumping to it: the
@@ -219,6 +225,8 @@ impl App {
         // Attaching is a jump, not a scroll: easing here would sweep through
         // the previous session's layout.
         self.model.smooth.settle();
+        // A catalog and its open menu belong to the session that produced it.
+        self.model.model_picker = crate::model_picker::Picker::default();
     }
 
     /// Start a fresh session and attach to it.

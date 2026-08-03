@@ -34,6 +34,13 @@ pub enum HarnessUpdate {
         provider: Option<String>,
         model: Option<String>,
     },
+    /// One SDK `list_models` result for the caption menu.
+    Models {
+        models: Vec<String>,
+        current: Option<String>,
+    },
+    /// Confirmation that SDK `set_model` accepted the selected route.
+    ModelSelected(String),
     Text(String),
     /// Streamed reasoning. Kept a separate variant from `Text` so the UI can
     /// place it in its own subordinate block instead of splicing a thought
@@ -101,6 +108,10 @@ pub enum Command {
     /// `Send` and `Attach` so a message typed just before it still lands in
     /// the session the user was looking at when they typed it.
     New,
+    /// Fetch the current session's SDK model catalog.
+    ListModels,
+    /// Select one exact id returned by `list_models`.
+    SetModel(String),
 }
 
 /// A handle every worker thread can use to reach the UI.
@@ -362,6 +373,24 @@ fn run(
                                 session_id: session.session_id,
                                 working_dir: session.working_dir,
                             })
+                        })
+                    }
+                    Command::ListModels => {
+                        let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                        if session.is_empty() {
+                            continue;
+                        }
+                        client.list_models(&session).map(|(models, current)| {
+                            ui.send(HarnessUpdate::Models { models, current })
+                        })
+                    }
+                    Command::SetModel(model) => {
+                        let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                        if session.is_empty() {
+                            continue;
+                        }
+                        client.set_model(&session, &model).map(|()| {
+                            ui.send(HarnessUpdate::ModelSelected(model));
                         })
                     }
                 };

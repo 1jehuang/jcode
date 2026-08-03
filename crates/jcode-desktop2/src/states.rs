@@ -66,6 +66,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("resume_picker_group", resume_picker_group),
     ("settings_panel", settings_panel),
     ("settings_panel_hover", settings_panel_hover),
+    ("model_picker", model_picker),
     ("notice", notice),
     ("error", error),
     ("offline", offline),
@@ -137,6 +138,7 @@ fn connecting() -> Model {
         hint: 0,
         // Detached: nothing has told us the model yet, so the caption is absent.
         model: None,
+        model_picker: crate::model_picker::Picker::default(),
         strip: crate::strip::Strip::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
@@ -266,6 +268,7 @@ fn attached_empty() -> Model {
         // than whatever the clock happened to pick.
         hint: 0,
         model: Some(fixed_model()),
+        model_picker: crate::model_picker::Picker::default(),
         strip: crate::strip::Strip::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
@@ -892,6 +895,25 @@ fn settings_panel_hover() -> Model {
             motion: false,
             copy_on_select: false,
         },
+        ..attached_empty()
+    }
+}
+
+/// The SDK-backed model menu, including a selected route and pointer hover.
+fn model_picker() -> Model {
+    let mut picker = crate::model_picker::Picker::default();
+    picker.open_loading();
+    picker.set_models(
+        vec![
+            "openai-oauth:gpt-5.6".into(),
+            "claude-api:claude-opus-4-8".into(),
+            "claude-oauth:claude-fable-5".into(),
+        ],
+        Some("openai-oauth:gpt-5.6".into()),
+    );
+    picker.set_hover(Some(1));
+    Model {
+        model_picker: picker,
         ..attached_empty()
     }
 }

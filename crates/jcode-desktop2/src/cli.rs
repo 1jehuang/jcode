@@ -335,6 +335,12 @@ fn run_e2e(message: &str) -> Result<()> {
                     model: id,
                 });
             }
+            harness::HarnessUpdate::Models { models, current } => {
+                model.model_picker.set_models(models, current);
+            }
+            harness::HarnessUpdate::ModelSelected(selected) => {
+                model.model_picker.mark_selected(selected);
+            }
             harness::HarnessUpdate::Text(text) => {
                 print!("{text}");
                 model.transcript.append_assistant(&text);
