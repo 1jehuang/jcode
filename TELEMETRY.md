@@ -96,6 +96,13 @@ event below. When telemetry is disabled, this header is omitted.
 
 ### Todo Session Event
 
+This does not replace the todo counters added in migration 0021. Those live on
+`session_details` / `turn_details` and count how often todo gates fired
+(`tool_cat_todo`, `feature_todo_used`, `todo_gate_*_count`). This event is the
+complement: the lifecycle outcome of the list and the score values themselves,
+plus the per-session join key. Read 0021 for "how often did gates fire" and this
+event for "did the work finish, and how confident was the agent".
+
 One aggregate event is sent when an active session ends. Its `id` and
 `correlation_id` fields are the same fresh per-session UUID. The persistent
 telemetry ID, account ID, internal session ID, todo IDs, and all user/model text
