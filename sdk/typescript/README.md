@@ -104,6 +104,17 @@ is reserved for transport faults.
 
 Or pass `socketPath` to `connect()`.
 
+## Errors
+
+Every failure is a `HarnessError` with a `code`:
+
+| Code | Meaning |
+| --- | --- |
+| `connect_failed` | The bridge is not running, or the socket path is wrong. The message names the path and the command to start it. |
+| `disconnected` | The connection dropped mid-request. |
+| `timeout` | No reply within `requestTimeoutMs` (30s by default). |
+| `unknown_session`, `invalid_request`, ... | Protocol errors relayed from the harness. |
+
 ## Forward compatibility
 
 The harness may add events at any time within protocol v1. Unknown kinds are

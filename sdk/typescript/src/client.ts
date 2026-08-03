@@ -38,9 +38,15 @@ export function unixSocketTransport(socketPath: string): Promise<Transport> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     socket.setNoDelay(true);
-    socket.once("error", reject);
+    // A bare `connect ENOENT /run/user/1000/jcode-api.sock` names the syscall
+    // and hides the actual cause: the bridge is not running. The first thing
+    // anyone does with this SDK is connect, so this is the error most likely
+    // to be someone's first impression of it. Say what to do about it.
+    const onConnectError = (cause: NodeJS.ErrnoException) =>
+      reject(connectError(socketPath, cause));
+    socket.once("error", onConnectError);
     socket.once("connect", () => {
-      socket.removeListener("error", reject);
+      socket.removeListener("error", onConnectError);
       // Keep a listener attached for the connection's lifetime: an unhandled
       // socket "error" (an EPIPE when the harness goes away mid-write, say)
       // is a fatal throw in Node, and callers should see a rejected request
@@ -70,6 +76,25 @@ export function unixSocketTransport(socketPath: string): Promise<Transport> {
       });
     });
   });
+}
+
+/** Turn a dial failure into an error that names the likely cause and fix. */
+function connectError(socketPath: string, cause: NodeJS.ErrnoException): HarnessError {
+  const code = cause.code ?? "unknown";
+  const hint =
+    code === "ENOENT"
+      ? `no harness API socket at ${socketPath}. Start the bridge with ` +
+        "`cargo run -p jcode-harness-api-server --bin jcode-harness-api-bridge`, " +
+        "or set JCODE_API_SOCKET to its path."
+      : code === "ECONNREFUSED"
+        ? `nothing is listening on ${socketPath}; a stale socket file is left over ` +
+          "from a bridge that exited. Restart the bridge."
+        : code === "EACCES"
+          ? `permission denied on ${socketPath}: the socket belongs to another user.`
+          : `could not connect to ${socketPath}: ${cause.message}`;
+  const error = new HarnessError("connect_failed", hint);
+  error.cause = cause;
+  return error;
 }
 
 export interface ConnectOptions {
