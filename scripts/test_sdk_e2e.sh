@@ -33,8 +33,14 @@ echo "== building bridge =="
 # `api_bridge_socket_flags_do_not_collide` covers the wiring it adds.
 cargo build --profile selfdev -p jcode-harness-api-server --bin jcode-harness-api-bridge
 
+# The bridge translates onto whatever daemon the environment points at, and that
+# daemon answers with whatever provider the environment selected. Inheriting
+# JCODE_ACTIVE_PROVIDER therefore makes this suite pass or fail based on the
+# caller's shell: a stale login for one provider turns every turn into a fatal
+# auth error, even though the same machine answers fine through failover. Let
+# provider selection fall back to the configured default instead.
 echo "== starting bridge on $socket =="
-JCODE_API_SOCKET="$socket" ./target/selfdev/jcode-harness-api-bridge >"$log" 2>&1 &
+JCODE_API_SOCKET="$socket" JCODE_ACTIVE_PROVIDER= ./target/selfdev/jcode-harness-api-bridge >"$log" 2>&1 &
 bridge_pid=$!
 cleanup() {
   kill "$bridge_pid" 2>/dev/null || true

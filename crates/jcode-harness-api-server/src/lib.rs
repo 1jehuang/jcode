@@ -62,18 +62,82 @@ where
 }
 
 /// Run the bridge accept loop forever.
+#[cfg(unix)]
+pub(crate) struct InstanceLock {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        // Best effort: the flock is released by the fd close regardless, and a
+        // leftover empty lock file is harmless (the next bridge re-locks it).
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Take the exclusive bridge lock beside the API socket, or report that a live
+/// bridge already holds it. `flock` is released by the kernel when the holder
+/// dies, so a crashed bridge never wedges the next one out.
+#[cfg(unix)]
+pub(crate) fn single_instance_lock(api_socket: &std::path::Path) -> Result<Option<InstanceLock>> {
+    use std::os::fd::AsRawFd;
+
+    let path = api_socket.with_extension("lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open bridge lock {}", path.display()))?;
+    let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    Ok(taken.then_some(InstanceLock { _file: file, path }))
+}
+
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {
+    // Only one bridge may own the socket.
+    //
+    // This is the fix for clients seeing "disconnected: harness API stream
+    // closed" at random: every desktop client spawned a bridge on demand, and
+    // each new bridge unlinked the live socket and bound its own. The older
+    // bridges kept running with their connected clients, but the *pathname*
+    // now pointed at the newest one, and each reconnect churned the same way.
+    // Whoever lost the race had its clients dropped. Refusing to start when a
+    // live bridge holds the lock makes on-demand spawning idempotent, which is
+    // what every caller already assumes.
+    #[cfg(unix)]
+    let _lock = match single_instance_lock(&api_socket)? {
+        Some(lock) => lock,
+        None => {
+            eprintln!(
+                "harness API bridge: another bridge already owns {}; exiting",
+                api_socket.display()
+            );
+            return Ok(());
+        }
+    };
     // A stale socket file blocks bind on Unix. On Windows there is no file to
-    // remove: the pipe namespace is not the filesystem.
+    // remove: the pipe namespace is not the filesystem. Safe to unlink here
+    // only because we hold the exclusive lock above, so no live bridge owns it.
     #[cfg(unix)]
     let _ = std::fs::remove_file(&api_socket);
     if let Some(parent) = api_socket.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    // `mut` because the Windows named-pipe listener republishes a pipe
-    // instance on every accept, so accepting takes `&mut self`. Harmless on
-    // Unix, and it keeps one accept loop for both platforms.
+    // `mut` only on Windows: the named-pipe listener republishes a pipe
+    // instance on every accept, so accepting takes `&mut self`. Unix's
+    // UnixListener::accept takes `&self`, and an unconditional `mut` there is
+    // an unused_mut warning, so the binding is declared per platform rather
+    // than warning on every build.
+    #[cfg(windows)]
     let mut listener = Listener::bind(&api_socket)
+        .with_context(|| format!("bind API socket {}", api_socket.display()))?;
+    #[cfg(unix)]
+    let listener = Listener::bind(&api_socket)
         .with_context(|| format!("bind API socket {}", api_socket.display()))?;
     // Restrict the socket to its owner, matching the daemon socket it fronts.
     //
@@ -248,6 +312,34 @@ where
 #[cfg(test)]
 #[path = "framing_tests.rs"]
 mod framing_tests;
+
+#[cfg(all(test, unix))]
+mod single_instance_tests {
+    /// Two bridges must never both own the API socket.
+    ///
+    /// They used to: `run_bridge` unlinked whatever socket file was there and
+    /// bound its own, so every on-demand spawn silently evicted the live
+    /// bridge and its clients reported "harness API stream closed".
+    #[test]
+    fn a_second_bridge_cannot_take_the_socket() {
+        let dir = std::env::temp_dir().join(format!("jcode-bridge-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("jcode-api.sock");
+
+        let first = super::single_instance_lock(&socket).unwrap();
+        assert!(first.is_some(), "the first bridge must take the lock");
+        assert!(
+            super::single_instance_lock(&socket).unwrap().is_none(),
+            "a second bridge must be refused while the first is alive"
+        );
+
+        // Once the owner is gone the lock is available again, so a crashed
+        // bridge never wedges its replacement out.
+        drop(first);
+        assert!(super::single_instance_lock(&socket).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 #[cfg(all(test, unix))]
 mod socket_permission_tests {
