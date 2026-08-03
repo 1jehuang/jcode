@@ -107,5 +107,36 @@ await step("the user's jcode never saw the instance", async () => {
   );
 });
 
+// A consumer whose process dies without calling close() must not leave the
+// instance daemon running. The daemon calls setsid(), so it survives anything
+// aimed at the process that started it: a server embedding jcode would
+// otherwise accumulate one daemon per restart, each holding a temp directory
+// and a model connection open indefinitely.
+await step("an exit without close() does not leak the daemon", async () => {
+  const { execFileSync, execSync } = await import("node:child_process");
+  const countDaemons = () =>
+    Number(execSync("pgrep -cf 'jcode --provider auto serve' || true", { encoding: "utf8" }).trim());
+
+  const before = countDaemons();
+  const script = `
+    import { JcodeClient } from ${JSON.stringify(new URL("../dist/index.js", import.meta.url).href)};
+    const client = await JcodeClient.launch({
+      binary: ${JSON.stringify(binary)},
+      workingDir: process.cwd(),
+      startupTimeoutMs: 60000,
+    });
+    console.log(client.instanceHome);
+    process.exit(0);  // no close(), like a crash
+  `;
+  execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 7000));
+  const after = countDaemons();
+  assert.equal(after, before, `a crashed consumer leaked ${after - before} daemon(s)`);
+});
+
 console.log(failures.length ? `\nFAILURES:\n${failures.join("\n")}` : "\nlaunch ok");
 process.exit(failures.length ? 1 : 0);
