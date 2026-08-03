@@ -201,6 +201,37 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
 }
 
 /**
+ * Pid of the daemon serving an instance, read from its own server registry.
+ *
+ * Synchronous on purpose: the only caller is a process "exit" handler, which
+ * cannot await, so shelling out to the CLI is not available. jcode records
+ * every server in `$JCODE_HOME/servers.json` keyed by socket path, and an
+ * instance's registry lists only that instance's daemon, so this can never
+ * resolve to the server the user is running themselves.
+ */
+function readDaemonPidSync(jcodeHome: string, runtimeDir: string): number | undefined {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(jcodeHome, "servers.json"), "utf8");
+  } catch {
+    return undefined;
+  }
+  let registry: Record<string, { socket?: string; pid?: number }>;
+  try {
+    registry = JSON.parse(raw) as Record<string, { socket?: string; pid?: number }>;
+  } catch {
+    return undefined;
+  }
+  const socket = path.join(runtimeDir, "jcode.sock");
+  for (const entry of Object.values(registry)) {
+    if (entry?.socket === socket && typeof entry.pid === "number" && entry.pid > 1) {
+      return entry.pid;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Ask an instance's daemon to exit.
  *
  * `jcode server stop` speaks to the daemon on the socket named by the
@@ -451,9 +482,39 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
     }
   };
 
+  // A consumer who crashes, or simply forgets close(), would otherwise leave
+  // the daemon running forever: a server embedding jcode would accumulate one
+  // instance per restart, each holding a temp directory and a model
+  // connection. Node runs "exit" handlers on a normal exit and after an
+  // uncaught exception, which covers everything short of SIGKILL.
+  const reapOnExit = () => {
+    try {
+      if (exited === undefined) child.kill("SIGTERM");
+    } catch {
+      // Already gone.
+    }
+    // The daemon calls setsid(), so it leads its own session and no signal
+    // aimed at the bridge can reach it. Killing the bridge alone is exactly
+    // the leak this handler exists to prevent.
+    const pid = readDaemonPidSync(jcodeHome, runtimeDir);
+    if (pid === undefined) return;
+    try {
+      // Negative pid: the daemon leads a group, so its helpers go with it.
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Already gone.
+      }
+    }
+  };
+  process.once("exit", reapOnExit);
+
   const deadline = Date.now() + (options.startupTimeoutMs ?? 30_000);
   while (Date.now() < deadline) {
     if (spawnError) {
+      process.removeListener("exit", reapOnExit);
       await shutdown();
       const binaryName = options.binary ?? "jcode";
       throw new HarnessError(
@@ -465,6 +526,7 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
       );
     }
     if (exited) {
+      process.removeListener("exit", reapOnExit);
       await shutdown();
       throw new HarnessError(
         "startup_failed",
@@ -473,11 +535,20 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
       );
     }
     if (fs.existsSync(socketPath)) {
-      return { socketPath, jcodeHome, process: child, shutdown };
+      return {
+        socketPath,
+        jcodeHome,
+        process: child,
+        shutdown: async () => {
+          process.removeListener("exit", reapOnExit);
+          await shutdown();
+        },
+      };
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
+  process.removeListener("exit", reapOnExit);
   await shutdown();
   throw new HarnessError(
     "startup_timeout",
