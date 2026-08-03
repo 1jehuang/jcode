@@ -201,7 +201,7 @@ fn todo_gate_notice(name: &str, output: &str, is_error: bool) -> Option<&'static
     }
 
     if output.contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE) {
-        Some("🔍 Checking the full outcome was owned end to end...")
+        Some("🔍 Checking the delivery state of the finished work...")
     } else if !is_error
         && output.contains(crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
     {
