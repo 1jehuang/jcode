@@ -1,12 +1,12 @@
 use image::GenericImageView;
 use ratatui::prelude::{Line, Modifier, Span, Style};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -73,6 +73,86 @@ struct FailedRenderCache {
 static FAILED_RENDERS: LazyLock<Mutex<FailedRenderCache>> =
     LazyLock::new(|| Mutex::new(FailedRenderCache::default()));
 
+/// Outcome of a LaTeX image render request issued from the draw path.
+pub(super) enum LatexImageOutcome {
+    /// Rendered lines are ready (the artifact was already cached on disk).
+    Ready(Vec<Line<'static>>),
+    /// A background render was queued; the caller should emit a placeholder
+    /// and re-render once the deferred render epoch advances.
+    Pending,
+    /// Rendering is impossible or already known to fail for this snippet.
+    Failed(String),
+}
+
+/// LaTeX snippets whose background render is currently queued or running,
+/// keyed by `cache_key`. Prevents re-queueing the same formula on every frame.
+static PENDING_RENDERS: LazyLock<Mutex<HashSet<u64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+struct DeferredLatexTask {
+    source: String,
+    display: bool,
+    dpi: u16,
+    key: u64,
+}
+
+static DEFERRED_TX: OnceLock<mpsc::Sender<DeferredLatexTask>> = OnceLock::new();
+
+fn deferred_sender() -> &'static mpsc::Sender<DeferredLatexTask> {
+    DEFERRED_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<DeferredLatexTask>();
+        // A failure to spawn leaves the receiver dropped, so `send` fails and
+        // callers fall back to reporting the error rather than blocking.
+        let _ = std::thread::Builder::new()
+            .name("jcode-latex-deferred".to_string())
+            .spawn(move || deferred_worker(rx));
+        tx
+    })
+}
+
+fn deferred_worker(rx: mpsc::Receiver<DeferredLatexTask>) {
+    for task in rx {
+        let toolchain = Toolchain::from_environment();
+        if let Err(error) = render_artifact(&task.source, task.display, task.dpi, &toolchain) {
+            remember_render_failure(task.key, &error);
+            report_error(&error);
+        }
+        if let Ok(mut pending) = PENDING_RENDERS.lock() {
+            pending.remove(&task.key);
+        }
+        // Reuse the deferred-render epoch so every markdown/body cache layer
+        // that already invalidates on completed mermaid renders also picks up
+        // completed formulas.
+        super::mermaid::notify_deferred_render_completed();
+    }
+}
+
+/// Queue a background render for `key`, returning false when the toolchain
+/// worker is unavailable.
+fn enqueue_render(source: &str, display: bool, dpi: u16, key: u64) -> bool {
+    match PENDING_RENDERS.lock() {
+        Ok(mut pending) => {
+            if !pending.insert(key) {
+                return true;
+            }
+        }
+        Err(_) => return false,
+    }
+    let task = DeferredLatexTask {
+        source: source.to_string(),
+        display,
+        dpi,
+        key,
+    };
+    if deferred_sender().send(task).is_err() {
+        if let Ok(mut pending) = PENDING_RENDERS.lock() {
+            pending.remove(&key);
+        }
+        return false;
+    }
+    true
+}
+
 /// Lock the failure cache, recovering from poisoning.
 ///
 /// A panic while holding this lock leaves only cache bookkeeping inconsistent,
@@ -118,6 +198,12 @@ thread_local! {
     static TEST_RENDER_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// Count of blocking TeX toolchain invocations. The draw path must never
+/// increment this (see #735): only the deferred worker thread may.
+#[cfg(test)]
+pub(super) static TEST_TOOLCHAIN_RUNS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 #[cfg(test)]
 pub(super) fn reset_test_render_attempts() {
     TEST_RENDER_ATTEMPTS.with(|attempts| attempts.set(0));
@@ -126,6 +212,11 @@ pub(super) fn reset_test_render_attempts() {
 #[cfg(test)]
 pub(super) fn test_render_attempts() -> u64 {
     TEST_RENDER_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn test_toolchain_runs() -> u64 {
+    TEST_TOOLCHAIN_RUNS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub(crate) fn set_log_hook(hook: fn(&str)) {
@@ -297,24 +388,30 @@ pub(super) fn render_latex_image(
     source: &str,
     display: bool,
     max_width: Option<usize>,
-) -> Result<Vec<Line<'static>>, String> {
+) -> LatexImageOutcome {
     #[cfg(test)]
     TEST_RENDER_ATTEMPTS.with(|attempts| attempts.set(attempts.get().saturating_add(1)));
     if !super::mermaid::image_protocol_available() {
-        return Err("terminal image protocol unavailable".to_string());
+        return LatexImageOutcome::Failed("terminal image protocol unavailable".to_string());
     }
     let dpi = render_dpi(super::mermaid::get_font_size());
-    // Never re-run the toolchain for a snippet that already failed at this
-    // geometry: this function runs on the synchronous draw path (see #563).
     let failure_key = cache_key(source, display, dpi);
+    // Never re-run the toolchain for a snippet that already failed at this
+    // geometry (see #563).
     if let Some(error) = cached_render_failure(failure_key) {
-        return Err(error);
+        return LatexImageOutcome::Failed(error);
     }
-    let artifact = match render_artifact(source, display, dpi, &Toolchain::from_environment()) {
+    // The TeX toolchain can block for seconds (missing formats, timeouts), and
+    // this runs on the synchronous draw path, which also serves keyboard input
+    // and interrupt handling. Only consume an already-cached artifact here;
+    // anything else is queued onto the background worker (see #735).
+    let artifact = match cached_artifact(source, display, dpi) {
         Ok(artifact) => artifact,
-        Err(error) => {
-            remember_render_failure(failure_key, &error);
-            return Err(error);
+        Err(_) => {
+            if enqueue_render(source, display, dpi, failure_key) {
+                return LatexImageOutcome::Pending;
+            }
+            return LatexImageOutcome::Failed("LaTeX render worker unavailable".to_string());
         }
     };
     let hash =
@@ -339,7 +436,16 @@ pub(super) fn render_latex_image(
             Style::default().add_modifier(Modifier::DIM),
         )),
     );
-    Ok(lines)
+    LatexImageOutcome::Ready(lines)
+}
+
+/// Load an already-rendered artifact from the on-disk cache without invoking
+/// any external command.
+fn cached_artifact(source: &str, display: bool, dpi: u16) -> Result<Artifact, String> {
+    validate_source(source)?;
+    let dir = cache_dir()?;
+    let cache_path = dir.join(format!("{:016x}.png", cache_key(source, display, dpi)));
+    load_artifact(&cache_path)
 }
 
 fn register_copy_source(hash: u64, source: &str, display: bool) {
@@ -411,6 +517,8 @@ fn render_artifact(
     dpi: u16,
     toolchain: &Toolchain,
 ) -> Result<Artifact, String> {
+    #[cfg(test)]
+    TEST_TOOLCHAIN_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     render_artifact_in(source, display, dpi, toolchain, &cache_dir()?)
 }
 
@@ -920,6 +1028,39 @@ mod tests {
             "50 redraws must not spawn the toolchain again"
         );
         reset_failed_render_cache();
+    }
+
+    /// Regression for #735: the draw path must stay responsive even when the
+    /// TeX toolchain hangs. `render_latex_image` only consumes the on-disk
+    /// cache and otherwise queues the work, so it must return promptly with
+    /// `Pending` (or `Failed` when no image protocol exists) and never block
+    /// for the multi-second command timeout.
+    #[test]
+    fn uncached_math_returns_immediately_instead_of_blocking_the_draw_path() {
+        use std::time::Instant;
+
+        let source = format!(
+            "unique_deferred_probe_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let started = Instant::now();
+        let outcome = render_latex_image(&source, true, Some(80));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < COMMAND_TIMEOUT,
+            "draw path blocked for {elapsed:?}; LaTeX rendering must be deferred"
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "draw path took {elapsed:?}; expected an immediate cache probe"
+        );
+        assert!(
+            !matches!(outcome, LatexImageOutcome::Ready(_)),
+            "an uncached formula cannot be ready synchronously"
+        );
     }
 
     #[test]

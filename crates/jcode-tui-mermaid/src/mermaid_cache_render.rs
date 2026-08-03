@@ -849,6 +849,14 @@ pub fn debug_bump_deferred_render_epoch_for_tests() {
     bump_deferred_render_epoch();
 }
 
+/// Announce that some other deferred renderer (e.g. the LaTeX image worker)
+/// finished, so the shared epoch advances and UI caches holding placeholder
+/// content rebuild on the next frame.
+pub fn notify_deferred_render_completed() {
+    bump_deferred_render_epoch();
+    crate::notify_render_completed();
+}
+
 fn deferred_render_sender() -> &'static mpsc::Sender<DeferredRenderTask> {
     DEFERRED_RENDER_TX.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<DeferredRenderTask>();

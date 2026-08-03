@@ -61,18 +61,19 @@ fn every_streaming_prefix_converges_to_the_full_math_render() {
     assert_eq!(lines_to_string(&incremental).matches("┌─ math").count(), 5);
 }
 
+/// Regression for #735: no markdown render, streaming or completed, may run
+/// the TeX toolchain on the calling (draw) thread. A blocking toolchain run
+/// there starves the TUI event loop and makes Esc/interrupt look ignored.
 #[test]
-fn streaming_math_never_invokes_the_synchronous_image_toolchain() {
-    latex_image::reset_test_render_attempts();
+fn math_rendering_never_runs_the_toolchain_on_the_render_thread() {
+    let before = latex_image::test_toolchain_runs();
     let mut renderer = IncrementalMarkdownRenderer::new(Some(90));
     let _ = renderer.update(exact_multiline_latex_response());
-    assert_eq!(latex_image::test_render_attempts(), 0);
-
-    latex_image::reset_test_render_attempts();
     let _ = render_markdown(r"$$x^2$$");
-    assert!(
-        latex_image::test_render_attempts() > 0,
-        "completed non-streaming Image mode should attempt the configured image renderer"
+    assert_eq!(
+        latex_image::test_toolchain_runs(),
+        before,
+        "markdown rendering must defer LaTeX toolchain work to the background worker"
     );
 }
 

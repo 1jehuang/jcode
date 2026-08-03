@@ -565,9 +565,14 @@ fn mermaid_sidebar_placeholder(text: &str) -> Line<'static> {
 /// render epoch advances).
 pub const MERMAID_PENDING_PLACEHOLDER_TEXT: &str = "↻ rendering mermaid diagram...";
 
+/// Placeholder emitted while a deferred LaTeX image render runs in the
+/// background. Shares the pending-detection prefix with the mermaid
+/// placeholder so the same cache-invalidation path covers both.
+pub const MATH_PENDING_PLACEHOLDER_TEXT: &str = "↻ rendering math...";
+
 /// Prefix used to recognize the pending placeholder even when a narrow width
 /// wraps its tail onto a following line.
-const MERMAID_PENDING_MATCH_PREFIX: &str = "↻ rendering mermaid";
+const MERMAID_PENDING_MATCH_PREFIX: &str = "↻ rendering";
 
 /// True when `line` is the deferred-mermaid pending placeholder. Tolerates
 /// leading/trailing padding spans added by centered display modes and the
@@ -1014,8 +1019,11 @@ fn latex_image_lines(
         return Some(lines);
     }
     match latex_image::render_latex_image(math, display, max_width) {
-        Ok(lines) => Some(lines),
-        Err(error) => {
+        latex_image::LatexImageOutcome::Ready(lines) => Some(lines),
+        latex_image::LatexImageOutcome::Pending => {
+            Some(vec![mermaid_sidebar_placeholder(MATH_PENDING_PLACEHOLDER_TEXT)])
+        }
+        latex_image::LatexImageOutcome::Failed(error) => {
             latex_image::report_error(&error);
             None
         }
