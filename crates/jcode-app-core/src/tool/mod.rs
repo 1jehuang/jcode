@@ -293,7 +293,7 @@ impl Registry {
         if crate::config::config().sponsors.enabled {
             Self::insert_tool(
                 &mut tools_map,
-                "discover_tools",
+                "integration_tools",
                 discover::DiscoverToolsTool::new(),
             );
         }

@@ -71,11 +71,11 @@ async fn test_discover_tools_not_registered_when_sponsors_disabled() {
     let registry = Registry::new(provider).await;
     let names = registry.tool_names().await;
     if crate::config::config().sponsors.enabled {
-        assert!(names.iter().any(|n| n == "discover_tools"));
+        assert!(names.iter().any(|n| n == "integration_tools"));
     } else {
         assert!(
-            !names.iter().any(|n| n == "discover_tools"),
-            "discover_tools must not be registered when sponsors are disabled"
+            !names.iter().any(|n| n == "integration_tools"),
+            "integration_tools must not be registered when sponsors are disabled"
         );
     }
 }
@@ -448,10 +448,10 @@ async fn print_tool_definition_token_report() {
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
-    // discover_tools keeps a deliberate second sentence disclosing that catalog
+    // integration_tools keeps a deliberate second sentence disclosing that catalog
     // entries are vetted/partnered integrations.
     // swarm appends the user-tunable swarm-prompt.md by design.
-    const EXEMPT: &[&str] = &["discover_tools", "swarm"];
+    const EXEMPT: &[&str] = &["integration_tools", "swarm"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

@@ -44,6 +44,7 @@ from benchmark_discovery import (  # noqa: E402
     BenchmarkError,
     benchmark_environment,
     load_categories,
+    DISCOVERY_TOOL_NAMES,
     parse_discovery_output,
     progress,
     start_server,
@@ -207,7 +208,7 @@ def load_cases(path: Path, categories: list[str]) -> list[RateCase]:
         if normalized in seen_prompts:
             raise BenchmarkError(f"duplicate rate prompt in case {case.id}")
         # Prompts must not hint at the mechanism or the taxonomy.
-        for leak in ("discover_tools", "tool discovery", "discovery tool", "catalog"):
+        for leak in ("discover_tools", "integration_tools", "tool discovery", "discovery tool", "catalog"):
             if leak in lowered:
                 raise BenchmarkError(f"case {case.id} leaks Discovery into the prompt ({leak!r})")
         for category in categories:
@@ -351,7 +352,7 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
             name = str(event.get("name", ""))
             output = str(event.get("output", ""))
             tool_input = pending_input.pop(str(event.get("id", "")), "")
-            if name == "discover_tools":
+            if name in DISCOVERY_TOOL_NAMES:
                 call = parse_discovery_output(output, elapsed)
                 record = asdict(call)
                 record["input"] = tool_input[:2000]

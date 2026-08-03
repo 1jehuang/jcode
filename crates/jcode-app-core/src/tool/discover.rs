@@ -223,29 +223,33 @@ struct DiscoverToolsInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiscoveryAction {
-    Browse,
-    Select,
+    Search,
+    Setup,
     Suggest,
 }
 
 impl DiscoveryAction {
+    /// Parse the requested phase. `search`/`setup` are the current names;
+    /// `browse`/`select` are accepted as aliases so transcripts, benchmark
+    /// baselines, and in-flight sessions recorded under the old vocabulary
+    /// keep working.
     fn parse(action: Option<&str>, has_tool: bool) -> Result<Self> {
         match action.map(str::trim).filter(|value| !value.is_empty()) {
-            None => Ok(if has_tool { Self::Select } else { Self::Browse }),
-            Some("browse") if !has_tool => Ok(Self::Browse),
-            Some("select") if has_tool => Ok(Self::Select),
+            None => Ok(if has_tool { Self::Setup } else { Self::Search }),
+            Some("search" | "browse") if !has_tool => Ok(Self::Search),
+            Some("setup" | "select") if has_tool => Ok(Self::Setup),
             Some("suggest") if !has_tool => Ok(Self::Suggest),
-            Some("browse") => Err(anyhow::anyhow!(
-                "discovery action 'browse' cannot include `tool`; use action 'select'"
+            Some("search" | "browse") => Err(anyhow::anyhow!(
+                "integration action 'search' cannot include `tool`; use action 'setup'"
             )),
-            Some("select") => Err(anyhow::anyhow!(
-                "discovery action 'select' requires the selected `tool` name"
+            Some("setup" | "select") => Err(anyhow::anyhow!(
+                "integration action 'setup' requires the chosen `tool` name"
             )),
             Some("suggest") => Err(anyhow::anyhow!(
-                "discovery action 'suggest' cannot include `tool`; use `product_name` for a known product"
+                "integration action 'suggest' cannot include `tool`; use `product_name` for a known product"
             )),
             Some(other) => Err(anyhow::anyhow!(
-                "unknown discovery action '{other}'. Available: browse, select, suggest"
+                "unknown integration action '{other}'. Available: search, setup, suggest"
             )),
         }
     }
@@ -540,7 +544,7 @@ fn looks_like_payment_card(candidate: &str) -> bool {
 #[async_trait]
 impl Tool for DiscoverToolsTool {
     fn name(&self) -> &str {
-        "discover_tools"
+        "integration_tools"
     }
 
     fn description(&self) -> &str {
@@ -558,8 +562,8 @@ impl Tool for DiscoverToolsTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["browse", "select", "suggest"],
-                    "description": "Phase. Defaults to select when `tool` is set, else browse. Suggest only after browse fails."
+                    "enum": ["search", "setup", "suggest"],
+                    "description": "Phase. Defaults to setup when `tool` is set, else search. Suggest only when no result fits."
                 },
                 "category": {
                     "type": "string",
@@ -576,11 +580,11 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": DISCOVERY_REASON_MIN_CHARS,
                     "maxLength": DISCOVERY_REASON_MAX_CHARS,
-                    "description": "Why the selection fits, or why browse results were unsuitable. Never include private data."
+                    "description": "Why the chosen integration fits, or why search results were unsuitable. Never include private data."
                 },
                 "tool": {
                     "type": "string",
-                    "description": "Catalog tool name to select when action=select."
+                    "description": "Catalog tool name to set up when action=setup."
                 },
                 "suggestion_kind": {
                     "type": "string",
@@ -601,7 +605,7 @@ impl Tool for DiscoverToolsTool {
                 "gap_evidence": {
                     "type": "string",
                     "maxLength": 500,
-                    "description": "Which browse results were close and why they did not fit. Maintainers only."
+                    "description": "Which search results were close and why they did not fit. Maintainers only."
                 },
                 "requirements": {
                     "type": "array",
@@ -611,7 +615,7 @@ impl Tool for DiscoverToolsTool {
                 },
                 "prior_request_id": {
                     "type": "string",
-                    "description": "For suggest: the request ID returned by the preceding browse in this category."
+                    "description": "For suggest: the request ID returned by the preceding search in this category."
                 }
             }
         })
@@ -1346,11 +1350,11 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
         .ok_or_else(|| anyhow::anyhow!("discovery returned no tool list"))?;
     if tools.is_empty() {
         return Ok(format!(
-            "No discoverable tools in category '{category}' right now.\n\nBrowse request ID: `{request_id}`\n\nIf this catalog gap matters to the task, call discover_tools again with action `suggest` and this `prior_request_id`."
+            "No integrations in category '{category}' right now.\n\nSearch request ID: `{request_id}`\n\nIf this catalog gap matters to the task, call integration_tools again with action `suggest` and this `prior_request_id`."
         ));
     }
     let mut out = format!(
-        "Discoverable tools in '{category}' (Jcode tool directory; recommendations must be based \
+        "Available integrations in '{category}' (Jcode tool directory; recommendations must be based \
          only on fit; details: {}):\n",
         crate::sponsors::DISCOVERY_PARTNERS_URL
     );
@@ -1366,14 +1370,14 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
         }
     }
     out.push_str(
-        "\n\nOnly select one of these if it is genuinely the best option for the task. \
-         To get a tool's setup instructions, call discover_tools again with action `select` \
-         and `tool` set to its name. If none is suitable, call it with action `suggest` and \
-         the browse request ID below so maintainers receive the catalog gap. Consequential \
+        "\n\nOnly use one of these if it is genuinely the best option for the task. \
+         To get an integration's setup instructions, call integration_tools again with action \
+         `setup` and `tool` set to its name. If none is suitable, call it with action `suggest` \
+         and the search request ID below so maintainers receive the catalog gap. Consequential \
          actions (signups, spending) must note the partnership in the confirmation \
          shown to the user.",
     );
-    out.push_str(&format!("\n\nBrowse request ID: `{request_id}`"));
+    out.push_str(&format!("\n\nSearch request ID: `{request_id}`"));
     Ok(out)
 }
 
@@ -1439,7 +1443,7 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
         .unwrap_or(tool_name);
     let blurb = tool.get("blurb").and_then(|v| v.as_str()).unwrap_or("");
     let mut out = format!(
-        "Selected '{name}' from '{category}' (Jcode tool directory; selection must be based only \
+        "Set up '{name}' from '{category}' (Jcode tool directory; the choice must be based only \
          on fit; details: {}):\n\n{name}: {blurb}",
         crate::sponsors::DISCOVERY_PARTNERS_URL
     );
@@ -1495,8 +1499,8 @@ mod tests {
             "11111111-2222-4333-8444-555555555555",
         )
         .unwrap();
-        assert!(out.contains("No discoverable tools"));
-        assert!(out.contains("Browse request ID"));
+        assert!(out.contains("No integrations"));
+        assert!(out.contains("Search request ID"));
         assert!(out.contains("action `suggest`"));
     }
 
@@ -1507,9 +1511,9 @@ mod tests {
         });
         let out =
             render_listing("payments", &listing, "11111111-2222-4333-8444-555555555555").unwrap();
-        assert!(out.contains("action `select`"));
+        assert!(out.contains("action `setup`"));
         assert!(out.contains("action `suggest`"));
-        assert!(out.contains("Browse request ID"));
+        assert!(out.contains("Search request ID"));
     }
 
     #[test]
@@ -1523,10 +1527,10 @@ mod tests {
             }
         });
         let out = render_selection("payments", "agentcard", &listing).unwrap();
-        assert!(out.contains("Selected 'agentcard'"));
+        assert!(out.contains("Set up 'agentcard'"));
         assert!(out.contains("Setup: npm install -g agentcard"));
         assert!(out.contains("Jcode tool directory"));
-        assert!(out.contains("selection must be based only on fit"));
+        assert!(out.contains("the choice must be based only on fit"));
         assert!(render_selection("payments", "ghost", &json!({})).is_err());
     }
 
@@ -1550,7 +1554,7 @@ mod tests {
         });
 
         let rendered = render_selection("email-messaging", "agentmail", &listing).unwrap();
-        assert!(rendered.contains("Selected 'agentmail'"));
+        assert!(rendered.contains("Set up 'agentmail'"));
         assert!(rendered.contains("\"source\":\"jcode\""));
         assert!(rendered.contains("\"referrer\":\"https://jcode.sh/discovery-tools\""));
         assert!(rendered.contains("agentmail-mcp@1.0.0"));
@@ -1598,7 +1602,7 @@ mod tests {
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
         assert!(schema.contains("May be shared with partners"));
         assert!(schema.contains("never secrets or personal data"));
-        assert!(schema.contains("Why the selection fits"));
+        assert!(schema.contains("Why the chosen integration fits"));
         assert!(schema.contains("known_product"));
         assert!(schema.contains("capability_gap"));
         assert!(schema.contains("prior_request_id"));
@@ -1613,19 +1617,36 @@ mod tests {
     fn discovery_action_is_explicit_but_backwards_compatible() {
         assert_eq!(
             DiscoveryAction::parse(None, false).unwrap(),
-            DiscoveryAction::Browse
+            DiscoveryAction::Search
         );
         assert_eq!(
             DiscoveryAction::parse(None, true).unwrap(),
-            DiscoveryAction::Select
+            DiscoveryAction::Setup
         );
         assert_eq!(
             DiscoveryAction::parse(Some("suggest"), false).unwrap(),
             DiscoveryAction::Suggest
         );
+        assert!(DiscoveryAction::parse(Some("setup"), false).is_err());
+        assert!(DiscoveryAction::parse(Some("search"), true).is_err());
+        assert!(DiscoveryAction::parse(Some("suggest"), true).is_err());
+    }
+
+    /// The tool was renamed from discovery vocabulary to integration
+    /// vocabulary. Old action names stay valid so resumed sessions and saved
+    /// benchmark baselines keep parsing.
+    #[test]
+    fn legacy_action_names_still_parse() {
+        assert_eq!(
+            DiscoveryAction::parse(Some("browse"), false).unwrap(),
+            DiscoveryAction::Search
+        );
+        assert_eq!(
+            DiscoveryAction::parse(Some("select"), true).unwrap(),
+            DiscoveryAction::Setup
+        );
         assert!(DiscoveryAction::parse(Some("select"), false).is_err());
         assert!(DiscoveryAction::parse(Some("browse"), true).is_err());
-        assert!(DiscoveryAction::parse(Some("suggest"), true).is_err());
     }
 
     #[test]

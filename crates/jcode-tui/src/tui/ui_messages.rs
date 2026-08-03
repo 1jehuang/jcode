@@ -3403,7 +3403,7 @@ fn render_discovery_card(
     is_error: bool,
     available_width: usize,
 ) -> Option<Vec<Line<'static>>> {
-    if tools_ui::canonical_tool_name(&tool.name) != "discover_tools" {
+    if tools_ui::canonical_tool_name(&tool.name) != "integration_tools" {
         return None;
     }
     let block_width = available_width.min(96);
