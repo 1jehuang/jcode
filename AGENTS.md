@@ -5,6 +5,10 @@
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - If the git state is not clean, or there are other agents working in the codebase in parallel, do your best to still commit your work. 
 - **Push when done** - Push all commits to remote when finishing a task or session
+- **Stay on your own branch** - Do not take, cherry-pick, merge, or copy code from other
+  people's or other agents' branches. Only work from your branch and its base (e.g. `main`).
+  If you need something that lives on another branch, tell the user and let them decide;
+  never pull it in yourself.
 - **Run the guardrails before pushing** - `scripts/check_guardrails.sh` runs every gate in
   CI's Format + Quality Guardrails jobs (fmt, clippy `-D warnings`, and the warning,
   code-size, test-size, panic, swallowed-error, dependency-boundary, and wildcard-reexport
