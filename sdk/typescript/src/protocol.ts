@@ -116,11 +116,29 @@ export type ApiEvent =
       description: string;
     }
   | { ev: "session_status"; session_id: string; status: string }
-  | { ev: "model_info"; session_id: string; provider?: string; model?: string }
-  /** Forward compatibility: unknown event kinds must be skipped silently. */
-  | { ev: string; [key: string]: unknown };
+  | { ev: "model_info"; session_id: string; provider?: string; model?: string };
 
-export type ApiEventKind = Extract<ApiEvent, { ev: string }>["ev"];
+/**
+ * An event kind this SDK does not know about.
+ *
+ * The harness may add events at any time within protocol v1, so one can arrive
+ * at runtime. It is deliberately *not* part of `ApiEvent`: a member with
+ * `ev: string` widens the discriminant, and TypeScript then refuses to narrow
+ * `event.ev === "text_delta"` to the text-delta member, leaving every field
+ * typed `unknown`. Forward compatibility is a runtime property, and paying for
+ * it with the type safety of the ninety-nine percent case is a bad trade.
+ *
+ * Handle these with a `default` branch, or filter with `isKnownEvent`.
+ */
+export interface UnknownApiEvent {
+  ev: string;
+  [key: string]: unknown;
+}
+
+/** Any frame off the wire, known or not. Narrow with `isKnownEvent`. */
+export type AnyApiEvent = ApiEvent | UnknownApiEvent;
+
+export type ApiEventKind = ApiEvent["ev"];
 
 export interface ClientFrame {
   v: number;
@@ -128,7 +146,7 @@ export interface ClientFrame {
   [key: string]: unknown;
 }
 
-export type ServerFrame = { v: number; reply_to?: number } & ApiEvent;
+export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
@@ -173,8 +191,6 @@ export const KNOWN_REQUEST_KINDS = [
   "ping",
 ] as const;
 
-export function isKnownEvent(
-  frame: ServerFrame,
-): frame is ServerFrame & { ev: (typeof KNOWN_EVENT_KINDS)[number] } {
+export function isKnownEvent(frame: AnyApiEvent): frame is ApiEvent {
   return (KNOWN_EVENT_KINDS as readonly string[]).includes(frame.ev);
 }

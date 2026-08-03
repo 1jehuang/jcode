@@ -610,6 +610,14 @@ jobs:
         run: npm run check
         working-directory: sdk/typescript
 
+      # `npm run check` proves the source compiles; it says nothing about what
+      # a consumer actually receives. The published tarball is a separate
+      # artifact (`files`, `exports`, `prepack`), and getting it wrong ships a
+      # package that installs but cannot be imported. Install it as a real
+      # dependency and import it the way a consumer would.
+      - name: Published tarball installs and imports
+        run: bash scripts/test_sdk_package.sh
+
   setup-friction:
     name: Setup Friction Eval (Linux installer)
     runs-on: ubuntu-latest

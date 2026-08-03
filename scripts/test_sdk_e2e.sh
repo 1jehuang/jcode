@@ -21,6 +21,10 @@ npm --prefix "$sdk_dir" install --no-audit --no-fund --silent
 npm --prefix "$sdk_dir" run build --silent
 
 echo "== building bridge =="
+# The standalone bridge binary, not `jcode api-bridge`, because the full jcode
+# binary takes minutes to link and this script must stay fast enough to run
+# per-change. The subcommand is a thin wrapper over the same `run_bridge`, and
+# `api_bridge_socket_flags_do_not_collide` covers the wiring it adds.
 cargo build --profile selfdev -p jcode-harness-api-server --bin jcode-harness-api-bridge
 
 echo "== starting bridge on $socket =="

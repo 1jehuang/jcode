@@ -128,13 +128,40 @@ Every failure is a `HarnessError` with a `code`:
 | `timeout` | No reply within `requestTimeoutMs` (30s by default). |
 | `unknown_session`, `invalid_request`, ... | Protocol errors relayed from the harness. |
 
+## Stability
+
+This package is generally available and follows semver against the protocol
+it speaks.
+
+- **Protocol v1 is stable.** The handshake negotiates a major version, and a
+  server that cannot speak v1 is rejected with `unsupported_version` rather
+  than half-working. A breaking protocol change bumps to v2 and to a new SDK
+  major.
+- **Additive changes are minor releases.** New events, new request fields, and
+  new methods arrive in minors. Existing frames keep their shape.
+- **Drift is checked mechanically, in both directions.** A Rust test reads
+  `src/protocol.ts` and fails if a variant *or a field* is missing here; a Node
+  test reads the Rust enums and fails if the tag sets diverge. Neither side can
+  land a schema change alone.
+- **The tarball is tested as a tarball.** `scripts/test_sdk_package.sh` packs
+  it, installs it into a throwaway project, and imports it as ESM, as CJS, and
+  through `tsc`.
+
+Compatibility: Node 20+, ESM and CJS, Linux and macOS. Windows is not
+supported yet, since the API is served over a Unix socket.
+
 ## Forward compatibility
 
-The harness may add events at any time within protocol v1. Unknown kinds are
-delivered on the generic `event` channel and are typed as
-`{ ev: string; [key: string]: unknown }`, so clients should switch on `ev` and
-ignore what they do not recognize. Breaking changes bump the major version and
-are rejected in the handshake.
+The harness may add events at any time within protocol v1. `events()` and
+`run()` are typed as `ApiEvent`, the union of kinds this SDK knows, so
+`switch (event.ev)` narrows each case; always keep a `default` branch for kinds
+added after your version. A frame of unknown kind is delivered as
+`UnknownApiEvent` (`{ ev: string; [key: string]: unknown }`); use
+`isKnownEvent(frame)` to narrow `AnyApiEvent` when you handle raw frames.
+
+`UnknownApiEvent` is deliberately not a member of `ApiEvent`: a member with
+`ev: string` widens the discriminant, and TypeScript then refuses to narrow any
+case, typing every field as `unknown`.
 
 ## Development
 
