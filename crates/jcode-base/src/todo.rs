@@ -499,7 +499,7 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     if trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE)
     {
-        return Some("🔍 Checking the full outcome was owned end to end...");
+        return Some("🔍 Checking the delivery state of the finished work...");
     }
     if trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE) {
         return Some("🔍 Re-checking the request was understood...");

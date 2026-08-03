@@ -506,10 +506,7 @@ fn grouped_todos_show_closed_feedback_loop_on_their_group_headers() {
         lines_text_concat(&render_todos_expanded(&data, Rect::new(0, 0, 70, 14))),
     ] {
         assert!(text.contains("loop strong"), "group loop missing: {text}");
-        assert!(
-            text.contains("loop weak"),
-            "low group loop missing: {text}"
-        );
+        assert!(text.contains("loop weak"), "low group loop missing: {text}");
     }
 }
 
