@@ -976,7 +976,9 @@ impl Provider for CopilotApiProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        let trimmed = model.trim();
+        // See `strip_own_model_prefix`: `--provider copilot` routes through this
+        // runtime directly, so session restore hands it `copilot:<model>`.
+        let trimmed = jcode_provider_core::strip_own_model_prefix(model, "copilot:");
         if trimmed.is_empty() {
             anyhow::bail!("Copilot model cannot be empty");
         }
