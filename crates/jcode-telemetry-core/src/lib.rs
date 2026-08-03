@@ -1747,6 +1747,35 @@ fn begin_session_with_mode(
         provider_switches: 0,
         model_switches: 0,
     };
+    // A live session in the slot means the process is switching sessions
+    // without anyone calling end_session (agent create/attach both call
+    // begin_session unconditionally). Overwriting it silently orphaned the
+    // previous session_start, which is why only ~25% of release
+    // session_starts ever saw a matching session_end. Close it out first so
+    // every start has a terminal event.
+    let superseded = match SESSION_STATE.lock() {
+        Ok(mut guard) => guard.as_ref().map(|prior| {
+            (
+                prior.provider_start.clone(),
+                prior.model_start.clone(),
+                prior.start_event_sent,
+            )
+        }),
+        Err(_) => None,
+    };
+    if let Some((provider_start, model_start, start_event_sent)) = superseded {
+        // Only worth an end event if the start was actually emitted; an
+        // unsent start has no orphan to pair with.
+        if start_event_sent {
+            emit_lifecycle_event(
+                "session_end",
+                &provider_start,
+                &model_start,
+                SessionEndReason::Superseded,
+                true,
+            );
+        }
+    }
     if let Ok(mut guard) = SESSION_STATE.lock() {
         *guard = Some(state);
     }

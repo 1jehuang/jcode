@@ -714,3 +714,43 @@ fn test_install_conversion_id_is_removed_when_telemetry_is_disabled() {
         jcode_core::env::remove_var("JCODE_HOME");
     }
 }
+
+/// Regression: `begin_session` used to overwrite a live `SESSION_STATE`
+/// without ending it, orphaning the previous `session_start`. That is why
+/// only ~25% of release `session_start` events ever had a matching
+/// `session_end`. Starting a second session must close the first.
+#[test]
+fn test_begin_session_closes_superseded_session() {
+    let _guard = lock_telemetry_test_state();
+    jcode_core::env::set_var("JCODE_TELEMETRY_DISABLED", "1");
+
+    begin_session("prov-a", "model-a");
+    let first_id = SESSION_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.session_id.clone());
+
+    begin_session("prov-b", "model-b");
+    let second = SESSION_STATE.lock().unwrap();
+    let second_state = second.as_ref().expect("second session should be live");
+
+    assert_ne!(
+        first_id.as_deref(),
+        Some(second_state.session_id.as_str()),
+        "second begin_session should install a distinct session"
+    );
+    assert_eq!(second_state.provider_start, "prov-b");
+    assert!(
+        !second_state.start_event_sent,
+        "a fresh session must not inherit the superseded session's sent flag"
+    );
+    drop(second);
+
+    jcode_core::env::remove_var("JCODE_TELEMETRY_DISABLED");
+}
+
+#[test]
+fn test_superseded_reason_has_label() {
+    assert_eq!(SessionEndReason::Superseded.as_str(), "superseded");
+}

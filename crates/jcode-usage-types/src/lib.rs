@@ -167,6 +167,8 @@ pub enum SessionEndReason {
     Signal,
     Disconnect,
     Reload,
+    /// A new session replaced this one in-process without an explicit close.
+    Superseded,
     Unknown,
 }
 
@@ -178,6 +180,7 @@ impl SessionEndReason {
             SessionEndReason::Signal => "signal",
             SessionEndReason::Disconnect => "disconnect",
             SessionEndReason::Reload => "reload",
+            SessionEndReason::Superseded => "superseded",
             SessionEndReason::Unknown => "unknown",
         }
     }

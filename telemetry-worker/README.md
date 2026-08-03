@@ -207,6 +207,13 @@ Two traps the panel now guards against:
 This is also why the overall `lifecycle_completion_ratio` in `health.sql` is
 low: it is a blend across channels, and the dev channels drag it down.
 
+Release's own ratio was ~0.25 for a separate reason: `begin_session` replaced
+a live in-process session without ending it, so every superseded session's
+`session_start` was orphaned. Those now emit a `session_end` with
+`session_stop_reason = 'superseded'`. Expect the release ratio to climb as
+clients upgrade, and expect `superseded` to be a large share of ends: it means
+one process opened several sessions, not that anything failed.
+
 ## Event types
 
 CLI events (sent by jcode itself): `install`, `upgrade`, `auth_success`,
