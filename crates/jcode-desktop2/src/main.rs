@@ -472,6 +472,17 @@ impl Model {
     }
 
     pub(crate) fn apply_momentum(&mut self, max: f64) {
+        // Shape the coast before spending it: a fling that runs at full speed
+        // into the top and is then killed by the clamp goes from hand speed to
+        // nothing between two frames. Telling it how far the edge is lets the
+        // brake land it instead. Room is measured toward wherever the fling is
+        // heading, so only the edge in front of it bites.
+        let room = if self.smooth.heading_up() {
+            max.max(0.0) - self.scroll
+        } else {
+            self.scroll
+        };
+        self.smooth.approach_edge(room);
         let pending = self.smooth.take_momentum();
         if pending == 0.0 {
             return;

@@ -176,6 +176,10 @@ pub struct Smooth {
     phase_known: bool,
     /// Momentum travel accumulated since the caller last collected it.
     pending: f64,
+    /// Distance to the edge the fling is heading for, as the caller last
+    /// measured it. `None` means nobody has said, so the coast runs unshaped.
+    /// See [`Smooth::approach_edge`].
+    room: Option<f64>,
 }
 
 impl Smooth {
@@ -263,11 +267,51 @@ impl Smooth {
         self.pending != 0.0
     }
 
+    /// Whether the fling is travelling toward older content, so the caller can
+    /// measure the room to the edge that is actually in front of it.
+    pub fn heading_up(&self) -> bool {
+        self.velocity > 0.0
+    }
+
+    /// Tell the fling how much room is left before the edge it is heading for,
+    /// in logical pixels, so it can land instead of slam.
+    ///
+    /// Without this, a coast into the top or the tail runs at full speed until
+    /// the clamp swallows a frame's travel and [`Self::stop`] kills it: the view
+    /// goes from hand speed to nothing between two frames. That discontinuity is
+    /// what reads as the page hitting a wall, and it is what the bench's `stop`
+    /// column measures.
+    ///
+    /// The room is *remembered* here and spent as extra deceleration in
+    /// [`Self::advance`]. Clamping the speed to `sqrt(2·a·s)` on the spot is the
+    /// obvious version and it is worse than the wall it replaces: the first
+    /// frame where the edge comes into range loses most of the speed in one
+    /// step, which measured a higher peak jerk than the hard stop did. Spread
+    /// over the frames that remain, the same arithmetic is a landing.
+    pub fn approach_edge(&mut self, room: f64) {
+        self.room = Some(room.max(0.0));
+    }
+
+    /// Deceleration that would bring the coast to rest in the room left, in
+    /// logical pixels per second squared, or 0 where no edge is in range.
+    ///
+    /// `v² = 2·a·s` rearranged. Unbounded above on purpose: a fling that
+    /// arrives with five pixels of room does have to stop hard, and a cap here
+    /// would only move the wall a few pixels instead of removing it. What keeps
+    /// it gentle in practice is that the term grows as the room shrinks, so an
+    /// ordinary flick is already slow by the time it is large.
+    fn edge_brake(&self) -> Option<f64> {
+        let room = self.room.filter(|room| *room > 0.0)?;
+        let speed = self.velocity.abs();
+        (speed > MIN_VELOCITY).then(|| speed * speed / (2.0 * room))
+    }
+
     /// Kill the fling: the view has hit the top or the tail, and coasting into
     /// a wall keeps the window repainting for no visible movement.
     pub fn stop(&mut self) {
         self.velocity = 0.0;
         self.pending = 0.0;
+        self.room = None;
     }
 
     /// Light the scrollbar without moving anything, e.g. while a drag holds a
@@ -292,6 +336,7 @@ impl Smooth {
     pub fn settle(&mut self) {
         self.lag = 0.0;
         self.lag_velocity = 0.0;
+        self.room = None;
         self.stop();
         self.holding_gesture = false;
         self.last_event = None;
@@ -380,12 +425,28 @@ impl Smooth {
             // flick early (short tau) or leaves it sliding for seconds (long
             // tau). The linear term dominates at low speed and is negligible
             // at high speed, which is the shape a browser fling has.
-            let braked = self.velocity.abs() - FRICTION_BRAKE * dt;
+            //
+            // An approaching edge raises that deceleration to whatever will
+            // actually stop the fling in the room that is left. Applied as an
+            // acceleration rather than as a cap on the speed, so the slowdown is
+            // spread over the frames before the edge instead of landing in the
+            // single frame the edge came into range.
+            let brake = self.edge_brake().unwrap_or(0.0).max(FRICTION_BRAKE);
+            let braked = self.velocity.abs() - brake * dt;
             self.velocity = self.velocity.signum() * braked.max(0.0);
             if self.velocity.abs() < MIN_VELOCITY {
                 self.stop();
             } else {
-                self.pending += self.velocity * dt;
+                // Never coast past the edge: the last frame of a landing would
+                // otherwise overshoot by whatever the integration rounded, and
+                // the clamp would swallow that as a stall.
+                let step = self.velocity * dt;
+                let step = match self.room {
+                    Some(room) => step.signum() * step.abs().min(room),
+                    None => step,
+                };
+                self.room = self.room.map(|room| (room - step.abs()).max(0.0));
+                self.pending += step;
             }
         }
         let holding = self.hold_until.is_some_and(|until| now < until);
@@ -707,6 +768,57 @@ mod tests {
             coasted += smooth.take_momentum();
         }
         assert_eq!(coasted, 0.0, "a lone event flung the view");
+    }
+
+    /// A fling told about an approaching edge decelerates into it, and delivers
+    /// exactly the room it was given rather than coasting through the wall.
+    ///
+    /// The old behaviour was to run at full speed until the clamp swallowed a
+    /// frame and `stop` killed the coast, which took the view from hand speed
+    /// to nothing between two frames. So the assertion is about the *last*
+    /// frame's travel, not about the total: that is the discontinuity the eye
+    /// sees, and it is what the bench's `stop` column gates.
+    #[test]
+    fn a_fling_lands_on_an_edge_instead_of_slamming_into_it() {
+        let start = Instant::now();
+        let mut smooth = Smooth::default();
+        let mut now = start;
+        smooth.gesture_held(true);
+        for _ in 0..8 {
+            now += Duration::from_millis(8);
+            smooth.glide_from(60.0, now);
+        }
+        smooth.gesture_held(false);
+        // 300px of room, against a fling that would otherwise carry far past it.
+        let mut room = 300.0;
+        let mut last_step = 0.0;
+        let mut travelled = 0.0;
+        for _ in 0..400 {
+            now += FRAME;
+            smooth.approach_edge(room);
+            smooth.advance(now);
+            let step = smooth.take_momentum();
+            if step.abs() > 0.05 {
+                last_step = step;
+            }
+            travelled += step;
+            room = (room - step).max(0.0);
+            if !smooth.has_momentum() && smooth.velocity.abs() < MIN_VELOCITY {
+                break;
+            }
+        }
+        assert!(
+            travelled <= 300.5,
+            "the fling coasted {travelled:.1}px through a 300px gap"
+        );
+        assert!(
+            travelled > 200.0,
+            "the brake ate the whole fling: only {travelled:.1}px of 300"
+        );
+        assert!(
+            last_step.abs() < 6.0,
+            "the fling was still doing {last_step:.1}px/frame when it stopped"
+        );
     }
 
     /// Hitting an edge ends the fling instead of grinding against the clamp.

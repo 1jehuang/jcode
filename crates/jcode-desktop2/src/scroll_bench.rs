@@ -337,6 +337,28 @@ impl Report {
             .fold(0.0, f64::max)
     }
 
+    /// Where the peak jerk landed, as a frame index, and whether the fingers
+    /// were still down there.
+    ///
+    /// Reported alongside the peak because the number alone is unreadable: a
+    /// spike on the frame the fingers lift is the handoff from tracking to
+    /// momentum and is expected to be sharp, while the same magnitude in the
+    /// middle of a coast is a stutter. Without the location, tuning one drives
+    /// the other.
+    pub fn jerk_site(&self) -> (usize, bool) {
+        let steps = self.steps();
+        let at = steps
+            .windows(2)
+            .enumerate()
+            .max_by(|a, b| (a.1[1] - a.1[0]).abs().total_cmp(&(b.1[1] - b.1[0]).abs()))
+            .map_or(0, |(index, _)| index + 1);
+        let gesturing = self
+            .samples
+            .get(at)
+            .is_some_and(|sample| sample.gesturing);
+        (at, gesturing)
+    }
+
     /// Frames that repainted without moving the view. Some are legitimate (the
     /// scrollbar is fading), so this is reported rather than gated: what must
     /// not happen is *many* of them while nothing is visibly changing.
@@ -402,11 +424,28 @@ impl Report {
             .map_or(0.0, |sample| (sample.view - sample.logical).abs())
     }
 
+    /// Speed the view was still carrying, in logical pixels per frame, on the
+    /// last frame that moved.
+    ///
+    /// This is the number `peak_jerk` cannot give: jerk is a maximum over the
+    /// whole script, so a flick's *launch* dominates it and a violent stop at
+    /// the end hides underneath. A scroll that decelerates into rest ends with
+    /// a fraction of a pixel per frame; one that is killed mid-coast ends with
+    /// whatever it was doing, and that discontinuity is what reads as the page
+    /// hitting a wall.
+    pub fn stop_speed(&self) -> f64 {
+        let steps = self.steps();
+        steps
+            .iter()
+            .rposition(|step| step.abs() > MOVED_EPSILON)
+            .map_or(0.0, |last| steps[last].abs())
+    }
+
     pub fn line(&self) -> String {
         format!(
             "{:<22} latency {:>5} settle {:>6} ratio {:>6} track {:>6.1}px \
-             drag {:>6} rev {:>2} jerk {:>6.1} still {:>4} relayout {:>3} \
-             mid {:>5}us max {:>6}us@f{:<4} lag {:>5.2}",
+             drag {:>6} rev {:>2} jerk {:>6.1}@f{:<4}{:1} stop {:>5.1} still {:>4} \
+             relayout {:>3} mid {:>5}us max {:>6}us@f{:<4} lag {:>5.2}",
             self.name,
             self.latency_ms
                 .map_or_else(|| "-".into(), |ms| format!("{ms}ms")),
@@ -419,6 +458,9 @@ impl Report {
                 .map_or_else(|| "-".into(), |r| format!("{r:.2}")),
             self.reversals(),
             self.peak_jerk(),
+            self.jerk_site().0,
+            if self.jerk_site().1 { "d" } else { "" },
+            self.stop_speed(),
             self.still_frames(),
             self.relayout_frames(),
             self.median_us(),
@@ -716,7 +758,7 @@ pub fn report(reports: &[Report]) -> bool {
          ratio: drawn travel / input travel, whole script; drag: the same while\n  \
          the fingers were down, which must be 1.00. track: worst fingers-down\n  \
          disagreement. rev: frames moving backwards. jerk: peak per-frame speed change.\n  \
-         mid: the frame cost a hand actually feels. max@fN: worst frame and where it\n  \
+         stop: px/frame still\n  being drawn on the last frame that moved, i.e. how abruptly it ended.\n  mid: the frame cost a hand actually feels. max@fN: worst frame and where it\n  \
          landed; on frame 0 it is the replay warming its own buffers, not a stutter."
     );
     ok
@@ -792,6 +834,18 @@ pub fn gate(report: &Report) -> Vec<String> {
     // scroll feel like it stopped the moment you let go. Past ~1.6s the view is
     // sliding long after the hand has moved on, which reads as the page
     // ignoring the user rather than as momentum.
+    // A scroll must decelerate into rest rather than be cut off mid-coast. The
+    // bound is in pixels per frame, so it is the same visible discontinuity at
+    // either cadence: a fifth of a line is a stop the eye reads as arriving,
+    // and above a line it reads as the page being switched off. This is what
+    // caught the fling into the top ending at 53px/frame, which `peak_jerk`
+    // could not see because a flick's launch dominates that maximum.
+    if report.stop_speed() > 12.0 {
+        failures.push(format!(
+            "the view was still doing {:.1}px/frame when it stopped",
+            report.stop_speed()
+        ));
+    }
     if report.settle_ms.is_some_and(|ms| ms > 1_600) {
         failures.push(format!(
             "still moving {}ms after the last event",
