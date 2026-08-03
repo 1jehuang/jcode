@@ -41,6 +41,30 @@ Use `--api-socket <path>` to listen elsewhere, and set `JCODE_API_SOCKET` to
 the same path in your client. (The global `--socket` selects the *internal
 daemon* socket, which is a different thing.)
 
+## Two ways to use jcode
+
+**Embed jcode as an agent engine** (`launch`). Starts a private instance with
+its own state, sessions, and sockets. It cannot see or disturb the jcode the
+user runs in their terminal, and `close()` shuts it down. This is the default
+for applications.
+
+```ts
+const client = await JcodeClient.launch({ workingDir: process.cwd() });
+const session = await client.createSession();
+console.log((await client.run(session.session_id, "hello")).text);
+await client.close();  // stops the instance
+```
+
+Provider logins are inherited from the user by default, since an instance with
+no credentials cannot reach a model. Pass `inheritLogins: false` to start empty
+and supply your own. Pass `jcodeHome` to keep sessions across runs instead of
+using a temporary directory.
+
+**Automate the user's own jcode** (`connect`). Attaches to the jcode already
+running on the machine, sharing its live sessions. This is what an editor
+plugin or a status dashboard wants. Anything it does is visible in the user's
+terminal, and it needs a bridge already running (`jcode api-bridge`).
+
 ## Quick start
 
 ```ts
@@ -96,7 +120,8 @@ is reserved for transport faults.
 
 | Method | Purpose |
 | --- | --- |
-| `JcodeClient.connect(options)` | Dial and complete the version handshake |
+| `JcodeClient.launch(options)` | Start a private instance and connect to it |
+| `JcodeClient.connect(options)` | Attach to the jcode already running on this machine |
 | `listSessions()` | Sessions visible to this client |
 | `createSession(workingDir?)` | Create and attach |
 | `attachSession(id)` / `detachSession(id)` | Subscribe / unsubscribe |

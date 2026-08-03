@@ -192,3 +192,93 @@ fn capability_report() {
     }
     println!();
 }
+
+/// The SDK mirrors jcode's external credential locations by hand, so a new one
+/// added in Rust must also be inherited by launched instances.
+///
+/// `JCODE_HOME` redirects every `user_home_path` lookup into
+/// `$JCODE_HOME/external/`, which is what makes an instance private. The cost
+/// is that an instance only sees another CLI's credentials if the SDK links
+/// that directory in. Miss one and inheritance silently half-works: the
+/// instance starts fine and fails on the first turn with an auth error, which
+/// reads like the user's login is broken rather than like a missing mapping.
+#[test]
+fn the_sdk_inherits_every_external_credential_location() {
+    let Some(sdk) = launch_source() else {
+        return;
+    };
+    for path in external_credential_paths() {
+        // The SDK links directories, so any file under a covered directory is
+        // covered. Compare on the first path segment (plus a second for the
+        // nested `.config/...` and `.local/share/...` cases).
+        let covered = sdk_covers(&sdk, &path);
+        assert!(
+            covered,
+            "jcode reads credentials from `~/{path}`, but sdk/typescript/src/launch.ts \
+             does not inherit it. Add the directory to EXTERNAL_CREDENTIAL_DIRS, or a \
+             launched instance will fail its first turn with an auth error."
+        );
+    }
+}
+
+fn launch_source() -> Option<String> {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdk/typescript/src/launch.ts");
+    std::fs::read_to_string(path).ok()
+}
+
+/// Does the SDK link a directory that contains `path`?
+fn sdk_covers(sdk: &str, path: &str) -> bool {
+    let mut prefix = String::new();
+    for segment in path.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        if sdk.contains(&format!("\"{prefix}\"")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Home-relative paths jcode reads other tools' credentials from.
+///
+/// Read out of the source so the list cannot drift: `user_home_path` is the
+/// single funnel for "a file in the user's home that JCODE_HOME sandboxes".
+fn external_credential_paths() -> Vec<String> {
+    const CREDENTIAL_HINTS: [&str; 5] = ["auth", "credential", "oauth", "hosts.json", "apps.json"];
+    let mut found = Vec::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    collect_home_paths(&root.join("crates"), &mut found);
+    collect_home_paths(&root.join("src"), &mut found);
+    found.retain(|path| {
+        let lower = path.to_ascii_lowercase();
+        CREDENTIAL_HINTS.iter().any(|hint| lower.contains(hint))
+    });
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn collect_home_paths(dir: &std::path::Path, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_home_paths(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (index, _) in source.match_indices("user_home_path(\"") {
+                let rest = &source[index + "user_home_path(\"".len()..];
+                if let Some(end) = rest.find('"') {
+                    found.push(rest[..end].to_string());
+                }
+            }
+        }
+    }
+}
