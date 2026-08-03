@@ -766,8 +766,7 @@ pub struct TerminalConfig {
 /// failures only logged. `pre_tool` is a gate: jcode waits for it and exit
 /// code 2 blocks the tool call (stderr becomes the error shown to the model);
 /// exit 0 allows; anything else fails open.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct HooksConfig {
     /// Runs when an agent turn begins (after the user message is added and
     /// before the model starts generating). Fires before the first `pre_tool`,
@@ -798,6 +797,173 @@ pub struct HooksConfig {
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    // `Option<String>` above is the original public API. Keep it populated with
+    // the first configured command while retaining an explicitly configured
+    // TOML/env array here. This lets existing callers keep reading or assigning
+    // the legacy fields without preventing native one-process-per-command
+    // execution.
+    turn_start_commands: Option<Vec<String>>,
+    turn_end_commands: Option<Vec<String>>,
+    session_start_commands: Option<Vec<String>>,
+    session_end_commands: Option<Vec<String>>,
+    pre_tool_commands: Option<Vec<String>>,
+    post_tool_commands: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum HookCommandValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct HooksConfigWire {
+    turn_start: Option<HookCommandValue>,
+    turn_end: Option<HookCommandValue>,
+    session_start: Option<HookCommandValue>,
+    session_end: Option<HookCommandValue>,
+    pre_tool: Option<HookCommandValue>,
+    post_tool: Option<HookCommandValue>,
+    pre_tool_timeout_ms: u64,
+}
+
+impl Default for HooksConfigWire {
+    fn default() -> Self {
+        Self {
+            turn_start: None,
+            turn_end: None,
+            session_start: None,
+            session_end: None,
+            pre_tool: None,
+            post_tool: None,
+            pre_tool_timeout_ms: 5000,
+        }
+    }
+}
+
+impl HooksConfig {
+    fn split_value(value: Option<HookCommandValue>) -> (Option<String>, Option<Vec<String>>) {
+        match value {
+            Some(HookCommandValue::One(command)) => (Some(command), None),
+            Some(HookCommandValue::Many(commands)) => (commands.first().cloned(), Some(commands)),
+            None => (None, None),
+        }
+    }
+
+    fn command_value<'a>(
+        legacy: &'a Option<String>,
+        commands: &'a Option<Vec<String>>,
+    ) -> Option<HookCommandValueRef<'a>> {
+        match commands {
+            Some(commands) => Some(HookCommandValueRef::Many(commands)),
+            None => legacy.as_deref().map(HookCommandValueRef::One),
+        }
+    }
+
+    /// Return every configured command for a lifecycle event in declaration
+    /// order. Legacy string fields are treated as a one-command list.
+    pub fn commands(&self, event: &str) -> Vec<&str> {
+        let (legacy, commands) = match event {
+            "turn_start" => (&self.turn_start, &self.turn_start_commands),
+            "turn_end" => (&self.turn_end, &self.turn_end_commands),
+            "session_start" => (&self.session_start, &self.session_start_commands),
+            "session_end" => (&self.session_end, &self.session_end_commands),
+            "pre_tool" => (&self.pre_tool, &self.pre_tool_commands),
+            "post_tool" => (&self.post_tool, &self.post_tool_commands),
+            _ => return Vec::new(),
+        };
+        match commands {
+            Some(commands) => commands.iter().map(String::as_str).collect(),
+            None => legacy.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Replace an event's commands. A zero-length list disables the hook and a
+    /// one-length list is stored through the legacy `Option<String>` field.
+    pub fn set_commands(&mut self, event: &str, commands: Vec<String>) {
+        let (legacy, all) = match event {
+            "turn_start" => (&mut self.turn_start, &mut self.turn_start_commands),
+            "turn_end" => (&mut self.turn_end, &mut self.turn_end_commands),
+            "session_start" => (&mut self.session_start, &mut self.session_start_commands),
+            "session_end" => (&mut self.session_end, &mut self.session_end_commands),
+            "pre_tool" => (&mut self.pre_tool, &mut self.pre_tool_commands),
+            "post_tool" => (&mut self.post_tool, &mut self.post_tool_commands),
+            _ => return,
+        };
+        *legacy = commands.first().cloned();
+        *all = (commands.len() > 1).then_some(commands);
+    }
+}
+
+impl<'de> Deserialize<'de> for HooksConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = HooksConfigWire::deserialize(deserializer)?;
+        let (turn_start, turn_start_commands) = Self::split_value(wire.turn_start);
+        let (turn_end, turn_end_commands) = Self::split_value(wire.turn_end);
+        let (session_start, session_start_commands) = Self::split_value(wire.session_start);
+        let (session_end, session_end_commands) = Self::split_value(wire.session_end);
+        let (pre_tool, pre_tool_commands) = Self::split_value(wire.pre_tool);
+        let (post_tool, post_tool_commands) = Self::split_value(wire.post_tool);
+        Ok(Self {
+            turn_start,
+            turn_end,
+            session_start,
+            session_end,
+            pre_tool,
+            post_tool,
+            pre_tool_timeout_ms: wire.pre_tool_timeout_ms,
+            turn_start_commands,
+            turn_end_commands,
+            session_start_commands,
+            session_end_commands,
+            pre_tool_commands,
+            post_tool_commands,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum HookCommandValueRef<'a> {
+    One(&'a str),
+    Many(&'a Vec<String>),
+}
+
+impl Serialize for HooksConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("HooksConfig", 7)?;
+        if let Some(value) = Self::command_value(&self.turn_start, &self.turn_start_commands) {
+            state.serialize_field("turn_start", &value)?;
+        }
+        if let Some(value) = Self::command_value(&self.turn_end, &self.turn_end_commands) {
+            state.serialize_field("turn_end", &value)?;
+        }
+        if let Some(value) = Self::command_value(&self.session_start, &self.session_start_commands)
+        {
+            state.serialize_field("session_start", &value)?;
+        }
+        if let Some(value) = Self::command_value(&self.session_end, &self.session_end_commands) {
+            state.serialize_field("session_end", &value)?;
+        }
+        if let Some(value) = Self::command_value(&self.pre_tool, &self.pre_tool_commands) {
+            state.serialize_field("pre_tool", &value)?;
+        }
+        if let Some(value) = Self::command_value(&self.post_tool, &self.post_tool_commands) {
+            state.serialize_field("post_tool", &value)?;
+        }
+        state.serialize_field("pre_tool_timeout_ms", &self.pre_tool_timeout_ms)?;
+        state.end()
+    }
 }
 
 impl Default for HooksConfig {
@@ -810,6 +976,12 @@ impl Default for HooksConfig {
             pre_tool: None,
             post_tool: None,
             pre_tool_timeout_ms: 5000,
+            turn_start_commands: None,
+            turn_end_commands: None,
+            session_start_commands: None,
+            session_end_commands: None,
+            pre_tool_commands: None,
+            post_tool_commands: None,
         }
     }
 }

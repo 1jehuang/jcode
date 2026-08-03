@@ -146,6 +146,27 @@ pub fn snapshot_client_terminal_env() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Replace every terminal-identifying variable inherited by `command` with an
+/// authoritative client snapshot.
+///
+/// Long-running servers may carry values from whichever pane launched them.
+/// Removing the complete allowlist first is important: simply overlaying the
+/// client's set leaves unrelated daemon values behind when the client does not
+/// define that variable. `JCODE_CLIENT_*` aliases follow the same rule.
+pub fn apply_client_terminal_env(command: &mut Command, client_env: &[(String, String)]) {
+    for key in CLIENT_TERMINAL_ENV_VARS {
+        command.env_remove(key);
+        command.env_remove(format!("JCODE_CLIENT_{key}"));
+    }
+
+    for (key, value) in client_env {
+        if CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()) {
+            command.env(key, value);
+            command.env(format!("JCODE_CLIENT_{key}"), value);
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnAttempt {
     pub terminal: String,
