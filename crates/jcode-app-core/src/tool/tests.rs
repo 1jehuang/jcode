@@ -1288,3 +1288,93 @@ async fn test_large_output_flag_costs_little_across_the_whole_tool_set() {
         defs.len()
     );
 }
+
+#[tokio::test]
+async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
+    // Batch is how oversized results actually arrive in practice: several
+    // searches fan out at once. Two separate guard applications matter here, and
+    // the aggregate one is the load-bearing case: batch concatenates every
+    // sub-result, so even if each sub-call were individually acceptable the
+    // combined output can blow the window. That aggregate is what withheld
+    // today's regression.
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let mut mgr = registry.compaction.write().await;
+        *mgr = CompactionManager::new().with_budget(10_000);
+    }
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 400_000 }),
+        )
+        .await;
+
+    let ctx = |name: &str| ToolContext {
+        session_id: format!("test-batch-context-guard-{name}"),
+        message_id: "test".to_string(),
+        tool_call_id: "test".to_string(),
+        working_dir: Some(std::env::temp_dir()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    let calls = serde_json::json!([
+        { "tool": "big_output", "intent": "one" },
+        { "tool": "big_output", "intent": "two" },
+    ]);
+
+    // Without an opt-in anywhere, nothing large escapes: no payload reaches the
+    // transcript, only the refusal.
+    let withheld = registry
+        .execute(
+            "batch",
+            serde_json::json!({ "intent": "test", "tool_calls": calls }),
+            ctx("withheld"),
+        )
+        .await
+        .expect("batch should succeed")
+        .output;
+    assert!(
+        withheld.contains("OUTPUT WITHHELD"),
+        "batch output must be guarded, got: {}",
+        &withheld[..withheld.len().min(300)]
+    );
+    assert!(
+        !withheld.contains(&"x".repeat(100)),
+        "no payload should survive when nothing opted in"
+    );
+
+    // Opting in at the batch level returns the aggregate, which is the level a
+    // caller reads. The sub-calls' own refusals are inside it, since each was
+    // guarded separately and neither sub-call opted in.
+    let accepted = registry
+        .execute(
+            "batch",
+            serde_json::json!({
+                "intent": "test",
+                "accept_large_output": true,
+                "tool_calls": calls,
+            }),
+            ctx("accepted"),
+        )
+        .await
+        .expect("batch should succeed")
+        .output;
+    // The aggregate is now returned rather than withheld: it carries the
+    // per-subcall section headers, which the withheld version never reaches.
+    assert!(
+        !accepted.starts_with("⚠️ OUTPUT WITHHELD"),
+        "batch-level opt-in should return the aggregate, got: {}",
+        &accepted[..accepted.len().min(200)]
+    );
+    assert!(
+        accepted.contains("--- [1] big_output ---"),
+        "aggregate should contain per-subcall sections, got: {}",
+        &accepted[..accepted.len().min(300)]
+    );
+    assert!(
+        accepted.matches("OUTPUT WITHHELD").count() >= 1,
+        "each sub-call is guarded on its own; neither opted in"
+    );
+}
