@@ -20,6 +20,26 @@ WITH today AS (
         SUM(CASE WHEN last_is_ci > 0 THEN 1 ELSE 0 END) AS ci_today
     FROM daily_active_users
     WHERE activity_date = date('now')
+), pace AS (
+    -- "Today" is a partial UTC day, so the today tiers always undercount and
+    -- the panel looked like a cliff every morning. Compare today-so-far with
+    -- the *same clock window* on prior days instead of a full day: DAU is a
+    -- distinct count, so it does not scale linearly and a naive
+    -- extrapolate-to-24h projection would overstate it.
+    SELECT
+        ROUND(
+            100.0 * (strftime('%s', 'now') - strftime('%s', 'now', 'start of day')) / 86400.0,
+            1
+        ) AS day_elapsed_pct,
+        COUNT(DISTINCT CASE WHEN created_at >= datetime('now', 'start of day') THEN telemetry_id END) AS users_sofar,
+        COUNT(DISTINCT CASE
+            WHEN created_at >= datetime('now', '-1 day', 'start of day')
+             AND created_at <= datetime('now', '-1 day') THEN telemetry_id END) AS users_sofar_yday,
+        COUNT(DISTINCT CASE
+            WHEN created_at >= datetime('now', '-7 days', 'start of day')
+             AND created_at <= datetime('now', '-7 days') THEN telemetry_id END) AS users_sofar_7d
+    FROM events
+    WHERE created_at >= datetime('now', '-7 days', 'start of day')
 ), recent AS (
     SELECT
         e.telemetry_id,
@@ -55,4 +75,14 @@ WITH today AS (
         COUNT(DISTINCT CASE WHEN is_ci = 1 THEN telemetry_id END) AS ci_24h
     FROM recent
 )
-SELECT * FROM today, trailing_24h;
+SELECT
+    today.*,
+    trailing_24h.*,
+    pace.day_elapsed_pct,
+    pace.users_sofar,
+    pace.users_sofar_yday,
+    pace.users_sofar_7d,
+    -- >1.0 means today is running ahead of that day at the same hour.
+    ROUND(CAST(pace.users_sofar AS REAL) / NULLIF(pace.users_sofar_yday, 0), 2) AS pace_vs_yday,
+    ROUND(CAST(pace.users_sofar AS REAL) / NULLIF(pace.users_sofar_7d, 0), 2) AS pace_vs_7d
+FROM today, trailing_24h, pace;
