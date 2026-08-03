@@ -1,0 +1,21 @@
+{
+  "version": "0.67.0",
+  "date": "2026-08-03",
+  "title": "Richer SDK and desktop workflows",
+  "highlights": [
+    "The Rust SDK now supports owned launches, global lifecycle events, schema-validated structured runs, and runtime file management",
+    "The new desktop experience adds multi-session workspace navigation, native math typesetting, persistent plans, richer settings and model selection, and image previews",
+    "Headed terminal spawns now integrate with Herdr for reliable visible agent sessions"
+  ],
+  "improvements": [
+    "Todo plans now use semantic quality assessments and continue iterating when evidence shows meaningful work remains",
+    "Rust and TypeScript SDK capabilities are kept in parity with clearer lifecycle behavior",
+    "Desktop self-development builds can relaunch registered desktop instances automatically"
+  ],
+  "fixes": [
+    "Restored desktop edit cards preserve their file names",
+    "Desktop errors render as distinct red cards",
+    "Todo assessment changes and low-confidence completion notices render correctly in the terminal",
+    "Activating a Jcode account now refreshes available models automatically"
+  ]
+}
