@@ -200,6 +200,101 @@ fn wait_for_socket(path: &Path, what: &str) -> Result<(), Box<dyn std::error::Er
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
+/// How far a connection attempt got before it died.
+///
+/// "disconnected: harness API stream closed" was true of every failure past
+/// the handshake and told the user nothing: a bridge that exited, a bridge
+/// that was replaced, and a session that could not be attached all read the
+/// same. The stage is recorded as the attempt progresses so the report can
+/// name what was actually happening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Starting the daemon/bridge, or waiting for their sockets.
+    Starting,
+    /// Connecting to the API socket.
+    Connecting,
+    /// Version handshake with the bridge.
+    Handshake,
+    /// Attach/create sent, waiting for the session.
+    Attaching,
+    /// Attached; streaming events.
+    Streaming,
+}
+
+impl Stage {
+    fn doing(self) -> &'static str {
+        match self {
+            Self::Starting => "starting the jcode runtime",
+            Self::Connecting => "connecting to the harness API socket",
+            Self::Handshake => "negotiating the harness API version",
+            Self::Attaching => "attaching a session",
+            Self::Streaming => "streaming the conversation",
+        }
+    }
+}
+
+/// Whether the API socket still answers, used to tell "the bridge died" apart
+/// from "the bridge is alive and dropped us".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketState {
+    Listening,
+    Gone,
+}
+
+/// Turn a lost connection into a sentence that names the cause.
+///
+/// Pure so the wording is testable: the whole point of this function is the
+/// text, and text that is only exercised by unplugging a socket by hand rots.
+pub fn describe_disconnect(
+    stage: Stage,
+    error: &str,
+    connected_for: Option<Duration>,
+    socket: &Path,
+    socket_state: SocketState,
+) -> String {
+    let lower = error.to_ascii_lowercase();
+    let stream_closed = lower.contains("harness api stream closed")
+        || lower.contains("the harness closed the connection")
+        || lower.contains("broken pipe")
+        || lower.contains("connection reset");
+    let cause = if stream_closed {
+        match socket_state {
+            // The socket answers but our stream is gone: the bridge we were
+            // talking to is not the one on the pathname any more, which is
+            // what a second bridge taking the socket looks like from here.
+            SocketState::Listening => format!(
+                "the harness API bridge dropped our connection while {} \
+                 (its socket {} still accepts, so a replacement bridge most \
+                 likely took over)",
+                stage.doing(),
+                socket.display()
+            ),
+            SocketState::Gone => format!(
+                "the harness API bridge exited while {} (its socket {} no \
+                 longer accepts connections)",
+                stage.doing(),
+                socket.display()
+            ),
+        }
+    } else {
+        format!("{} failed while {}", explain(error), stage.doing())
+    };
+    match connected_for {
+        Some(uptime) => format!("disconnected after {}: {cause}", human_duration(uptime)),
+        None => format!("disconnected: {cause}"),
+    }
+}
+
+fn human_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0 => format!("{}ms", d.as_millis()),
+        1..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 /// Spawn the connection worker. Returns the receiving side for the UI and a
 /// sender for outgoing user messages.
 ///
@@ -226,11 +321,17 @@ pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Se
             // writer and poller threads retire instead of writing into a dead
             // socket (or stealing a command from the live one).
             let generation = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            // Where the attempt got to, and when the stream came up: both are
+            // needed to say why it ended and are only known inside `run`.
+            let stage = Arc::new(Mutex::new(Stage::Starting));
+            let connected_at = Arc::new(Mutex::new(None::<Instant>));
             let error = match run(
                 &send,
                 Arc::clone(&outgoing),
                 Arc::clone(&resume),
                 Arc::clone(&generation),
+                Arc::clone(&stage),
+                Arc::clone(&connected_at),
             ) {
                 // `run` only returns on failure; `Ok` would mean the stream
                 // ended cleanly, which is still a lost connection.
@@ -238,7 +339,24 @@ pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Se
                 Err(error) => error.to_string(),
             };
             generation.store(false, Ordering::Relaxed);
-            send(HarnessUpdate::Failed(format!("disconnected: {error}")));
+            let path = api_socket_path();
+            let socket_state = match socket_accepts(&path) {
+                true => SocketState::Listening,
+                false => SocketState::Gone,
+            };
+            let stage = stage.lock().map(|s| *s).unwrap_or(Stage::Starting);
+            let uptime = connected_at
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                .map(|at| at.elapsed());
+            send(HarnessUpdate::Failed(describe_disconnect(
+                stage,
+                &error,
+                uptime,
+                &path,
+                socket_state,
+            )));
             send(HarnessUpdate::Status(format!(
                 "reconnecting in {}s...",
                 backoff.as_secs_f64().round().max(1.0)
@@ -277,18 +395,32 @@ fn run(
     outgoing: Arc<Mutex<Receiver<Command>>>,
     resume: Arc<Mutex<String>>,
     generation: Arc<std::sync::atomic::AtomicBool>,
+    stage: Arc<Mutex<Stage>>,
+    connected_at: Arc<Mutex<Option<Instant>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let set_stage = |next: Stage| {
+        if let Ok(mut guard) = stage.lock() {
+            *guard = next;
+        }
+    };
     let path = api_socket_path();
     send(HarnessUpdate::Status(format!(
         "connecting to {}...",
         path.display()
     )));
+    set_stage(Stage::Starting);
     ensure_runtime(send)?;
+    set_stage(Stage::Connecting);
     let stream = std::os::unix::net::UnixStream::connect(&path)
         .map_err(|error| format!("{error} (socket {})", path.display()))?;
     let reader = BufReader::new(stream.try_clone()?);
     let mut client = HarnessClient::new(reader, stream.try_clone()?);
+    set_stage(Stage::Handshake);
     client.hello(concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")))?;
+    if let Ok(mut guard) = connected_at.lock() {
+        *guard = Some(Instant::now());
+    }
+    set_stage(Stage::Attaching);
     send(HarnessUpdate::Status("connected, attaching...".into()));
     // Re-attach after a reconnect, so the conversation the user was reading
     // comes back instead of being replaced by a fresh empty session.
@@ -415,6 +547,7 @@ fn run(
         let frame = client.recv()?;
         match frame.event {
             ApiEvent::Attached { session } => {
+                set_stage(Stage::Streaming);
                 if let Ok(mut guard) = session_id.lock() {
                     *guard = session.session_id.clone();
                 }
