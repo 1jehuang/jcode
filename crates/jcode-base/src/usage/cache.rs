@@ -198,10 +198,7 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         .limits
         .iter()
         .filter_map(|limit| {
-            let model_name = limit
-                .name
-                .strip_prefix("7-day ")?
-                .strip_suffix(" window")?;
+            let model_name = limit.name.strip_prefix("7-day ")?.strip_suffix(" window")?;
             if model_name == "Opus" {
                 return None;
             }
