@@ -90,9 +90,6 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
         .cloned()
 }
 
-/// Input key a caller sets to accept the token cost of an oversized result.
-pub(crate) const ACCEPT_LARGE_OUTPUT_KEY: &str = "accept_large_output";
-
 /// Whether a tool call opted in to receiving an oversized (truncated) result.
 ///
 /// Read straight off the raw input rather than each tool's typed args, so every
@@ -104,8 +101,15 @@ pub(crate) const ACCEPT_LARGE_OUTPUT_KEY: &str = "accept_large_output";
 /// models routinely stringify booleans, but anything else (including `1`) is
 /// treated as absent: accidentally spending the remaining context window should
 /// take an unambiguous yes.
+#[cfg(test)]
+pub(crate) fn accept_large_output_schema_property_for_test() -> Value {
+    jcode_tool_core::accept_large_output_schema_property()
+}
+
 fn accepts_large_output(input: &Value) -> bool {
-    match input.get(ACCEPT_LARGE_OUTPUT_KEY) {
+    // Same key the schema advertises, so the documented flag and the honored
+    // flag cannot drift apart.
+    match input.get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
         Some(Value::Bool(accepted)) => *accepted,
         Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
         _ => false,

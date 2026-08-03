@@ -1222,3 +1222,69 @@ async fn test_execute_ignores_a_non_boolean_accept_flag() {
         &output[..output.len().min(200)]
     );
 }
+
+#[tokio::test]
+async fn test_every_tool_advertises_the_large_output_escape_hatch() {
+    // The guard applies to every tool, so every tool must document the way out.
+    // Asserted over the real definition list rather than per tool, because the
+    // failure mode is a new tool nobody remembered to annotate.
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    registry.register_ambient_tools().await;
+
+    let defs = registry.definitions(None).await;
+    assert!(
+        defs.len() > 20,
+        "expected the full tool set, got {}",
+        defs.len()
+    );
+
+    let mut missing = Vec::new();
+    for def in &defs {
+        let flag = &def.input_schema["properties"][jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY];
+        if flag.get("type").and_then(Value::as_str) != Some("boolean") {
+            missing.push(def.name.clone());
+        }
+        // Advertising it as required would force the model to answer a question
+        // about token budgets on every single call.
+        if let Some(required) = def.input_schema["required"].as_array() {
+            assert!(
+                !required
+                    .iter()
+                    .any(|v| v.as_str() == Some(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)),
+                "{} must not require accept_large_output",
+                def.name
+            );
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "tools missing the accept_large_output escape hatch: {missing:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_large_output_flag_costs_little_across_the_whole_tool_set() {
+    // Adding a property to every schema is paid on every request, forever. Keep
+    // the total honest: ~20 tokens per tool is acceptable, a paragraph is not.
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    registry.register_ambient_tools().await;
+    let defs = registry.definitions(None).await;
+
+    let property =
+        serde_json::to_string(&crate::tool::accept_large_output_schema_property_for_test())
+            .expect("serializable");
+    let per_tool = crate::util::estimate_tokens(&property);
+    let total = per_tool * defs.len();
+
+    assert!(
+        per_tool <= 25,
+        "per-tool cost {per_tool} tokens is too high: {property}"
+    );
+    assert!(
+        total < 1_500,
+        "{} tools x {per_tool} tokens = {total} tokens of permanent prompt overhead",
+        defs.len()
+    );
+}
