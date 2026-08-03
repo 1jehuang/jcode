@@ -1407,12 +1407,17 @@ fn ctrl_shift_n_starts_a_new_session() {
 #[test]
 fn a_new_session_clears_the_page_it_leaves() {
     let mut app = app_with("a draft");
-    app.model.transcript.append_assistant("previous session output");
+    app.model
+        .transcript
+        .append_assistant("previous session output");
     app.model.busy = true;
     app.model.scroll = 120.0;
     app.clear_for_session_change();
     assert!(!app.model.busy, "the new session inherited a running turn");
-    assert_eq!(app.model.scroll, 0.0, "the new session kept a scroll offset");
+    assert_eq!(
+        app.model.scroll, 0.0,
+        "the new session kept a scroll offset"
+    );
     assert_eq!(
         app.model.transcript.streaming_len(),
         0,
@@ -1426,7 +1431,9 @@ fn a_new_session_clears_the_page_it_leaves() {
 #[test]
 fn a_new_session_without_a_connection_keeps_the_page_and_says_why() {
     let mut app = app_with("a draft");
-    app.model.transcript.append_assistant("previous session output");
+    app.model
+        .transcript
+        .append_assistant("previous session output");
     let before = app.model.transcript.streaming_len();
     app.apply(Action::SessionNew, None);
     assert_eq!(
@@ -1435,7 +1442,10 @@ fn a_new_session_without_a_connection_keeps_the_page_and_says_why() {
         "a failed session start still cleared the transcript"
     );
     assert!(
-        app.model.notice.as_deref().is_some_and(|n| n.contains("not connected")),
+        app.model
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("not connected")),
         "a failed session start said nothing: {:?}",
         app.model.notice
     );
