@@ -139,6 +139,135 @@ fn sdk_protocol_source() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// Tag parity is not enough: a variant can keep its name and gain a field,
+/// and every JS client would then be unable to read the new data while all
+/// existing tests stay green. Renaming a field is worse, because the SDK
+/// keeps compiling against a name the wire no longer carries. Check the
+/// payload shape too, from the same side the change is made on.
+#[test]
+fn typescript_sdk_lists_every_field() {
+    let Some(sdk) = sdk_protocol_source() else {
+        return;
+    };
+    for (file, enum_name, tag) in [
+        ("requests.rs", "ApiRequest", "req"),
+        ("events.rs", "ApiEvent", "ev"),
+    ] {
+        for (variant, fields) in enum_variant_fields(file, enum_name) {
+            let Some(block) = sdk_variant_block(&sdk, tag, &variant) else {
+                panic!(
+                    "{enum_name}::{variant} has no `{tag}: \"{variant}\"` member in \
+                     sdk/typescript/src/protocol.ts"
+                );
+            };
+            for field in fields {
+                assert!(
+                    block.contains(&format!("{field}:")) || block.contains(&format!("{field}?:")),
+                    "{enum_name}::{variant}.{field} is missing from its TypeScript member \
+                     in sdk/typescript/src/protocol.ts:\n{block}"
+                );
+            }
+        }
+    }
+}
+
+/// The `{ ev: "tag"; ... }` object literal for one variant, braces balanced.
+fn sdk_variant_block(sdk: &str, tag: &str, variant: &str) -> Option<String> {
+    let needle = format!("{tag}: \"{variant}\"");
+    let hit = sdk.find(&needle)?;
+    let open = sdk[..hit].rfind('{')?;
+    let mut depth = 0usize;
+    for (offset, ch) in sdk[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(sdk[open..open + offset + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Snake-cased variant names paired with their serialized field names.
+fn enum_variant_fields(file: &str, enum_name: &str) -> Vec<(String, Vec<String>)> {
+    let body = enum_body(file, enum_name);
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for line in body.lines() {
+        let Some(rest) = line.strip_prefix("    ") else {
+            continue;
+        };
+        if rest.starts_with(' ') {
+            // A field line inside the variant currently being collected.
+            if let Some((_, fields)) = out.last_mut() {
+                if let Some(name) = field_name(rest) {
+                    fields.push(name);
+                }
+            }
+            continue;
+        }
+        let name: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric())
+            .collect();
+        let Some(first) = name.chars().next() else {
+            continue;
+        };
+        if !first.is_ascii_uppercase() || name == "Unknown" {
+            continue;
+        }
+        // Single-line variants carry their fields inline: `Foo { a: T, b: U },`.
+        let inline = rest
+            .split_once('{')
+            .and_then(|(_, tail)| tail.rsplit_once('}'))
+            .map(|(inner, _)| {
+                inner
+                    .split(',')
+                    .filter_map(|part| field_name(part.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        out.push((snake_case(&name), inline));
+    }
+    out
+}
+
+/// `name` from a `name: Type` field line, skipping attributes and comments.
+fn field_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.starts_with('#') || line.starts_with("//") || line.is_empty() {
+        return None;
+    }
+    let (name, _) = line.split_once(':')?;
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn enum_body(file: &str, enum_name: &str) -> String {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(file),
+    )
+    .expect("read API source");
+    let start = source
+        .find(&format!("pub enum {enum_name} {{"))
+        .expect("enum present");
+    let body = &source[start..];
+    let end = body.find("\n}").unwrap_or(body.len());
+    body[..end].to_string()
+}
+
 /// Snake-cased variant names of `enum_name`, excluding the `Unknown` catch-all.
 fn enum_variants(file: &str, enum_name: &str) -> Vec<String> {
     let source = std::fs::read_to_string(
