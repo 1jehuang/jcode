@@ -244,7 +244,26 @@ fn hooks_config_defaults_and_parses_from_toml() {
     assert_eq!(cfg.hooks.turn_start.as_deref(), Some("notify-start"));
     assert_eq!(cfg.hooks.turn_end.as_deref(), Some("notify-turn"));
     assert_eq!(cfg.hooks.pre_tool.as_deref(), Some("~/bin/policy"));
+    assert_eq!(cfg.hooks.commands("turn_end"), vec!["notify-turn"]);
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 1500);
+
+    let cfg: Config = toml::from_str(
+        "[hooks]\nturn_end = [\"notify-one --direct\", \"notify-two 'quoted arg'\"]\npre_tool = [\"policy-a\", \"policy-b\"]\n",
+    )
+    .expect("hook command arrays should parse");
+    assert_eq!(
+        cfg.hooks.commands("turn_end"),
+        vec!["notify-one --direct", "notify-two 'quoted arg'"]
+    );
+    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("notify-one --direct"));
+    assert_eq!(cfg.hooks.commands("pre_tool"), vec!["policy-a", "policy-b"]);
+
+    let serialized = toml::to_string(&cfg).expect("hook command arrays should serialize");
+    let round_trip: Config = toml::from_str(&serialized).expect("serialized hooks should parse");
+    assert_eq!(
+        round_trip.hooks.commands("turn_end"),
+        cfg.hooks.commands("turn_end")
+    );
 }
 
 #[test]
@@ -259,6 +278,17 @@ fn test_env_override_lifecycle_hooks() {
     cfg.apply_env_overrides();
     assert_eq!(cfg.hooks.turn_end.as_deref(), Some("my-notifier --fast"));
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 250);
+
+    crate::env::set_var(
+        "JCODE_HOOK_TURN_END",
+        r#"["notify-one --direct", "notify-two 'quoted arg'"]"#,
+    );
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(
+        cfg.hooks.commands("turn_end"),
+        vec!["notify-one --direct", "notify-two 'quoted arg'"]
+    );
 
     // Empty env value disables a config-file hook.
     crate::env::set_var("JCODE_HOOK_TURN_END", " ");

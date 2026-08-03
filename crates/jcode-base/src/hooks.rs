@@ -23,6 +23,13 @@
 
 use std::path::PathBuf;
 
+tokio::task_local! {
+    /// Terminal identity for the client whose request is currently executing.
+    /// Tokio task-local storage keeps concurrent server clients isolated even
+    /// though they share one daemon process and process environment.
+    static CLIENT_TERMINAL_ENV: Vec<(String, String)>;
+}
+
 /// Maximum bytes of JSON payload exported via `JCODE_HOOK_PAYLOAD`.
 const PAYLOAD_ENV_LIMIT: usize = 16 * 1024;
 /// Maximum bytes of tool input JSON exported to the pre_tool gate.
@@ -78,28 +85,43 @@ impl HookEvent {
 
 /// The configured command for `event`, if any.
 pub fn hook_command(event: &str) -> Option<String> {
+    hook_commands(event).into_iter().next()
+}
+
+/// Every configured command for `event`, in declaration order.
+pub fn hook_commands(event: &str) -> Vec<String> {
     if hooks_suppressed() {
-        return None;
+        return Vec::new();
     }
     let hooks = &crate::config::config().hooks;
-    let raw = match event {
-        "turn_start" => hooks.turn_start.as_deref(),
-        "turn_end" => hooks.turn_end.as_deref(),
-        "session_start" => hooks.session_start.as_deref(),
-        "session_end" => hooks.session_end.as_deref(),
-        "pre_tool" => hooks.pre_tool.as_deref(),
-        "post_tool" => hooks.post_tool.as_deref(),
-        _ => None,
-    };
-    raw.map(str::trim)
+    hooks
+        .commands(event)
+        .into_iter()
+        .map(str::trim)
         .filter(|command| !command.is_empty())
         .map(str::to_string)
+        .collect()
 }
 
 /// Whether a hook is configured for `event`. Cheap; used by hot paths to
 /// skip payload construction entirely when no hook is set.
 pub fn hook_configured(event: &str) -> bool {
-    hook_command(event).is_some()
+    !hook_commands(event).is_empty()
+}
+
+/// Run a future with an authoritative client terminal environment. Nested hook
+/// calls inherit this value, while concurrent client futures remain isolated.
+pub async fn with_client_terminal_env<F>(env: Vec<(String, String)>, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    CLIENT_TERMINAL_ENV.scope(env, future).await
+}
+
+fn current_client_terminal_env() -> Vec<(String, String)> {
+    CLIENT_TERMINAL_ENV
+        .try_with(Clone::clone)
+        .unwrap_or_default()
 }
 
 /// True when running inside a hook process (recursion guard).
@@ -183,6 +205,7 @@ fn build_hook_process(
     {
         cmd.current_dir(cwd);
     }
+    crate::terminal_launch::apply_client_terminal_env(&mut cmd, &current_client_terminal_env());
     apply_event_env(&mut cmd, event);
     Ok(cmd)
 }
@@ -192,28 +215,31 @@ fn build_hook_process(
 /// Detached and fire-and-forget: failures are logged, never propagated, and
 /// the hook process cannot block the agent.
 pub fn dispatch_observer(event: HookEvent) {
-    let Some(command_line) = hook_command(event.event) else {
+    let command_lines = hook_commands(event.event);
+    if command_lines.is_empty() {
         return;
-    };
+    }
     let event_name = event.event;
-    match build_hook_process(&command_line, &event) {
-        Ok(mut cmd) => {
-            cmd.stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            match crate::platform::spawn_detached(&mut cmd) {
-                Ok(_) => crate::logging::debug(&format!(
-                    "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
-                    event.session_id
-                )),
-                Err(error) => crate::logging::warn(&format!(
-                    "Hook '{event_name}' command '{command_line}' failed to start: {error}"
-                )),
+    for command_line in command_lines {
+        match build_hook_process(&command_line, &event) {
+            Ok(mut cmd) => {
+                cmd.stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                match crate::platform::spawn_detached(&mut cmd) {
+                    Ok(_) => crate::logging::debug(&format!(
+                        "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
+                        event.session_id
+                    )),
+                    Err(error) => crate::logging::warn(&format!(
+                        "Hook '{event_name}' command '{command_line}' failed to start: {error}"
+                    )),
+                }
             }
+            Err(error) => crate::logging::warn(&format!(
+                "Hook '{event_name}' command '{command_line}' is invalid: {error}"
+            )),
         }
-        Err(error) => crate::logging::warn(&format!(
-            "Hook '{event_name}' command '{command_line}' is invalid: {error}"
-        )),
     }
 }
 
@@ -231,9 +257,10 @@ pub async fn run_pre_tool_gate(
     tool_name: &str,
     tool_input_json: &str,
 ) -> GateDecision {
-    let Some(command_line) = hook_command("pre_tool") else {
+    let command_lines = hook_commands("pre_tool");
+    if command_lines.is_empty() {
         return GateDecision::Allow;
-    };
+    }
 
     let mut event = HookEvent::new("pre_tool")
         .session_id(session_id)
@@ -246,11 +273,34 @@ pub async fn run_pre_tool_gate(
         event = event.cwd(cwd);
     }
 
-    let std_cmd = match build_hook_process(&command_line, &event) {
+    for command_line in command_lines {
+        let decision = run_pre_tool_command(
+            &command_line,
+            &event,
+            session_id,
+            tool_name,
+            tool_input_json,
+        )
+        .await;
+        if matches!(decision, GateDecision::Block { .. }) {
+            return decision;
+        }
+    }
+    GateDecision::Allow
+}
+
+async fn run_pre_tool_command(
+    command_line: &str,
+    event: &HookEvent,
+    session_id: &str,
+    tool_name: &str,
+    tool_input_json: &str,
+) -> GateDecision {
+    let std_cmd = match build_hook_process(command_line, event) {
         Ok(cmd) => cmd,
         Err(error) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' is invalid: {error} (allowing tool call)"
+                "Hook 'pre_tool' command '{command_line}' is invalid: {error} (continuing)"
             ));
             return GateDecision::Allow;
         }
@@ -266,7 +316,7 @@ pub async fn run_pre_tool_gate(
         Ok(child) => child,
         Err(error) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' failed to start: {error} (allowing tool call)"
+                "Hook 'pre_tool' command '{command_line}' failed to start: {error} (continuing)"
             ));
             return GateDecision::Allow;
         }
@@ -285,13 +335,13 @@ pub async fn run_pre_tool_gate(
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' failed: {error} (allowing tool call)"
+                "Hook 'pre_tool' command '{command_line}' failed: {error} (continuing)"
             ));
             return GateDecision::Allow;
         }
         Err(_elapsed) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' timed out after {}ms (allowing tool call)",
+                "Hook 'pre_tool' command '{command_line}' timed out after {}ms (continuing)",
                 timeout.as_millis()
             ));
             return GateDecision::Allow;
@@ -315,7 +365,7 @@ pub async fn run_pre_tool_gate(
         }
         other => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' exited with {other:?} (expected 0=allow or 2=block; allowing tool call)"
+                "Hook 'pre_tool' command '{command_line}' exited with {other:?} (expected 0=allow or 2=block; continuing)"
             ));
             GateDecision::Allow
         }
@@ -424,6 +474,46 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn pre_tool_gate_runs_command_array_until_one_blocks() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let marker = temp.path().join("first-ran.txt");
+        let allow = write_executable_script(
+            temp.path(),
+            "first-allow.sh",
+            &format!(
+                "#!/bin/sh\nprintf ran > {}\nexit 0\n",
+                crate::terminal_launch::sh_escape(&marker.to_string_lossy())
+            ),
+        );
+        let block = write_executable_script(
+            temp.path(),
+            "second-block.sh",
+            "#!/bin/sh\necho 'blocked by second policy' >&2\nexit 2\n",
+        );
+        let commands = serde_json::to_string(&vec![
+            allow.to_string_lossy().into_owned(),
+            block.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize hook command array");
+        let _env = gate_test_config(&commands, 5000);
+
+        let decision = run_pre_tool_gate("ses_multi", None, "bash", "{}").await;
+
+        assert_eq!(
+            decision,
+            GateDecision::Block {
+                reason: "blocked by second policy".to_string()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("first policy should execute"),
+            "ran"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pre_tool_gate_fails_open_on_timeout_and_odd_exits() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
@@ -513,5 +603,108 @@ mod tests {
             None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
         }
         assert_eq!(recorded, "turn_end|ses_obs|ok|1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_dispatch_runs_every_configured_command_directly() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first_record = temp.path().join("first.txt");
+        let second_record = temp.path().join("second.txt");
+        let first = write_executable_script(
+            temp.path(),
+            "first.sh",
+            &format!(
+                "#!/bin/sh\nprintf first > {}\n",
+                crate::terminal_launch::sh_escape(&first_record.to_string_lossy())
+            ),
+        );
+        let second = write_executable_script(
+            temp.path(),
+            "second.sh",
+            &format!(
+                "#!/bin/sh\nprintf second > {}\n",
+                crate::terminal_launch::sh_escape(&second_record.to_string_lossy())
+            ),
+        );
+        let prev = std::env::var_os("JCODE_HOOK_TURN_START");
+        let commands = serde_json::to_string(&vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize hook command array");
+        crate::env::set_var("JCODE_HOOK_TURN_START", commands);
+
+        dispatch_observer(HookEvent::new("turn_start").session_id("ses_multi"));
+
+        for _ in 0..100 {
+            if first_record.exists() && second_record.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match prev {
+            Some(value) => crate::env::set_var("JCODE_HOOK_TURN_START", value),
+            None => crate::env::remove_var("JCODE_HOOK_TURN_START"),
+        }
+        assert_eq!(std::fs::read_to_string(first_record).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(second_record).unwrap(), "second");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_process_replaces_daemon_terminal_env_with_client_snapshot() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let script = write_executable_script(
+            temp.path(),
+            "env.sh",
+            "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$TMUX_PANE\" \"$HERDR_PANE_ID\" \"$JCODE_CLIENT_TMUX_PANE\" \"$JCODE_CLIENT_HERDR_PANE_ID\"\n",
+        );
+        let previous_tmux = std::env::var_os("TMUX_PANE");
+        let previous_herdr = std::env::var_os("HERDR_PANE_ID");
+        crate::env::set_var("TMUX_PANE", "daemon-pane");
+        crate::env::set_var("HERDR_PANE_ID", "daemon-herdr");
+
+        let run_for_pane = |tmux: &'static str, herdr: &'static str| {
+            let script = script.clone();
+            with_client_terminal_env(
+                vec![
+                    ("TMUX_PANE".to_string(), tmux.to_string()),
+                    ("HERDR_PANE_ID".to_string(), herdr.to_string()),
+                ],
+                async move {
+                    tokio::task::yield_now().await;
+                    build_hook_process(&script.to_string_lossy(), &HookEvent::new("turn_start"))
+                        .expect("hook command")
+                        .output()
+                        .expect("run hook")
+                },
+            )
+        };
+        let (first_output, second_output) = tokio::join!(
+            run_for_pane("client-pane-a", "herdr-pane-a"),
+            run_for_pane("client-pane-b", "herdr-pane-b")
+        );
+
+        match previous_tmux {
+            Some(value) => crate::env::set_var("TMUX_PANE", value),
+            None => crate::env::remove_var("TMUX_PANE"),
+        }
+        match previous_herdr {
+            Some(value) => crate::env::set_var("HERDR_PANE_ID", value),
+            None => crate::env::remove_var("HERDR_PANE_ID"),
+        }
+        assert!(first_output.status.success());
+        assert!(second_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&first_output.stdout),
+            "client-pane-a|herdr-pane-a|client-pane-a|herdr-pane-a"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&second_output.stdout),
+            "client-pane-b|herdr-pane-b|client-pane-b|herdr-pane-b"
+        );
     }
 }
