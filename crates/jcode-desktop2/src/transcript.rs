@@ -731,7 +731,7 @@ impl From<&[Message]> for Transcript {
 pub struct LaidMessage {
     pub role: Role,
     /// The delivery mark to draw beside this message, when it is one the app
-    /// sent. Not part of the layout cache's key: an ack changes a dot and an
+    /// sent. Not part of the layout cache's key: an ack changes a tone and an
     /// offset, never a wrap, so re-laying the message for it would be work for
     /// nothing (see [`crate::paint::TranscriptCache`], which refreshes this
     /// field on every frame instead).
