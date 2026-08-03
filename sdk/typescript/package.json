@@ -1,5 +1,5 @@
 {
-  "name": "@1jehuang/sdk",
+  "name": "@1jehuang/jcode-sdk",
   "version": "1.0.0",
   "description": "TypeScript SDK for the jcode harness API (protocol v1)",
   "license": "MIT",

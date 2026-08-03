@@ -1,4 +1,4 @@
-# Releasing `@1jehuang/sdk`
+# Releasing `@1jehuang/jcode-sdk`
 
 Everything except the two decisions only you can make is automated and checked
 in CI. This document exists so the release is a short command list rather than
@@ -6,7 +6,7 @@ a research exercise.
 
 ## Package ownership
 
-The package is published as `@1jehuang/sdk`. The `1jehuang` user scope is owned
+The package is published as `@1jehuang/jcode-sdk`. The `1jehuang` user scope is owned
 by the maintainer account and does not require an npm organization. The shorter
 `@jcode` scope belongs to someone else and must not be used in package metadata
 or documentation.
@@ -34,9 +34,9 @@ confirm with `npm pack --dry-run`.
 ```bash
 cd "$(mktemp -d)"
 npm init -y >/dev/null
-npm install @1jehuang/sdk
+npm install @1jehuang/jcode-sdk
 node --input-type=module -e '
-  import { JcodeClient } from "@1jehuang/sdk";
+  import { JcodeClient } from "@1jehuang/jcode-sdk";
   const client = await JcodeClient.launch({ workingDir: process.cwd() });
   const session = await client.createSession();
   console.log((await client.run(session.session_id, "say hello")).text);

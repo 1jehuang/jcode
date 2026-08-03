@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify the *published* @1jehuang/sdk tarball, not just its source.
+# Verify the *published* @1jehuang/jcode-sdk tarball, not just its source.
 #
 # `npm run check` compiles src/ and runs tests against it. A consumer never
 # sees src/: they see whatever `files`, `exports`, `main`, and `types` let out
@@ -30,7 +30,7 @@ npm install "$tarball" --no-audit --no-fund --silent
 
 echo "== ESM import =="
 node --input-type=module -e '
-import { JcodeClient, HarnessError, API_VERSION_MAJOR } from "@1jehuang/sdk";
+import { JcodeClient, HarnessError, API_VERSION_MAJOR } from "@1jehuang/jcode-sdk";
 if (typeof JcodeClient !== "function") throw new Error("JcodeClient missing");
 if (typeof HarnessError !== "function") throw new Error("HarnessError missing");
 if (API_VERSION_MAJOR !== 1) throw new Error("unexpected protocol version");
@@ -39,7 +39,7 @@ console.log("esm ok");
 
 echo "== CJS require =="
 node --input-type=commonjs -e '
-const sdk = require("@1jehuang/sdk");
+const sdk = require("@1jehuang/jcode-sdk");
 if (typeof sdk.JcodeClient !== "function") throw new Error("JcodeClient missing under require");
 console.log("cjs ok");
 '
@@ -60,7 +60,7 @@ cat > tsconfig.json <<'JSON'
 }
 JSON
 cat > consumer.ts <<'TS'
-import { JcodeClient, HarnessError, type TurnResult, type ApiEvent } from "@1jehuang/sdk";
+import { JcodeClient, HarnessError, type TurnResult, type ApiEvent } from "@1jehuang/jcode-sdk";
 
 export async function demo(prompt: string): Promise<TurnResult> {
   const client = await JcodeClient.connect({ clientName: "package-test/1.0" });
@@ -86,7 +86,7 @@ TS
 # and every field came back `unknown`. That compiles fine inside the repo and
 # only bites consumers, so assert it from a consumer.
 cat > narrowing.ts <<'TS'
-import { isKnownEvent, type AnyApiEvent, type ApiEvent } from "@1jehuang/sdk";
+import { isKnownEvent, type AnyApiEvent, type ApiEvent } from "@1jehuang/jcode-sdk";
 
 export function summarize(event: ApiEvent): string {
   switch (event.ev) {
@@ -120,7 +120,7 @@ echo "types ok"
 if command -v jcode >/dev/null 2>&1; then
   echo "== launching a private instance as a consumer would =="
   cat > launch-consumer.mjs <<'JS'
-import { JcodeClient } from "@1jehuang/sdk";
+import { JcodeClient } from "@1jehuang/jcode-sdk";
 import fs from "node:fs";
 
 // No `binary` option: resolve `jcode` from PATH, exactly like a consumer.
