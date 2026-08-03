@@ -142,7 +142,10 @@ fn a_disconnect_names_the_stage_and_the_socket() {
         socket,
         harness::SocketState::Listening,
     );
-    assert!(replaced.contains("streaming the conversation"), "{replaced}");
+    assert!(
+        replaced.contains("streaming the conversation"),
+        "{replaced}"
+    );
     assert!(replaced.contains("replacement bridge"), "{replaced}");
     assert!(replaced.contains("1m30s"), "{replaced}");
 

@@ -135,7 +135,10 @@ fn the_more_row_opens_the_config_file_and_shuts_the_menu() {
     let mut app = app();
     app.model.panel.open();
     let before = app.model.settings;
-    let index = ROWS.iter().position(|row| *row == Row::More).expect("more row");
+    let index = ROWS
+        .iter()
+        .position(|row| *row == Row::More)
+        .expect("more row");
     let band = app.frame.panel_row(ROWS.len(), index);
     click(
         &mut app,

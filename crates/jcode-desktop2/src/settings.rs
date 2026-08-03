@@ -353,7 +353,14 @@ mod tests {
 
     #[test]
     fn corrupt_content_keeps_the_defaults() {
-        for text in ["garbage", "theme=", "=x", "\0\0", "motion=maybe", "copy_on_select=maybe"] {
+        for text in [
+            "garbage",
+            "theme=",
+            "=x",
+            "\0\0",
+            "motion=maybe",
+            "copy_on_select=maybe",
+        ] {
             assert_eq!(
                 Settings::parse_over(Settings::default(), text),
                 Settings::default(),
