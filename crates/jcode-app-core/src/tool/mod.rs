@@ -566,6 +566,17 @@ impl Registry {
     /// Even if we have room, a single output shouldn't dominate the context.
     const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
 
+    /// Hard ceiling on a single tool output, independent of context budget.
+    ///
+    /// A fraction alone is not enough. On a model reporting a 1M-token window,
+    /// 30% permits a 300k-token single result, so a repo-wide grep sailed
+    /// through the guard and cost 233k tokens in one call. No individual tool
+    /// result is worth that much of any window: past roughly 50k tokens the
+    /// caller is reading a haystack, not an answer, and should narrow the query.
+    /// The effective ceiling is the smaller of this and the budget fraction, so
+    /// small windows still get proportional protection.
+    const SINGLE_OUTPUT_MAX_TOKENS: usize = 50_000;
+
     /// Message returned instead of an oversized tool result.
     ///
     /// It has one job: make the price legible and the retry obvious. The caller
@@ -731,8 +742,11 @@ impl Registry {
         let projected = current_tokens + output_tokens;
         let threshold_tokens = (budget as f32 * Self::CONTEXT_GUARD_THRESHOLD) as usize;
 
-        // Check 2: Is this single output unreasonably large relative to budget?
-        let single_max_tokens = (budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize;
+        // Check 2: Is this single output unreasonably large? Proportional to the
+        // budget, but also absolutely capped, because 30% of a 1M-token window is
+        // 300k tokens and no single tool result is worth that.
+        let single_max_tokens = ((budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize)
+            .min(Self::SINGLE_OUTPUT_MAX_TOKENS);
 
         let needs_truncation = projected > threshold_tokens || output_tokens > single_max_tokens;
 
