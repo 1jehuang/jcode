@@ -74,9 +74,11 @@ impl UsageData {
         if usage_reset_passed([
             self.five_hour_resets_at.as_deref(),
             self.seven_day_resets_at.as_deref(),
-        ]) || self.model_scoped.iter().any(|window| {
-            usage_reset_passed([window.resets_at.as_deref()])
-        }) {
+        ]) || self
+            .model_scoped
+            .iter()
+            .any(|window| usage_reset_passed([window.resets_at.as_deref()]))
+        {
             return true;
         }
 
