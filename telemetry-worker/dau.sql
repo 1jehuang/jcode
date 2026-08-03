@@ -23,9 +23,13 @@ WITH today AS (
 ), pace AS (
     -- "Today" is a partial UTC day, so the today tiers always undercount and
     -- the panel looked like a cliff every morning. Compare today-so-far with
-    -- the *same clock window* on prior days instead of a full day: DAU is a
-    -- distinct count, so it does not scale linearly and a naive
-    -- extrapolate-to-24h projection would overstate it.
+    -- the *same clock window* on prior days rather than extrapolating out to
+    -- 24h: DAU is a distinct count and does not scale linearly with time.
+    --
+    -- Counts here use the headline population (release channel, not CI), not
+    -- raw ids. Raw ids are dominated by throwaway dev-build traffic whose
+    -- volume swings by 5x day to day, which is what made a normal day look
+    -- first like a spike and then like a cliff.
     SELECT
         ROUND(
             100.0 * (strftime('%s', 'now') - strftime('%s', 'now', 'start of day')) / 86400.0,
@@ -40,6 +44,8 @@ WITH today AS (
              AND created_at <= datetime('now', '-7 days') THEN telemetry_id END) AS users_sofar_7d
     FROM events
     WHERE created_at >= datetime('now', '-7 days', 'start of day')
+      AND build_channel = 'release'
+      AND is_ci = 0
 ), recent AS (
     SELECT
         e.telemetry_id,
@@ -72,16 +78,23 @@ WITH today AS (
         COUNT(DISTINCT CASE WHEN build_channel = 'release' AND meaningful = 1 THEN telemetry_id END) AS meaningful_release_24h,
         -- Same headline metric over a rolling 24h window, excluding CI traffic.
         COUNT(DISTINCT CASE WHEN build_channel = 'release' AND is_ci = 0 AND meaningful = 1 THEN telemetry_id END) AS meaningful_release_24h_noci,
-        COUNT(DISTINCT CASE WHEN is_ci = 1 THEN telemetry_id END) AS ci_24h
+        COUNT(DISTINCT CASE WHEN is_ci = 1 THEN telemetry_id END) AS ci_24h,
+        -- Dev-build traffic: `debug`/`git_checkout` ids are overwhelmingly
+        -- throwaway (a session_start and an onboarding_step, no session_end),
+        -- and most are not env-detectable as CI. Tracked separately so swings
+        -- in automation volume cannot be misread as product growth or churn.
+        COUNT(DISTINCT CASE WHEN build_channel IN ('debug', 'git_checkout') THEN telemetry_id END) AS dev_build_24h
     FROM recent
 )
 SELECT
+    -- Headline first: real users, release channel, excluding CI.
+    trailing_24h.meaningful_release_24h_noci AS headline_users_24h,
     today.*,
     trailing_24h.*,
     pace.day_elapsed_pct,
-    pace.users_sofar,
-    pace.users_sofar_yday,
-    pace.users_sofar_7d,
+    pace.users_sofar AS release_users_sofar,
+    pace.users_sofar_yday AS release_users_sofar_yday,
+    pace.users_sofar_7d AS release_users_sofar_7d,
     -- >1.0 means today is running ahead of that day at the same hour.
     ROUND(CAST(pace.users_sofar AS REAL) / NULLIF(pace.users_sofar_yday, 0), 2) AS pace_vs_yday,
     ROUND(CAST(pace.users_sofar AS REAL) / NULLIF(pace.users_sofar_7d, 0), 2) AS pace_vs_7d
