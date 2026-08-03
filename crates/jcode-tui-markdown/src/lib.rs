@@ -1020,9 +1020,9 @@ fn latex_image_lines(
     }
     match latex_image::render_latex_image(math, display, max_width) {
         latex_image::LatexImageOutcome::Ready(lines) => Some(lines),
-        latex_image::LatexImageOutcome::Pending => {
-            Some(vec![mermaid_sidebar_placeholder(MATH_PENDING_PLACEHOLDER_TEXT)])
-        }
+        latex_image::LatexImageOutcome::Pending => Some(vec![mermaid_sidebar_placeholder(
+            MATH_PENDING_PLACEHOLDER_TEXT,
+        )]),
         latex_image::LatexImageOutcome::Failed(error) => {
             latex_image::report_error(&error);
             None
