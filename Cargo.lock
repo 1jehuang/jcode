@@ -3542,6 +3542,7 @@ dependencies = [
  "jcode-build-meta",
  "jcode-harness-api",
  "jcode-render-core",
+ "jcode-sdk",
  "parley",
  "pollster",
  "serde_json",
@@ -3590,6 +3591,7 @@ dependencies = [
  "jcode-base",
  "jcode-harness-api",
  "jcode-transport",
+ "libc",
  "serde",
  "serde_json",
  "tokio",
@@ -4043,6 +4045,14 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "unicode-width",
+]
+
+[[package]]
+name = "jcode-sdk"
+version = "0.1.0"
+dependencies = [
+ "jcode-harness-api",
+ "serde_json",
 ]
 
 [[package]]
