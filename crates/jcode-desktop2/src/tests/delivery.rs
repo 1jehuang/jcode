@@ -214,7 +214,7 @@ fn a_message_typed_mid_turn_is_queued_not_sent() {
     app.apply(Action::Submit, None);
     assert!(matches!(
         command_rx.try_recv(),
-        Ok(harness::Command::Send(_))
+        Ok(harness::Command::Send { .. })
     ));
 
     // The turn is running; a second message waits its turn.
@@ -263,7 +263,7 @@ fn the_turn_ending_sends_the_oldest_queued_message() {
         ]
     );
     match command_rx.try_recv() {
-        Ok(harness::Command::Send(content)) => assert_eq!(content, "second"),
+        Ok(harness::Command::Send { content, .. }) => assert_eq!(content, "second"),
         other => panic!("the queued message was not sent: {other:?}"),
     }
     assert!(app.model.busy, "the flushed message did not start a turn");
@@ -297,7 +297,7 @@ fn a_failure_also_flushes_the_queue() {
     app.drain_harness_updates();
 
     match command_rx.try_recv() {
-        Ok(harness::Command::Send(content)) => assert_eq!(content, "second"),
+        Ok(harness::Command::Send { content, .. }) => assert_eq!(content, "second"),
         other => panic!("the queued message was not sent after a failure: {other:?}"),
     }
 }

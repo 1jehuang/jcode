@@ -57,8 +57,13 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("overview_opening", overview_opening),
     ("overview_other_session", overview_other_session),
     ("overview_preview", overview_preview),
+    ("overview_thumbnails", overview_thumbnails),
     ("overview_single_session", overview_single_session),
     ("overview_many_sessions", overview_many_sessions),
+    ("resume_picker", resume_picker),
+    ("resume_picker_preview", resume_picker_preview),
+    ("resume_picker_search", resume_picker_search),
+    ("resume_picker_group", resume_picker_group),
     ("settings_panel", settings_panel),
     ("settings_panel_hover", settings_panel_hover),
     ("notice", notice),
@@ -111,6 +116,7 @@ fn connecting() -> Model {
         session_id: None,
         transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
+        resume: crate::resume::Picker::default(),
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
@@ -121,6 +127,9 @@ fn connecting() -> Model {
         selection: None,
         notice: None,
         failure: None,
+        // No pasted images in a capture: an attachment count is a fact about
+        // what the user just did, so a node pins it like anything else.
+        attachments: 0,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
         // Captures pin the hint, so the ghost line is a tested state rather
@@ -237,6 +246,7 @@ fn attached_empty() -> Model {
         session_id: Some("session_demo_0000".into()),
         transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
+        resume: crate::resume::Picker::default(),
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
@@ -247,6 +257,9 @@ fn attached_empty() -> Model {
         selection: None,
         notice: None,
         failure: None,
+        // No pasted images in a capture: an attachment count is a fact about
+        // what the user just did, so a node pins it like anything else.
+        attachments: 0,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
         // Captures pin the hint, so the ghost line is a tested state rather
@@ -656,6 +669,62 @@ fn overview_many_sessions() -> Model {
     }
 }
 
+/// Every card carrying its own conversation: the field as an actual view of
+/// several sessions at once rather than a set of labelled boxes.
+///
+/// The node the multi-session view is judged on. Five sessions of very
+/// different sizes, each with a distinct tail, so the thing to check is whether
+/// a card is *identifiable by its content* at thumbnail size and whether the
+/// name underneath survives having text above it.
+fn overview_thumbnails() -> Model {
+    let mut peeks = crate::overview::Peeks::default();
+    for (session, exchange) in [
+        (
+            "session_clover_1785130341680_5a8db08",
+            [
+                "rewrite the transcript layout to cache per message",
+                "Done: layout is memoised on content and width, so scrolling reuses it.",
+            ],
+        ),
+        (
+            "session_mushroom_1785129393446_e7007f8",
+            [
+                "why is the halftone screen in logical units?",
+                "So dot density is identical on 1x and HiDPI, like a CSS-pixel lattice.",
+            ],
+        ),
+        (
+            "session_pebble_1785130002233_1c93aa4",
+            ["bump the changelog", "Bumped to 0.9.4 and dated it."],
+        ),
+        (
+            "session_harbor_1785128881021_9f0b21d",
+            [
+                "the landing page jumps on load",
+                "The hero image had no intrinsic size; added width/height so nothing reflows.",
+            ],
+        ),
+        (
+            "session_ember_1785131110907_44de7c2",
+            ["deploy", "Deployed; the preview URL is live."],
+        ),
+    ] {
+        let mut tail = crate::transcript::Transcript::default();
+        tail.push(crate::transcript::Message::user(exchange[0]));
+        tail.push(crate::transcript::Message::assistant(exchange[1]));
+        peeks.insert(session, tail);
+    }
+    Model {
+        peeks,
+        overview: crate::overview::Overview::pinned(
+            true,
+            1.0,
+            Some("session_mushroom_1785129393446_e7007f8"),
+        ),
+        ..session_strip()
+    }
+}
+
 /// Hovering another session, with its conversation fetched: the state the
 /// preview exists for. Captured because it is the only one that shows the
 /// three layers at once (your own transcript, the hovered session's tail over
@@ -689,6 +758,111 @@ fn overview_preview() -> Model {
             1.0,
             Some("session_harbor_1785128881021_9f0b21d"),
         ),
+        ..session_strip()
+    }
+}
+
+/// A plausible session store, for the resume nodes: several projects, sessions
+/// of very different sizes, and one whose directory is unknown, so a capture
+/// shows the grouping doing real work rather than a tidy list.
+fn stored_sessions() -> Vec<crate::resume::Record> {
+    let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_785_000_000);
+    let mut records = Vec::new();
+    for (index, (id, dir, bytes)) in [
+        (
+            "session_mushroom_1785129393446_e7007f8",
+            Some("/home/j/jcode"),
+            2_400_000u64,
+        ),
+        (
+            "session_clover_1785130341680_5a8db08",
+            Some("/home/j/jcode"),
+            180_000,
+        ),
+        (
+            "session_pebble_1785130002233_1c93aa4",
+            Some("/home/j/jcode"),
+            12_000,
+        ),
+        (
+            "session_harbor_1785128881021_9f0b21d",
+            Some("/home/j/site"),
+            640_000,
+        ),
+        (
+            "session_lantern_1785121180559_44be21a",
+            Some("/home/j/site"),
+            3_200,
+        ),
+        (
+            "session_drift_1785008810210_77aa03b",
+            Some("/home/j/notes"),
+            96_000,
+        ),
+        ("session_ghost_1784900000000_00ff11a", None, 4_100),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        records.push(crate::resume::Record {
+            session_id: id.into(),
+            working_dir: dir.map(str::to_string),
+            title: None,
+            bytes,
+            // Newest first, which is the order the scan returns and therefore
+            // the order the projects stack in.
+            modified: base - std::time::Duration::from_secs(index as u64 * 3_600),
+        });
+    }
+    records
+}
+
+/// The picker as it opens: the newest project at the top, its first session
+/// highlighted, and the conversation still legible behind the card. The node
+/// the whole feature is judged on.
+fn resume_picker() -> Model {
+    Model {
+        resume: crate::resume::Picker::pinned(stored_sessions(), 1, ""),
+        ..session_strip()
+    }
+}
+
+/// A session highlighted with its tail fetched: the state that makes the panel
+/// a picker rather than a list, since this is where recognition happens.
+fn resume_picker_preview() -> Model {
+    let mut model = resume_picker();
+    let mut tail = crate::transcript::Transcript::default();
+    tail.push(crate::transcript::Message::user(
+        "why is the halftone screen in logical units?",
+    ));
+    tail.push(crate::transcript::Message::assistant(
+        "So the dot density is identical on 1x and HiDPI, exactly like the \
+         website's CSS-pixel lattice.",
+    ));
+    tail.push(crate::transcript::Message::user("and the gamma?"));
+    tail.push(crate::transcript::Message::assistant(
+        "Applied to luminance before sizing a dot, so the midtones do not crush.",
+    ));
+    let mut peeks = crate::overview::Peeks::default();
+    peeks.insert("session_mushroom_1785129393446_e7007f8", tail);
+    model.peeks = peeks;
+    model
+}
+
+/// Narrowed by a query: the state that proves search reaches across projects
+/// and that a search ignores collapse.
+fn resume_picker_search() -> Model {
+    Model {
+        resume: crate::resume::Picker::pinned(stored_sessions(), 1, "site"),
+        ..session_strip()
+    }
+}
+
+/// The highlight on a project heading: no session is selected, so the preview
+/// column has to say so rather than looking like a failed fetch.
+fn resume_picker_group() -> Model {
+    Model {
+        resume: crate::resume::Picker::pinned(stored_sessions(), 0, ""),
         ..session_strip()
     }
 }
