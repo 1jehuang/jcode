@@ -1306,6 +1306,11 @@ pub fn build_scene(
         );
     }
 
+    // The resume overlay is drawn last of all: it is a mode over the page, and
+    // unlike the overview it deliberately leaves the conversation legible
+    // underneath, which only works if nothing paints over it afterwards.
+    crate::scene_resume::draw_resume(scene, text, model, &frame, scale);
+
     if revealing {
         scene.pop_layer();
     }

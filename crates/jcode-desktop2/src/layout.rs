@@ -122,6 +122,43 @@ pub const PANEL_GAP: f64 = 6.0;
 /// Inset from the panel's edge to a row's text.
 pub const PANEL_TEXT_PAD: f64 = 10.0;
 
+/// The resume overlay: a left panel of stored sessions, a preview to its
+/// right, both floating over the conversation rather than replacing it.
+///
+/// Fractions of the window rather than fixed pixels, because the panel has to
+/// hold paths ("/home/j/some/deep/checkout") on a small window and must not
+/// eat a wide one. Clamped so it is neither unreadable nor a wall.
+pub const RESUME_PANEL_FRACTION: f64 = 0.34;
+pub const RESUME_PANEL_MIN: f64 = 220.0;
+pub const RESUME_PANEL_MAX: f64 = 380.0;
+/// Height of one row in the picker, and the search field above the list.
+pub const RESUME_ROW_HEIGHT: f64 = 22.0;
+pub const RESUME_SEARCH_HEIGHT: f64 = 30.0;
+/// Inset of the overlay card from the window edges, as a fraction of the
+/// window's short side, and its bounds in logical units.
+///
+/// Generous on purpose: the point of an overlay is that the conversation is
+/// still there around it. A card pinned near the window edges hides the very
+/// thing that makes the choice a comparison, and reads as a separate screen.
+pub const RESUME_INSET_FRACTION: f64 = 0.07;
+pub const RESUME_INSET_MIN: f64 = 20.0;
+pub const RESUME_INSET_MAX: f64 = 72.0;
+/// Fraction of the window height the card may take, and its floor.
+///
+/// Capped rather than full-height because the list scrolls: past this the extra
+/// rows buy less than the page they hide, and the whole reason this is an
+/// overlay is that the conversation stays readable around it.
+pub const RESUME_CARD_HEIGHT_FRACTION: f64 = 0.66;
+pub const RESUME_CARD_HEIGHT_MIN: f64 = 200.0;
+/// Padding inside the overlay's card, and its corner radius.
+pub const RESUME_PAD: f64 = 12.0;
+pub const RESUME_RADIUS: f64 = 8.0;
+/// Type sizes: a session row, a project heading, and the meta caption
+/// (directory, size) that trails a row.
+pub const RESUME_ROW_SIZE: f32 = 12.0;
+pub const RESUME_GROUP_SIZE: f32 = 11.0;
+pub const RESUME_META_SIZE: f32 = 9.5;
+
 /// Vertical breathing room between regions.
 pub const SPACE_BEFORE_COMPOSER: f64 = 20.0;
 /// Fraction of the page height the input box is centred on. 0.5 puts the
@@ -508,6 +545,106 @@ impl Frame {
         let panel = self.panel(rows);
         let top = panel.y0 + PANEL_PAD + index as f64 * PANEL_ROW_HEIGHT;
         vello::kurbo::Rect::new(panel.x0, top, panel.x1, top + PANEL_ROW_HEIGHT)
+    }
+
+    /// The resume overlay's card: the whole floating surface, inset from the
+    /// window on all four sides so the conversation stays visible around it.
+    ///
+    /// An overlay rather than a page: the point of the picker is to choose the
+    /// next session *while still seeing the one you are in*, which is what a
+    /// full-screen list takes away.
+    pub fn resume_card(&self) -> vello::kurbo::Rect {
+        let inset = (self.width.min(self.height) * RESUME_INSET_FRACTION)
+            .clamp(RESUME_INSET_MIN, RESUME_INSET_MAX);
+        let available = (self.height - inset * 2.0).max(1.0);
+        let height = (self.height * RESUME_CARD_HEIGHT_FRACTION)
+            .clamp(RESUME_CARD_HEIGHT_MIN.min(available), available);
+        // Centred in what is left, so the page shows above and below rather
+        // than only under the card: an overlay hanging from the top edge reads
+        // as a drawer, and a drawer is a different promise than a sheet.
+        let top = inset + (available - height) / 2.0;
+        vello::kurbo::Rect::new(
+            inset,
+            top,
+            (self.width - inset).max(inset + 1.0),
+            top + height,
+        )
+    }
+
+    /// The left panel: the search field and the list of projects and sessions.
+    pub fn resume_panel(&self) -> vello::kurbo::Rect {
+        let card = self.resume_card();
+        let width = (card.width() * RESUME_PANEL_FRACTION)
+            .clamp(RESUME_PANEL_MIN, RESUME_PANEL_MAX)
+            // A narrow window has no room for two columns, so the panel takes
+            // the card and the preview is dropped rather than squeezed into a
+            // strip too thin to read.
+            .min(card.width());
+        vello::kurbo::Rect::new(card.x0, card.y0, card.x0 + width, card.y1)
+    }
+
+    /// The search field at the top of the panel.
+    pub fn resume_search(&self) -> vello::kurbo::Rect {
+        let panel = self.resume_panel();
+        vello::kurbo::Rect::new(
+            panel.x0 + RESUME_PAD,
+            panel.y0 + RESUME_PAD,
+            panel.x1 - RESUME_PAD,
+            panel.y0 + RESUME_PAD + RESUME_SEARCH_HEIGHT,
+        )
+    }
+
+    /// The list region under the search field.
+    pub fn resume_list(&self) -> vello::kurbo::Rect {
+        let panel = self.resume_panel();
+        let search = self.resume_search();
+        vello::kurbo::Rect::new(
+            panel.x0 + RESUME_PAD,
+            search.y1 + RESUME_PAD / 2.0,
+            panel.x1 - RESUME_PAD,
+            (panel.y1 - RESUME_PAD).max(search.y1 + RESUME_ROW_HEIGHT),
+        )
+    }
+
+    /// How many rows the list can show at once. At least one, so a tiny window
+    /// still shows the row the highlight is on.
+    pub fn resume_visible_rows(&self) -> usize {
+        let list = self.resume_list();
+        ((list.height() / RESUME_ROW_HEIGHT) as usize).max(1)
+    }
+
+    /// The band of the `index`th *visible* row, for its highlight and text.
+    pub fn resume_row(&self, index: usize) -> vello::kurbo::Rect {
+        let list = self.resume_list();
+        let top = list.y0 + index as f64 * RESUME_ROW_HEIGHT;
+        vello::kurbo::Rect::new(list.x0, top, list.x1, top + RESUME_ROW_HEIGHT)
+    }
+
+    /// Which visible row a logical point is on, or `None` off the list.
+    ///
+    /// One definition shared by the highlight and by click handling, for the
+    /// same reason [`Self::panel_row_at`] is: a row that lights up under the
+    /// cursor and a different row firing on click is the worst kind of bug.
+    pub fn resume_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        let list = self.resume_list();
+        if !list.contains(vello::kurbo::Point::new(x, y)) {
+            return None;
+        }
+        let index = ((y - list.y0) / RESUME_ROW_HEIGHT) as usize;
+        (index < self.resume_visible_rows()).then_some(index)
+    }
+
+    /// The preview column, to the right of the panel, or `None` when the
+    /// window is too narrow to hold both.
+    pub fn resume_preview(&self) -> Option<vello::kurbo::Rect> {
+        let card = self.resume_card();
+        let panel = self.resume_panel();
+        let x0 = panel.x1 + RESUME_PAD;
+        let x1 = card.x1 - RESUME_PAD;
+        // Below the measure floor the preview is a column of one word per
+        // line, which tells the user nothing; the panel gets the whole card.
+        (x1 - x0 >= RESUME_PANEL_MIN * 0.6)
+            .then(|| vello::kurbo::Rect::new(x0, card.y0 + RESUME_PAD, x1, card.y1 - RESUME_PAD))
     }
 
     /// Whether a logical point is inside the donut, used for drag hit-testing.
