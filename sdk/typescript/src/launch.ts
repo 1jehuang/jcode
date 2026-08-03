@@ -232,77 +232,68 @@ function readDaemonPidSync(jcodeHome: string, runtimeDir: string): number | unde
 }
 
 /**
- * Ask an instance's daemon to exit.
+ * Stop an instance's daemon and wait for it to actually be gone.
  *
- * `jcode server stop` speaks to the daemon on the socket named by the
- * environment, so pointing it at the instance's runtime directory stops that
- * daemon and nothing else. Best-effort: if the daemon is already gone, or the
- * binary cannot be found, there is nothing to clean up and the caller should
- * still proceed to remove the directory.
+ * The pid comes from the instance's own `servers.json` rather than from
+ * `jcode server stop`: spawning a second jcode binary to read a pid out of a
+ * JSON file costs five seconds of process startup, and `close()` blocking that
+ * long makes the SDK feel broken. The registry is scoped to this instance's
+ * socket path, so this can never signal the server the user is running.
  */
 async function stopInstanceDaemon(
-  binary: string,
+  _binary: string,
   jcodeHome: string,
   runtimeDir: string,
 ): Promise<void> {
-  const output = await new Promise<string>((resolve) => {
-    const stopper = spawn(binary, ["server", "stop", "--force", "--json"], {
-      env: {
-        ...process.env,
-        JCODE_HOME: jcodeHome,
-        JCODE_RUNTIME_DIR: runtimeDir,
-        JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
-      },
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    let stdout = "";
-    stopper.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    const timer = setTimeout(() => {
-      stopper.kill("SIGKILL");
-      resolve(stdout);
-    }, 10_000);
-    timer.unref?.();
-    stopper.once("exit", () => {
-      clearTimeout(timer);
-      resolve(stdout);
-    });
-    stopper.once("error", () => {
-      clearTimeout(timer);
-      resolve(stdout);
-    });
-  });
-
-  // `server stop` sends SIGTERM and returns; it reports `stopped: false` with
-  // the pid it signalled, because the daemon is still unwinding. Returning
-  // here would delete the home while that daemon is still writing to it, so
-  // wait for the process to actually be gone.
-  let pid: number | undefined;
-  try {
-    const parsed = JSON.parse(output) as { signaled_pid?: number };
-    pid = typeof parsed.signaled_pid === "number" ? parsed.signaled_pid : undefined;
-  } catch {
-    // No parseable reply (no daemon, or an older binary): nothing to wait for.
-  }
+  const pid = readDaemonPidSync(jcodeHome, runtimeDir);
   if (pid === undefined) return;
 
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
+  const signal = (sig: NodeJS.Signals) => {
     try {
-      // Signal 0 tests for existence without touching the process.
-      process.kill(pid, 0);
+      // Negative pid: the daemon leads its own group after setsid(), and its
+      // helper children have to go too or they keep writing into the home.
+      process.kill(-pid, sig);
     } catch {
-      return; // Gone.
+      try {
+        process.kill(pid, sig);
+      } catch {
+        // Already gone.
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  };
+
+  signal("SIGTERM");
+
+  // Wait for a clean exit, but not for long. The daemon's own shutdown does
+  // background work (flushing a multi-megabyte search index, among other
+  // things) that can take fifteen seconds. Nothing there is worth preserving:
+  // the instance is ephemeral and about to be deleted, so a short graceful
+  // window followed by SIGKILL is both faster and more predictable.
+  const gracePeriod = Date.now() + 2000;
+  while (Date.now() < gracePeriod) {
+    if (!processExists(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  // Still alive after a graceful window: insist, so the instance cannot
-  // outlive the client that created it.
+
+  signal("SIGKILL");
+
+  // SIGKILL is not instant: the kernel still has to tear the process down, and
+  // returning before it is gone races the delete that follows.
+  const hardDeadline = Date.now() + 5000;
+  while (Date.now() < hardDeadline) {
+    if (!processExists(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/** True while `pid` is still a live process. */
+function processExists(pid: number): boolean {
   try {
-    process.kill(pid, "SIGKILL");
+    // Signal 0 tests for existence without touching the process.
+    process.kill(pid, 0);
+    return true;
   } catch {
-    // Raced us to exit.
+    return false;
   }
 }
 
@@ -497,15 +488,31 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
     // aimed at the bridge can reach it. Killing the bridge alone is exactly
     // the leak this handler exists to prevent.
     const pid = readDaemonPidSync(jcodeHome, runtimeDir);
-    if (pid === undefined) return;
-    try {
-      // Negative pid: the daemon leads a group, so its helpers go with it.
-      process.kill(-pid, "SIGTERM");
-    } catch {
+    if (pid !== undefined) {
+      // SIGKILL, not SIGTERM: an exit handler cannot await, so there is no
+      // chance to wait for a graceful shutdown, and a SIGTERM'd daemon would
+      // still be flushing when this process is gone, recreating the very
+      // directory being removed below.
       try {
-        process.kill(pid, "SIGTERM");
+        // Negative pid: the daemon leads a group, so its helpers go with it.
+        process.kill(-pid, "SIGKILL");
       } catch {
-        // Already gone.
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+
+    // Remove the home too. Reaping the daemon alone still leaves a temp
+    // directory per crash, which for a server that restarts is the same
+    // unbounded growth in a different resource.
+    if (ephemeral) {
+      try {
+        removeInstanceHome(jcodeHome);
+      } catch {
+        // Best-effort: an exit handler must not throw.
       }
     }
   };

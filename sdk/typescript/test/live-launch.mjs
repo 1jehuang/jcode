@@ -128,14 +128,22 @@ await step("an exit without close() does not leak the daemon", async () => {
     console.log(client.instanceHome);
     process.exit(0);  // no close(), like a crash
   `;
-  execFileSync(process.execPath, ["--input-type=module", "-e", script], {
-    encoding: "utf8",
-    timeout: 120_000,
-  });
+  const abandonedHome = execFileSync(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    { encoding: "utf8", timeout: 120_000 },
+  ).trim();
 
   await new Promise((resolve) => setTimeout(resolve, 7000));
   const after = countDaemons();
   assert.equal(after, before, `a crashed consumer leaked ${after - before} daemon(s)`);
+
+  // Reaping the daemon is only half of it: a temp directory per crash is the
+  // same unbounded growth in a different resource.
+  assert.ok(
+    !fs.existsSync(abandonedHome),
+    `a crashed consumer leaked its instance home: ${abandonedHome}`,
+  );
 });
 
 console.log(failures.length ? `\nFAILURES:\n${failures.join("\n")}` : "\nlaunch ok");

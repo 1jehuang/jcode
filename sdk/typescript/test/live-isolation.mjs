@@ -94,5 +94,15 @@ await step("the instance can still peek its own sessions", async () => {
 });
 
 await client.close();
+
+// Confirm the instance is actually gone, rather than trusting that close()
+// returned. `process.exit()` below would truncate any cleanup still running,
+// so this both checks the property and gives it a moment to settle.
+await new Promise((resolve) => setTimeout(resolve, 3000));
+if (fs.existsSync(client.instanceHome ?? "")) {
+  failures.push(`instance home leaked: ${client.instanceHome}`);
+  console.log(`FAIL instance home leaked: ${client.instanceHome}`);
+}
+
 console.log(failures.length ? `\nFAILURES:\n${failures.join("\n")}` : "\nisolation ok");
 process.exit(failures.length ? 1 : 0);
