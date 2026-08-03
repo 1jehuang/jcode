@@ -166,3 +166,36 @@ fn the_normalized_playwright_schema_conforms_to_every_dialect() {
         );
     }
 }
+
+/// The recovery layer must trigger on the error string the runtime actually
+/// builds, not on the idealized provider sentence.
+///
+/// `generate_content` wraps the HTTP body as "Gemini request {method} failed
+/// (HTTP 400): {body}", where the body is the raw JSON error envelope with its
+/// quotes backslash-escaped, and anyhow adds a "Caused by" layer on top. A
+/// classifier matching only the clean provider text would compile, pass its own
+/// unit tests, and never once fire in production.
+#[test]
+fn recovery_triggers_on_the_error_string_the_runtime_really_builds() {
+    let runtime_error = format!(
+        "Gemini request {} failed (HTTP {}): {}",
+        "generateContent", 400, GEMINI_400_BODY
+    );
+    let with_context = format!(
+        "{runtime_error}\n\nCaused by:\n    Gemini request to \
+         https://cloudcode-pa.googleapis.com/v1internal:generateContent failed"
+    );
+
+    let rejection = jcode_schema_dialect::classify(&with_context)
+        .expect("the runtime's own error string must be recognized as a schema rejection");
+    assert_eq!(
+        rejection.keyword.as_deref(),
+        Some("propertyNames"),
+        "recovery must extract the construct from the wrapped, escaped error"
+    );
+}
+
+/// Verbatim HTTP 400 envelope from the Antigravity/Gemini `generateContent`
+/// endpoint as quoted in issue #754, including the backslash-escaped quotes
+/// that survive into the error string.
+const GEMINI_400_BODY: &str = r#"{"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \"propertyNames\" at 'request.tools[0].function_declarations[32].parameters.properties[0].value': Cannot find field.","status":"INVALID_ARGUMENT"}}"#;
