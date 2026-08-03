@@ -3002,6 +3002,25 @@ async fn cancel_processing_message(
             *state.client_is_processing,
             *state.message_id
         ));
+        // Nothing is running anywhere for this session, so there is no turn to
+        // interrupt and arming the signal can only harm the *next* one: the
+        // deferred reset below runs 500ms later, and a message sent inside
+        // that window starts with the cancel flag already set and dies
+        // immediately, with no reply and no error. Report the interrupt and
+        // stop. Sessions whose turn is owned by another connection still take
+        // the signalling path, since the registry sees those turns.
+        if !crate::turn_cancel_registry::has_active_turn(&session_control.session_id) {
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_IDLE_NOOP request_id={:?} session={}",
+                request_id, session_label
+            ));
+            *state.client_is_processing = false;
+            let _ = client_event_tx.send(ServerEvent::Interrupted);
+            if let Some(message_id) = state.message_id.take() {
+                let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+            }
+            return;
+        }
         let cancel_epoch = session_control.request_cancel();
         let reset_control = session_control.clone();
         tokio::spawn(async move {
