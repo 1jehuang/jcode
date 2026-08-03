@@ -307,6 +307,37 @@ semantic_state! {
 }
 
 semantic_state! {
+    /// Whether an iterative goal has a defensible reason to stop. Unlike
+    /// feedback-loop quality, this records how far that loop has actually been
+    /// exercised rather than whether progress can be measured in principle.
+    IterationMaturity {
+        NotStarted = "not_started", legacy: 0..=12, score: 6,
+        Exploring = "exploring", legacy: 13..=29, score: 21,
+        Improving = "improving", legacy: 30..=49, score: 40,
+        PlateauUnproven = "plateau_unproven", legacy: 50..=69, score: 60,
+        OutcomeReached = "outcome_reached", legacy: 70..=79, score: 74,
+        ConstraintsExhausted = "constraints_exhausted", legacy: 80..=87, score: 84,
+        PlateauConfirmed = "plateau_confirmed", legacy: 88..=95, score: 92,
+        BudgetExhausted = "budget_exhausted", legacy: 96..=100, score: 98,
+    }
+}
+
+impl IterationMaturity {
+    /// Terminal bases that can justify completing a goal. `BudgetExhausted` is
+    /// deliberately terminal but not "better" than a confirmed plateau; the
+    /// ordering exists only for legacy numeric compatibility.
+    pub fn permits_completion(self) -> bool {
+        matches!(
+            self,
+            Self::OutcomeReached
+                | Self::ConstraintsExhausted
+                | Self::PlateauConfirmed
+                | Self::BudgetExhausted
+        )
+    }
+}
+
+semantic_state! {
     /// How much of a goal's correctness its feedback loop can report on its
     /// own, without the agent's or the user's judgment.
     FeedbackLoopState {
@@ -507,10 +538,16 @@ pub struct TodoGoal {
     /// calibrates how much delivery follow-through a completion review expects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub difficulty: Option<Difficulty>,
-    /// How far beyond the literal request the work extended. Descriptive,
-    /// never gated.
+    /// How far beyond the literal request the work extended. Completion is
+    /// gated at `necessary_followthrough` so consequential adjacent work is not
+    /// silently left to the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<Autonomy>,
+    /// How far an iterative feedback loop has progressed and, at completion,
+    /// the semantic basis for stopping. This is distinct from loop quality: a
+    /// perfectly measurable loop may still be actively improving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_maturity: Option<IterationMaturity>,
     /// Evidence that an open-ended search has reached a defensible stopping
     /// point, such as a plateau across distinct approaches, exhausted
     /// hypotheses, or an explicit budget limit. Required only when a
@@ -529,6 +566,8 @@ pub enum TodoGoalField {
     FeedbackLoop,
     #[serde(alias = "end_to_end_ownership")]
     DeliveryState,
+    Autonomy,
+    IterationMaturity,
     StoppingEvidence,
 }
 
