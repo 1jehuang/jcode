@@ -772,8 +772,9 @@ async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
         result.output
     );
     assert!(
-        result.output.contains("60k"),
-        "should quote the affordable size (30% of 200k), got: {}",
+        result.output.contains("50k"),
+        "should quote the affordable size, now bounded by the absolute \
+         single-output ceiling rather than 30% of the budget, got: {}",
         result.output
     );
 }
@@ -1377,4 +1378,69 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
         accepted.matches("OUTPUT WITHHELD").count() >= 1,
         "each sub-call is guarded on its own; neither opted in"
     );
+}
+
+#[tokio::test]
+async fn test_guard_withholds_large_output_on_a_million_token_window() {
+    // The regression that made every other test in this file misleading. They
+    // all pinned budgets of 1k to 200k, where 30% of the budget is a small
+    // number. Production reported a 1M-token window, so 30% permitted a 300k
+    // single result and a repo-wide grep costing 233k tokens sailed straight
+    // through a guard that had unit tests passing.
+    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1_000_000)));
+    {
+        let mut mgr = compaction.write().await;
+        mgr.update_observed_input_tokens(21_000);
+    }
+    let registry = Registry {
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        compaction,
+    };
+
+    // ~233k tokens: the real size of the agentgrep result that started this.
+    let output = ToolOutput::new("x".repeat(932_000));
+    let result = registry
+        .guard_context_overflow("agentgrep", output, false)
+        .await;
+
+    assert!(
+        result.output.contains("OUTPUT WITHHELD"),
+        "a 233k-token result must be withheld even on a 1M window, got: {}",
+        &result.output[..result.output.len().min(200)]
+    );
+    assert!(
+        result.output.len() < 1_500,
+        "refusal should cost ~120 tokens, not {} chars",
+        result.output.len()
+    );
+}
+
+#[tokio::test]
+async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
+    // Guards the invariant directly: however large the window, one tool result
+    // may never exceed the absolute ceiling. Without this, raising a model's
+    // advertised context window silently raises the per-call blast radius.
+    for budget in [200_000usize, 1_000_000, 2_000_000, 10_000_000] {
+        let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
+        let registry = Registry {
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+            compaction,
+        };
+
+        // Just over the absolute ceiling, but a trivial fraction of a huge window.
+        let over_ceiling_tokens = Registry::SINGLE_OUTPUT_MAX_TOKENS + 10_000;
+        let result = registry
+            .guard_context_overflow(
+                "test",
+                ToolOutput::new("x".repeat(over_ceiling_tokens * 4)),
+                false,
+            )
+            .await;
+        assert!(
+            result.output.contains("OUTPUT WITHHELD"),
+            "budget={budget}: {over_ceiling_tokens} tokens must exceed the absolute ceiling"
+        );
+    }
 }
