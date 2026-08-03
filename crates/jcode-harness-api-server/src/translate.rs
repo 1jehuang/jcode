@@ -195,6 +195,15 @@ impl BridgeState {
                     },
                 ))]
             }
+            // Answered locally before attach. The daemon treats `ping` as a
+            // "lightweight control" request: when it arrives as the first
+            // frame on a connection it is answered and the connection is then
+            // closed, which would tear down the client's whole session. A
+            // liveness probe must never cost the caller its connection, and
+            // reaching the bridge already proves the socket is alive.
+            "ping" if self.session_id.is_none() => {
+                vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Pong))]
+            }
             "ping" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ping));
