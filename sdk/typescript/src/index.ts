@@ -2,7 +2,7 @@
  * TypeScript SDK for the jcode harness API.
  *
  * ```ts
- * import { JcodeClient } from "@jcode/sdk";
+ * import { JcodeClient } from "@1jehuang/sdk";
  * const client = await JcodeClient.connect({ clientName: "my-app/1.0" });
  * const session = await client.createSession(process.cwd());
  * const turn = await client.run(session.session_id, "hello");
