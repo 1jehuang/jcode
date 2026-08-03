@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopState, IntentUnderstanding,
-    TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
+    TodoPlanField,
 };
 
 /// Whether the plan's intent understanding is solid enough to work against.
@@ -35,14 +36,24 @@ pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
     let delivery_passes = goal
         .delivery_state
         .is_some_and(|state| state >= required_delivery_state(goal.difficulty));
-    let stopping_passes = !matches!(
-        goal.difficulty,
-        Some(Difficulty::Research | Difficulty::OpenEnded)
+    let autonomy_passes = goal
+        .autonomy
+        .is_some_and(|state| state >= Autonomy::NecessaryFollowthrough);
+    let iteration_passes = goal
+        .iteration_maturity
+        .is_some_and(IterationMaturity::permits_completion);
+    let stopping_evidence_passes = !matches!(
+        goal.iteration_maturity,
+        Some(
+            IterationMaturity::PlateauConfirmed
+                | IterationMaturity::ConstraintsExhausted
+                | IterationMaturity::BudgetExhausted
+        )
     ) || goal
         .stopping_evidence
         .as_deref()
         .is_some_and(|evidence| !evidence.trim().is_empty());
-    delivery_passes && stopping_passes
+    delivery_passes && autonomy_passes && iteration_passes && stopping_evidence_passes
 }
 
 /// Pre-plan-intent-rewrite alignment continuation. Kept only so persisted
@@ -64,7 +75,7 @@ const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-clim
 
 /// Model-facing continuation for the private end-to-end ownership check. Names
 /// the assessment category without disclosing the score or threshold.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, follow the work through every relevant integration and runtime path, resolve consequential gaps, validate the complete workflow, and finish the necessary follow-through. For research or open-ended work, also record concrete `stopping_evidence`, such as a plateau across materially different iterations, exhausted hypotheses, or budget exhaustion. Then call the todo tool again with an updated `delivery_state` and any required stopping evidence on the goal.";
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state, autonomy, iteration maturity, or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, validate the complete workflow and consequential adjacent necessary follow-through, and continue exercising the feedback loop while gains or material hypotheses remain. Reassess the goal honestly from concrete evidence, then call the todo tool again with updated assessments.";
 
 /// Legacy ownership-gate wording (pre delivery_state rename). Kept only so
 /// persisted transcripts still classify it as a synthetic gate message.
@@ -1191,6 +1202,8 @@ mod tests {
         TodoGoal {
             group: group.map(str::to_string),
             delivery_state: delivery,
+            autonomy: Some(Autonomy::NecessaryFollowthrough),
+            iteration_maturity: Some(IterationMaturity::OutcomeReached),
             ..Default::default()
         }
     }
@@ -1270,6 +1283,7 @@ mod tests {
         let completed = vec![todo("work", "completed", Some("ship"))];
         let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
         goal.difficulty = Some(Difficulty::Research);
+        goal.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
 
         assert!(!newly_completed_groups_have_sufficient_delivery(
             &previous,
@@ -1285,24 +1299,76 @@ mod tests {
         ));
     }
 
-    /// Autonomy is descriptive only: no gate reads it.
     #[test]
-    fn autonomy_is_never_gated() {
+    fn autonomy_requires_necessary_followthrough_at_completion() {
         let previous = vec![todo("work", "in_progress", Some("ship"))];
         let completed = vec![todo("work", "completed", Some("ship"))];
-        for autonomy in [
-            None,
-            Some(Autonomy::RequestedOnly),
-            Some(Autonomy::Stewardship),
-        ] {
+        for autonomy in [None, Some(Autonomy::RequestedOnly)] {
             let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
             goal.autonomy = autonomy;
+            assert!(!newly_completed_groups_have_sufficient_delivery(
+                &previous,
+                &completed,
+                &[goal],
+            ));
+        }
+        for autonomy in [
+            Autonomy::NecessaryFollowthrough,
+            Autonomy::Proactive,
+            Autonomy::Stewardship,
+        ] {
+            let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+            goal.autonomy = Some(autonomy);
             assert!(newly_completed_groups_have_sufficient_delivery(
                 &previous,
                 &completed,
                 &[goal],
             ));
         }
+    }
+
+    #[test]
+    fn iteration_maturity_requires_terminal_basis_and_supporting_evidence() {
+        let previous = vec![todo("work", "in_progress", Some("search"))];
+        let completed = vec![todo("work", "completed", Some("search"))];
+        for maturity in [
+            None,
+            Some(IterationMaturity::NotStarted),
+            Some(IterationMaturity::Exploring),
+            Some(IterationMaturity::Improving),
+            Some(IterationMaturity::PlateauUnproven),
+        ] {
+            let mut goal = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+            goal.iteration_maturity = maturity;
+            assert!(!newly_completed_groups_have_sufficient_delivery(
+                &previous,
+                &completed,
+                &[goal],
+            ));
+        }
+
+        let mut plateau = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+        plateau.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
+        assert!(!newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[plateau.clone()],
+        ));
+        plateau.stopping_evidence = Some(
+            "Two distinct post-best approaches regressed under the same benchmark".to_string(),
+        );
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[plateau],
+        ));
+
+        let outcome = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+        assert!(newly_completed_groups_have_sufficient_delivery(
+            &previous,
+            &completed,
+            &[outcome],
+        ));
     }
 
     #[test]
@@ -1343,10 +1409,16 @@ mod tests {
     /// that the todo write which triggered the check was discarded.
     #[test]
     fn ownership_message_names_the_field_that_must_be_raised() {
-        assert!(
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("delivery_state"),
-            "the delivery nudge must name the field to raise"
-        );
+        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("iteration maturity"));
+        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("autonomy"));
+        for private_calibration in [
+            "necessary_followthrough",
+            "outcome_reached",
+            "plateau_confirmed",
+            "budget_exhausted",
+        ] {
+            assert!(!TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains(private_calibration));
+        }
         assert!(
             TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("call the todo tool again"),
             "the ownership nudge must say how to update the assessment"

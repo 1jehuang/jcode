@@ -229,6 +229,9 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
             if goal.autonomy.is_none() {
                 goal.autonomy = prev.autonomy;
             }
+            if goal.iteration_maturity.is_none() {
+                goal.iteration_maturity = prev.iteration_maturity;
+            }
             if goal.feedback_loop.is_none() {
                 goal.feedback_loop = prev.feedback_loop.clone();
             }
@@ -295,6 +298,14 @@ fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> V
     }
     if before.and_then(|goal| goal.delivery_state) != after.and_then(|goal| goal.delivery_state) {
         fields.push(TodoGoalField::DeliveryState);
+    }
+    if before.and_then(|goal| goal.autonomy) != after.and_then(|goal| goal.autonomy) {
+        fields.push(TodoGoalField::Autonomy);
+    }
+    if before.and_then(|goal| goal.iteration_maturity)
+        != after.and_then(|goal| goal.iteration_maturity)
+    {
+        fields.push(TodoGoalField::IterationMaturity);
     }
     if before.and_then(|goal| goal.stopping_evidence.as_ref())
         != after.and_then(|goal| goal.stopping_evidence.as_ref())
@@ -705,11 +716,16 @@ impl Tool for TodoTool {
                             "autonomy": {
                                 "type": "string",
                                 "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"],
-                                "description": "How far beyond the literal request the work extended. Descriptive only."
+                                "description": "How far beyond the literal request the work extended. Assess honestly from completed work and consequential adjacent follow-through."
+                            },
+                            "iteration_maturity": {
+                                "type": "string",
+                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"],
+                                "description": "How far the feedback loop has actually been exercised and the evidence-based reason, if any, that further iteration should stop. Assess the current state honestly rather than predicting a future result."
                             },
                             "stopping_evidence": {
                                 "type": "string",
-                                "description": "For research or open-ended goals only: concrete reason to stop, such as a plateau across materially different iterations, exhausted hypotheses, or budget exhaustion."
+                                "description": "Concrete evidence supporting the reported iteration maturity when a stopping claim is made. Name relevant attempts, observations, remaining hypotheses, or an actual constraint or budget."
                             }
                         }
                     }
@@ -873,13 +889,14 @@ mod tests {
         assert!(goal_props.contains_key("delivery_state"));
         assert!(goal_props.contains_key("difficulty"));
         assert!(goal_props.contains_key("autonomy"));
+        assert!(goal_props.contains_key("iteration_maturity"));
         assert!(goal_props.contains_key("stopping_evidence"));
         assert!(!goal_props.contains_key("end_to_end_ownership"));
         // Intent lives on the plan, not per goal.
         assert!(!goal_props.contains_key("user_intention"));
         assert!(!goal_props.contains_key("alignment_score"));
         assert!(!goal_props.contains_key("objective"));
-        assert_eq!(goal_props.len(), 7);
+        assert_eq!(goal_props.len(), 8);
 
         let goal_required = props["goals"]["items"]["required"]
             .as_array()
