@@ -4,6 +4,7 @@ let cachedTurnDetailColumns = null;
 let cachedWebDetailColumns = null;
 let cachedInstallDetailColumns = null;
 let cachedDiscoveryDetailColumns = null;
+let cachedTodoSessionDetailColumns = null;
 
 // Website beacon events (anonymous visitor_id minted in localStorage). Their
 // web-only fields live in the web_details table (see migration 0016): the
@@ -33,6 +34,7 @@ const CLI_EVENTS = [
   "session_end",
   "session_crash",
   "discovery",
+  "todo_session",
 ];
 
 const KNOWN_EVENTS = [
@@ -494,6 +496,13 @@ export default {
       }
     }
 
+    if (body.event === "todo_session") {
+      const problem = normalizeTodoSessionEvent(body);
+      if (problem) {
+        return jsonResponse({ error: problem }, 400, cors);
+      }
+    }
+
     // Firehose first: even if D1 is at its size cap, the raw event is
     // recorded in Analytics Engine and the day is reconstructable.
     const firehoseOk = writeFirehose(env, body);
@@ -631,6 +640,7 @@ const RETENTION_DAYS = {
   subscription_login: 180,
   subscription_router_error: 90,
   subscription_budget_exhausted: 365,
+  todo_session: 365,
 };
 
 const PRUNE_BATCH_LIMIT = 10000;
@@ -689,6 +699,18 @@ async function pruneOldEvents(env, options = {}) {
           console.warn(`install_details prune failed for ${eventType}`, err?.message || err);
         }
       }
+      if (eventType === "todo_session") {
+        try {
+          await env.DB.prepare(
+            `DELETE FROM todo_session_details WHERE event_id IN (
+               SELECT event_id FROM events
+               WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
+               LIMIT ?)`
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        } catch (err) {
+          console.warn("todo_session_details prune failed", err?.message || err);
+        }
+      }
       try {
         // Delete detail children first so the events FK never blocks the prune.
         await env.DB.prepare(
@@ -728,6 +750,22 @@ async function insertEvent(env, body) {
   const turnDetailColumns = await getTurnDetailColumns(env);
   const installDetailColumns = await getInstallDetailColumns(env);
   const common = commonEventEntries(body, columns);
+
+  if (body.event === "todo_session") {
+    const values = [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ...common,
+    ].filter(([name]) => columns.has(name));
+    const inserted = await insertEventRow(env, body, values);
+    if (inserted) {
+      await insertTodoSessionDetails(env, body, await getTodoSessionDetailColumns(env));
+    }
+    return;
+  }
 
   if (body.event === "discovery") {
     const values = [
@@ -1415,6 +1453,19 @@ async function getDiscoveryDetailColumns(env) {
   return cachedDiscoveryDetailColumns;
 }
 
+async function getTodoSessionDetailColumns(env) {
+  if (cachedTodoSessionDetailColumns) {
+    return cachedTodoSessionDetailColumns;
+  }
+  try {
+    const result = await env.DB.prepare("PRAGMA table_info(todo_session_details)").all();
+    cachedTodoSessionDetailColumns = new Set((result.results || []).map((row) => row.name));
+  } catch {
+    cachedTodoSessionDetailColumns = new Set();
+  }
+  return cachedTodoSessionDetailColumns;
+}
+
 async function insertDiscoveryDetails(env, body, columns) {
   if (!columns || columns.size === 0 || !body.event_id || !columns.has("event_id")) {
     return;
@@ -1438,6 +1489,42 @@ async function insertDiscoveryDetails(env, body, columns) {
   ].filter(([name]) => columns.has(name));
   if (values.length > 1) {
     await insertDynamic(env, "discovery_details", values);
+  }
+}
+
+async function insertTodoSessionDetails(env, body, columns) {
+  if (!columns || columns.size === 0 || !body.event_id || !columns.has("event_id")) {
+    return;
+  }
+  const values = [
+    ["event_id", body.event_id],
+    ["correlation_id", body.correlation_id],
+    ["session_end_reason", body.session_end_reason],
+    ["todos_created", body.todos_created || 0],
+    ["todos_completed", body.todos_completed || 0],
+    ["todos_abandoned", body.todos_abandoned || 0],
+    ["todo_updates", body.todo_updates || 0],
+    ["groups_completed", body.groups_completed || 0],
+    ["groups_total", body.groups_total || 0],
+    ["max_todo_list_size", body.max_todo_list_size || 0],
+    ["confidence_min", body.confidence_min ?? null],
+    ["confidence_mean", body.confidence_mean ?? null],
+    ["confidence_count", body.confidence_count || 0],
+    ["completion_confidence_min", body.completion_confidence_min ?? null],
+    ["completion_confidence_mean", body.completion_confidence_mean ?? null],
+    ["completion_confidence_count", body.completion_confidence_count || 0],
+    ["understands_user_intent_min", body.understands_user_intent_min ?? null],
+    ["understands_user_intent_mean", body.understands_user_intent_mean ?? null],
+    ["understands_user_intent_count", body.understands_user_intent_count || 0],
+    ["closed_feedback_loop_min", body.closed_feedback_loop_min ?? null],
+    ["closed_feedback_loop_mean", body.closed_feedback_loop_mean ?? null],
+    ["closed_feedback_loop_count", body.closed_feedback_loop_count || 0],
+    ["end_to_end_ownership_min", body.end_to_end_ownership_min ?? null],
+    ["end_to_end_ownership_mean", body.end_to_end_ownership_mean ?? null],
+    ["end_to_end_ownership_count", body.end_to_end_ownership_count || 0],
+  ].filter(([name]) => columns.has(name));
+  if (values.length > 1) {
+    await insertDynamic(env, "todo_session_details", values);
   }
 }
 
@@ -1673,6 +1760,44 @@ function normalizeDiscoveryEvent(body) {
   body.response_bytes = body.response_bytes == null ? null : Math.max(0, Math.min(1_048_576, Number(body.response_bytes) || 0));
   body.result_count = body.result_count == null ? null : Math.max(0, Math.min(10_000, Number(body.result_count) || 0));
   body.benchmark_run = body.benchmark_run === true;
+  return null;
+}
+
+function normalizeTodoSessionEvent(body) {
+  const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const endReasons = new Set([
+    "normal_exit", "panic", "signal", "disconnect", "reload", "superseded", "unknown",
+  ]);
+  if (typeof body.correlation_id !== "string" || !uuidV4.test(body.correlation_id)) {
+    return "Invalid todo correlation_id";
+  }
+  // This event must never carry the persistent telemetry ID. Its required `id`
+  // envelope field is the same ephemeral UUID used for the within-session join.
+  if (body.id !== body.correlation_id) {
+    return "Todo id must equal correlation_id";
+  }
+  if (!endReasons.has(body.session_end_reason)) {
+    return "Invalid todo session_end_reason";
+  }
+
+  for (const field of [
+    "todos_created", "todos_completed", "todos_abandoned", "todo_updates",
+    "groups_completed", "groups_total", "max_todo_list_size", "confidence_count",
+    "completion_confidence_count", "understands_user_intent_count",
+    "closed_feedback_loop_count", "end_to_end_ownership_count",
+  ]) {
+    body[field] = Math.max(0, Math.min(1_000_000, Math.trunc(Number(body[field]) || 0)));
+  }
+  for (const field of [
+    "confidence_min", "confidence_mean", "completion_confidence_min",
+    "completion_confidence_mean", "understands_user_intent_min",
+    "understands_user_intent_mean", "closed_feedback_loop_min",
+    "closed_feedback_loop_mean", "end_to_end_ownership_min", "end_to_end_ownership_mean",
+  ]) {
+    body[field] = body[field] == null
+      ? null
+      : Math.max(0, Math.min(100, Number(body[field]) || 0));
+  }
   return null;
 }
 
