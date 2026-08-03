@@ -84,8 +84,7 @@ function connectError(socketPath: string, cause: NodeJS.ErrnoException): Harness
   const hint =
     code === "ENOENT"
       ? `no harness API socket at ${socketPath}. Start the bridge with ` +
-        "`cargo run -p jcode-harness-api-server --bin jcode-harness-api-bridge`, " +
-        "or set JCODE_API_SOCKET to its path."
+        "`jcode api-bridge`, or set JCODE_API_SOCKET to its path."
       : code === "ECONNREFUSED"
         ? `nothing is listening on ${socketPath}; a stale socket file is left over ` +
           "from a bridge that exited. Restart the bridge."

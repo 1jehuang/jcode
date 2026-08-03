@@ -231,6 +231,14 @@ linux-compat-vendored-openssl = ["jcode-tui/linux-compat-vendored-openssl"]
 mmdr-size-api = ["jcode-tui/mmdr-size-api"]
 pdf = ["jcode-tui/pdf"]
 
+# The harness API bridge ships inside the released binary as `jcode api-bridge`.
+# SDK users must not need a Rust toolchain to reach the API: requiring
+# `cargo run -p jcode-harness-api-server` made the TypeScript SDK unusable for
+# anyone who installed jcode from a release artifact. Unix-only because the
+# bridge listens on a Unix socket.
+[target.'cfg(unix)'.dependencies]
+jcode-harness-api-server = { path = "crates/jcode-harness-api-server" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 

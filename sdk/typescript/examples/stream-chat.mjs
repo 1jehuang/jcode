@@ -2,7 +2,7 @@
  * Streaming chat example.
  *
  * Requires a running bridge:
- *   cargo run -p jcode-harness-api-server --bin jcode-harness-api-bridge
+ *   jcode api-bridge
  *
  * Usage: node examples/stream-chat.mjs "your prompt"
  */
