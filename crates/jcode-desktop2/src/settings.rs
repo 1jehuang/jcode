@@ -316,6 +316,7 @@ mod tests {
             theme: ThemeMode::Dark,
             reasoning: ReasoningMode::Off,
             motion: false,
+            copy_on_select: true,
         };
         assert_eq!(
             Settings::parse_over(Settings::default(), &settings.serialize()),
@@ -325,7 +326,7 @@ mod tests {
 
     #[test]
     fn corrupt_content_keeps_the_defaults() {
-        for text in ["garbage", "theme=", "=x", "\0\0", "motion=maybe"] {
+        for text in ["garbage", "theme=", "=x", "\0\0", "motion=maybe", "copy_on_select=maybe"] {
             assert_eq!(
                 Settings::parse_over(Settings::default(), text),
                 Settings::default(),
@@ -334,17 +335,32 @@ mod tests {
         }
     }
 
+    /// Off by default: highlighting text must not destroy whatever the user
+    /// deliberately copied unless they asked for that.
+    #[test]
+    fn copy_on_select_is_off_until_asked_for() {
+        assert!(!Settings::default().copy_on_select);
+        let mut settings = Settings::default();
+        settings.cycle(Row::CopyOnSelect, false);
+        assert!(settings.copy_on_select);
+        assert_eq!(settings.value(Row::CopyOnSelect), "on");
+        settings.cycle(Row::CopyOnSelect, false);
+        assert!(!settings.copy_on_select);
+    }
+
     #[test]
     fn a_partial_file_leaves_the_other_keys_alone() {
         let base = Settings {
             theme: ThemeMode::Dark,
             reasoning: ReasoningMode::Full,
             motion: false,
+            copy_on_select: true,
         };
         let parsed = Settings::parse_over(base, "theme=light\n");
         assert_eq!(parsed.theme, ThemeMode::Light);
         assert_eq!(parsed.reasoning, ReasoningMode::Full);
         assert!(!parsed.motion);
+        assert!(parsed.copy_on_select);
     }
 
     #[test]

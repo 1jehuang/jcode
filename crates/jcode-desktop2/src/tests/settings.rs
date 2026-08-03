@@ -20,6 +20,7 @@ fn app() -> App {
         theme: ThemeMode::Light,
         reasoning: crate::reasoning::ReasoningMode::Current,
         motion: true,
+        copy_on_select: false,
     };
     // The window is pinned to match, so a developer whose saved theme is dark
     // does not see a different starting state than one whose is light.
@@ -236,7 +237,7 @@ fn a_row_says_what_it_is_and_what_it_says() {
         assert!(!row.label().is_empty());
         assert!(!settings.value(*row).is_empty());
     }
-    assert_eq!(ROWS.len(), 3, "the panel grew: is every row worth a click?");
+    assert_eq!(ROWS.len(), 4, "the panel grew: is every row worth a click?");
     assert!(ROWS.contains(&Row::Theme));
 }
 
@@ -284,4 +285,27 @@ fn the_open_panel_covers_what_is_under_it() {
     // captions floating over the page.
     let border = r.darkest_in(panel.x0, panel.y0, panel.x1, panel.y0 + 1.5);
     assert!(border < 0.95, "the panel has no visible edge ({border:.3})");
+}
+
+/// The whole point of the row: with it on, highlighting text lands in the
+/// ordinary clipboard, and with it off the clipboard is left alone. Both
+/// halves matter, because the "off" half is what protects an explicit copy.
+#[test]
+fn copy_on_select_decides_whether_a_selection_reaches_the_clipboard() {
+    let mut app = app();
+    app.model.editor = crate::editor::Editor::with_text("hello world");
+    app.model.editor.move_to_start();
+    app.model.editor.extend_to(5);
+
+    app.publish_primary_selection();
+    assert_eq!(
+        app.clipboard.get(),
+        None,
+        "selecting text wrote to the clipboard with copy-on-select off"
+    );
+    assert_eq!(app.clipboard.primary(), Some("hello"));
+
+    app.model.settings.copy_on_select = true;
+    app.publish_primary_selection();
+    assert_eq!(app.clipboard.get().as_deref(), Some("hello"));
 }
