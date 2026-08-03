@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JcodeClient, HarnessError, NdjsonDecoder } from "../dist/index.js";
 import { startMockHarness } from "./mock-harness.ts";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
 
 test("ndjson decoder reassembles frames split across chunks", () => {
   const decoder = new NdjsonDecoder();
@@ -157,4 +160,38 @@ test("pending requests reject when the connection drops", async () => {
   const pending = client.ping();
   await server.close();
   await assert.rejects(() => pending);
+});
+
+test("a missing bridge socket explains how to start it", async () => {
+  const missing = path.join(os.tmpdir(), `jcode-sdk-absent-${process.pid}.sock`);
+  await assert.rejects(
+    () => JcodeClient.connect({ socketPath: missing }),
+    (error: HarnessError) => {
+      assert.equal(error.name, "HarnessError");
+      assert.equal(error.code, "connect_failed");
+      assert.match(error.message, /jcode-harness-api-bridge/);
+      assert.match(error.message, new RegExp(missing.replace(/[/\\]/g, "\\$&")));
+      return true;
+    },
+  );
+});
+
+test("a stale socket file reports a dead bridge, not a missing one", async () => {
+  // A bridge killed with SIGKILL leaves its socket file behind, so the path
+  // exists and dialling gets ECONNREFUSED. "Not found" would send the user
+  // looking for a config problem that is not there.
+  const stale = path.join(os.tmpdir(), `jcode-sdk-stale-${process.pid}.sock`);
+  fs.writeFileSync(stale, "");
+  try {
+    await assert.rejects(
+      () => JcodeClient.connect({ socketPath: stale }),
+      (error: HarnessError) => {
+        assert.equal(error.code, "connect_failed");
+        assert.match(error.message, /stale socket file|not a socket|could not connect/);
+        return true;
+      },
+    );
+  } finally {
+    fs.rmSync(stale, { force: true });
+  }
 });
