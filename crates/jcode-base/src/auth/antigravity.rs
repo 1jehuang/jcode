@@ -216,7 +216,11 @@ async fn refresh_tokens_uncoordinated(tokens: &AntigravityTokens) -> Result<Anti
 
     // Shared recorder: a permanently rejected refresh token becomes terminal
     // so background sweeps stop retrying it; transient failures stay retryable.
-    crate::auth::refresh_state::record_refresh_outcome("antigravity", &tokens.refresh_token, &result);
+    crate::auth::refresh_state::record_refresh_outcome(
+        "antigravity",
+        &tokens.refresh_token,
+        &result,
+    );
 
     result
 }
