@@ -818,3 +818,63 @@ fn capability_requests_need_an_attached_session() {
         }
     }
 }
+
+/// A session id becomes a filesystem path, so it must be treated as untrusted.
+///
+/// The id arrives straight off the wire and is interpolated into
+/// `<home>/sessions/<id>.json`. Without validation, a traversal id is a
+/// readable path, and `peek_session` returns whatever it finds there.
+#[test]
+fn a_session_id_cannot_escape_the_sessions_directory() {
+    for hostile in [
+        "../../../etc/passwd",
+        "../.ssh/id_rsa",
+        "a/b",
+        "a\\b",
+        "..",
+        "",
+        "with space",
+        "semi;colon",
+    ] {
+        assert!(
+            BridgeState::session_record_path(hostile).is_none(),
+            "`{hostile}` must not resolve to a session record path"
+        );
+    }
+}
+
+#[test]
+fn a_plain_session_id_still_resolves() {
+    let path = BridgeState::session_record_path("session_otter_1785728596263_80eb5ad6012a1864")
+        .expect("a normal session id must resolve");
+    assert!(path.ends_with("session_otter_1785728596263_80eb5ad6012a1864.json"));
+    assert!(
+        path.parent().is_some_and(|dir| dir.ends_with("sessions")),
+        "records live in the sessions directory: {}",
+        path.display()
+    );
+}
+
+/// Session records must be read from the *instance's* home, not the user's.
+///
+/// `launch()` gives an embedded instance its own `JCODE_HOME` precisely so it
+/// cannot see the user's work. Reading the user's home directly made
+/// `peek_session` return the real transcripts of the jcode the user runs
+/// interactively, from a client that was supposed to be sandboxed.
+#[test]
+fn session_records_are_read_from_the_instance_home() {
+    // SAFETY: single-threaded test process; the var is restored before asserting.
+    let previous = std::env::var_os("JCODE_HOME");
+    unsafe { std::env::set_var("JCODE_HOME", "/tmp/some-instance-home") };
+    let path = BridgeState::session_record_path("session_x_1_a");
+    match previous {
+        Some(value) => unsafe { std::env::set_var("JCODE_HOME", value) },
+        None => unsafe { std::env::remove_var("JCODE_HOME") },
+    }
+    let path = path.expect("a normal session id must resolve");
+    assert!(
+        path.starts_with("/tmp/some-instance-home"),
+        "JCODE_HOME must scope session records, got {}",
+        path.display()
+    );
+}
