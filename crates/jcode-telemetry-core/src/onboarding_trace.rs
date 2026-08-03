@@ -227,7 +227,7 @@ mod tests {
         // it by checking every string in the payload is either a known field
         // name or a known vocabulary value.
         let mut recorder = TraceRecorder::new(env_fixture());
-        recorder.step("start", Some("probe_done"), None, 0);
+        recorder.step("start", Some("route_fresh_install"), None, 0);
         recorder.step(
             "login_openai",
             Some("login_fail"),
@@ -278,7 +278,7 @@ mod tests {
             "start",
             "login_openai",
             "login_failed",
-            "probe_done",
+            "route_fresh_install",
             "login_fail",
             "retry_other_method",
             "callback_timeout",
@@ -295,10 +295,10 @@ mod tests {
         // A preview that differs from the real payload is worse than none, so
         // both go through `build`.
         let mut recorder = TraceRecorder::new(env_fixture());
-        recorder.step("start", Some("probe_done"), None, 0);
+        recorder.step("start", Some("route_fresh_install"), None, 0);
         let preview = recorder.preview_json(TraceOutcome::Ready);
         assert!(preview.contains("\"onboarding_trace\""));
-        assert!(preview.contains("\"probe_done\""));
+        assert!(preview.contains("\"route_fresh_install\""));
         assert!(preview.contains("\"outcome\": \"ready\""));
         // The install id is masked in the preview so pasting it in a bug report
         // does not disclose the anonymous identifier.
