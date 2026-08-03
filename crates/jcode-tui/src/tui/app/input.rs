@@ -1539,7 +1539,7 @@ impl App {
             }
             let goals = crate::todo::load_goals(&self.session.id).unwrap_or_default();
             let ownership_needs_followup =
-                !crate::todo::completed_groups_have_sufficient_ownership(&todos, &goals);
+                !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
             if ownership_needs_followup && gate_budget_left {

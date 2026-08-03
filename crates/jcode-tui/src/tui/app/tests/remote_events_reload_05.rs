@@ -131,9 +131,12 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 content: "Validate release result".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(100),
-                completion_confidence: Some(100),
-                confidence_history: vec![70, 100],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::from_legacy_score(70),
+                    crate::todo::ConfidenceState::from_legacy_score(100),
+                ],
                 ..Default::default()
             }],
         )
@@ -161,9 +164,9 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
                 content: "Ship the fix".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(50),
-                completion_confidence: Some(50),
-                confidence_history: vec![50],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
                 ..Default::default()
             }],
         )
@@ -209,9 +212,9 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
                 status: "completed".to_string(),
                 priority: "high".to_string(),
                 group: Some("release".to_string()),
-                confidence: Some(100),
-                completion_confidence: Some(100),
-                confidence_history: vec![100],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(100)],
                 ..Default::default()
             }],
         )
@@ -220,8 +223,8 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
             &app.session.id,
             &[crate::todo::TodoGoal {
                 group: Some("release".to_string()),
-                end_to_end_ownership: Some(95),
-                closed_feedback_loop: Some(100),
+                delivery_state: Some(crate::todo::DeliveryState::Integrated),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
                 feedback_loop: Some("run the end-to-end release check".to_string()),
                 ..Default::default()
             }],
@@ -231,7 +234,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
-        assert!(app.queued_messages[0].contains("end_to_end_ownership"));
+        assert!(app.queued_messages[0].contains("delivery_state"));
 
         let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
         assert_eq!(saved[0].status, "completed");
@@ -402,9 +405,12 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
                 content: "Speed up the parser".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(100),
-                completion_confidence: Some(100),
-                confidence_history: vec![97, 100],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::from_legacy_score(97),
+                    crate::todo::ConfidenceState::from_legacy_score(100),
+                ],
                 ..Default::default()
             }],
         )
@@ -416,7 +422,11 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
             &[crate::todo::GateObservation {
                 kind: crate::todo::GateObservationKind::IntentUnderstanding,
                 group: None,
-                score: Some(70),
+                state: Some(
+                    crate::todo::IntentUnderstanding::from_legacy_score(70)
+                        .as_str()
+                        .to_string(),
+                ),
             }],
         )
         .expect("record observation");
@@ -484,7 +494,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
                 content: "Finish the thing".to_string(),
                 status: "pending".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(80),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
                 ..Default::default()
             }],
         )
@@ -505,9 +515,12 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             content: "Done".to_string(),
             status: "completed".to_string(),
             priority: "high".to_string(),
-            confidence: Some(100),
-            completion_confidence: Some(100),
-            confidence_history: vec![95, 100],
+            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+            completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+            confidence_history: vec![
+                crate::todo::ConfidenceState::from_legacy_score(95),
+                crate::todo::ConfidenceState::from_legacy_score(100),
+            ],
             ..Default::default()
         };
 

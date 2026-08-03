@@ -56,7 +56,7 @@ fn todo_confidence_weight(priority: &str) -> u32 {
     }
 }
 
-fn todo_display_confidence(todo: &crate::todo::TodoItem) -> Option<u8> {
+fn todo_display_confidence(todo: &crate::todo::TodoItem) -> Option<crate::todo::ConfidenceState> {
     if todo.status == "completed" {
         todo.completion_confidence.or(todo.confidence)
     } else {
@@ -66,38 +66,41 @@ fn todo_display_confidence(todo: &crate::todo::TodoItem) -> Option<u8> {
 
 fn aggregate_todo_confidence<'a>(
     todos: impl IntoIterator<Item = &'a crate::todo::TodoItem>,
-) -> Option<u8> {
+) -> Option<crate::todo::ConfidenceState> {
     let mut weighted_sum = 0u32;
     let mut total_weight = 0u32;
     for todo in todos.into_iter().filter(|todo| todo.status != "cancelled") {
-        let Some(score) = todo_display_confidence(todo) else {
+        let Some(state) = todo_display_confidence(todo) else {
             continue;
         };
         let weight = todo_confidence_weight(&todo.priority);
-        weighted_sum += u32::from(score) * weight;
+        weighted_sum += u32::from(state.legacy_score()) * weight;
         total_weight += weight;
     }
     if total_weight == 0 {
         None
     } else {
-        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+        Some(crate::todo::ConfidenceState::from_legacy_score(
+            ((weighted_sum + total_weight / 2) / total_weight) as u8,
+        ))
     }
 }
 
-fn confidence_style(score: Option<u8>) -> Style {
-    let color = match score {
-        Some(90..=100) => rgb(100, 180, 100),
-        Some(70..=89) => rgb(220, 190, 100),
-        Some(_) => rgb(220, 120, 100),
+fn confidence_style(state: Option<crate::todo::ConfidenceState>) -> Style {
+    use crate::todo::ConfidenceState;
+    let color = match state {
+        Some(ConfidenceState::Validated | ConfidenceState::Verified) => rgb(100, 180, 100),
+        Some(ConfidenceState::Plausible) => rgb(220, 190, 100),
+        Some(ConfidenceState::Speculative) => rgb(220, 120, 100),
         None => rgb(100, 100, 110),
     };
     Style::default().fg(color)
 }
 
-fn confidence_label(score: Option<u8>) -> String {
-    score
-        .map(|score| format!("{}%", score))
-        .unwrap_or_else(|| "?%".to_string())
+fn confidence_label(state: Option<crate::todo::ConfidenceState>) -> String {
+    state
+        .map(|state| state.as_str().to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// Find the goal assessment recorded for a todo group (`None` = the
@@ -120,10 +123,11 @@ fn goal_for_group<'a>(
 /// Color for a closed feedback loop score: green when progress has a credible
 /// metric to iterate against, red when it is low (below the reframe-nudge
 /// threshold), amber in between.
-fn loop_style(score: u8) -> Style {
-    let color = if score >= crate::todo::LOW_CLOSED_FEEDBACK_LOOP {
+fn loop_style(state: crate::todo::FeedbackLoopState) -> Style {
+    use crate::todo::FeedbackLoopState;
+    let color = if state >= FeedbackLoopState::Closed {
         rgb(100, 180, 100)
-    } else if score >= crate::todo::LOW_CLOSED_FEEDBACK_LOOP.saturating_sub(20) {
+    } else if state >= FeedbackLoopState::Strong {
         rgb(220, 190, 100)
     } else {
         rgb(220, 120, 100)
@@ -133,7 +137,7 @@ fn loop_style(score: u8) -> Style {
 
 /// Append a " · hill N%" suffix describing a goal's closed feedback loop.
 fn push_goal_loop_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::TodoGoal) {
-    let Some(score) = goal.closed_feedback_loop else {
+    let Some(state) = goal.closed_feedback_loop else {
         return;
     };
     spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
@@ -141,14 +145,14 @@ fn push_goal_loop_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::Tod
         "loop ",
         Style::default().fg(rgb(140, 140, 150)),
     ));
-    spans.push(Span::styled(format!("{}%", score), loop_style(score)));
+    spans.push(Span::styled(state.as_str().to_string(), loop_style(state)));
 }
 
 /// Display width of the suffix `push_goal_loop_suffix` would render for this
 /// goal (0 when it renders nothing), so header truncation can reserve room.
 fn goal_loop_suffix_width(goal: &crate::todo::TodoGoal) -> u16 {
     match goal.closed_feedback_loop {
-        Some(score) => 3 + "loop ".len() as u16 + format!("{}%", score).len() as u16,
+        Some(state) => 3 + "loop ".len() as u16 + state.as_str().len() as u16,
         None => 0,
     }
 }
@@ -245,14 +249,17 @@ fn push_todo_pips(spans: &mut Vec<Span<'static>>, data: &InfoWidgetData, width_p
     }
 }
 
-fn aggregate_confidence_suffix_width(score: Option<u8>) -> u16 {
+fn aggregate_confidence_suffix_width(score: Option<crate::todo::ConfidenceState>) -> u16 {
     match score {
         Some(score) => 3 + "confidence ".len() as u16 + confidence_label(Some(score)).len() as u16,
         None => 0,
     }
 }
 
-fn push_aggregate_confidence_suffix(spans: &mut Vec<Span<'static>>, score: Option<u8>) {
+fn push_aggregate_confidence_suffix(
+    spans: &mut Vec<Span<'static>>,
+    score: Option<crate::todo::ConfidenceState>,
+) {
     let Some(score) = score else {
         return;
     };

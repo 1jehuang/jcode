@@ -1208,13 +1208,14 @@ fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'stat
         return Vec::new();
     };
     let mut spans = Vec::new();
-    for (label, score) in [
-        ("Closed feedback loop", goal.closed_feedback_loop),
-        ("Ownership", goal.end_to_end_ownership),
-    ] {
-        let Some(score) = score else {
-            continue;
-        };
+    let mut states: Vec<(&str, String)> = Vec::new();
+    if let Some(state) = goal.closed_feedback_loop {
+        states.push(("Closed feedback loop", state.as_str().to_string()));
+    }
+    if let Some(state) = goal.delivery_state {
+        states.push(("Delivery", state.as_str().to_string()));
+    }
+    for (label, state) in states {
         if !spans.is_empty() {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
         }
@@ -1222,10 +1223,7 @@ fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'stat
             format!("{} ", label),
             Style::default().fg(todo_label_color()),
         ));
-        spans.push(Span::styled(
-            format!("{}%", score),
-            Style::default().fg(todo_score_color()),
-        ));
+        spans.push(Span::styled(state, Style::default().fg(todo_score_color())));
     }
     spans
 }
@@ -1357,7 +1355,7 @@ fn push_todo_plan_details(
     base_indent: &str,
     inner_width: usize,
 ) {
-    if let Some(score) = plan.understands_user_intent {
+    if let Some(state) = plan.understands_user_intent {
         lines.push(todo_card_line(
             vec![
                 Span::styled(
@@ -1365,7 +1363,7 @@ fn push_todo_plan_details(
                     Style::default().fg(todo_label_color()),
                 ),
                 Span::styled(
-                    format!("{}%", score),
+                    state.as_str().to_string(),
                     Style::default().fg(todo_score_color()),
                 ),
             ],
@@ -1425,27 +1423,23 @@ fn push_todo_goal_details(
     let scores = todo_goal_score_spans(Some(goal));
     if !scores.is_empty() {
         let score_width = Line::from(scores.clone()).width();
-        let score_count = [goal.closed_feedback_loop, goal.end_to_end_ownership]
-            .into_iter()
-            .flatten()
-            .count();
+        let score_count = usize::from(goal.closed_feedback_loop.is_some())
+            + usize::from(goal.delivery_state.is_some());
         if score_width > inner_width.saturating_sub(2) && score_count > 1 {
-            for (label, score) in [
-                ("Closed feedback loop", goal.closed_feedback_loop),
-                ("Ownership", goal.end_to_end_ownership),
-            ] {
-                let Some(score) = score else {
-                    continue;
-                };
+            let mut states: Vec<(&str, String)> = Vec::new();
+            if let Some(state) = goal.closed_feedback_loop {
+                states.push(("Closed feedback loop", state.as_str().to_string()));
+            }
+            if let Some(state) = goal.delivery_state {
+                states.push(("Delivery", state.as_str().to_string()));
+            }
+            for (label, state) in states {
                 let mut spans = vec![Span::raw("  ")];
                 spans.push(Span::styled(
                     format!("{} ", label),
                     Style::default().fg(todo_label_color()),
                 ));
-                spans.push(Span::styled(
-                    format!("{}%", score),
-                    Style::default().fg(todo_score_color()),
-                ));
+                spans.push(Span::styled(state, Style::default().fg(todo_score_color())));
                 lines.push(todo_card_line(spans, base_indent, inner_width));
             }
         } else {
@@ -1509,11 +1503,13 @@ fn render_todo_plan_update(
                 update
                     .before
                     .as_ref()
-                    .and_then(|plan| plan.understands_user_intent),
+                    .and_then(|plan| plan.understands_user_intent)
+                    .map(|state| state.as_str().to_string()),
                 update
                     .after
                     .as_ref()
-                    .and_then(|plan| plan.understands_user_intent),
+                    .and_then(|plan| plan.understands_user_intent)
+                    .map(|state| state.as_str().to_string()),
                 base_indent,
                 inner_width,
             ),
@@ -1578,25 +1574,29 @@ fn render_todo_goal_updates(
                     update
                         .before
                         .as_ref()
-                        .and_then(|goal| goal.closed_feedback_loop),
+                        .and_then(|goal| goal.closed_feedback_loop)
+                        .map(|state| state.as_str().to_string()),
                     update
                         .after
                         .as_ref()
-                        .and_then(|goal| goal.closed_feedback_loop),
+                        .and_then(|goal| goal.closed_feedback_loop)
+                        .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
                 ),
-                crate::todo::TodoGoalField::EndToEndOwnership => push_todo_score_update(
+                crate::todo::TodoGoalField::DeliveryState => push_todo_score_update(
                     &mut lines,
-                    "Ownership",
+                    "Delivery",
                     update
                         .before
                         .as_ref()
-                        .and_then(|goal| goal.end_to_end_ownership),
+                        .and_then(|goal| goal.delivery_state)
+                        .map(|state| state.as_str().to_string()),
                     update
                         .after
                         .as_ref()
-                        .and_then(|goal| goal.end_to_end_ownership),
+                        .and_then(|goal| goal.delivery_state)
+                        .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
                 ),
@@ -1607,6 +1607,16 @@ fn render_todo_goal_updates(
                         .after
                         .as_ref()
                         .and_then(|goal| goal.feedback_loop.as_deref()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::StoppingEvidence => push_todo_text_update(
+                    &mut lines,
+                    "Stopping evidence",
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.stopping_evidence.as_deref()),
                     base_indent,
                     inner_width,
                 ),
@@ -1623,8 +1633,8 @@ fn render_todo_goal_updates(
 fn push_todo_score_update(
     lines: &mut Vec<Line<'static>>,
     label: &str,
-    before: Option<u8>,
-    after: Option<u8>,
+    before: Option<String>,
+    after: Option<String>,
     base_indent: &str,
     inner_width: usize,
 ) {
@@ -1637,20 +1647,13 @@ fn push_todo_score_update(
     ];
     match (before, after) {
         (Some(before), Some(after)) => {
-            spans.push(Span::styled(
-                format!("{}%", before),
-                Style::default().fg(todo_meta_color()),
-            ));
+            spans.push(Span::styled(before, Style::default().fg(todo_meta_color())));
             spans.push(Span::styled(" → ", Style::default().fg(todo_label_color())));
-            spans.push(Span::styled(
-                format!("{}%", after),
-                Style::default().fg(todo_score_color()),
-            ));
+            spans.push(Span::styled(after, Style::default().fg(todo_score_color())));
         }
-        (None, Some(after)) => spans.push(Span::styled(
-            format!("{}%", after),
-            Style::default().fg(todo_score_color()),
-        )),
+        (None, Some(after)) => {
+            spans.push(Span::styled(after, Style::default().fg(todo_score_color())))
+        }
         (_, None) => spans.push(Span::styled(
             "cleared",
             Style::default().fg(todo_meta_color()),
@@ -1698,14 +1701,14 @@ fn todo_card_confidence_label(todo: &crate::todo::TodoItem) -> Option<String> {
         && let (Some(planning), Some(completed)) = (todo.confidence, todo.completion_confidence)
         && planning != completed
     {
-        return Some(format!("{}→{}%", planning, completed));
+        return Some(format!("{}→{}", planning.as_str(), completed.as_str()));
     }
-    let score = if todo.status == "completed" {
+    let state = if todo.status == "completed" {
         todo.completion_confidence.or(todo.confidence)
     } else {
         todo.confidence
     };
-    score.map(|score| format!("{}%", score))
+    state.map(|state| state.as_str().to_string())
 }
 
 fn render_todo_card_item_line(

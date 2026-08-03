@@ -533,9 +533,9 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         return String::new();
     };
     let mut line = String::new();
-    if let Some(score) = goal.closed_feedback_loop {
+    if let Some(state) = goal.closed_feedback_loop {
         line.push('\n');
-        line.push_str(&format!("- Closed feedback loop: **{}%**\n", score));
+        line.push_str(&format!("- Closed feedback loop: **{}**\n", state.as_str()));
     }
     if let Some(feedback_loop) = goal
         .feedback_loop
@@ -547,8 +547,14 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         }
         line.push_str(&format!("- Feedback loop: {}\n", feedback_loop.trim()));
     }
-    if let Some(score) = goal.end_to_end_ownership {
-        line.push_str(&format!("- End-to-end ownership: **{}%**\n", score));
+    if let Some(state) = goal.delivery_state {
+        line.push_str(&format!("- Delivery state: **{}**\n", state.as_str()));
+    }
+    if let Some(difficulty) = goal.difficulty {
+        line.push_str(&format!("- Difficulty: {}\n", difficulty.as_str()));
+    }
+    if let Some(autonomy) = goal.autonomy {
+        line.push_str(&format!("- Autonomy: {}\n", autonomy.as_str()));
     }
     line
 }
@@ -564,8 +570,11 @@ fn format_plan_markdown(plan: &crate::todo::TodoPlan) -> String {
     {
         markdown.push_str(&format!("- User intention: {}\n", intention));
     }
-    if let Some(score) = plan.understands_user_intent {
-        markdown.push_str(&format!("- Understands user intent: **{}%**\n", score));
+    if let Some(state) = plan.understands_user_intent {
+        markdown.push_str(&format!(
+            "- Understands user intent: **{}**\n",
+            state.as_str()
+        ));
     }
     markdown
 }
@@ -660,7 +669,7 @@ fn todo_confidence_weight(priority: &str) -> u32 {
     }
 }
 
-fn todo_effective_confidence(todo: &TodoItem) -> Option<u8> {
+fn todo_effective_confidence(todo: &TodoItem) -> Option<crate::todo::ConfidenceState> {
     if todo.status == "completed" {
         todo.completion_confidence.or(todo.confidence)
     } else {
@@ -668,27 +677,31 @@ fn todo_effective_confidence(todo: &TodoItem) -> Option<u8> {
     }
 }
 
-fn weighted_todo_confidence(todos: &[TodoItem]) -> Option<u8> {
+/// Weighted-typical confidence across the list, reported as the semantic
+/// state nearest the weighted mean of representative scores.
+fn weighted_todo_confidence(todos: &[TodoItem]) -> Option<crate::todo::ConfidenceState> {
     let mut weighted_sum = 0u32;
     let mut total_weight = 0u32;
     for todo in todos.iter().filter(|todo| todo.status != "cancelled") {
-        let Some(score) = todo_effective_confidence(todo) else {
+        let Some(state) = todo_effective_confidence(todo) else {
             continue;
         };
         let weight = todo_confidence_weight(&todo.priority);
-        weighted_sum += u32::from(score) * weight;
+        weighted_sum += u32::from(state.legacy_score()) * weight;
         total_weight += weight;
     }
     if total_weight == 0 {
         None
     } else {
-        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+        Some(crate::todo::ConfidenceState::from_legacy_score(
+            ((weighted_sum + total_weight / 2) / total_weight) as u8,
+        ))
     }
 }
 
-fn format_confidence_value(score: Option<u8>) -> String {
-    score
-        .map(|score| format!("{}%", score))
+fn format_confidence_value(state: Option<crate::todo::ConfidenceState>) -> String {
+    state
+        .map(|state| state.as_str().to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -737,7 +750,9 @@ fn hash_todos_payload(
         goal.group.hash(&mut hasher);
         goal.closed_feedback_loop.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
-        goal.end_to_end_ownership.hash(&mut hasher);
+        goal.delivery_state.hash(&mut hasher);
+        goal.difficulty.hash(&mut hasher);
+        goal.autonomy.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -761,7 +776,7 @@ mod tests {
     fn plan() -> crate::todo::TodoPlan {
         crate::todo::TodoPlan {
             user_intention: Some("make navigation feel immediate".to_string()),
-            understands_user_intent: Some(96),
+            understands_user_intent: Some(crate::todo::IntentUnderstanding::from_legacy_score(96)),
             ..Default::default()
         }
     }
@@ -780,8 +795,9 @@ mod tests {
             status: status.to_string(),
             priority: priority.to_string(),
             group: None,
-            confidence,
-            completion_confidence,
+            confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
+            completion_confidence: completion_confidence
+                .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -811,12 +827,12 @@ mod tests {
 
         let markdown = build_todos_view_markdown(Some("session_test"), &todos, &plan(), &[]);
 
-        assert!(markdown.contains("- Weighted confidence: **86%**"));
-        assert!(markdown.contains("- Lowest completed confidence: **95%**"));
+        assert!(markdown.contains("- Weighted confidence: **plausible**"));
+        assert!(markdown.contains("- Lowest completed confidence: **plausible**"));
         assert!(markdown.contains("- Missing completion confidence: 0"));
-        assert!(markdown.contains("  - confidence: `80%`"));
-        assert!(markdown.contains("  - confidence: `70%`"));
-        assert!(markdown.contains("  - completion confidence: `95%`"));
+        assert!(markdown.contains("  - confidence: `plausible`"));
+        assert!(markdown.contains("  - confidence: `plausible`"));
+        assert!(markdown.contains("  - completion confidence: `plausible`"));
     }
 
     #[test]
@@ -830,7 +846,7 @@ mod tests {
             None,
         )];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
-        todos[0].confidence = Some(81);
+        todos[0].confidence = Some(crate::todo::ConfidenceState::Validated);
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
 
         assert_ne!(before, after);
@@ -866,11 +882,11 @@ mod tests {
             &plan(),
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
-                closed_feedback_loop: Some(90),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(90)),
                 feedback_loop: Some(
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
-                end_to_end_ownership: Some(85),
+                delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(85)),
                 ..Default::default()
             }],
         );
@@ -885,11 +901,11 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Understands user intent: **96%**"),
+            markdown.contains("- Understands user intent: **clear**"),
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Closed feedback loop: **90%**"),
+            markdown.contains("- Closed feedback loop: **strong**"),
             "{markdown}"
         );
         assert!(
@@ -898,7 +914,7 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- End-to-end ownership: **85%**"),
+            markdown.contains("- Delivery state: **workflow_validated**"),
             "{markdown}"
         );
         assert!(markdown.contains("## scrollback (0/1)"), "{markdown}");
@@ -926,7 +942,7 @@ mod tests {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         let goals = vec![crate::todo::TodoGoal {
-            closed_feedback_loop: Some(30),
+            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(30)),
             ..Default::default()
         }];
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);
@@ -961,7 +977,7 @@ mod tests {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let mut current = plan();
         let before = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
-        current.understands_user_intent = Some(99);
+        current.understands_user_intent = Some(crate::todo::IntentUnderstanding::Complete);
         let after = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
         assert_ne!(before, after);
     }

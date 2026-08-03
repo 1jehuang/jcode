@@ -593,7 +593,7 @@ pub(super) fn format_refactor_status(app: &App) -> String {
 
 fn todo_confidence_suffix(todo: &crate::todo::TodoItem) -> String {
     match todo.confidence {
-        Some(score) => format!(" · confidence {}%", score),
+        Some(state) => format!(" · confidence {}", state.as_str()),
         None => " · confidence unknown".to_string(),
     }
 }

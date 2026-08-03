@@ -32,7 +32,7 @@ use std::time::Instant;
 
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.5";
 const POKE_OFF_UI_HINT: &str = "/poke off to stop.";
-const TODO_CONFIDENCE_THRESHOLD: u8 = crate::todo::QUALITY_GATE_THRESHOLD;
+
 const TODO_COMPLETION_CONTINUATION_MESSAGE: &str =
     crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE;
 const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str =
@@ -2650,29 +2650,28 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
         .iter()
         .filter(|todo| todo.status == "completed")
         .collect();
-    let completion_scores: Vec<(&crate::todo::TodoItem, u8, u32)> = completed
-        .iter()
-        .filter_map(|todo| {
-            todo.completion_confidence
-                .map(|score| (*todo, score, todo_confidence_weight(&todo.priority)))
-        })
-        .collect();
-    let completion_average = weighted_confidence_average(
-        completion_scores
+    let completion_states: Vec<(&crate::todo::TodoItem, crate::todo::ConfidenceState, u32)> =
+        completed
             .iter()
-            .map(|(_, score, weight)| (*score, *weight)),
+            .filter_map(|todo| {
+                todo.completion_confidence
+                    .map(|state| (*todo, state, todo_confidence_weight(&todo.priority)))
+            })
+            .collect();
+    let completion_average = weighted_confidence_average(
+        completion_states
+            .iter()
+            .map(|(_, state, weight)| (state.legacy_score(), *weight)),
     );
     let missing_completion_confidence = completed
         .iter()
         .filter(|todo| todo.completion_confidence.is_none())
         .count();
-    let below_threshold_count = completion_scores
+    let below_threshold_count = completion_states
         .iter()
-        .filter(|(_, score, _)| *score < TODO_CONFIDENCE_THRESHOLD)
+        .filter(|(_, state, _)| !crate::todo::completion_confidence_passes(Some(*state)))
         .count();
-    let completion_confidence_needs_validation = completion_average
-        .map(|avg| avg < TODO_CONFIDENCE_THRESHOLD)
-        .unwrap_or(true)
+    let completion_confidence_needs_validation = completion_average.is_none()
         || missing_completion_confidence > 0
         || below_threshold_count > 0;
     let confidence_spike_detected = !crate::todo::spike_completed_todos(todos).is_empty();
@@ -2687,10 +2686,11 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
 }
 
 pub(super) fn format_todo_completion_confidence(summary: TodoConfidenceSummary) -> String {
-    match summary.completion_average {
-        Some(avg) => format!("{}%", avg),
-        None => "unknown".to_string(),
-    }
+    summary
+        .completion_average
+        .map(crate::todo::ConfidenceState::from_legacy_score)
+        .map(|state| state.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {

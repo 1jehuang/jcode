@@ -194,9 +194,9 @@ fn todo_work_line(todos: &[TodoItem]) -> Option<String> {
     if let Some(done) = last_done {
         let mut seg = format!("✓ {}", clip_todo(&done.content));
         if let Some(conf) = done.completion_confidence
-            && conf < 50
+            && conf == crate::todo::ConfidenceState::Speculative
         {
-            seg.push_str(&format!(" (low conf {}%)", conf));
+            seg.push_str(&format!(" (low conf: {})", conf.as_str()));
         }
         parts.push(seg);
     }
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn low_confidence_completion_is_flagged() {
         let mut done = todo_named("risky refactor", "completed", &[]);
-        done.completion_confidence = Some(35);
+        done.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(35));
         let n = build_turn_notification(None, 200.0, &[done], None);
         assert_eq!(n.subtitle.as_deref(), Some("✓ all 1 todos"));
         assert_eq!(n.body, "✓ risky refactor (low conf 35%)");
