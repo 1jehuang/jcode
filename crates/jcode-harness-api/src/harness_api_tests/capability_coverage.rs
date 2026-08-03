@@ -37,7 +37,6 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
-    ("Account", ClientInternal),
     ("BackgroundTool", ClientInternal),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),
@@ -49,9 +48,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
     ("InputShell", ClientInternal),
-    ("Login", ClientInternal),
     ("Message", Covered),
-    ("Model", ClientInternal),
     ("NotifyAuthChanged", ClientInternal),
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
@@ -115,6 +112,17 @@ fn collect_requests(dir: &std::path::Path, found: &mut BTreeSet<String>) {
                 continue;
             };
             for (index, _) in source.match_indices("Request::") {
+                // `Request::` also matches unrelated local enums whose names
+                // merely end in "Request" (the TUI's own
+                // `InlinePickerPreviewRequest::Login`, say). Those are UI
+                // state, not daemon capabilities, and counting them put three
+                // phantom entries in the ledger that no client could ever
+                // reach. Require the bare `Request::` path, so a qualified or
+                // suffixed enum is skipped.
+                let preceding = source[..index].chars().next_back();
+                if preceding.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+                    continue;
+                }
                 let name: String = source[index + "Request::".len()..]
                     .chars()
                     .take_while(|ch| ch.is_ascii_alphanumeric())
@@ -281,4 +289,62 @@ fn collect_home_paths(dir: &std::path::Path, found: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// Every ledger entry must name a real daemon request.
+///
+/// The scraper looks for `Request::Foo`, which also matches unrelated local
+/// enums whose names end in "Request". Three of the TUI's own picker states
+/// (`InlinePickerPreviewRequest::{Login, Account, Model}`) were recorded as
+/// daemon capabilities that way, and a phantom entry is worse than a missing
+/// one: it reads as a reviewed decision about a capability that does not
+/// exist, and "Login is deliberately internal" is a sentence nobody can act
+/// on. Check the other direction too, so the ledger cannot describe something
+/// the protocol has never had.
+#[test]
+fn the_ledger_only_names_real_daemon_requests() {
+    let Some(protocol) = protocol_request_variants() else {
+        return;
+    };
+    let unknown: Vec<&str> = LEDGER
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !protocol.contains(*name))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "the capability ledger names requests that do not exist in \
+         jcode-protocol's Request enum: {unknown:?}. These are usually local \
+         enums whose names end in \"Request\"; a phantom entry claims a \
+         decision was made about a capability that was never real."
+    );
+}
+
+/// Variant names of the daemon's wire `Request` enum.
+fn protocol_request_variants() -> Option<BTreeSet<String>> {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../jcode-protocol/src/wire.rs");
+    let source = std::fs::read_to_string(path).ok()?;
+    let start = source.find("pub enum Request {")?;
+    let body = &source[start..];
+    let end = body.find("\n}").unwrap_or(body.len());
+    Some(
+        body[..end]
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("    ")?;
+                if rest.starts_with(' ') {
+                    return None;
+                }
+                let name: String = rest
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric())
+                    .collect();
+                name.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+                    .then_some(name)
+            })
+            .collect(),
+    )
 }
