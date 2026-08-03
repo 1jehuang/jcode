@@ -370,6 +370,7 @@ impl JcodeClient {
             session_id: session_id.to_string(),
             content: content.to_string(),
             images,
+            no_reply: false,
         })?;
         if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
             let deadline = std::time::Instant::now() + timeout;

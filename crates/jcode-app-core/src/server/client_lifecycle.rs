@@ -225,6 +225,23 @@ fn reject_if_agent_busy_for_request(
         return false;
     }
 
+    send_agent_busy_error(
+        request_id,
+        request_kind,
+        client_session_id,
+        client_is_processing,
+        client_event_tx,
+    );
+    true
+}
+
+fn send_agent_busy_error(
+    request_id: u64,
+    request_kind: &'static str,
+    client_session_id: &str,
+    client_is_processing: bool,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
     crate::logging::event_warn(
         "SERVER_REQUEST_BUSY_AGENT_REJECTED",
         vec![
@@ -242,7 +259,6 @@ fn reject_if_agent_busy_for_request(
         ),
         retry_after_secs: Some(1),
     });
-    true
 }
 
 fn server_reload_starting() -> bool {
@@ -1077,7 +1093,21 @@ pub(super) async fn handle_client(
                 content,
                 images,
                 system_reminder,
+                no_reply,
             } => {
+                if no_reply {
+                    append_context_message(
+                        id,
+                        &content,
+                        images,
+                        &client_session_id,
+                        client_is_processing,
+                        &agent,
+                        &client_event_tx,
+                    )
+                    .await;
+                    continue;
+                }
                 if !client_is_processing {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
@@ -2748,6 +2778,37 @@ pub(super) async fn handle_client(
     )
     .await?;
     Ok(())
+}
+
+async fn append_context_message(
+    id: u64,
+    content: &str,
+    images: Vec<(String, String)>,
+    client_session_id: &str,
+    client_is_processing: bool,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let Ok(mut agent) = agent.try_lock() else {
+        send_agent_busy_error(
+            id,
+            "context_message",
+            client_session_id,
+            client_is_processing,
+            client_event_tx,
+        );
+        return;
+    };
+    let result = agent.append_user_context_message(content, images);
+    let event = match result {
+        Ok(()) => ServerEvent::ContextMessageAdded { id },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: crate::util::format_error_chain(&error),
+            retry_after_secs: None,
+        },
+    };
+    let _ = client_event_tx.send(event);
 }
 
 async fn start_processing_message(

@@ -27,6 +27,7 @@ export type {
   ConnectOptions,
   RunOptions,
   RunStructuredOptions,
+  SendMessageOptions,
   StructuredTurnResult,
   Transport,
   TurnResult,

@@ -10,6 +10,7 @@ fn client_frame_wire_shape() {
             session_id: "s1".into(),
             content: "hi".into(),
             images: vec![],
+            no_reply: false,
         },
     );
     let json = serde_json::to_string(&frame).unwrap();
@@ -17,6 +18,36 @@ fn client_frame_wire_shape() {
         json,
         r#"{"v":1,"id":7,"req":"send_message","session_id":"s1","content":"hi"}"#
     );
+}
+
+#[test]
+fn send_message_no_reply_wire_shape_and_legacy_default() {
+    let frame = ClientFrame::new(
+        8,
+        ApiRequest::SendMessage {
+            session_id: "s1".into(),
+            content: "context".into(),
+            images: vec![],
+            no_reply: true,
+        },
+    );
+    let json = serde_json::to_string(&frame).unwrap();
+    assert_eq!(
+        json,
+        r#"{"v":1,"id":8,"req":"send_message","session_id":"s1","content":"context","no_reply":true}"#
+    );
+
+    let legacy: ClientFrame = serde_json::from_str(
+        r#"{"v":1,"id":9,"req":"send_message","session_id":"s1","content":"old","images":[]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy.request,
+        ApiRequest::SendMessage {
+            no_reply: false,
+            ..
+        }
+    ));
 }
 
 #[test]

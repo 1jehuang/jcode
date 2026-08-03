@@ -36,6 +36,9 @@ pub enum ApiRequest {
         /// (media_type, base64_data) pairs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        /// Persist the message as context without starting a model turn.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_reply: bool,
     },
 
     /// Cancel the in-flight generation.

@@ -127,6 +127,17 @@ export interface RunOptions {
   autoApprove?: boolean;
 }
 
+export interface SendMessageOptions {
+  /** Attach images to the persisted user message. */
+  images?: ImageAttachment[];
+  /** Persist the message as context without starting a model turn. */
+  noReply?: boolean;
+  /** Wait for message_accepted when starting a normal model turn. */
+  waitForAccept?: boolean;
+  /** Maximum acknowledgement wait in milliseconds. */
+  acceptTimeoutMs?: number;
+}
+
 export interface RunStructuredOptions<T = unknown> extends RunOptions {
   /** JSON Schema the assistant's JSON response must satisfy. */
   schema: StructuredOutputSchema<T>;
@@ -384,9 +395,34 @@ export class JcodeClient extends EventEmitter {
   async sendMessage(
     sessionId: string,
     content: string,
-    images: ImageAttachment[] = [],
-    options: { waitForAccept?: boolean; acceptTimeoutMs?: number } = {},
+    options?: SendMessageOptions,
+  ): Promise<void>;
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    images?: ImageAttachment[],
+    options?: Omit<SendMessageOptions, "images">,
+  ): Promise<void>;
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    imagesOrOptions: ImageAttachment[] | SendMessageOptions = [],
+    legacyOptions: Omit<SendMessageOptions, "images"> = {},
   ): Promise<void> {
+    const options: SendMessageOptions = Array.isArray(imagesOrOptions)
+      ? { ...legacyOptions, images: imagesOrOptions }
+      : imagesOrOptions;
+    const images = options.images ?? [];
+    if (options.noReply) {
+      await this.requestOk({
+        req: "send_message",
+        session_id: sessionId,
+        content,
+        images,
+        no_reply: true,
+      });
+      return;
+    }
     const waitForAccept = options.waitForAccept ?? true;
     const accepted = waitForAccept
       ? this.waitForEvent(

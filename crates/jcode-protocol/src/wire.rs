@@ -45,6 +45,10 @@ pub enum Request {
         images: Vec<(String, String)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
+        /// Append the user message as context only. The daemon persists it and
+        /// acknowledges it without starting a model turn.
+        #[serde(default, skip_serializing_if = "is_false")]
+        no_reply: bool,
     },
 
     /// Cancel current generation
@@ -1004,6 +1008,12 @@ pub enum ServerEvent {
     /// Message/turn completed
     #[serde(rename = "done")]
     Done { id: u64 },
+
+    /// A context-only user message was appended and persisted. This is distinct
+    /// from `done`: no model turn was started and no turn boundary should be
+    /// emitted to API clients.
+    #[serde(rename = "context_message_added")]
+    ContextMessageAdded { id: u64 },
 
     /// Error occurred
     #[serde(rename = "error")]

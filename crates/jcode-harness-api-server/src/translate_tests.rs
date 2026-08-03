@@ -101,6 +101,64 @@ fn acking_the_pending_message_reports_acceptance() {
     assert!(matches!(&done[0].event, ApiEvent::TurnDone { .. }));
 }
 
+#[test]
+fn context_only_message_waits_for_persistence_event_and_replies_ok() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 27, "session_id": "s1",
+        "content": "context", "no_reply": true
+    }));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(message["type"], "message");
+    assert_eq!(message["no_reply"], true);
+    let legacy_id = message["id"].as_u64().unwrap();
+
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": legacy_id}))
+            .is_empty(),
+        "the daemon's early ack does not prove persistence"
+    );
+    let frames =
+        state.legacy_event_to_api(&json!({"type": "context_message_added", "id": legacy_id}));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(27));
+    assert!(matches!(frames[0].event, ApiEvent::Ok));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "done", "id": legacy_id}))
+            .is_empty(),
+        "context-only messages never create turn boundaries"
+    );
+}
+
+#[test]
+fn context_only_message_error_is_correlated_to_the_request() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 28, "session_id": "s1",
+        "content": "context", "no_reply": true
+    }));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    let legacy_id = message["id"].as_u64().unwrap();
+    let frames = state
+        .legacy_event_to_api(&json!({"type": "error", "id": legacy_id, "message": "save failed"}));
+    assert_eq!(frames[0].reply_to, Some(28));
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::Error { message, .. } if message == "save failed"
+    ));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "context_message_added", "id": legacy_id}))
+            .is_empty()
+    );
+}
+
 /// An ack for anything else (a ping, a clear) is still a plain request reply:
 /// promoting those to acceptance would wiggle a message that nobody sent.
 #[test]

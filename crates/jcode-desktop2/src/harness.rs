@@ -467,6 +467,7 @@ fn run(
                             session_id: session,
                             content,
                             images: vec![],
+                            no_reply: false,
                         }
                     }
                     // Retarget immediately rather than waiting for the

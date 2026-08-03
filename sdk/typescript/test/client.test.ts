@@ -118,6 +118,76 @@ test("run() collects a full turn and auto-approves permissions", async () => {
   await server.close();
 });
 
+test("sendMessage supports context-only options and waits for request completion", async () => {
+  let received: any;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "send_message") {
+        received = request;
+        send({ v: 1, reply_to: request.id, ev: "ok" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  await client.sendMessage("s1", "context", {
+    noReply: true,
+    images: [["image/png", "abc"]],
+  });
+  assert.equal(received.no_reply, true);
+  assert.deepEqual(received.images, [["image/png", "abc"]]);
+  client.close();
+  await server.close();
+});
+
+test("sendMessage retains the legacy images argument", async () => {
+  let received: any;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "send_message") {
+        received = request;
+        send({ v: 1, ev: "message_accepted", session_id: request.session_id });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  await client.sendMessage("s1", "normal", [["image/jpeg", "xyz"]]);
+  assert.deepEqual(received.images, [["image/jpeg", "xyz"]]);
+  assert.equal(received.no_reply, undefined);
+  client.close();
+  await server.close();
+});
+
+test("sendMessage noReply waits for request ok and does not wait for turn events", async () => {
+  let observed: any;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "send_message") {
+        observed = request;
+        send({ v: 1, reply_to: request.id, ev: "ok" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const seenTurn = new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), 20);
+    timer.unref?.();
+    client.once("turn_done", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+
+  await client.sendMessage("s1", "context only", { noReply: true });
+
+  assert.equal(observed.req, "send_message");
+  assert.equal(observed.session_id, "s1");
+  assert.equal(observed.content, "context only");
+  assert.equal(observed.no_reply, true);
+  assert.equal(await seenTurn, false);
+  client.close();
+  await server.close();
+});
+
 test("events() buffers while the consumer is busy and filters by session", async () => {
   const server = await startMockHarness();
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
