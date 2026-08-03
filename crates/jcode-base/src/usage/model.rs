@@ -58,6 +58,8 @@ pub struct UsageData {
     pub seven_day_resets_at: Option<String>,
     /// Seven-day Opus utilization (0.0-1.0)
     pub seven_day_opus: Option<f32>,
+    /// Model-specific weekly windows returned by newer OAuth usage responses.
+    pub model_scoped: Vec<ModelScopedUsageWindow>,
     /// Whether extra usage (long context, etc.) is enabled
     pub extra_usage_enabled: bool,
     /// Last fetch time
@@ -72,7 +74,9 @@ impl UsageData {
         if usage_reset_passed([
             self.five_hour_resets_at.as_deref(),
             self.seven_day_resets_at.as_deref(),
-        ]) {
+        ]) || self.model_scoped.iter().any(|window| {
+            usage_reset_passed([window.resets_at.as_deref()])
+        }) {
             return true;
         }
 
@@ -110,13 +114,41 @@ impl UsageData {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelScopedUsageWindow {
+    pub model_name: String,
+    /// Utilization as a fraction in [0.0, 1.0].
+    pub utilization: f32,
+    pub resets_at: Option<String>,
+}
+
 /// API response structures
 #[derive(Deserialize, Debug)]
 pub(super) struct UsageResponse {
     pub(super) five_hour: Option<UsageWindow>,
     pub(super) seven_day: Option<UsageWindow>,
     pub(super) seven_day_opus: Option<UsageWindow>,
+    #[serde(default)]
+    pub(super) limits: Vec<StructuredUsageLimit>,
     pub(super) extra_usage: Option<ExtraUsageResponse>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(super) struct StructuredUsageLimit {
+    pub(super) kind: Option<String>,
+    pub(super) percent: Option<f32>,
+    pub(super) resets_at: Option<String>,
+    pub(super) scope: Option<UsageLimitScope>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(super) struct UsageLimitScope {
+    pub(super) model: Option<UsageLimitModel>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(super) struct UsageLimitModel {
+    pub(super) display_name: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
