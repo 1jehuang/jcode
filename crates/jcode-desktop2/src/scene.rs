@@ -742,22 +742,21 @@ fn draw_transcript(
         // and hue), and a rule beside it only narrowed the measure while
         // saying a second time what the colour had already said.
 
-        // A failure notice: a rule down its left edge, no wash. A washed card
-        // is the user's own message in this theme, and dressing an error as
-        // something the user typed is worse than not marking it at all. The
-        // rule is the print convention for an interjection, and it takes the
-        // error ink so the mark is as loud as the text it labels.
+        // A failure notice is a red card. The translucent fill keeps the error
+        // text legible in both themes while making the whole message, rather
+        // than a line of furniture beside it, carry the error state.
         if placed.message.role == Role::Notice {
             scene.fill(
                 vello::peniko::Fill::NonZero,
                 Affine::scale(scale),
-                theme.error,
+                theme.error.with_alpha(0.14),
                 None,
-                &Rect::new(
-                    frame.left + USER_PAD_X,
+                &RoundedRect::new(
+                    frame.left,
                     message_top,
-                    frame.left + USER_PAD_X + frame.hairline() * 2.0,
+                    frame.right,
                     message_top + placed.message.height,
+                    USER_RADIUS,
                 ),
             );
         }

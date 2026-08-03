@@ -849,10 +849,6 @@ pub const REASONING_INSET: f64 = 0.0;
 /// that shows the call running. Wider than the reasoning rule because the
 /// spinner is a drawn object, not a hairline.
 pub const TOOL_INSET: f64 = 24.0;
-/// Indent of a failure notice's text, leaving room for the rule down its left
-/// edge. The rule is what tells the notice apart from the reply above it
-/// without spending a colour the print theme does not have.
-pub const NOTICE_INSET: f64 = 16.0;
 /// Vertical padding inside the live tool card.
 pub const TOOL_PAD_Y: f64 = 6.0;
 /// The progress bar's track: thin, because it is a readout rather than a
@@ -1013,7 +1009,9 @@ pub fn lay_out_message_reusing(
             },
         ),
         None => match notice {
-            Some(color) => (ParagraphStyle { color, ..base }, NOTICE_INSET),
+            // The card itself now carries the error treatment, so the text no
+            // longer needs to clear a rule down the left edge.
+            Some(color) => (ParagraphStyle { color, ..base }, 0.0),
             // An edit card sits at the margin. It used to be indented to clear
             // a rule down its left edge; the rule is gone (the diff's own wash
             // and hue already mark it), so the indent would only narrow the
