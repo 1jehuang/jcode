@@ -24,6 +24,7 @@ mod client;
 mod diagnostics;
 mod errors;
 mod launch;
+mod structured;
 
 #[cfg(test)]
 #[path = "sdk_tests/parity.rs"]
@@ -36,6 +37,11 @@ pub use client::{
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
 pub use launch::{LaunchOptions, ensure_runtime, socket_accepts, wait_for_socket};
+pub use structured::{
+    RunStructuredError, RunStructuredOptions, StructuredEventCallback, StructuredOutputAttempt,
+    StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,
+    StructuredValidationIssue,
+};
 
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
