@@ -142,6 +142,21 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         )
         .expect("save completed todo");
 
+        crate::todo::save_goals(
+            &reloaded_app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
+
+        // Pin the default so the clean-cycle finish disarms rather than
+        // re-arming; this test is about the spike-challenge flag, not the
+        // default-on re-arm behavior.
+        reloaded_app.auto_poke_default_on = false;
         assert!(!reloaded_app.schedule_auto_poke_followup_if_needed());
         assert!(!reloaded_app.auto_poke_incomplete_todos);
         assert!(!reloaded_app.todo_confidence_spike_challenged);
@@ -219,6 +234,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
             }],
         )
         .expect("save completed todo");
+
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
@@ -416,6 +432,17 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
         )
         .expect("save completed todo");
 
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
+
         // A point that was flagged during the turn and never resolved.
         crate::todo::append_gate_observations(
             &app.session.id,
@@ -518,8 +545,8 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
             completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
             confidence_history: vec![
-                crate::todo::ConfidenceState::from_legacy_score(95),
-                crate::todo::ConfidenceState::from_legacy_score(100),
+                crate::todo::ConfidenceState::Validated,
+                crate::todo::ConfidenceState::Verified,
             ],
             ..Default::default()
         };
@@ -528,6 +555,16 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         app.auto_poke_incomplete_todos = true;
         app.auto_poke_default_on = true;
         crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
         assert!(!app.schedule_auto_poke_followup_if_needed());
         assert!(
             app.auto_poke_incomplete_todos,
@@ -540,6 +577,16 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         app.auto_poke_default_on = true;
         crate::tui::app::commands::disable_auto_poke(&mut app);
         crate::todo::save_todos(&app.session.id, &[completed("todo-2")]).expect("save");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
         app.auto_poke_incomplete_todos = true; // pretend a stale arm survived
         assert!(!app.schedule_auto_poke_followup_if_needed());
         assert!(

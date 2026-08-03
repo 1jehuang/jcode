@@ -2484,6 +2484,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
             &app.session.id,
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 ..Default::default()
             }],
         )
@@ -2627,6 +2629,17 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         )
         .expect("save todos");
 
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
+
         app.auto_poke_incomplete_todos = true;
         app.is_processing = true;
         super::local::finish_turn(&mut app);
@@ -2648,6 +2661,9 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
+        // Pin the default so the clean second cycle disarms; this test is
+        // about challenging the spike exactly once.
+        app.auto_poke_default_on = false;
         super::local::finish_turn(&mut app);
 
         assert!(!app.auto_poke_incomplete_todos);
