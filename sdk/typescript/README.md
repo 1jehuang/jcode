@@ -1,4 +1,4 @@
-# @1jehuang/sdk
+# @1jehuang/jcode-sdk
 
 TypeScript SDK for the **jcode harness API** (protocol v1) — the stable,
 versioned boundary between the jcode agent runtime and any client.
@@ -13,7 +13,7 @@ Full documentation: **[jcode.sh/sdk](https://jcode.sh/sdk)**
 ## Install
 
 ```bash
-npm install @1jehuang/sdk
+npm install @1jehuang/jcode-sdk
 ```
 
 From a source checkout:
@@ -87,7 +87,7 @@ Swap `launch` for `connect` to drive the user's own jcode instead of a private
 instance; everything after that line is identical.
 
 ```ts
-import { JcodeClient } from "@1jehuang/sdk";
+import { JcodeClient } from "@1jehuang/jcode-sdk";
 
 const client = await JcodeClient.launch({ workingDir: process.cwd() });
 
