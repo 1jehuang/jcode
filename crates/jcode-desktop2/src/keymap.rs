@@ -98,6 +98,11 @@ pub enum Action {
     SessionUp,
     SessionDown,
 
+    /// Ctrl+Shift+N: start a fresh session and attach to it. The chord every
+    /// browser and terminal spends on "new window", for the same act: this is
+    /// the only way to add a session from inside the app, so it is bound
+    /// rather than left to the strip, which can only walk what already exists.
+    SessionNew,
     /// Overview field navigation, while the overview is held open. Spatial
     /// rather than list motion: the field is 2D, so these move to whichever
     /// blob actually lies that way.
@@ -376,6 +381,11 @@ pub const PORTED: &[Ported] = &[
         chord: "ctrl+shift+d",
         action: Action::ToggleTheme,
         tui: "light/dark theme",
+    },
+    Ported {
+        chord: "ctrl+shift+n",
+        action: Action::SessionNew,
+        tui: "new session",
     },
     Ported {
         chord: "ctrl+,",
@@ -755,6 +765,11 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     // cannot collide with a future plain Ctrl+R (recovery in
                     // the TUI), and grouped with the other view chords.
                     'r' => return Some(Action::CycleReasoningDisplay),
+                    // Ctrl+Shift+N: a new session. Shifted so it cannot be hit
+                    // by a plain Ctrl+N reflex while typing, and matching the
+                    // "new window" chord rather than "new tab": a session is a
+                    // whole place, not a view of this one.
+                    'n' => return Some(Action::SessionNew),
                     _ => {}
                 }
             }

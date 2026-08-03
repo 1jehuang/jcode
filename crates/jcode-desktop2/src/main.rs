@@ -1237,6 +1237,11 @@ impl App {
                 }
             }
 
+            // A new session is the one strip action that is not motion: the
+            // strip can only walk sessions that already exist, so adding one
+            // has to come from a key.
+            Action::SessionNew => self.new_session(),
+
             // The overview owns the keyboard while it is up, so these are the
             // only actions that can reach here from that state.
             Action::OverviewLeft => self.move_overview(overview::Dir::Left),
