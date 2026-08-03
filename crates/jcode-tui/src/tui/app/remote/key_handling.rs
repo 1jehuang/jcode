@@ -1945,6 +1945,7 @@ async fn handle_remote_key_internal(
                     || trimmed == "/commit-push"
                     || trimmed == "/commit-and-push"
                     || trimmed == "/fast-release"
+                    || trimmed == "/fast-macos-release"
                     || trimmed == "/remote-release"
                     || trimmed == "/cut-release"
                     || trimmed == "/commit-push-release"
@@ -1957,11 +1958,14 @@ async fn handle_remote_key_internal(
                         "/fast-release" | "/cut-release" | "/commit-push-release"
                     );
                     let is_remote_release = trimmed == "/remote-release";
+                    let is_fast_macos_release = trimmed == "/fast-macos-release";
                     let is_push = trimmed != "/commit";
                     let prompt = if is_triage {
                         app_mod::commands::build_triage_prompt(
                             trimmed.strip_prefix("/triage").unwrap_or_default(),
                         )
+                    } else if is_fast_macos_release {
+                        app_mod::commands::build_fast_macos_release_prompt()
                     } else if is_fast_release {
                         app_mod::commands::build_fast_release_prompt()
                     } else if is_remote_release {
@@ -1974,6 +1978,8 @@ async fn handle_remote_key_internal(
                     let launch_notice = |interrupted: bool| {
                         if is_triage {
                             app_mod::commands::triage_launch_notice(interrupted)
+                        } else if is_fast_macos_release {
+                            app_mod::commands::fast_macos_release_launch_notice(interrupted)
                         } else if is_fast_release {
                             app_mod::commands::fast_release_launch_notice(interrupted)
                         } else if is_remote_release {
@@ -1986,6 +1992,8 @@ async fn handle_remote_key_internal(
                     };
                     let cmd_label = if is_triage {
                         "/triage"
+                    } else if is_fast_macos_release {
+                        "/fast-macos-release"
                     } else if is_fast_release {
                         "/fast-release"
                     } else if is_remote_release {

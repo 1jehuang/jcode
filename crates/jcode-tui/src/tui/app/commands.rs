@@ -1680,6 +1680,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/fast-macos-release" {
+        handle_fast_macos_release_command_local(app);
+        return true;
+    }
+
     if trimmed == "/remote-release" {
         handle_remote_release_command_local(app);
         return true;
@@ -2163,6 +2168,13 @@ pub(super) fn build_fast_release_prompt() -> String {
     )
 }
 
+pub(super) fn build_fast_macos_release_prompt() -> String {
+    build_release_prompt(
+        "Before editing Cargo.toml or the changelog for the version bump, run scripts/quick-release.sh --prepare-fast-macos v<version>. It must cross-build and record the macOS arm64 binary with the future release identity while the release metadata is still unchanged.",
+        "Then run scripts/quick-release.sh --fast-macos-local v<version>. It must validate and publish the prepared macOS arm64 asset and GitHub release immediately, while CI replaces it with the signoff artifact and adds macOS Intel, Linux, Windows, FreeBSD, signatures, and final checksums. If preparation is stale or the release-metadata commit contains code changes, stop instead of publishing a binary that differs from the tag.",
+    )
+}
+
 pub(super) fn build_remote_release_prompt() -> String {
     build_release_prompt(
         "",
@@ -2235,6 +2247,14 @@ pub(super) fn fast_release_launch_notice(interrupted: bool) -> String {
     }
 }
 
+pub(super) fn fast_macos_release_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting logical commits + push + fast macOS release...".to_string()
+    } else {
+        "🚀 Starting logical commits + push + fast macOS release...".to_string()
+    }
+}
+
 pub(super) fn remote_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push + remote release...".to_string()
@@ -2284,6 +2304,23 @@ fn handle_fast_release_command_local(app: &mut App) {
         );
     } else {
         app.push_display_message(DisplayMessage::system(fast_release_launch_notice(false)));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
+fn handle_fast_macos_release_command_local(app: &mut App) {
+    let prompt = build_fast_macos_release_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /fast-macos-release...",
+            fast_macos_release_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(fast_macos_release_launch_notice(
+            false,
+        )));
         super::commands_improve::start_synthetic_user_turn(app, prompt);
     }
 }
