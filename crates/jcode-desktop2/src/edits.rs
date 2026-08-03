@@ -109,7 +109,14 @@ pub fn parse(name: &str, input_json: Option<&str>, output: &str) -> Option<EditC
     }
     Some(EditCard {
         intent: input_json.and_then(crate::activity::intent_from_partial_json),
-        files: input_json.map(files_in).unwrap_or_default(),
+        // The bridge normally streams the arguments, but restored/older calls
+        // can arrive without them. Edit tools also name the touched file in
+        // the first line of their output, so retain the useful "where" header
+        // instead of rendering a bare `+n -m` card in that case.
+        files: input_json
+            .map(files_in)
+            .filter(|files| !files.is_empty())
+            .unwrap_or_else(|| files_from_output(name, output)),
         diff,
         added,
         removed,
@@ -173,6 +180,28 @@ fn files_in(input: &str) -> Vec<String> {
     files
 }
 
+/// Recover the path from the stable summary line emitted by single-file edit
+/// tools. This is a fallback only: structured tool arguments remain the source
+/// of truth whenever the bridge delivered them.
+fn files_from_output(name: &str, output: &str) -> Vec<String> {
+    let first = output.lines().next().unwrap_or_default();
+    let path = match name {
+        "edit" => first
+            .strip_prefix("Edited ")
+            .and_then(|line| line.split_once(": replaced ").map(|(path, _)| path)),
+        "multiedit" => first.strip_prefix("Edited "),
+        "write" => first
+            .strip_prefix("Created ")
+            .or_else(|| first.strip_prefix("Wrote "))
+            .and_then(|line| line.rsplit_once(" (").map(|(path, _)| path)),
+        _ => None,
+    };
+    path.map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| vec![path.to_string()])
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +236,18 @@ mod tests {
         // meaningful, but trailing blanks only widen the card's measure.
         assert_eq!(card.diff, "1+ fn main() {}\n2+\n");
         assert_eq!((card.added, card.removed), (2, 0));
+        assert_eq!(card.files, vec!["a.rs".to_string()]);
+    }
+
+    #[test]
+    fn an_edit_recovers_its_file_when_arguments_are_missing() {
+        let card = parse(
+            "edit",
+            None,
+            "Edited crates/app/Cargo.toml: replaced 1 occurrence(s)\n12- old\n",
+        )
+        .expect("card");
+        assert_eq!(card.files, vec!["crates/app/Cargo.toml".to_string()]);
     }
 
     /// A tool that did not touch files never produces a card, however its
