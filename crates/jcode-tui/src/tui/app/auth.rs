@@ -743,16 +743,31 @@ impl App {
             )
             .await
             {
-                ActivationOutcome::Active(me) => publish(
-                    format!(
-                        "Jcode Account Ready\n\n{} is active for {}.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout",
+                ActivationOutcome::Active(me) => {
+                    let message = format!(
+                        "Jcode Account Ready\n\n{} is active for {}. Models are being refreshed automatically.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout",
                         me.parsed_tier()
                             .map(|tier| tier.display_name().to_string())
                             .unwrap_or(me.tier),
                         me.email
-                    ),
-                    "Jcode account plan active",
-                ),
+                    );
+                    publish(message.clone(), "Jcode account plan active");
+
+                    // The device flow used to stop after saving the credential and
+                    // publishing a status message. Unlike every other login flow it
+                    // never told the App that authentication had completed, so the
+                    // running provider retained its pre-login routes until the user
+                    // manually ran /refresh-model-list. Route activation also powers
+                    // model-switch availability checks, which made every newly shown
+                    // subscription model appear unavailable in that stale runtime.
+                    crate::bus::Bus::global().publish(
+                        crate::bus::BusEvent::LoginCompleted(crate::bus::LoginCompleted {
+                            provider: "jcode".to_string(),
+                            success: true,
+                            message,
+                        }),
+                    );
+                }
                 ActivationOutcome::Canceled(_) => publish(
                     "Jcode Account Login\n\nCheckout was canceled. The valid account key remains saved, but no paid plan is active.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout".to_string(),
                     "Jcode account plan not active",
