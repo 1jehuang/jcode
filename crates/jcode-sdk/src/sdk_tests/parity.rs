@@ -27,7 +27,11 @@ struct Capability {
 /// The shared surface. Adding a capability means adding it here first.
 const CAPABILITIES: &[Capability] = &[
     cap("connect", "connect"),
+    cap("launch", "launch"),
     cap("list_sessions", "listSessions"),
+    cap("archive_session", "archiveSession"),
+    cap("restore_session", "restoreSession"),
+    cap("set_retention_policy", "setRetentionPolicy"),
     cap("create_session", "createSession"),
     cap("attach_session", "attachSession"),
     cap("detach_session", "detachSession"),
@@ -41,6 +45,13 @@ const CAPABILITIES: &[Capability] = &[
     cap("rewind_undo", "rewindUndo"),
     cap("respond_to_permission", "respondToPermission"),
     cap("list_models", "listModels"),
+    cap("get_runtime_info", "getRuntimeInfo"),
+    cap("set_api_key", "setApiKey"),
+    cap("clear_api_key", "clearApiKey"),
+    cap("read_file", "readFile"),
+    cap("find_files", "findFiles"),
+    cap("search_text", "searchText"),
+    cap("file_status", "fileStatus"),
     cap("set_model", "setModel"),
     cap("set_reasoning_effort", "setReasoningEffort"),
     cap("compact", "compact"),
@@ -48,7 +59,9 @@ const CAPABILITIES: &[Capability] = &[
     cap("cancel_soft_interrupts", "cancelSoftInterrupts"),
     cap("ping", "ping"),
     cap("run", "run"),
+    cap("run_structured", "runStructured"),
     cap("events", "events"),
+    cap("global_events", "globalEvents"),
     cap("request", "request"),
     cap("notify", "notify"),
     cap("supports", "supports"),
@@ -61,11 +74,11 @@ const fn cap(rust: &'static str, ts: &'static str) -> Capability {
 /// Every shared capability exists in the Rust SDK.
 #[test]
 fn the_rust_sdk_implements_every_shared_capability() {
-    let source = rust_client_source();
+    let methods = rust_public_methods();
     let missing: Vec<&str> = CAPABILITIES
         .iter()
         .map(|c| c.rust)
-        .filter(|name| !source.contains(&format!("pub fn {name}(")))
+        .filter(|name| !methods.iter().any(|method| method == name))
         .collect();
     assert!(
         missing.is_empty(),
@@ -78,17 +91,14 @@ fn the_rust_sdk_implements_every_shared_capability() {
 /// Every shared capability exists in the TypeScript SDK.
 #[test]
 fn the_typescript_sdk_implements_every_shared_capability() {
-    let Some(source) = ts_client_source() else {
+    let Some(methods) = ts_public_methods() else {
         // Vendored builds without the sdk/ tree: nothing to compare against.
         return;
     };
     let missing: Vec<&str> = CAPABILITIES
         .iter()
         .map(|c| c.ts)
-        .filter(|name| {
-            // Methods are declared as `async foo(`, `foo(`, or `static foo(`.
-            !source.contains(&format!("{name}("))
-        })
+        .filter(|name| !methods.iter().any(|method| method == name))
         .collect();
     assert!(
         missing.is_empty(),
@@ -166,65 +176,19 @@ const RUST_ONLY: &[&str] = &[
 /// This is intentionally noisy technical debt, not a second capability list.
 /// New TS methods fail the parity test unless they are implemented in Rust or
 /// added here with a reviewable reason. Removing entries is the parity roadmap.
-const TS_ONLY: &[(&str, &str)] = &[
-    (
-        "launch",
-        "TS provisions an isolated child instance; Rust currently only ensures the user runtime",
-    ),
-    ("close", "Rust closes through Drop"),
-    (
-        "archiveSession",
-        "Rust SDK does not yet expose session archival",
-    ),
-    (
-        "restoreSession",
-        "Rust SDK does not yet expose session restoration",
-    ),
-    (
-        "setRetentionPolicy",
-        "Rust SDK does not yet expose retention policy",
-    ),
-    (
-        "getRuntimeInfo",
-        "Rust SDK does not yet expose runtime introspection",
-    ),
-    (
-        "setApiKey",
-        "Rust SDK does not yet expose credential provisioning",
-    ),
-    (
-        "clearApiKey",
-        "Rust SDK does not yet expose credential removal",
-    ),
-    (
-        "readFile",
-        "Rust SDK does not yet expose session-rooted file reads",
-    ),
-    (
-        "findFiles",
-        "Rust SDK does not yet expose session-rooted file discovery",
-    ),
-    (
-        "searchText",
-        "Rust SDK does not yet expose session-rooted text search",
-    ),
-    (
-        "fileStatus",
-        "Rust SDK does not yet expose session-rooted file status",
-    ),
-    (
-        "globalEvents",
-        "Rust has an all-session event filter but not TS reconnecting global events",
-    ),
-    (
-        "runStructured",
-        "Rust SDK does not yet expose schema-validated structured output",
-    ),
-];
+const TS_ONLY: &[(&str, &str)] = &[("close", "Rust closes through Drop")];
 
 fn rust_client_source() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/client.rs");
-    std::fs::read_to_string(path).expect("the Rust SDK client must be readable")
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    ["client.rs", "structured.rs"]
+        .into_iter()
+        .map(|file| {
+            std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| {
+                panic!("the Rust SDK source {file} must be readable: {error}")
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn ts_client_source() -> Option<String> {
@@ -236,23 +200,22 @@ fn ts_client_source() -> Option<String> {
 /// Public method names in `impl JcodeClient`.
 fn rust_public_methods() -> Vec<String> {
     let source = rust_client_source();
-    let start = source
-        .find("impl JcodeClient {")
-        .expect("client.rs must have an `impl JcodeClient` block");
-    // The impl block ends at the first column-zero closing brace after it.
-    let body = &source[start..];
-    let end = body.find("\n}").unwrap_or(body.len());
-    body[..end]
-        .lines()
-        .filter_map(|line| {
+    let mut methods = std::collections::BTreeSet::new();
+    let mut remaining = source.as_str();
+    while let Some(start) = remaining.find("impl JcodeClient {") {
+        let body = &remaining[start..];
+        let end = body.find("\n}").unwrap_or(body.len());
+        methods.extend(body[..end].lines().filter_map(|line| {
             let rest = line.trim().strip_prefix("pub fn ")?;
             Some(
                 rest.chars()
                     .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
-                    .collect(),
+                    .collect::<String>(),
             )
-        })
-        .collect()
+        }));
+        remaining = &body[end.min(body.len())..];
+    }
+    methods.into_iter().collect()
 }
 
 /// Public method names in the TypeScript `JcodeClient` class.
@@ -276,7 +239,7 @@ fn ts_public_methods() -> Option<Vec<String>> {
         let Some(open) = declaration.find('(') else {
             continue;
         };
-        let name = &declaration[..open];
+        let name = declaration[..open].split('<').next().unwrap_or_default();
         if !name.is_empty()
             && name
                 .chars()
