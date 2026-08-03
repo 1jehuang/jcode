@@ -82,6 +82,95 @@ fn goal_group_key(group: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn todo_telemetry_update(
+    previous: &[TodoItem],
+    todos: &[TodoItem],
+    goals: &[TodoGoal],
+    plan: &TodoPlan,
+) -> crate::telemetry::TodoTelemetryUpdate {
+    let previous_by_id: HashMap<&str, &TodoItem> = previous
+        .iter()
+        .map(|todo| (todo.id.as_str(), todo))
+        .collect();
+    let current_by_id: HashMap<&str, &TodoItem> =
+        todos.iter().map(|todo| (todo.id.as_str(), todo)).collect();
+
+    let todos_created = current_by_id
+        .keys()
+        .filter(|id| !previous_by_id.contains_key(**id))
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let todos_completed = current_by_id
+        .iter()
+        .filter(|(id, todo)| {
+            todo.status == "completed"
+                && previous_by_id
+                    .get(**id)
+                    .is_none_or(|previous| previous.status != "completed")
+        })
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let todos_abandoned = previous_by_id
+        .iter()
+        .filter(|(id, todo)| todo.status != "completed" && !current_by_id.contains_key(**id))
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let current_incomplete = current_by_id
+        .values()
+        .filter(|todo| todo.status != "completed")
+        .count()
+        .min(u32::MAX as usize) as u32;
+
+    let mut group_completion: HashMap<Option<String>, bool> = HashMap::new();
+    for todo in current_by_id.values() {
+        let completed = todo.status == "completed";
+        group_completion
+            .entry(goal_group_key(todo.group.as_deref()))
+            .and_modify(|all_completed| *all_completed &= completed)
+            .or_insert(completed);
+    }
+
+    crate::telemetry::TodoTelemetryUpdate {
+        todos_created,
+        todos_completed,
+        todos_abandoned,
+        current_incomplete,
+        list_size: todos.len().min(u32::MAX as usize) as u32,
+        groups_completed: group_completion
+            .values()
+            .filter(|completed| **completed)
+            .count()
+            .min(u32::MAX as usize) as u32,
+        groups_total: group_completion.len().min(u32::MAX as usize) as u32,
+        confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
+            current_by_id.values().filter_map(|todo| todo.confidence),
+        ),
+        completion_confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
+            current_by_id
+                .values()
+                .filter_map(|todo| todo.completion_confidence),
+        ),
+        understands_user_intent: crate::telemetry::TelemetryScoreSummary::from_scores(
+            plan.understands_user_intent,
+        ),
+        closed_feedback_loop: crate::telemetry::TelemetryScoreSummary::from_scores(
+            goals.iter().filter_map(|goal| goal.closed_feedback_loop),
+        ),
+        end_to_end_ownership: crate::telemetry::TelemetryScoreSummary::from_scores(
+            goals.iter().filter_map(|goal| goal.end_to_end_ownership),
+        ),
+    }
+}
+
+fn record_todo_telemetry(
+    previous: &[TodoItem],
+    todos: &[TodoItem],
+    goals: &[TodoGoal],
+    plan: &TodoPlan,
+) {
+    crate::telemetry::record_todo_update(todo_telemetry_update(previous, todos, goals, plan));
+}
+
 /// Append `value` to `history` when it is a new observation.
 ///
 /// One todo-tool write contributes at most one entry per score, so a single
@@ -635,6 +724,7 @@ impl Tool for TodoTool {
                 let plan = merge_plan(&stored_plan, params.plan);
                 if !newly_completed_groups_have_sufficient_ownership(&previous, &todos, &goals) {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
+                    record_todo_telemetry(&previous, &previous, &stored_goals, &stored_plan);
                     return build_todo_output(
                         previous,
                         stored_plan,
@@ -677,6 +767,7 @@ impl Tool for TodoTool {
                 save_todos(&ctx.session_id, &todos)?;
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;
+                record_todo_telemetry(&previous, &todos, &goals, &plan);
 
                 Bus::global().publish(BusEvent::TodoUpdated(TodoEvent {
                     session_id: ctx.session_id.clone(),
@@ -697,6 +788,7 @@ impl Tool for TodoTool {
                 let todos = load_todos(&ctx.session_id)?;
                 let goals = load_goals(&ctx.session_id).unwrap_or_default();
                 let plan = load_plan(&ctx.session_id).unwrap_or_default();
+                record_todo_telemetry(&todos, &todos, &goals, &plan);
                 build_todo_output(todos, plan, goals, None, None, Vec::new())
             })()
         };
@@ -1051,6 +1143,85 @@ mod tests {
             group: group.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn todo_telemetry_derives_lifecycle_groups_and_score_summaries() {
+        let mut pending = todo_in_group(Some("build"), "pending");
+        pending.confidence = Some(70);
+        let mut removed = todo_in_group(Some("build"), "removed");
+        removed.status = "in_progress".to_string();
+        removed.confidence = Some(80);
+        let previous = vec![pending.clone(), removed];
+
+        pending.status = "completed".to_string();
+        pending.completion_confidence = Some(96);
+        let mut created = todo_in_group(Some("verify"), "created");
+        created.confidence = Some(90);
+        let current = vec![pending, created];
+        let goals = vec![
+            TodoGoal {
+                group: Some("build".to_string()),
+                closed_feedback_loop: Some(85),
+                end_to_end_ownership: Some(96),
+                ..Default::default()
+            },
+            TodoGoal {
+                group: Some("verify".to_string()),
+                closed_feedback_loop: Some(95),
+                end_to_end_ownership: Some(100),
+                ..Default::default()
+            },
+        ];
+        let plan = TodoPlan {
+            understands_user_intent: Some(92),
+            ..Default::default()
+        };
+
+        let update = todo_telemetry_update(&previous, &current, &goals, &plan);
+        assert_eq!(update.todos_created, 1);
+        assert_eq!(update.todos_completed, 1);
+        assert_eq!(update.todos_abandoned, 1);
+        assert_eq!(update.current_incomplete, 1);
+        assert_eq!(update.list_size, 2);
+        assert_eq!(update.groups_completed, 1);
+        assert_eq!(update.groups_total, 2);
+        assert_eq!(update.confidence.min, Some(70));
+        assert_eq!(update.confidence.mean, Some(80.0));
+        assert_eq!(update.confidence.count, 2);
+        assert_eq!(update.completion_confidence.min, Some(96));
+        assert_eq!(update.completion_confidence.count, 1);
+        assert_eq!(update.understands_user_intent.min, Some(92));
+        assert_eq!(update.closed_feedback_loop.min, Some(85));
+        assert_eq!(update.closed_feedback_loop.mean, Some(90.0));
+        assert_eq!(update.end_to_end_ownership.min, Some(96));
+        assert_eq!(update.end_to_end_ownership.mean, Some(98.0));
+    }
+
+    #[test]
+    fn todo_telemetry_regrouping_does_not_create_or_abandon_items() {
+        let mut completed = todo_in_group(Some("old"), "a");
+        completed.status = "completed".to_string();
+        let pending = todo_in_group(Some("old"), "b");
+        let previous = vec![completed.clone(), pending.clone()];
+
+        completed.group = Some("done".to_string());
+        let mut pending = pending;
+        pending.group = Some("remaining".to_string());
+        let current = vec![completed, pending];
+
+        let update = todo_telemetry_update(&previous, &current, &[], &TodoPlan::default());
+        assert_eq!(update.todos_created, 0);
+        assert_eq!(update.todos_completed, 0);
+        assert_eq!(update.todos_abandoned, 0);
+        assert_eq!(update.groups_completed, 1);
+        assert_eq!(update.groups_total, 2);
+    }
+
+    #[test]
+    fn todo_telemetry_zero_state_is_all_zero_and_has_no_scores() {
+        let update = todo_telemetry_update(&[], &[], &[], &TodoPlan::default());
+        assert_eq!(update, crate::telemetry::TodoTelemetryUpdate::default());
     }
 
     /// Issue #695: after the agent moves to a new task and replaces the todo
