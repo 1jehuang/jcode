@@ -1093,6 +1093,66 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn herdr_spawn_adapter_executes_split_then_run_with_quoted_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-herdr-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary Herdr fixture");
+        let herdr = dir.join("fake herdr");
+        let log = dir.join("calls.log");
+        let cwd = dir.join("work a b");
+        std::fs::create_dir_all(&cwd).expect("temporary Herdr working directory");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = pane ] && [ \"$2\" = split ]; then\n  printf '%s\\n' '{{\"result\":{{\"pane\":{{\"pane_id\":\"w9:p12\"}}}}}}'\nfi\n",
+                log.display()
+            ),
+        )
+        .expect("write fake Herdr");
+        let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&herdr, permissions).unwrap();
+
+        let command = TerminalCommand::new(
+            "/opt/Jcode App/jcode",
+            vec!["--resume".to_string(), "session with spaces".to_string()],
+        )
+        .client_terminal_env(vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "w1:p1".to_string()),
+            ("HERDR_BIN_PATH".to_string(), herdr.display().to_string()),
+        ]);
+        let mut process =
+            build_spawn_command("herdr", &command, &cwd).expect("build Herdr adapter");
+        assert!(process.status().expect("run Herdr adapter").success());
+
+        let calls = std::fs::read_to_string(log).expect("read fake Herdr calls");
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            format!(
+                "pane split --current --direction right --cwd {} --focus",
+                cwd.display()
+            )
+        );
+        assert_eq!(
+            lines[1],
+            "pane run w9:p12 '/opt/Jcode App/jcode' '--resume' 'session with spaces'"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn shell_command_quotes_arguments() {
         let shell = shell_command(&["jcode".to_string(), "it's ok".to_string()]);
         #[cfg(unix)]
