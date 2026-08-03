@@ -43,6 +43,9 @@ fi
 echo "== driving a real turn =="
 JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-turn.mjs"
 
+echo "== exercising the control surface =="
+JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-control.mjs"
+
 echo "== bridge log =="
 cat "$log"
 echo "SDK e2e passed."
