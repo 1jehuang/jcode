@@ -1170,26 +1170,9 @@ pub async fn refresh_claude_tokens_for_account(
     )
     .await;
 
-    match &result {
-        Ok(_) => {
-            let _ = crate::auth::refresh_state::record_success("claude");
-        }
-        Err(err) => {
-            let message = err.to_string();
-            // A permanently rejected refresh token cannot recover, so remember
-            // it and stop paying a doomed network round-trip on every turn.
-            // Transient failures still record normally and keep retrying.
-            if crate::auth::refresh_state::error_is_permanent_rejection(&message) {
-                let _ = crate::auth::refresh_state::record_permanent_rejection(
-                    "claude",
-                    refresh_token,
-                    &message,
-                );
-            } else {
-                let _ = crate::auth::refresh_state::record_failure("claude", &message);
-            }
-        }
-    }
+    // Shared recorder: permanent rejections become terminal, transient
+    // failures stay retryable. Same policy for every provider.
+    crate::auth::refresh_state::record_refresh_outcome("claude", refresh_token, &result);
 
     result
 }
@@ -1248,6 +1231,14 @@ pub async fn refresh_openai_tokens_for_account(
 ) -> Result<OAuthTokens> {
     let observed_refresh = refresh_token.to_string();
     let label = label.to_string();
+    // A token the provider already rejected as unrecoverable cannot start
+    // working again. Fail fast so callers fall through to their fallback
+    // instead of paying a doomed round-trip on every catalog sweep and turn.
+    crate::auth::refresh_state::ensure_refresh_allowed(
+        "openai",
+        refresh_token,
+        "Run `jcode login --provider openai` to mint a fresh token.",
+    )?;
     crate::auth::refresh_coordinator::single_flight(
         format!("openai:{label}"),
         {
@@ -1326,14 +1317,10 @@ async fn refresh_openai_tokens_inner(
     }
     .await;
 
-    match &result {
-        Ok(_) => {
-            let _ = crate::auth::refresh_state::record_success("openai");
-        }
-        Err(err) => {
-            let _ = crate::auth::refresh_state::record_failure("openai", err.to_string());
-        }
-    }
+    // Route through the shared outcome recorder so a permanently invalidated
+    // OpenAI refresh token lands in the terminal `Rejected` state instead of
+    // being force-refreshed by every background catalog sweep forever.
+    crate::auth::refresh_state::record_refresh_outcome("openai", refresh_token, &result);
 
     result
 }

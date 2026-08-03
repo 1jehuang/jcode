@@ -8,6 +8,7 @@ mod commands;
 pub mod copilot;
 pub mod cursor;
 pub mod doctor;
+pub mod env_facts;
 pub mod external;
 pub mod gemini;
 pub mod google;
