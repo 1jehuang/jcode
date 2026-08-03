@@ -200,6 +200,12 @@ fn detected_resume_terminal_with_client_env(
     client_terminal_env: &[(String, String)],
 ) -> Option<String> {
     let is_set = |key| terminal_env_value(client_terminal_env, key).is_some();
+    // Herdr is a terminal multiplexer, so headed sessions should remain in the
+    // workspace that requested them instead of escaping into the underlying
+    // emulator. Prefer it even when the pane also advertises kitty/wezterm.
+    if is_set("HERDR_ENV") && is_set("HERDR_PANE_ID") {
+        return Some("herdr".to_string());
+    }
     if is_set("HANDTERM_SESSION") || is_set("HANDTERM_PID") {
         return Some("handterm".to_string());
     }
@@ -338,7 +344,10 @@ fn resume_terminal_candidates_with_client_env(
     // A tmux client already owns the user's terminal layout. Prefer a pane in
     // that exact client over opening another emulator window. Explicit
     // JCODE_TERMINAL and configured spawn hooks still take precedence.
-    if terminal_env_value(client_terminal_env, "TMUX").is_some()
+    let in_herdr = terminal_env_value(client_terminal_env, "HERDR_ENV").is_some()
+        && terminal_env_value(client_terminal_env, "HERDR_PANE_ID").is_some();
+    if !in_herdr
+        && terminal_env_value(client_terminal_env, "TMUX").is_some()
         && terminal_env_value(client_terminal_env, "TMUX_PANE").is_some()
     {
         push_unique_terminal(&mut candidates, "tmux");
@@ -614,6 +623,35 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
     }
 
     match term {
+        #[cfg(unix)]
+        "herdr" => {
+            // `pane split` deliberately creates a shell and returns its pane id;
+            // `pane run` is the atomic, bracketed-paste-aware way to start a
+            // command in that shell. Keep the small composition here rather
+            // than requiring every user to configure an equivalent spawn hook.
+            let herdr = terminal_env_value(&command.client_terminal_env, "HERDR_BIN_PATH")
+                .unwrap_or_else(|| "herdr".to_string());
+            let shell = shell_command(&command_parts(command));
+            let script = concat!(
+                "set -eu; ",
+                "response=\"$(\"$1\" pane split --current --direction right --cwd \"$2\" --focus)\"; ",
+                "pane_id=\"$(printf '%s\\n' \"$response\" | sed -n '",
+                "s/.*\\\"pane_id\\\"[[:space:]]*:[[:space:]]*\\\"\\([^\\\"]*\\)\\\".*/\\1/p' | head -n 1)\"; ",
+                "test -n \"$pane_id\"; ",
+                "exec \"$1\" pane run \"$pane_id\" \"$3\""
+            );
+            cmd = Command::new("sh");
+            cmd.current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .args(["-c", script, "jcode-herdr-spawn", &herdr])
+                .arg(cwd)
+                .arg(shell);
+            if command.fresh_spawn {
+                cmd.env("JCODE_FRESH_SPAWN", "1");
+            }
+        }
         #[cfg(unix)]
         "tmux" => {
             cmd.args(["split-window", "-h"]);
@@ -931,6 +969,22 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn herdr_context_is_preferred_over_outer_emulator_and_tmux() {
+        let client_env = vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "w2:p7".to_string()),
+            ("KITTY_PID".to_string(), "1234".to_string()),
+            ("TMUX".to_string(), "/tmp/tmux,1,0".to_string()),
+            ("TMUX_PANE".to_string(), "%3".to_string()),
+        ];
+
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert_eq!(candidates.first().map(String::as_str), Some("herdr"));
+        assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn missing_tmux_binary_falls_back_to_detected_emulator() {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous_terminal = std::env::var_os("JCODE_TERMINAL");
@@ -1004,6 +1058,38 @@ mod tests {
             ]
         );
         assert_eq!(env_value(&cmd, "TMUX_PANE").as_deref(), Some("%42"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn herdr_spawn_splits_calling_pane_and_runs_resume_command() {
+        let command = TerminalCommand::new(
+            "/usr/local/bin/jcode",
+            vec!["--resume".to_string(), "ses herdr".to_string()],
+        )
+        .client_terminal_env(vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "w2:p7".to_string()),
+            (
+                "HERDR_BIN_PATH".to_string(),
+                "/opt/herdr/bin/herdr".to_string(),
+            ),
+        ]);
+
+        let cmd = build_spawn_command("herdr", &command, Path::new("/work/a b"))
+            .expect("herdr spawn command should build");
+        assert_eq!(cmd.get_program().to_string_lossy(), "sh");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("pane split --current --direction right"));
+        assert!(args[1].contains("pane run \"$pane_id\""));
+        assert_eq!(args[2], "jcode-herdr-spawn");
+        assert_eq!(args[3], "/opt/herdr/bin/herdr");
+        assert_eq!(args[4], "/work/a b");
+        assert_eq!(args[5], "'/usr/local/bin/jcode' '--resume' 'ses herdr'");
     }
 
     #[test]
