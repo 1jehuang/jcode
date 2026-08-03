@@ -1,21 +1,24 @@
-//! Harness API wiring for desktop2.
+//! Harness wiring for desktop2, on top of the Rust SDK.
 //!
-//! Connects to the harness API socket (served by `jcode-harness-api-bridge`)
-//! on a background thread, attaches a session, and forwards streamed events
-//! to the UI thread over a channel.
+//! This is the app's half of the conversation: it maps SDK events onto the
+//! `HarnessUpdate`s the UI draws, and UI `Command`s onto SDK calls. Everything
+//! that is not desktop2-specific (starting the runtime, correlating replies,
+//! explaining a lost connection) lives in `jcode-sdk`, so this file is about
+//! the app rather than about the protocol.
 //!
-//! The app starts the runtime it needs rather than telling the user to. A
-//! desktop app that only works when you have already launched two daemons by
-//! hand is indistinguishable from a broken one, so `ensure_runtime` boots the
-//! jcode daemon and the bridge on demand and waits for the socket.
+//! Desktop2 is built on the SDK deliberately: it is the SDK's only large,
+//! shipping consumer, which is what keeps the SDK's shape honest instead of
+//! validated only by its own examples.
 
-use jcode_harness_api::{ApiEvent, ApiRequest, ClientFrame, HarnessClient, write_frame};
-use std::io::BufReader;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient, LaunchOptions};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Failure wording and connection-stage reporting are the SDK's, so the app
+/// and any other client describe the same failure the same way.
+pub use jcode_sdk::{SocketState, Stage, describe_disconnect, explain};
 
 /// UI-facing updates produced by the connection worker.
 #[derive(Debug)]
@@ -85,7 +88,11 @@ pub enum HarnessUpdate {
 /// message that was typed into the session being left.
 #[derive(Debug)]
 pub enum Command {
-    Send(String),
+    Send {
+        content: String,
+        /// (media_type, base64_data) pairs, attached to this message only.
+        images: Vec<(String, String)>,
+    },
     /// Attach to another session; the worker retargets subsequent sends.
     Attach(String),
     /// Fetch the tail of another session without attaching to it.
@@ -96,10 +103,27 @@ pub enum Command {
     New,
 }
 
-/// The API socket both this app and the bridge agree on. Shared with the
-/// bridge via `jcode-harness-api` so the two can never disagree.
+/// A handle every worker thread can use to reach the UI.
+///
+/// The connection worker, the command thread and the session poller all
+/// produce updates, so the sink is a cloneable handle rather than a closure
+/// borrowed from one of their frames.
+#[derive(Clone)]
+struct Ui {
+    updates: Sender<HarnessUpdate>,
+    redraw: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Ui {
+    fn send(&self, update: HarnessUpdate) {
+        let _ = self.updates.send(update);
+        (self.redraw)();
+    }
+}
+
+/// The API socket both this app and the bridge agree on.
 pub fn api_socket_path() -> PathBuf {
-    jcode_harness_api::api_socket_path()
+    jcode_sdk::api_socket_path()
 }
 
 /// Working directory for sessions this app creates.
@@ -122,75 +146,8 @@ fn default_working_dir() -> Option<String> {
         .then(|| manifest_dir.display().to_string())
 }
 
-/// How long to wait for a freshly spawned runtime to publish its socket.
-const RUNTIME_START_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// How often the session strip is refreshed.
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-fn socket_accepts(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
-}
-
-/// Locate a sibling executable next to our own, falling back to `$PATH`.
-///
-/// Self-dev and release builds both keep the binaries side by side, so a
-/// sibling lookup starts the *matching* build instead of whatever stale copy
-/// happens to be first on `$PATH`.
-fn sibling_exe(name: &str) -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
-        .filter(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from(name))
-}
-
-/// Start the daemon and the API bridge if they are not already listening.
-///
-/// Idempotent and safe to race: both the daemon and the bridge refuse to
-/// replace a live socket, so a duplicate spawn simply exits.
-fn ensure_runtime(send: &impl Fn(HarnessUpdate)) -> Result<(), Box<dyn std::error::Error>> {
-    let api = api_socket_path();
-    if socket_accepts(&api) {
-        return Ok(());
-    }
-
-    let legacy = jcode_harness_api::legacy_socket_path();
-    if !socket_accepts(&legacy) {
-        send(HarnessUpdate::Status("starting jcode runtime...".into()));
-        std::process::Command::new(sibling_exe("jcode"))
-            .arg("serve")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| format!("could not start the jcode runtime: {error}"))?;
-        wait_for_socket(&legacy, "jcode runtime")?;
-    }
-
-    send(HarnessUpdate::Status(
-        "starting harness API bridge...".into(),
-    ));
-    std::process::Command::new(sibling_exe("jcode-harness-api-bridge"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| format!("could not start jcode-harness-api-bridge: {error}"))?;
-    wait_for_socket(&api, "harness API bridge")?;
-    Ok(())
-}
-
-fn wait_for_socket(path: &Path, what: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + RUNTIME_START_TIMEOUT;
-    while Instant::now() < deadline {
-        if socket_accepts(path) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err(format!("timed out waiting for the {what} at {}", path.display()).into())
-}
 
 /// Backoff between reconnection attempts, and its ceiling.
 ///
@@ -200,101 +157,6 @@ fn wait_for_socket(path: &Path, what: &str) -> Result<(), Box<dyn std::error::Er
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
-/// How far a connection attempt got before it died.
-///
-/// "disconnected: harness API stream closed" was true of every failure past
-/// the handshake and told the user nothing: a bridge that exited, a bridge
-/// that was replaced, and a session that could not be attached all read the
-/// same. The stage is recorded as the attempt progresses so the report can
-/// name what was actually happening.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stage {
-    /// Starting the daemon/bridge, or waiting for their sockets.
-    Starting,
-    /// Connecting to the API socket.
-    Connecting,
-    /// Version handshake with the bridge.
-    Handshake,
-    /// Attach/create sent, waiting for the session.
-    Attaching,
-    /// Attached; streaming events.
-    Streaming,
-}
-
-impl Stage {
-    fn doing(self) -> &'static str {
-        match self {
-            Self::Starting => "starting the jcode runtime",
-            Self::Connecting => "connecting to the harness API socket",
-            Self::Handshake => "negotiating the harness API version",
-            Self::Attaching => "attaching a session",
-            Self::Streaming => "streaming the conversation",
-        }
-    }
-}
-
-/// Whether the API socket still answers, used to tell "the bridge died" apart
-/// from "the bridge is alive and dropped us".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SocketState {
-    Listening,
-    Gone,
-}
-
-/// Turn a lost connection into a sentence that names the cause.
-///
-/// Pure so the wording is testable: the whole point of this function is the
-/// text, and text that is only exercised by unplugging a socket by hand rots.
-pub fn describe_disconnect(
-    stage: Stage,
-    error: &str,
-    connected_for: Option<Duration>,
-    socket: &Path,
-    socket_state: SocketState,
-) -> String {
-    let lower = error.to_ascii_lowercase();
-    let stream_closed = lower.contains("harness api stream closed")
-        || lower.contains("the harness closed the connection")
-        || lower.contains("broken pipe")
-        || lower.contains("connection reset");
-    let cause = if stream_closed {
-        match socket_state {
-            // The socket answers but our stream is gone: the bridge we were
-            // talking to is not the one on the pathname any more, which is
-            // what a second bridge taking the socket looks like from here.
-            SocketState::Listening => format!(
-                "the harness API bridge dropped our connection while {} \
-                 (its socket {} still accepts, so a replacement bridge most \
-                 likely took over)",
-                stage.doing(),
-                socket.display()
-            ),
-            SocketState::Gone => format!(
-                "the harness API bridge exited while {} (its socket {} no \
-                 longer accepts connections)",
-                stage.doing(),
-                socket.display()
-            ),
-        }
-    } else {
-        format!("{} failed while {}", explain(error), stage.doing())
-    };
-    match connected_for {
-        Some(uptime) => format!("disconnected after {}: {cause}", human_duration(uptime)),
-        None => format!("disconnected: {cause}"),
-    }
-}
-
-fn human_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    match secs {
-        0 => format!("{}ms", d.as_millis()),
-        1..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
-        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
-    }
-}
-
 /// Spawn the connection worker. Returns the receiving side for the UI and a
 /// sender for outgoing user messages.
 ///
@@ -303,33 +165,30 @@ fn human_duration(d: Duration) -> String {
 /// prevent: every attempt reports why it failed, and the next attempt
 /// re-attaches the session the user was looking at rather than starting a new
 /// one behind their back.
-pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Sender<Command>) {
+pub fn spawn(
+    redraw: impl Fn() + Send + Sync + 'static,
+) -> (Receiver<HarnessUpdate>, Sender<Command>) {
     let (update_tx, update_rx) = channel::<HarnessUpdate>();
     let (outgoing_tx, outgoing_rx) = channel::<Command>();
+    let ui = Ui {
+        updates: update_tx,
+        redraw: Arc::new(redraw),
+    };
     std::thread::spawn(move || {
-        let send = move |update: HarnessUpdate| {
-            let _ = update_tx.send(update);
-            redraw();
-        };
         // Shared across attempts: the command queue must survive a reconnect,
         // and the session to re-attach to has to be remembered.
         let outgoing = Arc::new(Mutex::new(outgoing_rx));
         let resume = Arc::new(Mutex::new(String::new()));
         let mut backoff = RECONNECT_BACKOFF;
         loop {
-            // Each attempt gets its own generation, so the previous attempt's
-            // writer and poller threads retire instead of writing into a dead
-            // socket (or stealing a command from the live one).
-            let generation = Arc::new(std::sync::atomic::AtomicBool::new(true));
             // Where the attempt got to, and when the stream came up: both are
             // needed to say why it ended and are only known inside `run`.
             let stage = Arc::new(Mutex::new(Stage::Starting));
             let connected_at = Arc::new(Mutex::new(None::<Instant>));
             let error = match run(
-                &send,
+                &ui,
                 Arc::clone(&outgoing),
                 Arc::clone(&resume),
-                Arc::clone(&generation),
                 Arc::clone(&stage),
                 Arc::clone(&connected_at),
             ) {
@@ -338,26 +197,21 @@ pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Se
                 Ok(()) => "the harness closed the connection".to_string(),
                 Err(error) => error.to_string(),
             };
-            generation.store(false, Ordering::Relaxed);
             let path = api_socket_path();
-            let socket_state = match socket_accepts(&path) {
-                true => SocketState::Listening,
-                false => SocketState::Gone,
-            };
             let stage = stage.lock().map(|s| *s).unwrap_or(Stage::Starting);
             let uptime = connected_at
                 .lock()
                 .ok()
                 .and_then(|guard| *guard)
                 .map(|at| at.elapsed());
-            send(HarnessUpdate::Failed(describe_disconnect(
+            ui.send(HarnessUpdate::Failed(describe_disconnect(
                 stage,
                 &error,
                 uptime,
                 &path,
-                socket_state,
+                SocketState::probe(&path),
             )));
-            send(HarnessUpdate::Status(format!(
+            ui.send(HarnessUpdate::Status(format!(
                 "reconnecting in {}s...",
                 backoff.as_secs_f64().round().max(1.0)
             )));
@@ -368,33 +222,11 @@ pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Se
     (update_rx, outgoing_tx)
 }
 
-/// Human wording for a failure, when the cause is one the user can act on.
-///
-/// Provider errors arrive as whatever the HTTP stack said, and "error sending
-/// request for url (...): dns error: failed to lookup address information" does
-/// not tell a user their wifi is off. Everything unrecognised is passed through
-/// unchanged: a wrong guess would be worse than the raw text.
-pub fn explain(message: &str) -> String {
-    let lower = message.to_ascii_lowercase();
-    const OFFLINE: [&str; 6] = [
-        "dns error",
-        "failed to lookup address information",
-        "temporary failure in name resolution",
-        "network is unreachable",
-        "no route to host",
-        "name or service not known",
-    ];
-    if OFFLINE.iter().any(|needle| lower.contains(needle)) {
-        return format!("no network connection: {message}");
-    }
-    message.to_string()
-}
-
+/// One connection attempt: connect, attach, then stream until it dies.
 fn run(
-    send: &impl Fn(HarnessUpdate),
+    ui: &Ui,
     outgoing: Arc<Mutex<Receiver<Command>>>,
     resume: Arc<Mutex<String>>,
-    generation: Arc<std::sync::atomic::AtomicBool>,
     stage: Arc<Mutex<Stage>>,
     connected_at: Arc<Mutex<Option<Instant>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -404,51 +236,64 @@ fn run(
         }
     };
     let path = api_socket_path();
-    send(HarnessUpdate::Status(format!(
+    ui.send(HarnessUpdate::Status(format!(
         "connecting to {}...",
         path.display()
     )));
+
     set_stage(Stage::Starting);
-    ensure_runtime(send)?;
+    jcode_sdk::ensure_runtime(&LaunchOptions::default(), &|status| {
+        ui.send(HarnessUpdate::Status(status.to_string()))
+    })?;
+
     set_stage(Stage::Connecting);
-    let stream = std::os::unix::net::UnixStream::connect(&path)
-        .map_err(|error| format!("{error} (socket {})", path.display()))?;
-    let reader = BufReader::new(stream.try_clone()?);
-    let mut client = HarnessClient::new(reader, stream.try_clone()?);
-    set_stage(Stage::Handshake);
-    client.hello(concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")))?;
+    let client = JcodeClient::connect(ConnectOptions {
+        client_name: concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")).to_string(),
+        // The runtime is already up; a second check would only cost a dial.
+        ensure_runtime: false,
+        ..Default::default()
+    })?;
     if let Ok(mut guard) = connected_at.lock() {
         *guard = Some(Instant::now());
     }
+
+    // Subscribe before attaching, so events the daemon pushes as part of the
+    // attach (the model it chose, the first status) are not missed.
+    let events = client.events(None);
+
     set_stage(Stage::Attaching);
-    send(HarnessUpdate::Status("connected, attaching...".into()));
+    ui.send(HarnessUpdate::Status("connected, attaching...".into()));
     // Re-attach after a reconnect, so the conversation the user was reading
     // comes back instead of being replaced by a fresh empty session.
     let previous = resume.lock().map(|guard| guard.clone()).unwrap_or_default();
-    match previous.is_empty() {
-        true => client.send(ApiRequest::CreateSession {
-            working_dir: default_working_dir(),
-        })?,
-        false => client.send(ApiRequest::AttachSession {
-            session_id: previous,
-        })?,
+    let attached = match previous.is_empty() {
+        true => client.create_session(default_working_dir())?,
+        false => client.attach_session(&previous)?,
     };
+    let session_id = Arc::new(Mutex::new(attached.session_id.clone()));
+    if let Ok(mut guard) = resume.lock() {
+        *guard = attached.session_id.clone();
+    }
+    set_stage(Stage::Streaming);
+    ui.send(HarnessUpdate::Attached {
+        session_id: attached.session_id,
+        working_dir: attached.working_dir,
+    });
 
-    // Writer thread: forwards user messages immediately even while the read
-    // loop below is blocked on the stream. Frame ids start high so they never
-    // collide with the reader-side HarnessClient's counter.
-    let session_id = Arc::new(Mutex::new(String::new()));
-    let writer_ids = AtomicU64::new(1_000_000);
+    // Command thread: forwards user messages immediately even while the event
+    // loop below is blocked on the stream. It owns the requests whose replies
+    // are values rather than stream events (peeks, attaches), so the event
+    // loop never has to guess which request a `history` frame answers.
     std::thread::spawn({
+        let client = client.clone();
         let session_id = Arc::clone(&session_id);
         let resume = Arc::clone(&resume);
-        let generation = Arc::clone(&generation);
-        let mut writer_stream = stream.try_clone()?;
+        let ui = ui.clone();
         move || {
             // `recv_timeout` rather than `recv`: a blocking receive would hold
             // the queue past this connection's death and swallow the first
             // command the *next* connection should have sent.
-            while generation.load(Ordering::Relaxed) {
+            while !client.is_closed() {
                 let command = {
                     let Ok(queue) = outgoing.lock() else { break };
                     match queue.recv_timeout(Duration::from_millis(100)) {
@@ -457,22 +302,19 @@ fn run(
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 };
-                let request = match command {
-                    Command::Send(content) => {
+                let outcome = match command {
+                    Command::Send { content, images } => {
                         let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
                         if session.is_empty() {
                             continue;
                         }
-                        ApiRequest::SendMessage {
-                            session_id: session,
-                            content,
-                            images: vec![],
-                            no_reply: false,
-                        }
+                        // The acknowledgement is rendered from the stream, so
+                        // there is nothing to wait for here.
+                        client.send_message(&session, &content, images, None)
                     }
-                    // Retarget immediately rather than waiting for the
-                    // `Attached` event: a message typed straight after a
-                    // switch must land in the session the user is looking at.
+                    // Retarget immediately rather than waiting for the attach
+                    // to complete: a message typed straight after a switch must
+                    // land in the session the user is looking at.
                     Command::Attach(target) => {
                         if let Ok(mut guard) = session_id.lock() {
                             *guard = target.clone();
@@ -480,33 +322,51 @@ fn run(
                         if let Ok(mut guard) = resume.lock() {
                             *guard = target.clone();
                         }
-                        ApiRequest::AttachSession { session_id: target }
+                        client.attach_session(&target).map(|session| {
+                            ui.send(HarnessUpdate::Attached {
+                                session_id: session.session_id,
+                                working_dir: session.working_dir,
+                            })
+                        })
                     }
                     // A peek must not retarget anything: it is a read of
                     // another session, and the one we are attached to has to
                     // stay the one a message would land in.
-                    Command::Peek(target) => ApiRequest::PeekSession {
-                        session_id: target,
-                        limit: None,
-                    },
-                    // The new session's id is not known until the daemon
-                    // replies, so retargeting waits for the `Attached` event
-                    // rather than being guessed here. Clearing the current id
-                    // in the meantime is deliberate: a message sent into that
-                    // gap is dropped rather than landing in the session the
-                    // user just asked to leave.
+                    Command::Peek(target) => client.peek_session(&target, None).map(|messages| {
+                        ui.send(HarnessUpdate::Peek {
+                            session_id: target,
+                            transcript: to_transcript(messages),
+                        })
+                    }),
+                    // Clearing the current id while the session is created is
+                    // deliberate: a message sent into that gap is dropped
+                    // rather than landing in the session the user just left.
                     Command::New => {
                         if let Ok(mut guard) = session_id.lock() {
                             guard.clear();
                         }
-                        ApiRequest::CreateSession {
-                            working_dir: default_working_dir(),
-                        }
+                        client.create_session(default_working_dir()).map(|session| {
+                            if let Ok(mut guard) = session_id.lock() {
+                                *guard = session.session_id.clone();
+                            }
+                            if let Ok(mut guard) = resume.lock() {
+                                *guard = session.session_id.clone();
+                            }
+                            ui.send(HarnessUpdate::Attached {
+                                session_id: session.session_id,
+                                working_dir: session.working_dir,
+                            })
+                        })
                     }
                 };
-                let frame = ClientFrame::new(writer_ids.fetch_add(1, Ordering::Relaxed), request);
-                if write_frame(&mut writer_stream, &frame).is_err() {
-                    break;
+                // A failed command is the user's action not happening, so it is
+                // reported rather than swallowed. The connection dying is the
+                // event loop's error to report, so this thread just retires.
+                if let Err(error) = outcome {
+                    if error.code() == "disconnected" {
+                        break;
+                    }
+                    ui.send(HarnessUpdate::Failed(explain(&error.message)));
                 }
             }
         }
@@ -517,17 +377,18 @@ fn run(
     // slow because a strip that is a second stale costs nothing, while a busy
     // poll would tax the daemon for the whole life of the window.
     std::thread::spawn({
-        let mut poll_stream = stream.try_clone()?;
-        let poll_ids = AtomicU64::new(2_000_000);
-        let generation = Arc::clone(&generation);
+        let client = client.clone();
+        let ui = ui.clone();
         move || {
-            while generation.load(Ordering::Relaxed) {
-                let frame = ClientFrame::new(
-                    poll_ids.fetch_add(1, Ordering::Relaxed),
-                    ApiRequest::ListSessions,
-                );
-                if write_frame(&mut poll_stream, &frame).is_err() {
-                    break;
+            while !client.is_closed() {
+                match client.list_sessions() {
+                    Ok(sessions) => ui.send(HarnessUpdate::Sessions(
+                        sessions.into_iter().map(to_entry).collect(),
+                    )),
+                    // A poll that fails is not worth a banner: the strip simply
+                    // stays as it was, and a dead connection is reported once
+                    // by the event loop rather than every two seconds.
+                    Err(_) => break,
                 }
                 std::thread::sleep(SESSION_POLL_INTERVAL);
             }
@@ -544,41 +405,16 @@ fn run(
     // last; tool calls stream one at a time, so this is exact today and would
     // degrade to a briefly wrong label rather than a panic if that changed.
     let mut current_call = String::new();
-    loop {
-        let frame = client.recv()?;
-        match frame.event {
-            ApiEvent::Attached { session } => {
-                set_stage(Stage::Streaming);
-                if let Ok(mut guard) = session_id.lock() {
-                    *guard = session.session_id.clone();
-                }
-                // Remember it for a reconnect: coming back to a different
-                // session than the one on screen would look like the app lost
-                // the conversation.
-                if let Ok(mut guard) = resume.lock() {
-                    *guard = session.session_id.clone();
-                }
-                // The daemon reports the full session set only alongside
-                // history, so ask for it once on attach; without this the
-                // strip would only ever see the session we are attached to.
-                // A write failure here means the connection is gone, which is
-                // the read loop's error to report, so surface it rather than
-                // continuing to poll a dead socket.
-                client.send(ApiRequest::GetHistory {
-                    session_id: session.session_id.clone(),
-                })?;
-                send(HarnessUpdate::Attached {
-                    session_id: session.session_id,
-                    working_dir: session.working_dir,
-                });
-            }
-            ApiEvent::TextDelta { text, .. } => send(HarnessUpdate::Text(text)),
+
+    for event in events {
+        match event {
+            ApiEvent::TextDelta { text, .. } => ui.send(HarnessUpdate::Text(text)),
             // Reasoning is not rendered as transcript text yet, but its
             // arrival is proof the model is working, which is the thing the
             // silent-until-done UI was missing.
             ApiEvent::ReasoningDelta { text, .. } => {
-                send(HarnessUpdate::Activity("thinking".into()));
-                send(HarnessUpdate::Reasoning(text));
+                ui.send(HarnessUpdate::Activity("thinking".into()));
+                ui.send(HarnessUpdate::Reasoning(text));
             }
             ApiEvent::ToolStart { call_id, name, .. } => {
                 tool_input.remove(&call_id);
@@ -586,11 +422,11 @@ fn run(
                 // The call opens under its tool name; the streamed arguments
                 // usually carry a better line (the `intent`), which replaces
                 // this one in place as it arrives.
-                send(HarnessUpdate::Tool {
+                ui.send(HarnessUpdate::Tool {
                     call_id,
                     label: name.clone(),
                 });
-                send(HarnessUpdate::Activity(name));
+                ui.send(HarnessUpdate::Activity(name));
             }
             ApiEvent::ToolInputDelta { call_id, delta, .. } => {
                 let key = if call_id.is_empty() {
@@ -601,11 +437,11 @@ fn run(
                 let buffer = tool_input.entry(key.clone()).or_default();
                 buffer.push_str(&delta);
                 if let Some(intent) = crate::activity::intent_from_partial_json(buffer) {
-                    send(HarnessUpdate::Tool {
+                    ui.send(HarnessUpdate::Tool {
                         call_id: key,
                         label: intent.clone(),
                     });
-                    send(HarnessUpdate::Activity(intent));
+                    ui.send(HarnessUpdate::Activity(intent));
                 }
             }
             ApiEvent::ToolExec { call_id, name, .. } => {
@@ -618,14 +454,14 @@ fn run(
                     .and_then(|input| crate::activity::intent_from_partial_json(input))
                 {
                     Some(intent) => {
-                        send(HarnessUpdate::Tool {
+                        ui.send(HarnessUpdate::Tool {
                             call_id,
                             label: intent.clone(),
                         });
-                        send(HarnessUpdate::Activity(intent));
+                        ui.send(HarnessUpdate::Activity(intent));
                     }
                     None if tool_input.contains_key(&call_id) => {}
-                    None => send(HarnessUpdate::Activity(name)),
+                    None => ui.send(HarnessUpdate::Activity(name)),
                 }
             }
             ApiEvent::ToolDone {
@@ -647,58 +483,16 @@ fn run(
                         &output,
                     )
                 {
-                    send(HarnessUpdate::Edit(card));
+                    ui.send(HarnessUpdate::Edit(card));
                 }
                 tool_input.remove(&call_id);
-                send(HarnessUpdate::Activity("thinking".into()));
-            }
-            ApiEvent::Sessions { sessions } => {
-                send(HarnessUpdate::Sessions(
-                    sessions
-                        .into_iter()
-                        .map(|session| crate::strip::Entry {
-                            session_id: session.session_id,
-                            working_dir: session.working_dir,
-                            busy: session.status == "busy",
-                            // The overview sizes a blob by how much
-                            // conversation the session holds; a session the
-                            // server could not measure is drawn at the floor
-                            // rather than dropped.
-                            weight: session.transcript_bytes.unwrap_or(0) as f64,
-                        })
-                        .collect(),
-                ));
+                ui.send(HarnessUpdate::Activity("thinking".into()));
             }
             ApiEvent::ModelInfo {
                 provider, model, ..
-            } => send(HarnessUpdate::Model { provider, model }),
-            // A peek's reply. History for the *attached* session arrives on
-            // this event too, but the desktop asks for that only to learn the
-            // session set, so treating every one as a peek is correct: the
-            // preview cache is keyed by id and the attached session's own
-            // transcript is built from the stream, not from here.
-            ApiEvent::History {
-                session_id,
-                messages,
-            } => {
-                let mut transcript = crate::transcript::Transcript::default();
-                for message in messages {
-                    let text = message.content.trim();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    transcript.push(match message.role.as_str() {
-                        "user" => crate::transcript::Message::user(text),
-                        _ => crate::transcript::Message::assistant(text),
-                    });
-                }
-                send(HarnessUpdate::Peek {
-                    session_id,
-                    transcript,
-                });
-            }
-            ApiEvent::MessageAccepted { .. } => send(HarnessUpdate::MessageAccepted),
-            ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
+            } => ui.send(HarnessUpdate::Model { provider, model }),
+            ApiEvent::MessageAccepted { .. } => ui.send(HarnessUpdate::MessageAccepted),
+            ApiEvent::TurnDone { .. } => ui.send(HarnessUpdate::TurnDone),
             ApiEvent::BackgroundProgress {
                 task_id,
                 label,
@@ -706,7 +500,7 @@ fn run(
                 percent,
                 done,
                 ..
-            } => send(HarnessUpdate::Progress {
+            } => ui.send(HarnessUpdate::Progress {
                 task_id,
                 label,
                 summary,
@@ -717,44 +511,41 @@ fn run(
                 // A failed request is also the end of the turn it belonged to:
                 // the daemon sends `error` *instead of* `done`, so without this
                 // the UI would spin its activity indicator forever.
-                send(HarnessUpdate::Failed(explain(&message)));
-                send(HarnessUpdate::TurnDone);
+                ui.send(HarnessUpdate::Failed(explain(&message)));
+                ui.send(HarnessUpdate::TurnDone);
             }
             _ => {}
         }
     }
+    // The event stream only ends when the connection does.
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The failure a user is most likely to hit, and the one that motivated
-    /// this: the machine is offline, so the provider's DNS lookup fails. The
-    /// raw text names a URL and a resolver; the user needs to be told their
-    /// network is down.
-    #[test]
-    fn an_offline_failure_is_explained_in_the_users_terms() {
-        let raw = "error sending request for url (https://api.example.com/v1/messages): \
-                   dns error: failed to lookup address information: Name or service not known";
-        let explained = explain(raw);
-        assert!(
-            explained.starts_with("no network connection"),
-            "offline was not named: {explained}"
-        );
-        assert!(
-            explained.contains("dns error"),
-            "the underlying cause must survive: {explained}"
-        );
+/// A session-list entry, sized for the overview.
+fn to_entry(session: jcode_sdk::SessionInfo) -> crate::strip::Entry {
+    crate::strip::Entry {
+        session_id: session.session_id,
+        working_dir: session.working_dir,
+        busy: session.status == "busy",
+        // The overview sizes a blob by how much conversation the session
+        // holds; a session the server could not measure is drawn at the floor
+        // rather than dropped.
+        weight: session.transcript_bytes.unwrap_or(0) as f64,
     }
+}
 
-    /// Anything unrecognised is passed through untouched. A wrong guess about a
-    /// cause is worse than the provider's own words.
-    #[test]
-    fn an_unrecognised_failure_is_passed_through() {
-        assert_eq!(
-            explain("overloaded_error: try again"),
-            "overloaded_error: try again"
-        );
+/// Stored history as a transcript the overview can preview.
+fn to_transcript(messages: Vec<jcode_sdk::HistoryMessage>) -> crate::transcript::Transcript {
+    let mut transcript = crate::transcript::Transcript::default();
+    for message in messages {
+        let text = message.content.trim();
+        if text.is_empty() {
+            continue;
+        }
+        transcript.push(match message.role.as_str() {
+            "user" => crate::transcript::Message::user(text),
+            _ => crate::transcript::Message::assistant(text),
+        });
     }
+    transcript
 }
