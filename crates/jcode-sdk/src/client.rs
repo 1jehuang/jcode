@@ -11,7 +11,7 @@
 //! fans frames out to whoever asked for them.
 
 use crate::errors::{Error, ErrorKind, Result};
-use crate::launch::{LaunchOptions, ensure_runtime};
+use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_instance};
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
     PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path, read_frame,
@@ -19,9 +19,11 @@ use jcode_harness_api::{
 };
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError, channel, sync_channel,
+};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// How a client reaches the harness.
@@ -52,6 +54,12 @@ impl Default for ConnectOptions {
 
 /// A duplex byte transport. Lets tests and future WebSockets plug in.
 pub trait Transport: Send {
+    /// A handle which interrupts both halves after `split`. Custom transports
+    /// may omit this; native sockets provide it so Drop closes promptly.
+    fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
+
     fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)>;
 }
 
@@ -91,6 +99,13 @@ impl UnixTransport {
 }
 
 impl Transport for UnixTransport {
+    fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let socket = self.0.try_clone().ok()?;
+        Some(Arc::new(move || {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }))
+    }
+
     fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
         let writer = self
             .0
@@ -141,6 +156,145 @@ impl Drop for EventStream {
     }
 }
 
+/// Discovery and buffering controls for [`JcodeClient::global_events`].
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalEventsOptions {
+    /// How often persisted sessions are rescanned. Zero performs one scan.
+    pub discovery_interval: Duration,
+    /// Maximum events waiting for the consumer before the stream fails loudly.
+    pub max_buffered_events: usize,
+}
+
+impl Default for GlobalEventsOptions {
+    fn default() -> Self {
+        Self {
+            discovery_interval: Duration::from_secs(1),
+            max_buffered_events: 10_000,
+        }
+    }
+}
+
+struct GlobalEventControl {
+    stopped: AtomicBool,
+    terminal_error: Mutex<Option<Error>>,
+    children: Mutex<HashMap<String, JcodeClient>>,
+    tx: SyncSender<ApiEvent>,
+    max_buffered_events: usize,
+    wake_lock: Mutex<()>,
+    wake: Condvar,
+}
+
+/// Events fanned in from every persisted and newly-created session.
+///
+/// Delivery begins when each per-session child attaches. Ordering is preserved
+/// within a session; no total order across sessions is promised. Dropping this
+/// stream cancels discovery and closes all child connections.
+pub struct GlobalEventStream {
+    rx: Receiver<ApiEvent>,
+    control: Arc<GlobalEventControl>,
+    discovery: Option<std::thread::JoinHandle<()>>,
+}
+
+impl GlobalEventStream {
+    /// Block for the next event, returning the terminal stream error once.
+    pub fn next(&self) -> Result<Option<ApiEvent>> {
+        loop {
+            if let Some(error) = take_global_error(&self.control) {
+                return Err(error);
+            }
+            if self.control.stopped.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            match self.rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(event) => {
+                    if let Some(error) = take_global_error(&self.control) {
+                        return Err(error);
+                    }
+                    if self.control.stopped.load(Ordering::Acquire) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(event));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.control.stopped.load(Ordering::Acquire) {
+                        if let Some(error) = take_global_error(&self.control) {
+                            return Err(error);
+                        }
+                        return Ok(None);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+            }
+        }
+    }
+
+    /// Wait up to `timeout` for an event. `Ok(None)` means timeout or shutdown.
+    pub fn next_timeout(&self, timeout: Duration) -> Result<Option<ApiEvent>> {
+        if let Some(error) = take_global_error(&self.control) {
+            return Err(error);
+        }
+        if self.control.stopped.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        match self.rx.recv_timeout(timeout) {
+            Ok(event) => {
+                if let Some(error) = take_global_error(&self.control) {
+                    Err(error)
+                } else if self.control.stopped.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    Ok(Some(event))
+                }
+            }
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                if let Some(error) = take_global_error(&self.control) {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for GlobalEventStream {
+    type Item = Result<ApiEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        GlobalEventStream::next(self).transpose()
+    }
+}
+
+impl Drop for GlobalEventStream {
+    fn drop(&mut self) {
+        stop_global_stream(&self.control, None);
+        if let Some(discovery) = self.discovery.take() {
+            let _ = discovery.join();
+        }
+    }
+}
+
+fn take_global_error(control: &GlobalEventControl) -> Option<Error> {
+    control.terminal_error.lock().ok()?.take()
+}
+
+fn stop_global_stream(control: &GlobalEventControl, error: Option<Error>) {
+    if let Some(error) = error
+        && let Ok(mut terminal) = control.terminal_error.lock()
+        && terminal.is_none()
+    {
+        *terminal = Some(error);
+    }
+    control.stopped.store(true, Ordering::Release);
+    control.wake.notify_all();
+    let children = control
+        .children
+        .lock()
+        .ok()
+        .map(|mut children| std::mem::take(&mut *children));
+    drop(children);
+}
+
 struct Inner {
     writer: Mutex<Box<dyn Write + Send>>,
     /// Requests waiting for their `reply_to` frame.
@@ -152,22 +306,69 @@ struct Inner {
     closed: AtomicBool,
     request_timeout: Option<Duration>,
     socket_path: std::path::PathBuf,
+    client_name: String,
+    native_socket: bool,
+    shutdown: Option<Arc<dyn Fn() + Send + Sync>>,
+    client_handles: AtomicUsize,
 }
 
 /// Connected harness client.
 ///
 /// Replies are correlated by the `reply_to` id the server echoes; anything
 /// without one is a stream event and goes to every subscriber.
-#[derive(Clone)]
 pub struct JcodeClient {
     inner: Arc<Inner>,
+    instance: Option<Arc<LaunchedInstance>>,
+    /// State directory of the private instance this client owns, if any.
+    pub instance_home: Option<std::path::PathBuf>,
     /// Server identity from the handshake, e.g. "jcode-harness-api-bridge/0.1.0".
     pub server: String,
     /// Capability strings advertised by the server.
     pub capabilities: Vec<String>,
 }
 
+impl Clone for JcodeClient {
+    fn clone(&self) -> Self {
+        self.inner.client_handles.fetch_add(1, Ordering::Relaxed);
+        Self {
+            inner: Arc::clone(&self.inner),
+            instance: self.instance.clone(),
+            instance_home: self.instance_home.clone(),
+            server: self.server.clone(),
+            capabilities: self.capabilities.clone(),
+        }
+    }
+}
+
+impl Drop for JcodeClient {
+    fn drop(&mut self) {
+        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if let Some(shutdown) = &self.inner.shutdown {
+                shutdown();
+            }
+        }
+    }
+}
+
 impl JcodeClient {
+    /// Start and own a private jcode instance, then connect to it.
+    ///
+    /// Its state and sockets are isolated from the user's interactive jcode.
+    /// The last clone of this client shuts the instance down through Drop.
+    pub fn launch(options: LaunchOptions) -> Result<Self> {
+        let instance = Arc::new(launch_instance(&options)?);
+        let connect = ConnectOptions {
+            socket_path: Some(instance.socket_path.clone()),
+            client_name: options.client_name.clone(),
+            request_timeout: options.request_timeout,
+            ensure_runtime: false,
+        };
+        let mut client = Self::connect(connect)?;
+        client.instance_home = Some(instance.jcode_home.clone());
+        client.instance = Some(instance);
+        Ok(client)
+    }
+
     /// Connect to the jcode running on this machine.
     ///
     /// Use this to automate the user's own jcode: a desktop app, an editor
@@ -177,20 +378,27 @@ impl JcodeClient {
         if options.ensure_runtime {
             ensure_runtime(&LaunchOptions::default(), &|_| {})?;
         }
-        Self::over(Box::new(UnixTransport::connect(&path)?), &options, path)
+        Self::over(
+            Box::new(UnixTransport::connect(&path)?),
+            &options,
+            path,
+            true,
+        )
     }
 
     /// Connect over a caller-supplied transport. The seam tests use.
     pub fn connect_with(transport: Box<dyn Transport>, options: ConnectOptions) -> Result<Self> {
         let path = options.socket_path.clone().unwrap_or_else(api_socket_path);
-        Self::over(transport, &options, path)
+        Self::over(transport, &options, path, false)
     }
 
     fn over(
         transport: Box<dyn Transport>,
         options: &ConnectOptions,
         socket_path: std::path::PathBuf,
+        native_socket: bool,
     ) -> Result<Self> {
+        let shutdown = transport.shutdown_handle();
         let (reader, writer) = transport.split()?;
         let inner = Arc::new(Inner {
             writer: Mutex::new(writer),
@@ -201,11 +409,17 @@ impl JcodeClient {
             closed: AtomicBool::new(false),
             request_timeout: options.request_timeout,
             socket_path,
+            client_name: options.client_name.clone(),
+            native_socket,
+            shutdown,
+            client_handles: AtomicUsize::new(1),
         });
         spawn_reader(Arc::clone(&inner), reader);
 
         let mut client = Self {
             inner,
+            instance: None,
+            instance_home: None,
             server: String::new(),
             capabilities: Vec::new(),
         };
@@ -310,6 +524,51 @@ impl JcodeClient {
             id,
             inner: Arc::clone(&self.inner),
         }
+    }
+
+    /// Stream events from all persisted and newly-created sessions.
+    ///
+    /// The bridge attaches one session per connection, so this discovers
+    /// sessions repeatedly, owns one native child connection per session, and
+    /// fans their events into a bounded queue. A disconnected child is removed
+    /// and attached again by a later discovery pass.
+    pub fn global_events(&self, options: GlobalEventsOptions) -> Result<GlobalEventStream> {
+        if !self.inner.native_socket {
+            return Err(Error::new(
+                ErrorKind::UnsupportedTransport,
+                "global_events requires a native socket connection; custom transports cannot be cloned into per-session child connections",
+            ));
+        }
+        if self.is_closed() {
+            return Err(closed_error());
+        }
+        if options.max_buffered_events == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "max_buffered_events must be positive",
+            ));
+        }
+
+        let (tx, rx) = sync_channel(options.max_buffered_events);
+        let control = Arc::new(GlobalEventControl {
+            stopped: AtomicBool::new(false),
+            terminal_error: Mutex::new(None),
+            children: Mutex::new(HashMap::new()),
+            tx,
+            max_buffered_events: options.max_buffered_events,
+            wake_lock: Mutex::new(()),
+            wake: Condvar::new(),
+        });
+        let parent = self.clone();
+        let discovery_control = Arc::clone(&control);
+        let discovery = std::thread::spawn(move || {
+            discover_global_sessions(parent, discovery_control, options.discovery_interval);
+        });
+        Ok(GlobalEventStream {
+            rx,
+            control,
+            discovery: Some(discovery),
+        })
     }
 
     // --- Curated surface -----------------------------------------------------
@@ -879,6 +1138,135 @@ pub struct Usage {
     pub input: u64,
     pub output: u64,
     pub cache_read_input: Option<u64>,
+}
+
+fn discover_global_sessions(
+    parent: JcodeClient,
+    control: Arc<GlobalEventControl>,
+    interval: Duration,
+) {
+    loop {
+        if control.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let sessions = match parent
+            .request_ok(ApiRequest::ListSessions {
+                include_archived: true,
+            })
+            .and_then(|frame| match frame.event {
+                ApiEvent::Sessions { sessions } => Ok(sessions),
+                other => Err(unexpected("sessions", &other)),
+            }) {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                stop_global_stream(&control, Some(error));
+                return;
+            }
+        };
+
+        for session in sessions {
+            if control.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            start_global_child(&parent, &control, session.session_id);
+        }
+
+        if interval.is_zero() {
+            return;
+        }
+        let Ok(guard) = control.wake_lock.lock() else {
+            stop_global_stream(
+                &control,
+                Some(Error::new(
+                    ErrorKind::Transport,
+                    "global event lock poisoned",
+                )),
+            );
+            return;
+        };
+        let _ = control.wake.wait_timeout(guard, interval);
+    }
+}
+
+fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, session_id: String) {
+    if control
+        .children
+        .lock()
+        .map(|children| children.contains_key(&session_id))
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    let child = match JcodeClient::connect(ConnectOptions {
+        socket_path: Some(parent.inner.socket_path.clone()),
+        client_name: format!("{}/global-events", parent.inner.client_name),
+        request_timeout: parent.inner.request_timeout,
+        ensure_runtime: false,
+    }) {
+        Ok(child) => child,
+        Err(error) => {
+            stop_global_stream(control, Some(error));
+            return;
+        }
+    };
+    let stream = child.events(Some(&session_id));
+    if let Err(error) = child.attach_session(&session_id) {
+        if !matches!(
+            error.kind,
+            ErrorKind::Harness(jcode_harness_api::ErrorCode::UnknownSession)
+        ) {
+            stop_global_stream(control, Some(error));
+        }
+        return;
+    }
+    if control.stopped.load(Ordering::Acquire) {
+        return;
+    }
+    if let Ok(mut children) = control.children.lock() {
+        children.insert(session_id.clone(), child);
+    } else {
+        stop_global_stream(
+            control,
+            Some(Error::new(
+                ErrorKind::Transport,
+                "global event lock poisoned",
+            )),
+        );
+        return;
+    }
+
+    let pump_control = Arc::clone(control);
+    std::thread::spawn(move || {
+        while let Some(event) = stream.next() {
+            if pump_control.stopped.load(Ordering::Acquire) {
+                break;
+            }
+            match pump_control.tx.try_send(event) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    stop_global_stream(
+                        &pump_control,
+                        Some(Error::new(
+                            ErrorKind::EventBufferOverflow,
+                            format!(
+                                "global_events consumer fell behind {} buffered events",
+                                pump_control.max_buffered_events
+                            ),
+                        )),
+                    );
+                    break;
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    stop_global_stream(&pump_control, None);
+                    break;
+                }
+            }
+        }
+        if let Ok(mut children) = pump_control.children.lock() {
+            children.remove(&session_id);
+        }
+    });
 }
 
 /// The reader thread: correlates replies, fans stream events out.
