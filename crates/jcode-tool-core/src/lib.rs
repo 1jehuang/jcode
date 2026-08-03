@@ -229,3 +229,58 @@ mod tests {
         assert_eq!(out, schema);
     }
 }
+
+#[cfg(test)]
+mod escape_hatch_tests {
+    use super::*;
+
+    #[test]
+    fn injects_the_escape_hatch_into_any_object_schema() {
+        // MCP tools are built from remote definitions and never edit their own
+        // schemas, so they can only advertise the flag if injection is central.
+        // A schema shaped like an MCP proxy's proves the mechanism.
+        let mcp_shaped = serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": { "path": { "type": "string" } }
+        });
+        let out = ensure_intent_in_schema(mcp_shaped);
+        assert_eq!(
+            out["properties"][ACCEPT_LARGE_OUTPUT_KEY]["type"], "boolean",
+            "every object schema must advertise the escape hatch"
+        );
+        // Optional by design: requiring it would make the model answer a token
+        // budget question on every call.
+        let required: Vec<&str> = out["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"intent"));
+        assert!(!required.contains(&ACCEPT_LARGE_OUTPUT_KEY));
+    }
+
+    #[test]
+    fn never_overwrites_a_schema_that_declares_the_flag_itself() {
+        let custom = serde_json::json!({
+            "type": "object",
+            "properties": {
+                ACCEPT_LARGE_OUTPUT_KEY: { "type": "boolean", "description": "custom" }
+            }
+        });
+        let out = ensure_intent_in_schema(custom);
+        assert_eq!(
+            out["properties"][ACCEPT_LARGE_OUTPUT_KEY]["description"], "custom",
+            "a tool's own declaration must survive injection"
+        );
+    }
+
+    #[test]
+    fn the_schema_key_matches_what_the_guard_reads() {
+        // The registry reads this exact constant off raw tool input. If the two
+        // ever diverge, the flag would be advertised but never honored, which is
+        // worse than not offering it at all.
+        assert_eq!(ACCEPT_LARGE_OUTPUT_KEY, "accept_large_output");
+    }
+}
