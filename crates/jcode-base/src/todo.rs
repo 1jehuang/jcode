@@ -39,7 +39,7 @@ const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-clim
 
 /// Model-facing continuation for the private end-to-end ownership check. Names
 /// the assessment category without disclosing the score or threshold.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "Your end-to-end ownership is not high enough to complete this goal. Take ownership of the full user outcome, not just the immediate implementation. Follow the work through every relevant integration and runtime path, resolve consequential gaps, validate the complete workflow, and finish the necessary follow-through. Then call the todo tool again, setting a higher `end_to_end_ownership` on the goal for this group; until that field is raised the write is rejected and the stored todo list is left unchanged.";
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your end-to-end ownership is not high enough to finish this goal. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, not just the immediate implementation. Follow the work through every relevant integration and runtime path, resolve consequential gaps, validate the complete workflow, and finish the necessary follow-through. Then call the todo tool again, setting a higher `end_to_end_ownership` on the goal for this group.";
 
 /// Model-facing continuation for private completion-confidence checks. Names
 /// the assessment category without disclosing scores, items, or thresholds.
@@ -236,6 +236,31 @@ pub fn newly_completed_groups_have_sufficient_ownership(
 
     groups.into_iter().all(|group| {
         if !group_is_complete(incoming, &group) || group_is_complete(previous, &group) {
+            return true;
+        }
+        goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == group)
+            .and_then(|goal| goal.end_to_end_ownership)
+            .is_some_and(|score| score >= QUALITY_GATE_THRESHOLD)
+    })
+}
+
+/// Whether every completed todo group currently has a passing ownership
+/// assessment. This is evaluated at turn finish, after the todo update has
+/// already been persisted, so a weak assessment can block completion without
+/// discarding the model's state transition.
+pub fn completed_groups_have_sufficient_ownership(todos: &[TodoItem], goals: &[TodoGoal]) -> bool {
+    let mut groups: Vec<Option<String>> = Vec::new();
+    for todo in todos {
+        let group = normalized_group(todo.group.as_deref());
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+
+    groups.into_iter().all(|group| {
+        if !group_is_complete(todos, &group) {
             return true;
         }
         goals
@@ -1167,9 +1192,8 @@ mod tests {
         ));
     }
 
-    /// The rejection is silent about *how* to clear it unless the message names
-    /// the field. A caller that cannot tell which field to raise reads the
-    /// rejection as a stuck tool and retries the same payload indefinitely.
+    /// The turn-finish gate must tell the model how to clear it without implying
+    /// that the todo write which triggered the check was discarded.
     #[test]
     fn ownership_message_names_the_field_that_must_be_raised() {
         assert!(
@@ -1178,16 +1202,34 @@ mod tests {
         );
         assert!(
             TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("call the todo tool again"),
-            "the ownership nudge must say to retry the write"
+            "the ownership nudge must say how to update the assessment"
         );
-        // The write is discarded, so a caller must know its list was not saved.
         assert!(
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
-            "the ownership nudge must disclose that the write was rejected"
+            !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("rejected")
+                && !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
+            "the turn-finish nudge must not claim the already-saved write was discarded"
         );
         // Every gate message that requires a specific field should name it, so
         // this property is asserted for the sibling gates too.
         assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("completion_confidence"));
+    }
+
+    #[test]
+    fn completed_groups_require_sufficient_ownership_at_turn_finish() {
+        let incomplete = vec![todo("work", "in_progress", Some("ship"))];
+        assert!(completed_groups_have_sufficient_ownership(&incomplete, &[]));
+
+        let completed = vec![todo("work", "completed", Some("ship"))];
+        for ownership in [None, Some(0), Some(95)] {
+            assert!(!completed_groups_have_sufficient_ownership(
+                &completed,
+                &[ownership_goal(Some("ship"), ownership)],
+            ));
+        }
+        assert!(completed_groups_have_sufficient_ownership(
+            &completed,
+            &[ownership_goal(Some("ship"), Some(96))],
+        ));
     }
 
     #[test]
