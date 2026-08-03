@@ -23,4 +23,17 @@ export {
 } from "./launch.js";
 export type { LaunchOptions, LaunchedInstance } from "./launch.js";
 export { JcodeClient, unixSocketTransport } from "./client.js";
-export type { ConnectOptions, Transport, TurnResult } from "./client.js";
+export type {
+  ConnectOptions,
+  RunOptions,
+  RunStructuredOptions,
+  StructuredTurnResult,
+  Transport,
+  TurnResult,
+} from "./client.js";
+export { StructuredOutputError } from "./structured.js";
+export type {
+  StructuredOutputAttempt,
+  StructuredOutputSchema,
+  StructuredValidationIssue,
+} from "./structured.js";
