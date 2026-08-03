@@ -1401,11 +1401,36 @@ impl App {
             }
             match state {
                 AuthState::Available => ready.push(name.to_string()),
-                AuthState::Expired => attention.push(format!("{name} - login expired")),
+                AuthState::Expired => attention.push(format!(
+                    "{name} - {}",
+                    Self::onboarding_attention_reason(key)
+                )),
                 AuthState::NotConfigured => {}
             }
         }
         (ready, attention)
+    }
+
+    /// Why a provider needs attention, taken from its recorded credential
+    /// lifecycle rather than assumed.
+    ///
+    /// `AuthState::Expired` is overloaded: it means both "partially configured"
+    /// and "the token is dead". Reporting the wrong one is how the readiness
+    /// summary told a user "GitHub Copilot - login expired" for a provider that
+    /// was never configured. `CredState` knows the difference, so ask it.
+    fn onboarding_attention_reason(provider_key: &str) -> &'static str {
+        use crate::auth::refresh_state::{CredState, cred_state};
+        // No refresh token to fingerprint here: `cred_state` then reports
+        // `Stale` rather than `Rejected`, which is the conservative answer.
+        match cred_state(provider_key, None) {
+            // Nothing was ever recorded for this provider, so there is no
+            // evidence of an expiry. Say what we actually know.
+            CredState::Absent => "needs sign-in",
+            CredState::Present => "configured, not verified",
+            CredState::Verified => "needs a retry",
+            CredState::Stale => "login needs a refresh",
+            CredState::Rejected => "login expired, sign in again",
+        }
     }
 
     /// Handle the result of the onboarding default-model validation: render one
