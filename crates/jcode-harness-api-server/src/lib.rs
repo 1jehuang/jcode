@@ -66,6 +66,19 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
     }
     let listener = UnixListener::bind(&api_socket)
         .with_context(|| format!("bind API socket {}", api_socket.display()))?;
+    // Restrict the socket to its owner, matching the daemon socket it fronts.
+    //
+    // Without this the bridge widens access to everything behind it: the
+    // daemon socket is 0600, but a default-umask bind here produced 0755, so
+    // any local user could drive sessions, read transcripts, and spend the
+    // owner's provider tokens. A bridge must never be more permissive than
+    // the thing it bridges to.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&api_socket, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict API socket {}", api_socket.display()))?;
+    }
     eprintln!(
         "harness API bridge: listening on {} -> {}",
         api_socket.display(),
@@ -223,3 +236,48 @@ where
 #[cfg(test)]
 #[path = "framing_tests.rs"]
 mod framing_tests;
+
+#[cfg(all(test, unix))]
+mod socket_permission_tests {
+    /// The API socket must never be more permissive than the daemon socket it
+    /// fronts.
+    ///
+    /// This regressed once: `UnixListener::bind` applies the process umask, so
+    /// the socket landed at 0755 while the daemon socket it bridges to is
+    /// 0600. Every guarantee behind the daemon socket was then reachable by
+    /// any local user, including reading transcripts and spending the owner's
+    /// provider tokens.
+    #[tokio::test]
+    async fn the_api_socket_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("jcode-api-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let api_socket = dir.join("api.sock");
+        let legacy_socket = dir.join("daemon.sock");
+
+        let bridge_socket = api_socket.clone();
+        let handle = tokio::spawn(async move {
+            let _ = super::run_bridge(bridge_socket, legacy_socket).await;
+        });
+
+        // Wait for the bind, which happens before the accept loop.
+        let mut mode = None;
+        for _ in 0..100 {
+            if let Ok(meta) = std::fs::metadata(&api_socket) {
+                mode = Some(meta.permissions().mode() & 0o777);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            mode,
+            Some(0o600),
+            "API socket must be owner-only (0600); a wider mode exposes every \
+             session behind the bridge to other local users"
+        );
+    }
+}
