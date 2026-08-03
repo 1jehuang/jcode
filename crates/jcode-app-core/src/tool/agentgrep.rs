@@ -230,6 +230,10 @@ impl Tool for AgentGrepTool {
                 "paths_only": {
                     "type": "boolean",
                     "description": "Return only matching paths instead of match excerpts where supported."
+                },
+                "accept_large_output": {
+                    "type": "boolean",
+                    "description": "Pay the stated token cost for a result withheld as too large. Prefer narrowing the query."
                 }
             }
         })

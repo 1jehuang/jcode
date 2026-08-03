@@ -662,12 +662,12 @@ async fn test_context_guard_small_output_passes_through() {
     };
 
     let output = ToolOutput::new("small output");
-    let result = registry.guard_context_overflow("test", output).await;
+    let result = registry.guard_context_overflow("test", output, false).await;
     assert_eq!(result.output, "small output");
 }
 
 #[tokio::test]
-async fn test_context_guard_truncates_huge_single_output() {
+async fn test_context_guard_withholds_huge_single_output_by_default() {
     let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
     let registry = Registry {
         tools: Arc::new(RwLock::new(HashMap::new())),
@@ -679,14 +679,102 @@ async fn test_context_guard_truncates_huge_single_output() {
     // Create output that's way larger
     let big_output = "x".repeat(8000); // 2000 tokens, well over 30% of 1000
     let output = ToolOutput::new(big_output.clone());
-    let result = registry.guard_context_overflow("test", output).await;
+    let result = registry.guard_context_overflow("test", output, false).await;
+
+    // The whole point of the refusal: none of the payload is spent.
+    assert!(
+        !result.output.contains(&"x".repeat(100)),
+        "withheld output must not leak the payload"
+    );
+    assert!(
+        result.output.contains("OUTPUT WITHHELD"),
+        "should say the output was withheld, got: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("accept_large_output"),
+        "should name the opt-in flag so the caller can retry"
+    );
+    // A refusal that costs as much as the payload would defeat itself.
+    assert!(
+        result.output.len() < 1200,
+        "refusal should be cheap, was {} chars",
+        result.output.len()
+    );
+}
+
+#[tokio::test]
+async fn test_context_guard_returns_truncated_output_when_caller_accepts() {
+    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
+    let registry = Registry {
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        compaction,
+    };
+
+    let big_output = "x".repeat(8000);
+    let output = ToolOutput::new(big_output.clone());
+    let result = registry.guard_context_overflow("test", output, true).await;
+
     assert!(
         result.output.len() < big_output.len(),
-        "Output should be truncated"
+        "opt-in still truncates to what the budget allows"
     );
     assert!(
         result.output.contains("TRUNCATED"),
-        "Should contain truncation warning"
+        "should say the output was truncated, got: {}",
+        result.output
+    );
+    assert!(
+        result.output.starts_with(&"x".repeat(200)),
+        "opt-in must actually return the payload prefix"
+    );
+}
+
+#[tokio::test]
+async fn test_context_guard_reports_the_real_cost_and_affordable_size() {
+    // 200k budget, 40k already used. A 90k-token result is over the 30%
+    // single-output ceiling (60k), so it is withheld. The quoted numbers must
+    // match the actual arithmetic, since the caller decides based on them.
+    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
+    {
+        let mut mgr = compaction.write().await;
+        mgr.update_observed_input_tokens(40_000);
+    }
+    let registry = Registry {
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        compaction,
+    };
+
+    let output = ToolOutput::new("x".repeat(360_000)); // ~90k tokens
+    let result = registry.guard_context_overflow("test", output, false).await;
+
+    assert!(result.output.contains("OUTPUT WITHHELD"));
+    assert!(
+        result.output.contains("90k tokens"),
+        "should quote the real output size, got: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("45%"),
+        "should quote the share of budget (90k of 200k), got: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("200k context budget"),
+        "should quote the budget, got: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("40k is already used"),
+        "should quote context already spent, got: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("60k"),
+        "should quote the affordable size (30% of 200k), got: {}",
+        result.output
     );
 }
 
@@ -705,10 +793,42 @@ async fn test_context_guard_truncates_when_context_nearly_full() {
 
     // Even a modest output should get truncated when context is 95% full
     let output = ToolOutput::new("x".repeat(4000)); // 1000 tokens
-    let result = registry.guard_context_overflow("test", output).await;
+    let result = registry.guard_context_overflow("test", output, false).await;
     assert!(
-        result.output.contains("TRUNCATED") || result.output.contains("CONTEXT LIMIT"),
+        result.output.contains("WITHHELD") || result.output.contains("CONTEXT LIMIT"),
         "Should warn about context limits when nearly full"
+    );
+}
+
+#[tokio::test]
+async fn test_context_guard_still_refuses_when_context_is_exhausted() {
+    // With almost no room left there is nothing to spend, so accepting the cost
+    // cannot buy anything. The opt-in must not become a way to blow past the
+    // window entirely.
+    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(10_000)));
+    {
+        let mut mgr = compaction.write().await;
+        mgr.update_observed_input_tokens(9_990);
+    }
+    let registry = Registry {
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        compaction,
+    };
+
+    let payload = "x".repeat(400_000);
+    let result = registry
+        .guard_context_overflow("test", ToolOutput::new(payload.clone()), true)
+        .await;
+    assert!(
+        result.output.len() < 2_000,
+        "exhausted context must not return the payload, got {} chars",
+        result.output.len()
+    );
+    assert!(
+        result.output.contains("CONTEXT LIMIT REACHED"),
+        "should report the hard limit, got: {}",
+        result.output
     );
 }
 
@@ -722,12 +842,45 @@ async fn test_context_guard_zero_budget_passes_through() {
     };
 
     let output = ToolOutput::new("x".repeat(100_000));
-    let result = registry.guard_context_overflow("test", output).await;
+    let result = registry.guard_context_overflow("test", output, false).await;
     assert_eq!(
         result.output.len(),
         100_000,
         "Zero budget should pass through"
     );
+}
+
+#[test]
+fn test_accepts_large_output_requires_an_unambiguous_yes() {
+    use super::accepts_large_output;
+
+    assert!(accepts_large_output(
+        &serde_json::json!({ "accept_large_output": true })
+    ));
+    // Models routinely stringify booleans, so accept the string spelling too.
+    assert!(accepts_large_output(
+        &serde_json::json!({ "accept_large_output": "true" })
+    ));
+    assert!(accepts_large_output(
+        &serde_json::json!({ "accept_large_output": "TRUE" })
+    ));
+
+    // Everything else means no. Spending the rest of the window should never
+    // happen because of a truthy-looking value.
+    for input in [
+        serde_json::json!({}),
+        serde_json::json!({ "accept_large_output": false }),
+        serde_json::json!({ "accept_large_output": "false" }),
+        serde_json::json!({ "accept_large_output": 1 }),
+        serde_json::json!({ "accept_large_output": "yes" }),
+        serde_json::json!({ "accept_large_output": serde_json::Value::Null }),
+        serde_json::json!({ "query": "accept_large_output" }),
+    ] {
+        assert!(
+            !accepts_large_output(&input),
+            "should not opt in for {input}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -877,4 +1030,91 @@ fn collect_dangling_required(schema: &Value, path: &str, errors: &mut Vec<String
         }
         _ => {}
     }
+}
+
+#[tokio::test]
+async fn test_context_guard_never_spends_more_than_it_reports() {
+    // State-space sweep over budget, fill level, and payload size. Two
+    // invariants must hold in every combination, because the whole point of the
+    // guard is that a caller can trust the accounting:
+    //   1. Without the opt-in, the returned text is small. Refusing has to be
+    //      cheap or it reproduces the bug it prevents.
+    //   2. The returned text never exceeds the remaining safety headroom, with
+    //      or without the opt-in. Otherwise "accept the cost" would silently
+    //      overrun the window.
+    for budget in [10_000usize, 50_000, 200_000] {
+        for fill_percent in [0usize, 25, 50, 80, 89, 95] {
+            for payload_tokens in [1usize, 500, 5_000, 100_000] {
+                for accept in [false, true] {
+                    let compaction =
+                        Arc::new(RwLock::new(CompactionManager::new().with_budget(budget)));
+                    let used = budget * fill_percent / 100;
+                    if used > 0 {
+                        let mut mgr = compaction.write().await;
+                        mgr.update_observed_input_tokens(used as u64);
+                    }
+                    let registry = Registry {
+                        tools: Arc::new(RwLock::new(HashMap::new())),
+                        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+                        compaction,
+                    };
+
+                    let payload = "x".repeat(payload_tokens * 4);
+                    let result = registry
+                        .guard_context_overflow("test", ToolOutput::new(payload.clone()), accept)
+                        .await;
+                    let returned_tokens = result.output.len() / 4;
+
+                    let threshold = (budget as f32 * 0.90) as usize;
+                    let headroom = threshold.saturating_sub(used);
+                    let passed_through = result.output == payload;
+
+                    if !accept && !passed_through {
+                        assert!(
+                            result.output.len() < 1_500,
+                            "refusal must stay cheap: budget={budget} fill={fill_percent} \
+                             payload={payload_tokens} returned {} chars",
+                            result.output.len()
+                        );
+                    }
+
+                    // Allow a small slack for the notice text appended after the slice.
+                    assert!(
+                        returned_tokens <= headroom.max(1_000) + 500,
+                        "returned ~{returned_tokens}k tokens with only {headroom} headroom: \
+                         budget={budget} fill={fill_percent} payload={payload_tokens} \
+                         accept={accept}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
+    // The exact shape that motivated this change: a 233k-token agentgrep result
+    // against a 200k budget with 18k already used. Printed so the wording stays
+    // reviewable, and asserted so it keeps naming the cost and the escape hatch.
+    let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
+    {
+        let mut mgr = compaction.write().await;
+        mgr.update_observed_input_tokens(18_000);
+    }
+    let registry = Registry {
+        tools: Arc::new(RwLock::new(HashMap::new())),
+        skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+        compaction,
+    };
+
+    let result = registry
+        .guard_context_overflow("agentgrep", ToolOutput::new("x".repeat(932_000)), false)
+        .await;
+    println!("---\n{}\n---", result.output);
+
+    assert!(result.output.contains("233k tokens"));
+    assert!(result.output.contains("116%"), "got: {}", result.output);
+    assert!(result.output.contains("18k is already used"));
+    assert!(result.output.contains("accept_large_output"));
+    assert!(result.output.contains("paths_only"));
 }
