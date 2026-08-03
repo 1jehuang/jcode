@@ -13,8 +13,9 @@
 use crate::errors::{Error, ErrorKind, Result};
 use crate::launch::{LaunchOptions, ensure_runtime};
 use jcode_harness_api::{
-    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, PermissionDecision,
-    ServerFrame, SessionInfo, api_socket_path, read_frame, write_frame,
+    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
+    PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path, read_frame,
+    write_frame,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -325,6 +326,30 @@ impl JcodeClient {
         }
     }
 
+    /// Reversibly hide a session from the default list. Its transcript remains
+    /// available for a later restore.
+    pub fn archive_session(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::ArchiveSession {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Put an archived session back in the default session list.
+    pub fn restore_session(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::RestoreSession {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Automatically archive inactive sessions after `archive_after_days`.
+    /// `None` disables automatic archival.
+    pub fn set_retention_policy(&self, archive_after_days: Option<u32>) -> Result<()> {
+        self.request_ok(ApiRequest::SetRetentionPolicy { archive_after_days })
+            .map(drop)
+    }
+
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
         match self
             .request_ok(ApiRequest::CreateSession { working_dir })?
@@ -482,6 +507,175 @@ impl JcodeClient {
         }
     }
 
+    /// Runtime identity, route catalog, protocol metadata, and a live health
+    /// check for a session.
+    pub fn get_runtime_info(&self, session_id: &str) -> Result<RuntimeInfo> {
+        self.ping()?;
+        match self
+            .request_ok(ApiRequest::GetRuntimeInfo {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::RuntimeInfo {
+                session_id,
+                provider,
+                model,
+                routes,
+            } => {
+                let mut providers = Vec::new();
+                if let Some(provider) = provider.as_ref() {
+                    providers.push(provider.clone());
+                }
+                for route in &routes {
+                    if !providers.contains(&route.provider) {
+                        providers.push(route.provider.clone());
+                    }
+                }
+                Ok(RuntimeInfo {
+                    server: self.server.clone(),
+                    protocol_version: API_VERSION_MAJOR,
+                    capabilities: self.capabilities.clone(),
+                    healthy: true,
+                    session_id,
+                    provider,
+                    model,
+                    providers,
+                    routes,
+                })
+            }
+            other => Err(unexpected("runtime_info", &other)),
+        }
+    }
+
+    /// Persist an API key in jcode's owner-only provider store and hot-reload
+    /// provider credentials.
+    pub fn set_api_key(&self, provider: &str, api_key: &str) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::SetApiKey {
+                provider: provider.to_string(),
+                api_key: api_key.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::CredentialUpdated { .. } => Ok(()),
+            other => Err(unexpected("credential_updated", &other)),
+        }
+    }
+
+    /// Remove a persisted API-key credential and hot-reload provider
+    /// credentials.
+    pub fn clear_api_key(&self, provider: &str) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::ClearApiKey {
+                provider: provider.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::CredentialUpdated { .. } => Ok(()),
+            other => Err(unexpected("credential_updated", &other)),
+        }
+    }
+
+    /// Read one UTF-8 file under the session working directory.
+    pub fn read_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        max_bytes: Option<u64>,
+    ) -> Result<FileContent> {
+        match self
+            .request_ok(ApiRequest::ReadFile {
+                session_id: session_id.to_string(),
+                path: path.to_string(),
+                max_bytes,
+            })?
+            .event
+        {
+            ApiEvent::FileContent {
+                path,
+                content,
+                size,
+                truncated,
+                ..
+            } => Ok(FileContent {
+                path,
+                content,
+                size,
+                truncated,
+            }),
+            other => Err(unexpected("file_content", &other)),
+        }
+    }
+
+    /// Find files by case-insensitive path substring under the session root.
+    pub fn find_files(
+        &self,
+        session_id: &str,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<String>> {
+        match self
+            .request_ok(ApiRequest::FindFiles {
+                session_id: session_id.to_string(),
+                query: query.to_string(),
+                limit,
+            })?
+            .event
+        {
+            ApiEvent::Files { paths, .. } => Ok(paths),
+            other => Err(unexpected("files", &other)),
+        }
+    }
+
+    /// Search UTF-8 files under the session root for a literal string.
+    pub fn search_text(
+        &self,
+        session_id: &str,
+        query: &str,
+        options: SearchTextOptions,
+    ) -> Result<Vec<TextMatch>> {
+        match self
+            .request_ok(ApiRequest::SearchText {
+                session_id: session_id.to_string(),
+                query: query.to_string(),
+                path: options.path,
+                limit: options.limit,
+            })?
+            .event
+        {
+            ApiEvent::TextMatches { matches, .. } => Ok(matches),
+            other => Err(unexpected("text_matches", &other)),
+        }
+    }
+
+    /// Read safe filesystem metadata for a path under the session root.
+    pub fn file_status(&self, session_id: &str, path: &str) -> Result<FileStatus> {
+        match self
+            .request_ok(ApiRequest::FileStatus {
+                session_id: session_id.to_string(),
+                path: path.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::FileStatus {
+                path,
+                exists,
+                kind,
+                size,
+                modified_ms,
+                ..
+            } => Ok(FileStatus {
+                path,
+                exists,
+                kind,
+                size,
+                modified_ms,
+            }),
+            other => Err(unexpected("file_status", &other)),
+        }
+    }
+
     /// Switch the session to a different model. `model` is an id from
     /// `list_models`.
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
@@ -619,6 +813,48 @@ pub struct RunOptions {
     /// Auto-answer permission prompts. Only meaningful when the server
     /// advertises the `permissions` capability.
     pub auto_approve: bool,
+}
+
+/// Runtime identity and protocol metadata returned by [`JcodeClient::get_runtime_info`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeInfo {
+    pub server: String,
+    pub protocol_version: u32,
+    pub capabilities: Vec<String>,
+    pub healthy: bool,
+    pub session_id: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub providers: Vec<String>,
+    pub routes: Vec<ModelRouteInfo>,
+}
+
+/// Content and truncation metadata returned by [`JcodeClient::read_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileContent {
+    pub path: String,
+    pub content: String,
+    pub size: u64,
+    pub truncated: bool,
+}
+
+/// Optional constraints for [`JcodeClient::search_text`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchTextOptions {
+    /// Restrict the search to this relative path under the session root.
+    pub path: Option<String>,
+    /// Maximum number of matches to return.
+    pub limit: Option<u32>,
+}
+
+/// Safe filesystem metadata returned by [`JcodeClient::file_status`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStatus {
+    pub path: String,
+    pub exists: bool,
+    pub kind: String,
+    pub size: Option<u64>,
+    pub modified_ms: Option<u64>,
 }
 
 /// What one turn produced.
