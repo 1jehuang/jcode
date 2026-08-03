@@ -111,4 +111,49 @@ TS
 npx --no-install tsc -p tsconfig.json
 echo "types ok"
 
+# Everything above proves the tarball imports and typechecks. It does not prove
+# the thing a consumer actually does: install the package and launch jcode from
+# PATH, with no repo, no cargo, and no locally built binary. That path has its
+# own failure modes (a missing `api-bridge` subcommand in the installed build,
+# a leaked daemon, an instance home that never gets removed), and none of them
+# are visible from inside the repo.
+if command -v jcode >/dev/null 2>&1; then
+  echo "== launching a private instance as a consumer would =="
+  cat > launch-consumer.mjs <<'JS'
+import { JcodeClient } from "@jcode/sdk";
+import fs from "node:fs";
+
+// No `binary` option: resolve `jcode` from PATH, exactly like a consumer.
+const client = await JcodeClient.launch({ workingDir: process.cwd() });
+const home = client.instanceHome;
+
+const sessions = await client.listSessions();
+if (sessions.length !== 0) {
+  throw new Error(`a fresh instance reported ${sessions.length} sessions`);
+}
+
+await client.close();
+
+// The daemon keeps writing for a moment after shutdown, so "gone" has to mean
+// "stayed gone" rather than "was briefly absent".
+await new Promise((resolve) => setTimeout(resolve, 5000));
+if (fs.existsSync(home)) {
+  throw new Error(`instance home leaked: ${fs.readdirSync(home).join(", ")}`);
+}
+console.log("launch ok");
+JS
+
+  daemons_before="$(pgrep -cf 'jcode --provider auto serve' || true)"
+  node launch-consumer.mjs
+  sleep 3
+  daemons_after="$(pgrep -cf 'jcode --provider auto serve' || true)"
+  if [ "$daemons_before" != "$daemons_after" ]; then
+    echo "FAIL: launch() leaked a daemon ($daemons_before -> $daemons_after)"
+    exit 1
+  fi
+  echo "no daemon leaked ($daemons_before -> $daemons_after)"
+else
+  echo "== skipping launch check: jcode is not on PATH =="
+fi
+
 echo "SDK package check passed."
