@@ -91,7 +91,7 @@ const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-clim
 
 /// Model-facing continuation for the private end-to-end ownership check. Names
 /// the assessment category without disclosing the score or threshold.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state, autonomy, iteration maturity, or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, validate the complete workflow and consequential adjacent necessary follow-through, and continue exercising the feedback loop while gains or material hypotheses remain. Reassess the goal honestly from concrete evidence, then call the todo tool again with updated assessments.";
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state, autonomy, iteration maturity, or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, validate the complete workflow and consequential adjacent necessary follow-through, and continue exercising the feedback loop while gains or material hypotheses remain. Reassess the goal honestly from concrete evidence, then call the todo tool again with an updated `delivery_state`, `autonomy`, and `iteration_maturity`, plus any required `stopping_evidence`.";
 
 /// Legacy ownership-gate wording (pre delivery_state rename). Kept only so
 /// persisted transcripts still classify it as a synthetic gate message.
