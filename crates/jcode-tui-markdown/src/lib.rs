@@ -574,19 +574,22 @@ pub const MATH_PENDING_PLACEHOLDER_TEXT: &str = "↻ rendering math...";
 /// wraps its tail onto a following line.
 const MERMAID_PENDING_MATCH_PREFIX: &str = "↻ rendering";
 
-/// True when `line` is the deferred-mermaid pending placeholder. Tolerates
-/// leading/trailing padding spans added by centered display modes and the
-/// truncated tail produced when a narrow width wraps the placeholder.
+/// True when `line` is a deferred-render pending placeholder (mermaid or
+/// math). Tolerates leading/trailing padding spans added by centered display
+/// modes and the truncated tail produced when a narrow width wraps it.
+///
+/// Matches on the line's joined text rather than a single span: the wrapping
+/// pass splits a line into one span per word, so a per-span test silently
+/// stops recognizing placeholders once content reaches the wrapper. That made
+/// prepared bodies miss their staleness stamp, leaving "rendering..." on
+/// screen permanently because no cache layer knew to rebuild.
 pub fn line_is_mermaid_pending_placeholder(line: &Line<'_>) -> bool {
-    let mut spans = line
+    let joined: String = line
         .spans
         .iter()
-        .map(|span| span.content.as_ref().trim())
-        .filter(|content| !content.is_empty());
-    let Some(first) = spans.next() else {
-        return false;
-    };
-    first.starts_with(MERMAID_PENDING_MATCH_PREFIX) && spans.next().is_none()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    joined.trim().starts_with(MERMAID_PENDING_MATCH_PREFIX)
 }
 
 fn apply_inline_decorations(mut style: Style, strike: bool, in_link: bool) -> Style {
