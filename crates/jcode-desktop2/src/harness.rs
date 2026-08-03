@@ -204,6 +204,12 @@ pub fn spawn(
                 .ok()
                 .and_then(|guard| *guard)
                 .map(|at| at.elapsed());
+            // Reaching the daemon proves the retry loop recovered. Without
+            // resetting here, one old outage permanently leaves every later
+            // disconnect at the 10-second ceiling.
+            if uptime.is_some() {
+                backoff = RECONNECT_BACKOFF;
+            }
             ui.send(HarnessUpdate::Failed(describe_disconnect(
                 stage,
                 &error,
