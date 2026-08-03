@@ -56,6 +56,7 @@ jcode-logging = { path = "../jcode-logging" }
 # OAuth
 base64 = "0.22"
 sha2 = "0.10"
+jcode-transport = { path = "../jcode-transport" }
 rand = "0.9.3"
 hex = "0.4"
 url = "2"
