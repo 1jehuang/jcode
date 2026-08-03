@@ -8,7 +8,8 @@
 //! (Ctrl+A jumping the caret, Ctrl+C killing a turn while text is selected).
 //!
 //! TUI/emacs chords are kept wherever they do not collide, so terminal muscle
-//! memory still mostly works: Ctrl+E, Ctrl+K, Ctrl+U, Ctrl+W, Alt+B/F. Where
+//! memory still mostly works: Ctrl+E, Ctrl+U, Ctrl+W, Alt+B/F. Ctrl+J/K walk
+//! prompts, matching the TUI's prompt navigation. Where
 //! the two disagree the web binding wins and start-of-line stays reachable via
 //! Home.
 //!
@@ -82,6 +83,10 @@ pub enum Action {
     PageDown,
     ScrollTop,
     ScrollBottom,
+    /// Jump to the adjacent user prompt. "Previous" travels toward older
+    /// transcript content and "next" travels back toward the live tail.
+    PromptPrev,
+    PromptNext,
 
     /// Escape: cancel a running turn, else clear the input, else follow the
     /// tail. Never quits: quitting on Escape loses work.
@@ -315,8 +320,13 @@ pub const PORTED: &[Ported] = &[
     },
     Ported {
         chord: "ctrl+k",
-        action: Action::KillToEnd,
-        tui: "Ctrl+K kill to end",
+        action: Action::PromptPrev,
+        tui: "previous prompt",
+    },
+    Ported {
+        chord: "ctrl+j",
+        action: Action::PromptNext,
+        tui: "next prompt",
     },
     Ported {
         chord: "ctrl+w",
@@ -607,7 +617,10 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
     ("ctrl+s", "no input stash yet"),
     ("ctrl+p", "no auto-poke yet"),
     ("ctrl+g", "no diagram overlay yet"),
-    ("ctrl+j / ctrl+[ / ctrl+]", "no prompt-jump anchors yet"),
+    (
+        "ctrl+[ / ctrl+]",
+        "prompt-jump aliases are not bound on desktop",
+    ),
     ("super+5", "onboarding simulator is a TUI dev aid"),
 ];
 
@@ -871,6 +884,16 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     'l' => return Some(Action::SessionRight),
                     'k' => return Some(Action::SessionUp),
                     'j' => return Some(Action::SessionDown),
+                    _ => {}
+                }
+            }
+            // Prompt navigation is deliberately Control-only. Cmd+K keeps its
+            // text-field meaning on macOS, while the TUI's Ctrl+J/K muscle
+            // memory walks whole turns instead of shaving a few text rows.
+            if ctrl && !sup && !alt && !shift {
+                match ch {
+                    'k' => return Some(Action::PromptPrev),
+                    'j' => return Some(Action::PromptNext),
                     _ => {}
                 }
             }

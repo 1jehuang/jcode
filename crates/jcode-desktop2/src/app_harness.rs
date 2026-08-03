@@ -117,6 +117,10 @@ impl App {
                         std::time::Instant::now(),
                     );
                 }
+                harness::HarnessUpdate::Todo(card) => {
+                    self.model.transcript.set_todo(&card);
+                    self.model.stream.reveal_all();
+                }
                 harness::HarnessUpdate::MessageAccepted => {
                     // The agent has the oldest message still in flight. Marking
                     // it here rather than on the first token is the point of
@@ -199,6 +203,10 @@ impl App {
         if turn_ended && !self.model.busy {
             self.flush_queued_message();
         }
+        // The horizontal workspace keeps neighboring pages visible even when
+        // the overview is closed. Fetch their tails as soon as the session list
+        // is known; `Peeks` deduplicates this call across ordinary redraws.
+        self.request_peek();
     }
 
     /// Drop everything that belonged to the session being left.
@@ -263,6 +271,14 @@ impl App {
         };
         if self.model.session_id.as_deref() == Some(target.as_str()) {
             return;
+        }
+        // Once this model becomes a neighbor it must show the conversation the
+        // user just left, not an older daemon peek. The live transcript is the
+        // freshest cache entry and remains read-only while the target attaches.
+        if let Some(current) = self.model.session_id.clone() {
+            self.model
+                .peeks
+                .insert(&current, self.model.transcript.clone());
         }
         self.clear_for_session_change();
         self.model.status = format!("attaching: {target}");

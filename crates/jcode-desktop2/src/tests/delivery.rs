@@ -268,7 +268,9 @@ fn the_turn_ending_sends_the_oldest_queued_message() {
     }
     assert!(app.model.busy, "the flushed message did not start a turn");
     assert!(
-        command_rx.try_recv().is_err(),
+        command_rx
+            .try_iter()
+            .all(|command| !matches!(command, harness::Command::Send { .. })),
         "more than one queued message was sent at one boundary"
     );
 }

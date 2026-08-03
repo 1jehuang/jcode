@@ -7,7 +7,7 @@
 
 use super::visual::Rendered;
 use crate::keymap::Action;
-use crate::settings::{ROWS, Row, Settings};
+use crate::settings::{CONFIG_ROWS, ROWS, Row, Settings};
 use crate::theme::ThemeMode;
 use crate::{App, states};
 
@@ -52,6 +52,30 @@ fn clicking_the_gear_opens_and_shuts_the_panel() {
     assert!(app.model.panel.is_open(), "the gear did not open the panel");
     click(&mut app, x, y);
     assert!(!app.model.panel.is_open(), "the gear did not shut again");
+}
+
+#[test]
+fn clicking_sessions_opens_the_session_overview() {
+    let mut app = app();
+    let button = app.frame.sessions();
+    assert!(click(
+        &mut app,
+        button.x0 + button.width() / 2.0,
+        button.y0 + button.height() / 2.0,
+    ));
+    assert!(
+        app.model.overview.is_open(),
+        "sessions did not open the overview"
+    );
+}
+
+#[test]
+fn sessions_sits_at_the_top_left_of_the_page() {
+    let app = app();
+    let button = app.frame.sessions();
+    assert_eq!(button.x0, app.frame.left);
+    assert_eq!(button.y0, app.frame.gear().y0);
+    assert!(button.x1 < app.frame.gear().x0);
 }
 
 #[test]
@@ -128,10 +152,10 @@ fn every_row_reaches_the_running_window() {
     assert_eq!(app.model.donut.is_some(), app.model.settings.motion);
 }
 
-/// The `more` row is a door, not a dial: it must open the config file, say so,
-/// change no setting, and put the menu away.
+/// The `more` row opens the graphical configuration view in place. It must not
+/// launch an editor, dismiss the panel, or mutate a setting merely by opening.
 #[test]
-fn the_more_row_opens_the_config_file_and_shuts_the_menu() {
+fn the_more_row_opens_the_graphical_configuration_view() {
     let mut app = app();
     app.model.panel.open();
     let before = app.model.settings;
@@ -146,12 +170,26 @@ fn the_more_row_opens_the_config_file_and_shuts_the_menu() {
         band.y0 + band.height() / 2.0,
     );
     assert_eq!(app.model.settings, before, "the more row changed a setting");
-    assert!(!app.model.panel.is_open(), "the more row left the menu up");
-    let notice = app.model.notice.clone().unwrap_or_default();
     assert!(
-        notice.contains("config.toml"),
-        "the more row said nothing about where it went: {notice:?}"
+        app.model.panel.is_open(),
+        "the graphical view was dismissed"
     );
+    assert_eq!(app.model.panel.rows(), CONFIG_ROWS);
+    assert!(CONFIG_ROWS.contains(&Row::CopyOnSelect));
+
+    let copy = CONFIG_ROWS
+        .iter()
+        .position(|row| *row == Row::CopyOnSelect)
+        .expect("copy-on-select row");
+    app.cycle_setting(copy);
+    assert_ne!(app.model.settings.copy_on_select, before.copy_on_select);
+
+    let back = CONFIG_ROWS
+        .iter()
+        .position(|row| *row == Row::Back)
+        .expect("back row");
+    app.cycle_setting(back);
+    assert_eq!(app.model.panel.rows(), ROWS);
 }
 
 #[test]

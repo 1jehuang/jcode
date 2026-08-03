@@ -23,16 +23,16 @@ impl App {
                 return true;
             }
             let rows = self.model.model_picker.visual_rows();
-            if let Some(index) = self.frame.model_menu_row_at(rows, x, y)
-                && let Some(model) = self.model.model_picker.models().get(index).cloned()
-            {
-                self.model.model_picker.close();
-                if let Some((_, outgoing)) = self.harness.as_ref() {
-                    if outgoing.send(harness::Command::SetModel(model)).is_err() {
+            if let Some(index) = self.frame.model_menu_row_at(rows, x, y) {
+                if let Some(model) = self.model.model_picker.choose_row(index) {
+                    self.model.model_picker.close();
+                    if let Some((_, outgoing)) = self.harness.as_ref() {
+                        if outgoing.send(harness::Command::SetModel(model)).is_err() {
+                            self.model.set_notice("not connected: cannot change model");
+                        }
+                    } else {
                         self.model.set_notice("not connected: cannot change model");
                     }
-                } else {
-                    self.model.set_notice("not connected: cannot change model");
                 }
                 self.request_redraw();
                 return true;

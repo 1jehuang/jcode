@@ -59,6 +59,8 @@ pub enum HarnessUpdate {
     /// tools that write to disk, and kept separate from `Tool` because an edit
     /// earns a permanent transcript card while a call's status line does not.
     Edit(crate::edits::EditCard),
+    /// The newest structured plan snapshot produced by the `todo` tool.
+    Todo(crate::todos::TodoCard),
     TurnDone,
     /// A background task this session is waiting on: how far along it is, or
     /// that it finished. Forwarded so a long wait shows a moving bar instead of
@@ -506,6 +508,13 @@ fn run(
                 error,
                 ..
             } => {
+                if error.is_none()
+                    && name == "todo"
+                    && let Some(card) =
+                        crate::todos::parse(tool_input.get(&call_id).map(String::as_str))
+                {
+                    ui.send(HarnessUpdate::Todo(card));
+                }
                 // An edit that changed lines becomes a permanent card in the
                 // transcript: the intent that motivated it and the lines it
                 // added and removed. Read from the call's own arguments and
@@ -560,6 +569,7 @@ fn run(
 fn to_entry(session: jcode_sdk::SessionInfo) -> crate::strip::Entry {
     crate::strip::Entry {
         session_id: session.session_id,
+        title: session.title,
         working_dir: session.working_dir,
         busy: session.status == "busy",
         // The overview sizes a blob by how much conversation the session

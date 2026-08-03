@@ -12,6 +12,7 @@ mod app_overview;
 mod app_resume;
 mod app_selection;
 mod app_settings;
+mod app_workspace;
 mod boot;
 mod capture;
 mod caret;
@@ -24,9 +25,11 @@ mod edits;
 mod frame_meter;
 mod harness;
 mod hints;
+mod icons;
 mod input;
 mod keymap;
 mod layout;
+mod math;
 mod mem;
 mod meta;
 mod model_picker;
@@ -41,10 +44,12 @@ mod resume;
 mod scene;
 mod scene_overview;
 mod scene_resume;
+mod scene_workspace;
 mod scroll;
 mod scroll_bench;
 mod scroll_profile;
 mod select;
+mod selfdev_reload;
 mod settings;
 mod states;
 mod stream;
@@ -55,12 +60,15 @@ mod syntax;
 mod tests;
 mod text;
 mod theme;
+mod todos;
 mod transcript;
 mod viewport;
 mod window_state;
+mod workspace;
 
 use anyhow::Result;
 use scene::build_scene;
+use scene_workspace::build_workspace_scene;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use vello::Scene;
@@ -77,6 +85,8 @@ fn main() -> Result<()> {
     if let Some(result) = cli::dispatch(&args) {
         return result;
     }
+    selfdev_reload::install();
+    let _selfdev_registration = selfdev_reload::register();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
@@ -157,6 +167,9 @@ struct App {
     /// When the overview's zoom last stepped. Separate from `last_frame`
     /// because the donut's clock stops once there is a transcript.
     overview_frame: Option<std::time::Instant>,
+    /// When the workspace camera last stepped. Kept separate from the overview
+    /// so either animation can run or settle independently.
+    workspace_frame: Option<std::time::Instant>,
     /// Geometry of the most recently built frame. Pointer hit-testing reads
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
@@ -196,6 +209,7 @@ impl Default for App {
             geometry_saved: None,
             last_frame: None,
             overview_frame: None,
+            workspace_frame: None,
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
@@ -239,6 +253,9 @@ const PROGRESS_FRAME: std::time::Duration = std::time::Duration::from_millis(40)
 
 /// Frame interval while the overview zooms (~60fps).
 const OVERVIEW_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Frame interval while the horizontal session camera moves (~60fps).
+const WORKSPACE_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Deadlines closer than this are a continuous animation (the donut, the
 /// overview zoom, the streaming reveal, the scroll glide), and those are paced
@@ -323,6 +340,13 @@ pub struct Model {
     /// and in a test without carrying megabytes of base64 through the layout.
     /// The bytes live on `App`, beside the connection that sends them.
     pub attachments: usize,
+    /// Decoded pending images used by the renderer. Encoded originals remain on
+    /// `App`, so painting never has to decode base64 or compressed image data.
+    pub attachment_previews: Vec<vello::peniko::ImageData>,
+    /// Attachment currently presented above the page. A fresh paste holds large
+    /// briefly then flies to its thumbnail; clicking a thumbnail opens it until
+    /// the next click.
+    pub attachment_preview: Option<(usize, std::time::Instant, bool)>,
     /// The most recent failure, until the next turn starts.
     ///
     /// Separate from [`Self::status`] because the status line is suppressed for
@@ -346,6 +370,9 @@ pub struct Model {
     pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
     pub strip: strip::Strip,
+    /// Horizontal multi-session camera. Session ownership stays in `strip` and
+    /// this state only supplies native-scale column positions and easing.
+    pub workspace: workspace::Workspace,
     /// The session overview: the card strip held Super zooms out into. Part of
     /// the model so a frame stays a pure function of it and every phase of
     /// the zoom is capturable.
@@ -440,6 +467,8 @@ impl Default for Model {
             selection: None,
             notice: None,
             attachments: 0,
+            attachment_previews: Vec::new(),
+            attachment_preview: None,
             failure: None,
             donut: settings.motion.then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
@@ -447,6 +476,7 @@ impl Default for Model {
             stream: stream::Stream::default(),
             smooth: scroll::Smooth::default(),
             strip: strip::Strip::default(),
+            workspace: workspace::Workspace::default(),
             overview: overview::Overview::default(),
             peeks: overview::Peeks::default(),
             resume: resume::Picker::default(),
@@ -634,6 +664,8 @@ impl App {
         let mut content = self.model.editor.take_for_submit();
         let images = std::mem::take(&mut self.pending_images);
         self.model.attachments = 0;
+        self.model.attachment_previews.clear();
+        self.model.attachment_preview = None;
         // The transcript card needs something to draw and the daemon needs
         // non-empty content, so an image sent on its own says so rather than
         // appearing as a blank card indistinguishable from a glitch.
@@ -729,19 +761,33 @@ impl App {
             transcript: cache,
         } = painter;
         let probe = layout::Frame::new(size, scale);
-        let lines = crate::input::InputLayout::new(
+        // The empty editor still draws its hint inside the well. Measure that
+        // same visible string here, otherwise a hint that wraps at a narrow
+        // window is laid out as two rows inside a one-row composer.
+        let composer_source = if model.editor.is_empty() {
+            crate::hints::hint(model.hint)
+        } else {
+            model.editor.text()
+        };
+        let mut lines = crate::input::InputLayout::new(
             text,
-            model.editor.text(),
+            composer_source,
             probe.composer_text_width(),
             scene::composer_text_style(model),
             probe.scale,
         )
         .line_count();
+        if !model.attachment_previews.is_empty() {
+            lines += scene::ATTACHMENT_PREVIEW_ROWS;
+        }
         // The top chrome row is reserved when it has something to say: more
         // than one session to move between (the strip proper), or a working
         // directory to name. With neither it would be a widget saying "1 of 1"
         // about nowhere, so nothing is reserved and the page is unchanged.
-        let strip = model.strip.len() > 1 || model.working_dir.is_some() || model.mem.is_some();
+        let strip = model.strip.len() > 1
+            || model.working_dir.is_some()
+            || model.mem.is_some()
+            || model.transcript.has_user_message();
         // Measure the conversation so the composer can sit just under the
         // last reply while it is short, instead of floating at the middle of
         // the page with a gap above it. Content height is a function of the
@@ -789,7 +835,45 @@ impl App {
     }
 
     fn on_pointer_pressed(&mut self) {
-        let (x, y) = self.pointer;
+        let (x, y) = self.focused_pointer();
+        if self
+            .model
+            .attachment_preview
+            .is_some_and(|(_, opened, automatic)| {
+                automatic && opened.elapsed() >= std::time::Duration::from_millis(1050)
+            })
+        {
+            self.model.attachment_preview = None;
+        }
+        if let Some((index, _, _)) = self.model.attachment_preview {
+            if scene::attachment_overlay_close_rect(&self.frame).contains((x, y))
+                && index < self.pending_images.len()
+            {
+                self.pending_images.remove(index);
+                self.model.attachment_previews.remove(index);
+                self.model.attachments = self.pending_images.len();
+            }
+            self.model.attachment_preview = None;
+            self.request_redraw();
+            return;
+        }
+        for (index, rect) in scene::attachment_thumbnail_rects(&self.frame, &self.model)
+            .into_iter()
+            .enumerate()
+        {
+            if scene::attachment_thumbnail_close_rect(rect).contains((x, y)) {
+                self.pending_images.remove(index);
+                self.model.attachment_previews.remove(index);
+                self.model.attachments = self.pending_images.len();
+                self.request_redraw();
+                return;
+            }
+            if rect.contains((x, y)) {
+                self.model.attachment_preview = Some((index, std::time::Instant::now(), false));
+                self.request_redraw();
+                return;
+            }
+        }
         // The picker is modal: a click on a row takes it, a click on a project
         // heading opens or shuts it, and a click on the dimmed page around the
         // card dismisses, like any overlay.
@@ -989,8 +1073,8 @@ impl App {
     /// Show a text caret over the composer and the default arrow elsewhere, so
     /// the input box looks editable before it is clicked.
     fn update_cursor_icon(&mut self) {
-        let (x, y) = self.pointer;
-        let panel_rows = crate::settings::ROWS.len();
+        let (x, y) = self.focused_pointer();
+        let panel_rows = self.model.panel.rows().len();
         // The picker's rows are the only clickable thing while it is up, so the
         // pointer says so there and stays an arrow over the dimmed page.
         if self.model.resume.is_open() {
@@ -1007,6 +1091,7 @@ impl App {
             return;
         }
         let wanted = if self.frame.hits_gear(x, y)
+            || self.frame.hits_sessions(x, y)
             || (self.has_model_caption() && self.frame.hits_model_button(x, y))
             || (self.model.model_picker.is_open()
                 && self
@@ -1051,7 +1136,7 @@ impl App {
         // preview follows the cursor. A hover off the list leaves the highlight
         // where it was, so crossing a heading does not blank the preview.
         if self.model.resume.is_open() {
-            let (x, y) = self.pointer;
+            let (x, y) = self.focused_pointer();
             if let Some(row) = self.resume_row_under(x, y)
                 && row != self.model.resume.cursor()
             {
@@ -1067,7 +1152,7 @@ impl App {
         // cards leaves the highlight where it was: sliding across the gap
         // between two sessions must not deselect the one you were on.
         if self.model.overview.is_open() {
-            let (x, y) = self.pointer;
+            let (x, y) = self.focused_pointer();
             if let Some(card) = self.overview_field().hit(x, y) {
                 let id = card.session_id.clone();
                 if self.model.overview.focus() != Some(id.as_str()) {
@@ -1079,24 +1164,25 @@ impl App {
             return;
         }
         if self.model.spin.dragging {
-            self.model.spin.drag_to(self.pointer.0);
+            self.model.spin.drag_to(self.focused_pointer().0);
             self.request_redraw();
             return;
         }
-        if self.model_picker_hover(self.pointer.0, self.pointer.1) {
+        let (pointer_x, pointer_y) = self.focused_pointer();
+        if self.model_picker_hover(pointer_x, pointer_y) {
             self.request_redraw();
         }
-        if self.settings_hover(self.pointer.0, self.pointer.1) {
+        if self.settings_hover(pointer_x, pointer_y) {
             self.request_redraw();
         }
         self.update_cursor_icon();
         if self.selecting {
             // Dragging at the edge scrolls the conversation under the pointer,
             // so a selection is not capped at one screenful.
-            let scrolled = self.autoscroll_for_drag(self.pointer.1);
+            let scrolled = self.autoscroll_for_drag(pointer_y);
             // Clamp into the region so dragging past the top or bottom keeps
             // extending to the nearest text instead of dropping the gesture.
-            let (x, y) = self.pointer;
+            let (x, y) = self.focused_pointer();
             let y = y.clamp(self.frame.body_top + 1.0, self.frame.body_bottom - 1.0);
             if let Some(position) = self.transcript_position_at(x, y)
                 && let Some(selection) = self.model.selection.as_mut()
@@ -1117,7 +1203,7 @@ impl App {
         if !self.dragging {
             return;
         }
-        let (x, y) = self.pointer;
+        let (x, y) = self.focused_pointer();
         // Clamp to the well vertically so dragging out of the box keeps
         // extending rather than dropping the selection.
         let y = y.clamp(
@@ -1186,6 +1272,21 @@ impl App {
     /// spin, so the states that animate nothing (no window focus, a pinned
     /// caret with no donut and no turn in flight) return `None` here.
     pub fn animation_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let attachment = self
+            .model
+            .attachment_preview
+            .and_then(|(_, opened, automatic)| {
+                automatic
+                    .then(|| {
+                        let end = opened + std::time::Duration::from_millis(1050);
+                        if now < end {
+                            Some(now + std::time::Duration::from_millis(16))
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten()
+            });
         // The overview is the one animation that must run whether or not the
         // window thinks it is focused: a compositor that steals focus while
         // Super is held would otherwise freeze the field mid-zoom.
@@ -1234,10 +1335,17 @@ impl App {
             let progress = (self.model.progress_clock.is_some()
                 && self.model.transcript.has_indeterminate_progress())
             .then(|| now + BACKGROUND_FRAME);
-            return [overview, bounce, spinner, stream, smooth, boot, progress]
-                .into_iter()
-                .flatten()
-                .min();
+            let workspace = self
+                .model
+                .workspace
+                .is_animating()
+                .then(|| now + WORKSPACE_FRAME);
+            return [
+                overview, bounce, workspace, spinner, stream, smooth, boot, progress, attachment,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
         }
         // The boot reveal outranks everything: it is the first thing on screen
         // and it must not be paced by whatever else happens to be animating.
@@ -1270,8 +1378,14 @@ impl App {
             .deliveries()
             .filter_map(|delivery| delivery.next_frame_at(now))
             .min();
+        let workspace = self
+            .model
+            .workspace
+            .is_animating()
+            .then(|| now + WORKSPACE_FRAME);
         [
-            caret, donut, spinner, stream, smooth, overview, bounce, boot, ack, progress,
+            caret, donut, spinner, stream, smooth, overview, workspace, bounce, boot, ack,
+            progress, attachment,
         ]
         .into_iter()
         .flatten()
@@ -1323,6 +1437,29 @@ impl App {
             frame.scale,
         );
         crate::viewport::Viewport::new(laid, region, state.scroll).max_scroll()
+    }
+
+    /// Pin the adjacent user prompt to the top edge using the same measured
+    /// layout the painter uses. This keeps jumps exact even when markdown wraps.
+    fn scroll_by_prompt(&mut self, older: bool) {
+        let frame = self.frame;
+        let style = crate::scene::transcript_body_style(&self.model);
+        let width = (frame.column() - crate::transcript::USER_PAD_X * 2.0).max(1.0);
+        let region = self.transcript_region_height();
+        let App { painter, model, .. } = self;
+        let paint::Painter { text, transcript } = painter;
+        let laid = transcript.lay_out(
+            text,
+            &model.transcript,
+            width,
+            &model.theme,
+            style,
+            frame.scale,
+        );
+        let target = crate::viewport::adjacent_prompt_scroll(laid, region, model.scroll, older);
+        let travelled = target - model.scroll;
+        model.scroll = target;
+        model.smooth.nudge(travelled, std::time::Instant::now());
     }
 
     /// Report the conversation's measured height to the stream, so growth at
@@ -1377,12 +1514,16 @@ impl App {
             // interaction for something the user already asked for.
             Action::SessionLeft => {
                 if self.model.strip.focus_left() {
+                    self.begin_workspace_transition(workspace::Direction::Left);
                     self.attach_focused_session();
+                    self.request_peek();
                 }
             }
             Action::SessionRight => {
                 if self.model.strip.focus_right() {
+                    self.begin_workspace_transition(workspace::Direction::Right);
                     self.attach_focused_session();
+                    self.request_peek();
                 }
             }
             Action::SessionUp => {
@@ -1549,6 +1690,29 @@ impl App {
             Action::Paste => match self.clipboard.get_image() {
                 Ok(Some(image)) => {
                     let label = image.label();
+                    let decoded = match image::load_from_memory(&image.bytes) {
+                        Ok(decoded) => decoded.into_rgba8(),
+                        Err(error) => {
+                            self.model
+                                .set_notice(format!("could not preview image: {error}"));
+                            return true;
+                        }
+                    };
+                    let (width, height) = decoded.dimensions();
+                    self.model
+                        .attachment_previews
+                        .push(vello::peniko::ImageData {
+                            data: decoded.into_raw().into(),
+                            format: vello::peniko::ImageFormat::Rgba8,
+                            alpha_type: vello::peniko::ImageAlphaType::Alpha,
+                            width,
+                            height,
+                        });
+                    self.model.attachment_preview = Some((
+                        self.model.attachment_previews.len() - 1,
+                        std::time::Instant::now(),
+                        true,
+                    ));
                     self.pending_images
                         .push((image.media_type, crate::png::base64(&image.bytes)));
                     self.model.attachments = self.pending_images.len();
@@ -1627,6 +1791,8 @@ impl App {
                     .smooth
                     .nudge(travelled, std::time::Instant::now());
             }
+            Action::PromptPrev => self.scroll_by_prompt(true),
+            Action::PromptNext => self.scroll_by_prompt(false),
 
             // Escape never quits: it cancels, then clears, then re-follows the
             // tail, matching the TUI.
@@ -1901,6 +2067,7 @@ impl ApplicationHandler for App {
                 }
                 self.settle_super_release(std::time::Instant::now());
                 self.tick_overview(std::time::Instant::now());
+                self.tick_workspace(std::time::Instant::now());
                 self.animate_donut();
                 self.model.boot.advance(std::time::Instant::now());
                 self.model.stream.advance(std::time::Instant::now());
@@ -1914,16 +2081,20 @@ impl ApplicationHandler for App {
                 let mut scene = Scene::new();
                 self.frame_meter.start();
                 let scale = self.effective_scale();
-                if let Some(state) = self.state.as_mut() {
-                    let size = state.size();
+                if let Some(size) = self.state.as_ref().map(render::RenderState::size) {
                     // Record the geometry the frame was built with, so pointer
                     // hit-testing uses exactly what the user sees. Measured
                     // through the app's own painter: a throwaway one would
                     // start with a cold cache and re-lay the whole transcript
                     // every frame, which is the cost this cache exists to
                     // remove.
-                    self.frame =
-                        Self::frame_for_model_with(size, scale, &self.model, &mut self.painter);
+                    let page_size = self.workspace_render_size(size);
+                    self.frame = Self::frame_for_model_with(
+                        page_size,
+                        scale,
+                        &self.model,
+                        &mut self.painter,
+                    );
                 }
                 // Feed the conversation's measured height to the stream's
                 // glide, so a reply growing at the tail slides the page up
@@ -1933,7 +2104,7 @@ impl ApplicationHandler for App {
                 self.observe_stream_growth();
                 if let Some(state) = self.state.as_mut() {
                     let size = state.size();
-                    build_scene(&mut scene, &mut self.painter, &self.model, size, scale);
+                    build_workspace_scene(&mut scene, &mut self.painter, &self.model, size, scale);
                     self.frame_meter.end_build();
                     if let Err(error) = state.render(&scene, &mut self.frame_meter) {
                         eprintln!("render error: {error:#}");
@@ -1976,9 +2147,22 @@ impl ApplicationHandler for App {
     /// after *any* event, and so an idle window sleeps indefinitely instead of
     /// waking forever.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if selfdev_reload::requested() {
+            match selfdev_reload::relaunch() {
+                Ok(()) => event_loop.exit(),
+                Err(error) => eprintln!("desktop2 selfdev reload failed: {error:#}"),
+            }
+            return;
+        }
         let flow = match self.animation_deadline(std::time::Instant::now()) {
-            Some(at) => ControlFlow::WaitUntil(at),
-            None => ControlFlow::Wait,
+            Some(at) => ControlFlow::WaitUntil(
+                at.min(std::time::Instant::now() + std::time::Duration::from_millis(250)),
+            ),
+            // Poll sparsely so a selfdev signal is observed even if the window
+            // backend restarts an interrupted wait internally.
+            None => ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(250),
+            ),
         };
         event_loop.set_control_flow(flow);
     }

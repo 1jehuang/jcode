@@ -39,19 +39,22 @@ const MAX_ROW_HEIGHT: f64 = 132.0;
 /// Room reserved above each row for its label, in logical units.
 pub const ROW_LABEL_BAND: f64 = 20.0;
 
-/// The region the field is laid out in: the page inside its margins.
+/// The bounded overlay region the field is laid out in.
 ///
 /// One definition shared by the renderer and by pointer hit-testing, for the
 /// same reason [`crate::layout::Frame`] is: if the two ever disagreed, clicks
 /// would land on a different card than the one under the cursor.
 pub fn area(frame: &crate::layout::Frame) -> (f64, f64, f64, f64) {
-    let inset = (frame.width * 0.04).clamp(16.0, 56.0);
-    // The overview replaces the page rather than sitting in the transcript's
-    // slot, so it gets the window from the top margin down to the hint row.
-    // Anchoring the top at `body_top` left the field crowded into the lower
-    // two thirds with a band of blank paper above it.
-    let bottom = frame.height - crate::layout::FOOTNOTE_HEIGHT * 2.5;
-    (inset, inset, frame.width - inset, bottom.max(inset + 1.0))
+    // Deliberately leave a substantial ring of the current page visible. The
+    // session picker is a temporary object over the conversation, not a route
+    // away from it. Caps keep the panel readable on a large monitor, while the
+    // fractions make it gracefully fill a small window without touching its
+    // edges.
+    let width = (frame.width * 0.84).min(960.0).max(1.0);
+    let height = (frame.height * 0.68).min(620.0).max(1.0);
+    let left = (frame.width - width) / 2.0;
+    let top = (frame.height - height) / 2.0;
+    (left, top, left + width, top + height)
 }
 
 /// A direction for keyboard navigation across the field.
@@ -551,6 +554,7 @@ mod tests {
     fn entry(id: &str, dir: &str, weight: f64) -> Entry {
         Entry {
             session_id: id.into(),
+            title: None,
             working_dir: Some(dir.into()),
             busy: false,
             weight,
@@ -881,5 +885,22 @@ mod tests {
         overview.advance(0.02);
         overview.open(Some("a1"));
         assert_eq!(overview.focus(), Some("a3"));
+    }
+
+    #[test]
+    fn session_field_is_a_bounded_overlay_with_page_visible_around_it() {
+        for size in [(420, 540), (1280, 800), (1920, 1080)] {
+            let frame = crate::layout::Frame::new(size, 1.0);
+            let (left, top, right, bottom) = area(&frame);
+            assert!(
+                left > 0.0 && top > 0.0,
+                "overlay touched the top or left at {size:?}"
+            );
+            assert!(
+                right < frame.width && bottom < frame.height,
+                "overlay filled the page at {size:?}"
+            );
+            assert!(right - left <= 960.0 && bottom - top <= 620.0);
+        }
     }
 }

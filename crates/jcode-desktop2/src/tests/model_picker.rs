@@ -67,14 +67,23 @@ fn sdk_results_populate_the_open_menu_and_a_row_uses_set_model() {
         Some("openai-oauth:gpt-5.6")
     );
 
-    let second = app.frame.model_menu_row(2, 1);
-    click(&mut app, centre(second));
-    match commands.try_recv() {
-        Ok(harness::Command::SetModel(model)) => {
-            assert_eq!(model, "claude-api:claude-opus-4-8")
+    // Provider → connection → model.
+    let openai = app.frame.model_menu_row(2, 0);
+    click(&mut app, centre(openai));
+    let oauth = app.frame.model_menu_row(1, 0);
+    click(&mut app, centre(oauth));
+    let model = app.frame.model_menu_row(1, 0);
+    click(&mut app, centre(model));
+    let selected = std::iter::from_fn(|| commands.try_recv().ok()).find_map(|command| {
+        match command {
+            harness::Command::SetModel(model) => Some(model),
+            // Draining the catalog update may request a fresh session preview.
+            // It is independent of the model menu and shares the ordered worker
+            // channel by design.
+            _ => None,
         }
-        other => panic!("expected set_model command, got {other:?}"),
-    }
+    });
+    assert_eq!(selected.as_deref(), Some("openai-oauth:gpt-5.6"));
     assert!(!app.model.model_picker.is_open());
 
     updates

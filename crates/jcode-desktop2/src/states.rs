@@ -36,6 +36,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("tool_progress", tool_progress),
     ("background_progress", background_progress),
     ("background_progress_many", background_progress_many),
+    ("todo_card", todo_card),
     ("edit_card", edit_card),
     ("edit_cards_many", edit_cards_many),
     ("edit_card_large", edit_card_large),
@@ -131,6 +132,8 @@ fn connecting() -> Model {
         // No pasted images in a capture: an attachment count is a fact about
         // what the user just did, so a node pins it like anything else.
         attachments: 0,
+        attachment_previews: Vec::new(),
+        attachment_preview: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
         // Captures pin the hint, so the ghost line is a tested state rather
@@ -140,6 +143,7 @@ fn connecting() -> Model {
         model: None,
         model_picker: crate::model_picker::Picker::default(),
         strip: crate::strip::Strip::default(),
+        workspace: crate::workspace::Workspace::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
         stream: crate::stream::Stream::default(),
@@ -262,6 +266,8 @@ fn attached_empty() -> Model {
         // No pasted images in a capture: an attachment count is a fact about
         // what the user just did, so a node pins it like anything else.
         attachments: 0,
+        attachment_previews: Vec::new(),
+        attachment_preview: None,
         donut: Some(fixed_donut()),
         spin: fixed_spin(),
         // Captures pin the hint, so the ghost line is a tested state rather
@@ -270,6 +276,7 @@ fn attached_empty() -> Model {
         model: Some(fixed_model()),
         model_picker: crate::model_picker::Picker::default(),
         strip: crate::strip::Strip::default(),
+        workspace: crate::workspace::Workspace::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
         stream: crate::stream::Stream::default(),
@@ -500,30 +507,35 @@ fn demo_strip(focused: &str) -> crate::strip::Strip {
             // the same size would prove nothing about the sizing.
             crate::strip::Entry {
                 session_id: "session_clover_1785130341680_5a8db08".into(),
+                title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 480_000.0,
             },
             crate::strip::Entry {
                 session_id: "session_mushroom_1785129393446_e7007f8".into(),
+                title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: true,
                 weight: 90_000.0,
             },
             crate::strip::Entry {
                 session_id: "session_pebble_1785130002233_1c93aa4".into(),
+                title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 6_000.0,
             },
             crate::strip::Entry {
                 session_id: "session_harbor_1785128881021_9f0b21d".into(),
+                title: None,
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
                 weight: 210_000.0,
             },
             crate::strip::Entry {
                 session_id: "session_ember_1785131110907_44de7c2".into(),
+                title: None,
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
                 weight: 1_200.0,
@@ -618,6 +630,7 @@ fn overview_single_session() -> Model {
     let strip = crate::strip::Strip::build(
         vec![crate::strip::Entry {
             session_id: "session_willow_1785130555000_7d3e9f1".into(),
+            title: None,
             working_dir: Some("/home/j/jcode".into()),
             busy: false,
             weight: 40_000.0,
@@ -653,6 +666,7 @@ fn overview_many_sessions() -> Model {
     let entries: Vec<crate::strip::Entry> = (0..18)
         .map(|n| crate::strip::Entry {
             session_id: id(n),
+            title: None,
             working_dir: Some(format!("/home/j/proj{}", n % 4)),
             busy: n % 5 == 0,
             // A spread of sizes rather than a ramp, so the field is not a
@@ -1077,6 +1091,37 @@ fn background_progress_many() -> Model {
             6,
             std::time::Duration::from_secs(212),
             Some("wait for the plan to resolve"),
+        ),
+        ..attached_empty()
+    }
+}
+
+/// The plan card mid-task: completed, active, and pending items across two
+/// groups, so every native state (check, active dot, empty dot, connector,
+/// header, progress bar) is visible in one capture.
+fn todo_card() -> Model {
+    use crate::transcript::{Message, Transcript};
+    let mut transcript = Transcript::default();
+    transcript.push(Message::user("refit the harness reconnect path"));
+    let card = crate::todos::parse(Some(
+        r#"{"todos":[
+            {"content":"Trace the reconnect events end to end","status":"completed","group":"Investigate"},
+            {"content":"Reproduce the dropped-frame race","status":"completed","group":"Investigate"},
+            {"content":"Rework the backoff so a flap cannot stampede","status":"in_progress","group":"Fix"},
+            {"content":"Surface the retry state in the status line","status":"pending","group":"Fix"},
+            {"content":"Add a soak test against the flaky socket","status":"pending","group":"Verify"}
+        ]}"#,
+    ))
+    .expect("static todo json parses");
+    transcript.set_todo(&card);
+    transcript.set_live_tool("call_1", "rework the reconnect backoff");
+    Model {
+        transcript,
+        busy: true,
+        activity: crate::activity::Activity::pinned(
+            3,
+            std::time::Duration::from_secs(61),
+            Some("rework the reconnect backoff"),
         ),
         ..attached_empty()
     }

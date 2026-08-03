@@ -105,6 +105,8 @@ pub const DONUT_MIN_SIDE: f64 = 100.0;
 /// margin's trailing corner: the one place on the page that is empty at every
 /// window size, and the corner every desktop app already puts its chrome in.
 pub const GEAR_SIZE: f64 = 18.0;
+/// Sessions button size.
+pub const SESSIONS_SIZE: f64 = GEAR_SIZE;
 /// Radius of the gear's body, as a fraction of its box. The teeth and the hub
 /// are drawn around this, so the whole mark scales from one number.
 pub const GEAR_RADIUS: f64 = 0.30;
@@ -566,6 +568,24 @@ impl Frame {
         let x1 = self.right;
         let y0 = (centre_y - GEAR_SIZE / 2.0).max(0.0);
         vello::kurbo::Rect::new(x1 - GEAR_SIZE, y0, x1, y0 + GEAR_SIZE)
+    }
+
+    /// The sessions button at the leading edge of the page's top margin.
+    ///
+    /// Sessions are navigation, so they occupy the familiar top-left position;
+    /// settings stays at the opposite edge as a secondary control.
+    pub fn sessions(&self) -> vello::kurbo::Rect {
+        let gear = self.gear();
+        vello::kurbo::Rect::new(
+            self.left,
+            gear.y0,
+            self.left + SESSIONS_SIZE,
+            gear.y0 + SESSIONS_SIZE,
+        )
+    }
+
+    pub fn hits_sessions(&self, x: f64, y: f64) -> bool {
+        self.sessions().contains(vello::kurbo::Point::new(x, y))
     }
 
     /// Whether a logical point is on the gear. The whole box, not the drawn

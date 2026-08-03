@@ -118,6 +118,7 @@ impl TranscriptCache {
                     // drawn width, so a tick that leaves the label unchanged
                     // must move the bar without re-laying the card.
                     entry.permille = message.permille;
+                    entry.todo_states.clone_from(&message.todo_states);
                 }
                 self.hits += 1;
                 continue;

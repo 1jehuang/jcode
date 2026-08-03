@@ -149,9 +149,12 @@ pub fn parse_markdown(text: &str) -> Document {
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
     options.insert(Options::ENABLE_DEFINITION_LIST);
 
-    let normalized = crate::preprocess::normalize_latex_math(text);
-    let escaped = crate::preprocess::escape_currency_dollars(&normalized);
-    let parser = Parser::new_ext(&escaped, options);
+    // Currency must be escaped before normalizing `\(...\)` to `$...$`.
+    // Otherwise numeric LaTeX such as `\(1\)` becomes `$1$` and is then
+    // mistaken for a price by the currency guard.
+    let escaped = crate::preprocess::escape_currency_dollars(text);
+    let normalized = crate::preprocess::normalize_latex_math(&escaped);
+    let parser = Parser::new_ext(&normalized, options);
 
     let mut doc = Document::default();
 
@@ -507,6 +510,9 @@ pub fn parse_markdown(text: &str) -> Document {
                         )]));
                     }
                     push_block(&mut doc, BlockKind::MathDisplay, lines);
+                    if let Some(block) = doc.blocks.last_mut() {
+                        block.latex = Some(math.to_string());
+                    }
                 }
             }
             Event::FootnoteReference(label) => {
