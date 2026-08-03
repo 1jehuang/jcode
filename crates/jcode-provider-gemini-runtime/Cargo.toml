@@ -28,6 +28,10 @@ tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+jcode-provider-antigravity = { path = "../jcode-provider-antigravity" }
+jcode-provider-openai = { path = "../jcode-provider-openai" }
+jcode-schema-dialect = { path = "../jcode-schema-dialect" }
+serde = { version = "1", features = ["derive"] }
 # The migrated gemini tests use jcode-base's test-env sandbox (lock_test_env).
 jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 tempfile = "3"
