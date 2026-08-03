@@ -481,10 +481,8 @@ fn rendered_rule_width(max_width: Option<usize>) -> usize {
 
 // Colors matching ui.rs palette
 use jcode_tui_workspace::color_support::rgb;
-const MATH_FOREGROUND: (u8, u8, u8) = (100, 160, 255);
-/// Inline math sits inside prose, so it matches the body text brightness with
-/// only a gentle blue tint instead of the saturated display-math blue.
-const MATH_INLINE_FOREGROUND: (u8, u8, u8) = (185, 200, 225);
+const MATH_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
+const MATH_INLINE_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
 
 fn code_bg() -> Color {
     rgb(45, 45, 45)

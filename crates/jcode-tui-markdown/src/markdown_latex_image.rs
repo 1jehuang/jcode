@@ -10,7 +10,8 @@ use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
-const RENDERER_VERSION: u8 = 4;
+// Bump whenever rendering output changes so stale images are not reused.
+const RENDERER_VERSION: u8 = 5;
 const MAX_SOURCE_BYTES: usize = 32 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const FOREGROUND: (u8, u8, u8) = super::MATH_FOREGROUND;
