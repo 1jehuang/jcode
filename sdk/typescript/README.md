@@ -8,6 +8,8 @@ Unix socket. Schema drift is guarded from both sides: a Rust test fails if a
 variant is added without mirroring it here, and a Node test fails if the tag
 sets diverge.
 
+Full documentation: **[jcode.sh/sdk](https://jcode.sh/sdk)**
+
 ## Install
 
 ```bash
