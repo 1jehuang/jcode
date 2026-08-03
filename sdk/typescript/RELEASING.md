@@ -25,8 +25,14 @@ bash ../../scripts/test_sdk_package.sh   # the tarball as a consumer sees it
 npm publish                     # publishConfig already sets public access
 ```
 
+Use the **Publish TypeScript SDK** workflow and provide an existing jcode release
+tag. It downloads that release's six runtime artifacts, publishes the matching
+platform packages first, and then publishes the SDK. All seven package manifests
+must have the same version. The main package uses exact optional dependency
+versions so an SDK release can never silently pick up a different runtime.
+
 `prepack` rebuilds `dist/` from a clean slate, so a stale build cannot be
-published. `files` limits the tarball to `dist`, `README.md`, and `LICENSE`;
+published. `files` limits the main tarball to `dist`, `README.md`, and `LICENSE`;
 confirm with `npm pack --dry-run`.
 
 ## Verifying a published release

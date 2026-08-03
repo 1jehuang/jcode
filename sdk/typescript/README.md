@@ -26,7 +26,11 @@ npm run build
 
 ## Requirements
 
-jcode must be installed, and Node 20 or newer.
+Node 20 or newer. The SDK installs the correct jcode runtime for supported
+macOS, Linux, and Windows architectures as an optional platform package, so a
+separate jcode installation is not normally required. If optional dependencies
+are disabled, `launch()` falls back to `jcode` on `PATH`; `binary` can also
+select a specific executable.
 
 macOS and Linux are exercised end to end in CI. Windows builds and is wired up
 (the bridge listens on a named pipe rather than a Unix socket, and the SDK
@@ -35,7 +39,8 @@ treat it as untested rather than unsupported and please report what breaks.
 
 `launch()` needs nothing else: it starts its own daemon and bridge. `connect()`
 needs a bridge already running, which the user starts once and leaves running.
-The bridge ships in the released binary, so no Rust toolchain is needed:
+The bridge ships in the runtime package, so no Rust toolchain is needed. To use
+`connect()` with the user's global jcode, start its bridge:
 
 ```bash
 jcode api-bridge
