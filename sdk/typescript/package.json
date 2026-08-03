@@ -1,6 +1,6 @@
 {
   "name": "@jcode/sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "TypeScript SDK for the jcode harness API (protocol v1)",
   "license": "MIT",
   "type": "module",
@@ -12,16 +12,46 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
-  "engines": { "node": ">=20" },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test --experimental-strip-types test/*.test.ts",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "keywords": [
+    "jcode",
+    "agent",
+    "sdk",
+    "llm",
+    "coding-agent",
+    "harness-api"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1jehuang/jcode.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/1jehuang/jcode/tree/main/sdk/typescript#readme",
+  "bugs": {
+    "url": "https://github.com/1jehuang/jcode/issues"
+  },
+  "author": "Jeremy Huang",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
   }
 }

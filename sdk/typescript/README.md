@@ -11,6 +11,12 @@ sets diverge.
 ## Install
 
 ```bash
+npm install @jcode/sdk
+```
+
+From a source checkout:
+
+```bash
 cd sdk/typescript
 npm install
 npm run build
@@ -18,13 +24,20 @@ npm run build
 
 ## Requirements
 
-The harness API bridge must be running. It exposes the API socket
-(`$XDG_RUNTIME_DIR/jcode-api.sock`) and translates onto the internal daemon
-socket:
+jcode must be installed, and its API bridge running. The bridge ships in the
+released binary, so no Rust toolchain is needed:
 
 ```bash
-cargo run -p jcode-harness-api-server --bin jcode-harness-api-bridge
+jcode api-bridge
 ```
+
+It starts the jcode server if one is not already up, then exposes the API
+socket (`$XDG_RUNTIME_DIR/jcode-api.sock`) and translates onto the internal
+daemon socket. Leave it running while your client is connected.
+
+Use `--api-socket <path>` to listen elsewhere, and set `JCODE_API_SOCKET` to
+the same path in your client. (The global `--socket` selects the *internal
+daemon* socket, which is a different thing.)
 
 ## Quick start
 
