@@ -87,7 +87,7 @@ Swap `launch` for `connect` to drive the user's own jcode instead of a private
 instance; everything after that line is identical.
 
 A complete runnable application is available in
-[`examples/demo-app`](./examples/demo-app).
+[`examples/demo-app`](https://github.com/1jehuang/jcode/tree/master/sdk/typescript/examples/demo-app).
 
 ```ts
 import { JcodeClient } from "@1jehuang/jcode-sdk";
@@ -331,21 +331,80 @@ Or pass `socketPath` to `connect()`.
 
 ## Errors
 
-Every failure is a `HarnessError` with a `code`:
+SDK and protocol failures reject with a `HarnessError`. Its stable `code` is
+the value to branch on; the message is diagnostic text and can change. Normal
+JavaScript errors (for example, an OS filesystem error) can still surface from
+the platform.
 
-| Code | Meaning |
-| --- | --- |
-| `jcode_not_found` | `launch()` could not run jcode: not installed, or not on `PATH`. Pass `binary` with a full path. |
-| `startup_failed` | The instance exited while starting. The message carries its stderr. |
-| `startup_timeout` | The instance never opened its socket within `startupTimeoutMs`. |
-| `connect_failed` | The bridge is not running, or the socket path is wrong. The message names the path and the command to start it. |
-| `disconnected` | The connection dropped mid-request. |
-| `timeout` | No reply within `requestTimeoutMs` (30s by default). |
-| `structured_schema_invalid` | `runStructured()` received an invalid JSON Schema. |
-| `structured_output_invalid` | The model did not produce valid structured output within the retry budget. |
-| `unsupported_transport` | `globalEvents()` was requested on a custom transport that cannot be cloned safely. |
-| `event_buffer_overflow` | A `globalEvents()` consumer fell behind its bounded queue. |
-| `unknown_session`, `invalid_request`, ... | Protocol errors relayed from the harness. |
+```ts
+import { HarnessError, StructuredOutputError } from "@1jehuang/jcode-sdk";
+
+try {
+  await client.run(sessionId, prompt);
+} catch (error) {
+  if (error instanceof StructuredOutputError) {
+    console.error(error.validationErrors, error.lastText, error.attempts);
+  } else if (error instanceof HarnessError) {
+    switch (error.code) {
+      case "unknown_session":
+        // Refresh listSessions(), then ask the user to choose another session.
+        break;
+      case "disconnected":
+      case "timeout":
+        // Reconnect and retry only if the operation is safe to repeat.
+        break;
+      default:
+        console.error(error.code, error.message);
+    }
+  } else {
+    throw error;
+  }
+}
+```
+
+### Launch and connection errors
+
+| Code | Cause | Recovery |
+| --- | --- | --- |
+| `jcode_not_found` | `launch()` could not execute jcode. | Install jcode, put it on `PATH`, or pass `binary` with an absolute path. |
+| `startup_failed` | The private instance exited before opening its API socket. Its stderr is included in the message. | Display/log the message; fix the reported configuration, credential, or binary error before retrying. |
+| `startup_timeout` | The private instance did not open its API socket within `startupTimeoutMs`. | Increase the timeout on a slow machine; otherwise inspect stderr and ensure the runtime directory is writable. |
+| `invalid_instance_home` | `jcodeHome`, its credential paths, or the source login home is unsafe (same directory, symlink, file, or traversal). | Choose a separate real directory. Do not point a private instance at the user's live jcode home. |
+| `connect_failed` | The bridge is absent, dead, or listening at another socket path. | Run `jcode api-bridge`; verify `socketPath` or `JCODE_API_SOCKET`. The message names the attempted path. |
+| `handshake_failed` | The peer replied with an invalid frame during protocol negotiation. | Confirm the socket is a jcode harness socket and upgrade jcode/SDK together. |
+| `unsupported_version` | Client and bridge do not share a protocol major version. | Upgrade the older side. Do not retry unchanged versions. |
+
+### Request and transport errors
+
+| Code | Cause | Recovery |
+| --- | --- | --- |
+| `disconnected` | The socket closed or a write failed while work was in flight. | Reconnect. Retry only idempotent reads, or first verify whether a mutating request took effect. |
+| `timeout` | No correlated reply arrived within `requestTimeoutMs` (30 seconds by default). | Check daemon health and raise the timeout for legitimately slow requests. Treat outcome as unknown before repeating mutations. |
+| `unexpected_reply` | A reply was valid protocol data but not the event kind required by that SDK method. | Upgrade both sides and report the server/client versions with the error. |
+| `unknown_request` | The bridge does not implement that request tag. | Upgrade jcode, or stop using that newer SDK method with this bridge. |
+| `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
+| `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or compaction request). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
+| `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
+| `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
+
+### Streaming and structured-output errors
+
+| Code | Cause | Recovery |
+| --- | --- | --- |
+| `unsupported_transport` | `globalEvents()` was called on a custom transport, which cannot be cloned into per-session connections. | Use a native socket client, or consume individual `events()` streams yourself. |
+| `event_buffer_overflow` | A `globalEvents()` consumer fell behind `maxBufferedEvents`; the SDK fails rather than dropping events silently. | Consume faster, reduce work in the loop, or deliberately increase the bounded buffer. Recreate the iterator afterward. |
+| `concurrent_next` | Two callers invoked `next()` concurrently on the same global event iterator. | Give the iterator one consumer and fan out events inside the application. |
+| `structured_schema_invalid` | The JSON Schema passed to `runStructured()` is invalid. | Fix the schema; this is deterministic and should not be retried unchanged. |
+| `structured_output_invalid` | The model exhausted the structured-output retry budget without producing schema-valid JSON. | Catch `StructuredOutputError` and inspect `validationErrors`, `lastText`, and `attempts`; revise the prompt/schema or increase `maxRetries` deliberately. |
+
+Protocol error frames that are not replies to a pending request are emitted on
+`harness_error`. Transport failures are emitted on `error` and also close the
+client. Always register an `error` listener when using EventEmitter-style
+listeners because Node treats an unhandled `error` event as fatal.
+
+Unknown future server codes remain accessible as `HarnessError.code`; keep a
+default branch and show the diagnostic message instead of assuming this table
+is exhaustive forever.
 
 ## Stability
 
