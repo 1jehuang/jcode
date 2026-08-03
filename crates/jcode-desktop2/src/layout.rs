@@ -1274,7 +1274,10 @@ mod tests {
                     frame.width,
                     frame.height
                 );
-                assert!(card.width() > 0.0 && card.height() > 0.0, "{card:?} degenerate");
+                assert!(
+                    card.width() > 0.0 && card.height() > 0.0,
+                    "{card:?} degenerate"
+                );
 
                 let panel = frame.resume_panel_for(rows);
                 let list = frame.resume_list_for(rows);
@@ -1312,7 +1315,10 @@ mod tests {
                 frame.width - card.x1 >= RESUME_INSET_MIN - 0.5,
                 "no right margin"
             );
-            assert!(card.y0 > 0.0 && card.y1 < frame.height, "no vertical margin");
+            assert!(
+                card.y0 > 0.0 && card.y1 < frame.height,
+                "no vertical margin"
+            );
         });
     }
 
@@ -1348,8 +1354,14 @@ mod tests {
             }
             // Above the list and below it belong to nobody.
             let list = frame.resume_list_for(rows);
-            assert_eq!(frame.resume_row_at(rows, list.x0 + 1.0, list.y0 - 2.0), None);
-            assert_eq!(frame.resume_row_at(rows, list.x0 - 2.0, list.y0 + 1.0), None);
+            assert_eq!(
+                frame.resume_row_at(rows, list.x0 + 1.0, list.y0 - 2.0),
+                None
+            );
+            assert_eq!(
+                frame.resume_row_at(rows, list.x0 - 2.0, list.y0 + 1.0),
+                None
+            );
         });
     }
 }
