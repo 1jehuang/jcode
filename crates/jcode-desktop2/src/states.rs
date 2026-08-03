@@ -159,6 +159,7 @@ fn connecting() -> Model {
             theme: crate::theme::ThemeMode::Light,
             reasoning: crate::reasoning::ReasoningMode::Current,
             motion: true,
+            copy_on_select: false,
         },
         panel: crate::settings::Panel::default(),
     }
@@ -282,6 +283,7 @@ fn attached_empty() -> Model {
             theme: crate::theme::ThemeMode::Light,
             reasoning: crate::reasoning::ReasoningMode::Current,
             motion: true,
+            copy_on_select: false,
         },
         panel: crate::settings::Panel::default(),
     }
@@ -714,6 +716,7 @@ fn settings_panel_hover() -> Model {
             theme: crate::theme::ThemeMode::Light,
             reasoning: crate::reasoning::ReasoningMode::Full,
             motion: false,
+            copy_on_select: false,
         },
         ..attached_empty()
     }

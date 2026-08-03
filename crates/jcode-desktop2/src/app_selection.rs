@@ -132,11 +132,18 @@ impl App {
     /// writing there would mean highlighting a word silently destroys whatever
     /// the user had copied. On platforms without a primary selection this is a
     /// no-op, which is the honest behaviour rather than a surprising one.
+    /// When `copy on select` is on, the same text also goes to the ordinary
+    /// clipboard: that is the terminal-style behaviour, opt-in because it is
+    /// destructive, and it stays on this one path so mouse and keyboard
+    /// selections cannot diverge.
     pub(crate) fn publish_primary_selection(&mut self) {
         let Some(text) = self.any_selected_text() else {
             return;
         };
         self.copy_to(clipboard::Target::Primary, &text);
+        if self.model.settings.copy_on_select {
+            self.copy_to(clipboard::Target::Clipboard, &text);
+        }
     }
 
     /// Paste the primary selection at the composer's cursor. Middle click is

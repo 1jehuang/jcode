@@ -87,6 +87,10 @@ impl App {
                     .motion
                     .then(|| crate::donut::Donut::new(crate::DONUT_GRID));
             }
+            // Nothing to push: the next selection reads the flag directly, and
+            // copying whatever happens to be highlighted at the moment the row
+            // is toggled would be a surprise.
+            Row::CopyOnSelect => {}
         }
     }
 
