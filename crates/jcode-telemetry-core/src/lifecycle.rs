@@ -27,6 +27,7 @@ pub(super) fn emit_lifecycle_event(
         let state = match guard.as_ref() {
             Some(s) => SessionTelemetry {
                 session_id: s.session_id.clone(),
+                correlation_id: s.correlation_id.clone(),
                 started_at: s.started_at,
                 started_at_utc: s.started_at_utc,
                 provider_start: s.provider_start.clone(),
@@ -134,6 +135,7 @@ pub(super) fn emit_lifecycle_event(
                 error_rate_limited: s.error_rate_limited,
                 provider_switches: s.provider_switches,
                 model_switches: s.model_switches,
+                todo: s.todo.clone(),
             },
             None => return,
         };
@@ -192,6 +194,15 @@ pub(super) fn emit_lifecycle_event(
     let agent_role = infer_agent_role(&state);
     let time_to_first_agent_action_ms = time_to_first_agent_action_ms(&state);
     let time_to_first_useful_action_ms = time_to_first_useful_action_ms(&state);
+    let todo_event = todo_session_event(
+        &state,
+        reason,
+        schema_version,
+        build_channel.clone(),
+        git_checkout,
+        ci,
+        from_cargo,
+    );
     let event = SessionLifecycleEvent {
         event_id: new_event_id(),
         id,
@@ -340,8 +351,60 @@ pub(super) fn emit_lifecycle_event(
     if let Ok(payload) = serde_json::to_value(&event) {
         let _ = send_payload(payload, DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT));
     }
+    if let Ok(payload) = serde_json::to_value(&todo_event) {
+        let _ = send_payload(payload, DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT));
+    }
     unregister_active_session(&state.session_id);
     if session_success {
         emit_onboarding_step_once("first_session_success", None, None);
+    }
+}
+
+pub(super) fn todo_session_event(
+    state: &SessionTelemetry,
+    reason: SessionEndReason,
+    schema_version: u32,
+    build_channel: String,
+    is_git_checkout: bool,
+    is_ci: bool,
+    ran_from_cargo: bool,
+) -> TodoSessionEvent {
+    let todo = &state.todo;
+    TodoSessionEvent {
+        event_id: new_event_id(),
+        id: state.correlation_id.clone(),
+        correlation_id: state.correlation_id.clone(),
+        event: "todo_session",
+        version: version(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        session_end_reason: reason.as_str(),
+        todos_created: todo.todos_created,
+        todos_completed: todo.todos_completed,
+        todos_abandoned: todo.abandoned(),
+        todo_updates: todo.todo_updates,
+        groups_completed: todo.groups_completed,
+        groups_total: todo.groups_total,
+        max_todo_list_size: todo.max_todo_list_size,
+        confidence_min: todo.confidence.min,
+        confidence_mean: todo.confidence.mean,
+        confidence_count: todo.confidence.count,
+        completion_confidence_min: todo.completion_confidence.min,
+        completion_confidence_mean: todo.completion_confidence.mean,
+        completion_confidence_count: todo.completion_confidence.count,
+        understands_user_intent_min: todo.understands_user_intent.min,
+        understands_user_intent_mean: todo.understands_user_intent.mean,
+        understands_user_intent_count: todo.understands_user_intent.count,
+        closed_feedback_loop_min: todo.closed_feedback_loop.min,
+        closed_feedback_loop_mean: todo.closed_feedback_loop.mean,
+        closed_feedback_loop_count: todo.closed_feedback_loop.count,
+        end_to_end_ownership_min: todo.end_to_end_ownership.min,
+        end_to_end_ownership_mean: todo.end_to_end_ownership.mean,
+        end_to_end_ownership_count: todo.end_to_end_ownership.count,
+        schema_version,
+        build_channel,
+        is_git_checkout,
+        is_ci,
+        ran_from_cargo,
     }
 }

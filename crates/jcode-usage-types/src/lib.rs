@@ -461,6 +461,52 @@ pub struct DiscoveryEvent {
     pub ran_from_cargo: bool,
 }
 
+/// Privacy-safe todo progress for one runtime session.
+///
+/// `id` is deliberately the same fresh, session-scoped UUID as
+/// `correlation_id`, not the install's persistent telemetry ID. This lets the
+/// receiving telemetry worker join the aggregate to discovery API requests
+/// without linking either side to an install or account. Todo, goal, plan, and
+/// feedback-loop text are intentionally not representable in this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoSessionEvent {
+    pub event_id: String,
+    pub id: String,
+    pub correlation_id: String,
+    pub event: &'static str,
+    pub version: String,
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub session_end_reason: &'static str,
+    pub todos_created: u32,
+    pub todos_completed: u32,
+    pub todos_abandoned: u32,
+    pub todo_updates: u32,
+    pub groups_completed: u32,
+    pub groups_total: u32,
+    pub max_todo_list_size: u32,
+    pub confidence_min: Option<u8>,
+    pub confidence_mean: Option<f64>,
+    pub confidence_count: u32,
+    pub completion_confidence_min: Option<u8>,
+    pub completion_confidence_mean: Option<f64>,
+    pub completion_confidence_count: u32,
+    pub understands_user_intent_min: Option<u8>,
+    pub understands_user_intent_mean: Option<f64>,
+    pub understands_user_intent_count: u32,
+    pub closed_feedback_loop_min: Option<u8>,
+    pub closed_feedback_loop_mean: Option<f64>,
+    pub closed_feedback_loop_count: u32,
+    pub end_to_end_ownership_min: Option<u8>,
+    pub end_to_end_ownership_mean: Option<f64>,
+    pub end_to_end_ownership_count: u32,
+    pub schema_version: u32,
+    pub build_channel: String,
+    pub is_git_checkout: bool,
+    pub is_ci: bool,
+    pub ran_from_cargo: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionLifecycleEvent {
     pub event_id: String,
