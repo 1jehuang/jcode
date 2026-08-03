@@ -795,7 +795,7 @@ impl App {
                 }
                 None if !self
                     .frame
-                    .resume_card()
+                    .resume_card_for(self.model.resume.rows().len())
                     .contains(vello::kurbo::Point::new(x, y)) =>
                 {
                     self.apply_resume(keymap::Action::ResumeCancel, None);
