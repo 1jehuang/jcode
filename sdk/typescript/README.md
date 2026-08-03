@@ -284,6 +284,11 @@ added after your version. A frame of unknown kind is delivered as
 `ev: string` widens the discriminant, and TypeScript then refuses to narrow any
 case, typing every field as `unknown`.
 
+## Releasing
+
+See [RELEASING.md](RELEASING.md). `bash scripts/sdk_publish_preflight.sh` runs
+every gate and reports what is left.
+
 ## Development
 
 ```bash
