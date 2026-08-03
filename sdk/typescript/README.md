@@ -26,8 +26,12 @@ npm run build
 
 ## Requirements
 
-jcode must be installed, and its API bridge running. The bridge ships in the
-released binary, so no Rust toolchain is needed:
+jcode must be installed, and Node 20 or newer, on macOS or Linux. Windows is
+not supported yet, because the API is served over a Unix socket.
+
+`launch()` needs nothing else: it starts its own daemon and bridge. `connect()`
+needs a bridge already running, which the user starts once and leaves running.
+The bridge ships in the released binary, so no Rust toolchain is needed:
 
 ```bash
 jcode api-bridge
@@ -35,7 +39,7 @@ jcode api-bridge
 
 It starts the jcode server if one is not already up, then exposes the API
 socket (`$XDG_RUNTIME_DIR/jcode-api.sock`) and translates onto the internal
-daemon socket. Leave it running while your client is connected.
+daemon socket. The socket is owner-only, matching the daemon socket it fronts.
 
 Use `--api-socket <path>` to listen elsewhere, and set `JCODE_API_SOCKET` to
 the same path in your client. (The global `--socket` selects the *internal
@@ -67,10 +71,13 @@ terminal, and it needs a bridge already running (`jcode api-bridge`).
 
 ## Quick start
 
+Swap `launch` for `connect` to drive the user's own jcode instead of a private
+instance; everything after that line is identical.
+
 ```ts
 import { JcodeClient } from "@jcode/sdk";
 
-const client = await JcodeClient.connect({ clientName: "my-app/1.0" });
+const client = await JcodeClient.launch({ workingDir: process.cwd() });
 
 const session = await client.createSession(process.cwd());
 const turn = await client.run(session.session_id, "What files are in src/?", {
