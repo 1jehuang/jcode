@@ -26,6 +26,7 @@ struct Capability {
 
 /// The shared surface. Adding a capability means adding it here first.
 const CAPABILITIES: &[Capability] = &[
+    cap("connect", "connect"),
     cap("list_sessions", "listSessions"),
     cap("create_session", "createSession"),
     cap("attach_session", "attachSession"),
@@ -119,18 +120,106 @@ fn neither_sdk_has_an_untriaged_public_capability() {
          its TypeScript counterpart, or to RUST_ONLY with a comment saying why \
          it is Rust-specific."
     );
+
+    let Some(ts) = ts_public_methods() else {
+        return;
+    };
+    let known: std::collections::BTreeSet<&str> = CAPABILITIES.iter().map(|c| c.ts).collect();
+    let untriaged: Vec<&String> = ts
+        .iter()
+        .filter(|name| !known.contains(name.as_str()))
+        .filter(|name| !TS_ONLY.iter().any(|(allowed, _)| allowed == &name.as_str()))
+        .collect();
+    assert!(
+        untriaged.is_empty(),
+        "these public JcodeClient methods are in the TypeScript SDK but not in the \
+         shared capability list: {untriaged:?}. Add each to CAPABILITIES and the \
+         Rust SDK, or to TS_ONLY with a reason when it is genuinely language-specific."
+    );
+
+    if !TS_ONLY.is_empty() {
+        eprintln!(
+            "warning: SDK parity has {} explicitly triaged TypeScript-only methods: {}",
+            TS_ONLY.len(),
+            TS_ONLY
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 }
 
 /// Rust-specific members, with the reason each one is not mirrored.
 const RUST_ONLY: &[&str] = &[
-    // Rust needs an explicit constructor pair where TS uses static factories
-    // with optional args; `connect_with` is the transport seam tests use.
-    "connect",
+    // `connect_with` is the explicit transport seam Rust tests use; TypeScript
+    // accepts its transport through the options passed to `connect`.
     "connect_with",
     // `Drop` closes the connection in Rust, so there is no `close()` to mirror.
     "is_closed",
     // TS reads `client.socketPath` as a field; Rust exposes it as an accessor.
     "socket_path",
+];
+
+/// Public TypeScript methods not yet represented by an equivalent Rust method.
+///
+/// This is intentionally noisy technical debt, not a second capability list.
+/// New TS methods fail the parity test unless they are implemented in Rust or
+/// added here with a reviewable reason. Removing entries is the parity roadmap.
+const TS_ONLY: &[(&str, &str)] = &[
+    (
+        "launch",
+        "TS provisions an isolated child instance; Rust currently only ensures the user runtime",
+    ),
+    ("close", "Rust closes through Drop"),
+    (
+        "archiveSession",
+        "Rust SDK does not yet expose session archival",
+    ),
+    (
+        "restoreSession",
+        "Rust SDK does not yet expose session restoration",
+    ),
+    (
+        "setRetentionPolicy",
+        "Rust SDK does not yet expose retention policy",
+    ),
+    (
+        "getRuntimeInfo",
+        "Rust SDK does not yet expose runtime introspection",
+    ),
+    (
+        "setApiKey",
+        "Rust SDK does not yet expose credential provisioning",
+    ),
+    (
+        "clearApiKey",
+        "Rust SDK does not yet expose credential removal",
+    ),
+    (
+        "readFile",
+        "Rust SDK does not yet expose session-rooted file reads",
+    ),
+    (
+        "findFiles",
+        "Rust SDK does not yet expose session-rooted file discovery",
+    ),
+    (
+        "searchText",
+        "Rust SDK does not yet expose session-rooted text search",
+    ),
+    (
+        "fileStatus",
+        "Rust SDK does not yet expose session-rooted file status",
+    ),
+    (
+        "globalEvents",
+        "Rust has an all-session event filter but not TS reconnecting global events",
+    ),
+    (
+        "runStructured",
+        "Rust SDK does not yet expose schema-validated structured output",
+    ),
 ];
 
 fn rust_client_source() -> String {
@@ -164,4 +253,37 @@ fn rust_public_methods() -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Public method names in the TypeScript `JcodeClient` class.
+///
+/// Methods are two-space-indented in this file. Private helpers are explicitly
+/// excluded and overloads are deduplicated. Keeping this small parser here makes
+/// the guard run under ordinary `cargo test`, without requiring Node or a TS AST.
+fn ts_public_methods() -> Option<Vec<String>> {
+    let source = ts_client_source()?;
+    let start = source.find("export class JcodeClient")?;
+    let mut methods = std::collections::BTreeSet::new();
+    for line in source[start..].lines() {
+        let Some(mut declaration) = line.strip_prefix("  ") else {
+            continue;
+        };
+        if declaration.starts_with(' ') || declaration.starts_with("private ") {
+            continue;
+        }
+        declaration = declaration.strip_prefix("static ").unwrap_or(declaration);
+        declaration = declaration.strip_prefix("async ").unwrap_or(declaration);
+        let Some(open) = declaration.find('(') else {
+            continue;
+        };
+        let name = &declaration[..open];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+        {
+            methods.insert(name.to_string());
+        }
+    }
+    Some(methods.into_iter().collect())
 }
