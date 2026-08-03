@@ -2108,7 +2108,7 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
         title: None,
         tool_data: Some(crate::message::ToolCall {
             id: "call_discovery".to_string(),
-            name: "discover_tools".to_string(),
+            name: "integration_tools".to_string(),
             input,
             intent: None,
             thought_signature: None,
@@ -2119,9 +2119,9 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
 #[test]
 fn render_tool_message_shows_discovery_browse_results_and_rationale() {
     let msg = discovery_message(
-        "Discoverable tools in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nBrowse request ID: `11111111-2222-4333-8444-555555555555`",
+        "Discoverable tools in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nSearch request ID: `11111111-2222-4333-8444-555555555555`",
         serde_json::json!({
-            "action": "browse",
+            "action": "search",
             "category": "payments",
             "query": "manage Stripe sandbox products and recurring prices",
             "reason": "the task needs test-mode catalog administration through scoped agent access"
@@ -2180,7 +2180,7 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
 fn batched_discovery_renders_without_disclosure_notice() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
-        content: "--- [1] discover_tools ---\nDiscoverable tools in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nBrowse request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
+        content: "--- [1] integration_tools ---\nAvailable integrations in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nSearch request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
         duration_secs: None,
         title: None,
@@ -2189,9 +2189,9 @@ fn batched_discovery_renders_without_disclosure_notice() {
             name: "batch".to_string(),
             input: serde_json::json!({
                 "tool_calls": [{
-                    "tool": "discover_tools",
+                    "tool": "integration_tools",
                     "parameters": {
-                        "action": "browse",
+                        "action": "search",
                         "category": "payments",
                         "query": "issue a capped virtual card",
                         "reason": "the task requires a payment instrument with a hard limit"
