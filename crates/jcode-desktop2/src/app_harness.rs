@@ -44,6 +44,7 @@ impl App {
                     session_id,
                     working_dir,
                 } => {
+                    let reconnected = self.model.failure.is_some();
                     self.model.status = format!("attached: {session_id}");
                     // A successful attach is the proof the failure is over: a
                     // reconnected window must not keep reporting the outage it
@@ -54,6 +55,9 @@ impl App {
                     self.model.strip.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
                     self.model.working_dir = working_dir;
+                    if reconnected {
+                        self.model.set_notice("reconnected");
+                    }
                     self.retitle();
                 }
                 harness::HarnessUpdate::Model { provider, model } => {
