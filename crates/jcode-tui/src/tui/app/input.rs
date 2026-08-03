@@ -1537,13 +1537,28 @@ impl App {
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }
+            let goals = crate::todo::load_goals(&self.session.id).unwrap_or_default();
+            let ownership_needs_followup =
+                !crate::todo::completed_groups_have_sufficient_ownership(&todos, &goals);
+            let gate_budget_left =
+                self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
+            if ownership_needs_followup && gate_budget_left {
+                self.todo_completion_gate_attempts =
+                    self.todo_completion_gate_attempts.saturating_add(1);
+                crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
+                self.push_display_message(DisplayMessage::system(
+                    "🔍 Checking end-to-end ownership before finishing...",
+                ));
+                self.queued_messages
+                    .push(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string());
+                self.pending_queued_dispatch = true;
+                return true;
+            }
             let confidence_summary = super::commands::todo_confidence_summary(&todos);
             let confidence_label =
                 super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
-            let gate_budget_left =
-                self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
             if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
                 && gate_budget_left
             {

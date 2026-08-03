@@ -2,11 +2,9 @@ use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
     GateObservation, GateObservationKind, LOW_CLOSED_FEEDBACK_LOOP, LOW_INTENT_UNDERSTANDING,
-    SEVERE_INTENT_MISUNDERSTANDING, TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
-    TODO_OWNERSHIP_CONTINUATION_MESSAGE, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
-    TodoPlan, TodoPlanChange, TodoPlanField, append_gate_observations, load_goals, load_plan,
-    load_todos, newly_completed_groups_have_sufficient_ownership, save_goals, save_plan,
-    save_todos,
+    SEVERE_INTENT_MISUNDERSTANDING, TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE, TodoGoal,
+    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    append_gate_observations, load_goals, load_plan, load_todos, save_goals, save_plan, save_todos,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -722,18 +720,6 @@ impl Tool for TodoTool {
                 let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
                 let plan = merge_plan(&stored_plan, params.plan);
-                if !newly_completed_groups_have_sufficient_ownership(&previous, &todos, &goals) {
-                    crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
-                    record_todo_telemetry(&previous, &previous, &stored_goals, &stored_plan);
-                    return build_todo_output(
-                        previous,
-                        stored_plan,
-                        stored_goals,
-                        None,
-                        None,
-                        [TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
-                    );
-                }
                 let (observations, nudges) =
                     record_reframe_observations(&plan, &goals, &todos, &previous);
                 for observation in &observations {
@@ -896,8 +882,8 @@ mod tests {
         assert!(alignment_description.contains("what the user actually wants"));
         assert!(alignment_description.contains("Score low when guessing"));
         // The detailed calibration rubric moved out of the always-on schema
-        // into the gate continuation messages, which are paid only when a
-        // write is rejected.
+        // into deferred turn-finish continuation messages, which are paid only
+        // when the completed turn needs another quality pass.
         for required_concept in [
             "requirement inventory",
             "outcomes, deliverables, constraints, prohibited actions",
@@ -1328,14 +1314,18 @@ mod tests {
             goals.clone(),
             None,
             None,
-            [TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
+            [crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string()],
         )
         .expect("ownership gate should produce a structured todo result");
 
         assert_eq!(output.title.as_deref(), Some("1 todos"));
         assert!(output.output.starts_with('['));
         assert!(output.output.contains("\"status\": \"in_progress\""));
-        assert!(output.output.contains(TODO_OWNERSHIP_CONTINUATION_MESSAGE));
+        assert!(
+            output
+                .output
+                .contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE)
+        );
         assert_eq!(
             output.metadata,
             Some(json!({"todos": todos, "plan": plan, "goals": goals}))
@@ -1445,6 +1435,59 @@ mod tests {
             .expect("both recorded points should be surfaced");
         assert!(digest.contains("started this work without understanding"));
         assert!(digest.contains("feedback loop"));
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[tokio::test]
+    async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "ownership-save-before-turn-gate";
+
+        let output = TodoTool::new()
+            .execute(
+                json!({
+                    "todos": [{
+                        "content": "ship the complete workflow",
+                        "status": "completed",
+                        "priority": "high",
+                        "id": "ship",
+                        "group": "release",
+                        "confidence": 100,
+                        "completion_confidence": 100,
+                    }],
+                    "goals": [{
+                        "group": "release",
+                        "closed_feedback_loop": 100,
+                        "feedback_loop": "run the end-to-end release check",
+                        "end_to_end_ownership": 95,
+                    }],
+                }),
+                test_ctx(session),
+            )
+            .await
+            .expect("low ownership must not reject the todo write");
+
+        let saved = load_todos(session).expect("completed todo should be persisted");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].status, "completed");
+        assert_eq!(
+            load_goals(session).expect("goal should be persisted")[0].end_to_end_ownership,
+            Some(95)
+        );
+        assert!(
+            !output
+                .output
+                .contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE),
+            "ownership is enforced after the turn, not by rejecting the write: {}",
+            output.output
+        );
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),

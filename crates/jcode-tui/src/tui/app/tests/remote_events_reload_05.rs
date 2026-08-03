@@ -196,6 +196,49 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
 }
 
 #[test]
+fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the complete workflow".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                group: Some("release".to_string()),
+                confidence: Some(100),
+                completion_confidence: Some(100),
+                confidence_history: vec![100],
+                ..Default::default()
+            }],
+        )
+        .expect("save completed todo");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                group: Some("release".to_string()),
+                end_to_end_ownership: Some(95),
+                closed_feedback_loop: Some(100),
+                feedback_loop: Some("run the end-to-end release check".to_string()),
+                ..Default::default()
+            }],
+        )
+        .expect("save low-ownership goal");
+
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].contains("end_to_end_ownership"));
+
+        let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
+        assert_eq!(saved[0].status, "completed");
+    });
+}
+
+#[test]
 fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
     let mut app = create_test_app();
     let session_id = format!("test-391-stale-{}", std::process::id());
