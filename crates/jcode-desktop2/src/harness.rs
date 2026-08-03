@@ -90,6 +90,10 @@ pub enum Command {
     Attach(String),
     /// Fetch the tail of another session without attaching to it.
     Peek(String),
+    /// Start a fresh session and attach to it. Travels the same channel as
+    /// `Send` and `Attach` so a message typed just before it still lands in
+    /// the session the user was looking at when they typed it.
+    New,
 }
 
 /// The API socket both this app and the bridge agree on. Shared with the
@@ -352,6 +356,20 @@ fn run(
                         session_id: target,
                         limit: None,
                     },
+                    // The new session's id is not known until the daemon
+                    // replies, so retargeting waits for the `Attached` event
+                    // rather than being guessed here. Clearing the current id
+                    // in the meantime is deliberate: a message sent into that
+                    // gap is dropped rather than landing in the session the
+                    // user just asked to leave.
+                    Command::New => {
+                        if let Ok(mut guard) = session_id.lock() {
+                            guard.clear();
+                        }
+                        ApiRequest::CreateSession {
+                            working_dir: default_working_dir(),
+                        }
+                    }
                 };
                 let frame = ClientFrame::new(writer_ids.fetch_add(1, Ordering::Relaxed), request);
                 if write_frame(&mut writer_stream, &frame).is_err() {

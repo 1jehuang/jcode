@@ -21,10 +21,11 @@ pub enum Row {
     Theme,
     Reasoning,
     Motion,
+    CopyOnSelect,
 }
 
 /// Every row, in the order the panel draws them.
-pub const ROWS: &[Row] = &[Row::Theme, Row::Reasoning, Row::Motion];
+pub const ROWS: &[Row] = &[Row::Theme, Row::Reasoning, Row::Motion, Row::CopyOnSelect];
 
 impl Row {
     pub fn label(self) -> &'static str {
@@ -32,6 +33,7 @@ impl Row {
             Self::Theme => "theme",
             Self::Reasoning => "thinking",
             Self::Motion => "motion",
+            Self::CopyOnSelect => "copy on select",
         }
     }
 }
@@ -44,6 +46,13 @@ pub struct Settings {
     pub reasoning: ReasoningMode,
     /// Whether the hero donut animates. Off is the reduced-motion choice.
     pub motion: bool,
+    /// Whether highlighting text also writes it to the ordinary clipboard.
+    ///
+    /// Off by default: a selection always fills the primary selection, and
+    /// overwriting the real clipboard on every drag is destructive enough that
+    /// it has to be asked for. On, it is the terminal-style behaviour people
+    /// come here expecting.
+    pub copy_on_select: bool,
 }
 
 impl Default for Settings {
@@ -52,7 +61,23 @@ impl Default for Settings {
             theme: ThemeMode::System,
             reasoning: ReasoningMode::default(),
             motion: true,
+            copy_on_select: false,
         }
+    }
+}
+
+/// The word a boolean row shows.
+const fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+/// Parse a boolean row's saved value, tolerating the spellings a hand-edited
+/// file is likely to contain.
+fn parse_on_off(value: &str) -> Option<bool> {
+    match value {
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -66,13 +91,8 @@ impl Settings {
                 ThemeMode::System => "system",
             },
             Row::Reasoning => self.reasoning.label(),
-            Row::Motion => {
-                if self.motion {
-                    "on"
-                } else {
-                    "off"
-                }
-            }
+            Row::Motion => on_off(self.motion),
+            Row::CopyOnSelect => on_off(self.copy_on_select),
         }
     }
 
@@ -86,6 +106,7 @@ impl Settings {
             Row::Theme => self.theme = self.next_theme(system_dark),
             Row::Reasoning => self.reasoning = self.reasoning.cycle(),
             Row::Motion => self.motion = !self.motion,
+            Row::CopyOnSelect => self.copy_on_select = !self.copy_on_select,
         }
     }
 
@@ -131,15 +152,18 @@ impl Settings {
             theme: crate::theme::Theme::preference_from_env(),
             reasoning: ReasoningMode::from_env(),
             motion: !crate::donut_disabled(),
+            copy_on_select: std::env::var("JCODE_DESKTOP2_COPY_ON_SELECT")
+                .is_ok_and(|value| matches!(value.trim(), "1" | "on" | "true")),
         }
     }
 
     pub fn serialize(&self) -> String {
         format!(
-            "theme={}\nthinking={}\nmotion={}\n",
+            "theme={}\nthinking={}\nmotion={}\ncopy_on_select={}\n",
             self.value(Row::Theme),
             self.value(Row::Reasoning),
             self.value(Row::Motion),
+            self.value(Row::CopyOnSelect),
         )
     }
 
@@ -164,11 +188,16 @@ impl Settings {
                         settings.reasoning = mode;
                     }
                 }
-                "motion" => match value {
-                    "on" | "true" | "1" => settings.motion = true,
-                    "off" | "false" | "0" => settings.motion = false,
-                    _ => {}
-                },
+                "motion" => {
+                    if let Some(on) = parse_on_off(value) {
+                        settings.motion = on;
+                    }
+                }
+                "copy_on_select" => {
+                    if let Some(on) = parse_on_off(value) {
+                        settings.copy_on_select = on;
+                    }
+                }
                 _ => {}
             }
         }
