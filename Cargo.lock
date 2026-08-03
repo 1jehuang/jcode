@@ -3407,6 +3407,7 @@ dependencies = [
  "jcode-pdf",
  "jcode-plan",
  "jcode-provider-core",
+ "jcode-schema-dialect",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-setup-hints",
@@ -3823,6 +3824,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "jcode-provider-gemini",
+ "jcode-schema-dialect",
  "serde",
  "serde_json",
 ]
@@ -3839,6 +3841,7 @@ dependencies = [
  "jcode-provider-antigravity",
  "jcode-provider-core",
  "jcode-provider-gemini",
+ "jcode-schema-dialect",
  "reqwest 0.12.28",
  "serde_json",
  "tempfile",
@@ -4004,6 +4007,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jcode-message-types",
+ "jcode-schema-dialect",
  "serde",
  "serde_json",
 ]
@@ -4017,8 +4021,11 @@ dependencies = [
  "chrono",
  "jcode-base",
  "jcode-message-types",
+ "jcode-provider-antigravity",
  "jcode-provider-core",
  "jcode-provider-gemini",
+ "jcode-provider-openai",
+ "jcode-schema-dialect",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4119,6 +4126,16 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "unicode-width",
+]
+
+[[package]]
+name = "jcode-schema-dialect"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
