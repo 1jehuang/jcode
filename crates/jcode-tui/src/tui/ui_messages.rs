@@ -1600,6 +1600,38 @@ fn render_todo_goal_updates(
                     base_indent,
                     inner_width,
                 ),
+                crate::todo::TodoGoalField::Autonomy => push_todo_score_update(
+                    &mut lines,
+                    "Autonomy",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.autonomy)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.autonomy)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::IterationMaturity => push_todo_score_update(
+                    &mut lines,
+                    "Iteration",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.iteration_maturity)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.iteration_maturity)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
                 crate::todo::TodoGoalField::FeedbackLoop => push_todo_text_update(
                     &mut lines,
                     "Feedback",
