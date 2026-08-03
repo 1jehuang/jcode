@@ -7,10 +7,10 @@
 //! against a scripted server on a real socket pair.
 
 use jcode_harness_api::{
-    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, SessionInfo, read_frame,
-    write_frame,
+    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ModelRouteInfo, ServerFrame, SessionInfo,
+    TextMatch, read_frame, write_frame,
 };
-use jcode_sdk::{ConnectOptions, JcodeClient, Transport};
+use jcode_sdk::{ConnectOptions, JcodeClient, SearchTextOptions, Transport};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::channel;
@@ -109,6 +109,190 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
     assert!(
         !client.supports("permissions"),
         "a capability the server did not advertise must not be claimed"
+    );
+}
+
+/// GA session-management, runtime, credential, and file methods must preserve
+/// the stable protocol shapes while returning ergonomic SDK-owned values.
+#[test]
+fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&requests);
+    let routes = vec![
+        ModelRouteInfo {
+            model: "claude".to_string(),
+            provider: "anthropic".to_string(),
+            api_method: "messages".to_string(),
+            available: true,
+            detail: "ready".to_string(),
+        },
+        ModelRouteInfo {
+            model: "gemini".to_string(),
+            provider: "google".to_string(),
+            api_method: "generate_content".to_string(),
+            available: true,
+            detail: "ready".to_string(),
+        },
+    ];
+    let reply_routes = routes.clone();
+    let client = fake_harness(move |frame, writer| {
+        seen.lock()
+            .expect("request log")
+            .push(frame.request.clone());
+        let event = match &frame.request {
+            ApiRequest::ArchiveSession { .. }
+            | ApiRequest::RestoreSession { .. }
+            | ApiRequest::SetRetentionPolicy { .. } => ApiEvent::Ok,
+            ApiRequest::Ping => ApiEvent::Pong,
+            ApiRequest::GetRuntimeInfo { .. } => ApiEvent::RuntimeInfo {
+                session_id: "s1".to_string(),
+                provider: Some("anthropic".to_string()),
+                model: Some("claude".to_string()),
+                routes: reply_routes.clone(),
+            },
+            ApiRequest::SetApiKey { provider, .. } => ApiEvent::CredentialUpdated {
+                provider: provider.clone(),
+                configured: true,
+            },
+            ApiRequest::ClearApiKey { provider } => ApiEvent::CredentialUpdated {
+                provider: provider.clone(),
+                configured: false,
+            },
+            ApiRequest::ReadFile { .. } => ApiEvent::FileContent {
+                session_id: "s1".to_string(),
+                path: "src/a.rs".to_string(),
+                content: "hello".to_string(),
+                size: 8,
+                truncated: true,
+            },
+            ApiRequest::FindFiles { .. } => ApiEvent::Files {
+                session_id: "s1".to_string(),
+                paths: vec!["src/a.rs".to_string()],
+            },
+            ApiRequest::SearchText { .. } => ApiEvent::TextMatches {
+                session_id: "s1".to_string(),
+                matches: vec![TextMatch {
+                    path: "src/a.rs".to_string(),
+                    line: 2,
+                    column: 3,
+                    preview: "  hello".to_string(),
+                }],
+            },
+            ApiRequest::FileStatus { .. } => ApiEvent::FileStatus {
+                session_id: "s1".to_string(),
+                path: "src/a.rs".to_string(),
+                exists: true,
+                kind: "file".to_string(),
+                size: Some(8),
+                modified_ms: Some(123),
+            },
+            other => panic!("unexpected request: {other:?}"),
+        };
+        reply(frame, event, writer);
+    });
+
+    client.archive_session("s1").expect("archive");
+    client.restore_session("s1").expect("restore");
+    client
+        .set_retention_policy(Some(30))
+        .expect("retention policy");
+
+    let runtime = client.get_runtime_info("s1").expect("runtime info");
+    assert_eq!(runtime.server, "fake-harness/1.0");
+    assert_eq!(runtime.protocol_version, API_VERSION_MAJOR);
+    assert_eq!(runtime.capabilities, ["sessions"]);
+    assert!(runtime.healthy);
+    assert_eq!(runtime.session_id, "s1");
+    assert_eq!(runtime.provider.as_deref(), Some("anthropic"));
+    assert_eq!(runtime.model.as_deref(), Some("claude"));
+    assert_eq!(runtime.providers, ["anthropic", "google"]);
+    assert_eq!(runtime.routes, routes);
+
+    client.set_api_key("gemini-api", "secret").expect("set key");
+    client.clear_api_key("jcode").expect("clear key");
+
+    let content = client
+        .read_file("s1", "src/a.rs", Some(5))
+        .expect("read file");
+    assert_eq!(content.path, "src/a.rs");
+    assert_eq!(content.content, "hello");
+    assert_eq!(content.size, 8);
+    assert!(content.truncated);
+    assert_eq!(
+        client
+            .find_files("s1", "a.rs", Some(4))
+            .expect("find files"),
+        ["src/a.rs"]
+    );
+    assert_eq!(
+        client
+            .search_text(
+                "s1",
+                "hello",
+                SearchTextOptions {
+                    path: Some("src".to_string()),
+                    limit: Some(2),
+                },
+            )
+            .expect("search text"),
+        [TextMatch {
+            path: "src/a.rs".to_string(),
+            line: 2,
+            column: 3,
+            preview: "  hello".to_string(),
+        }]
+    );
+    let status = client.file_status("s1", "src/a.rs").expect("file status");
+    assert_eq!(status.path, "src/a.rs");
+    assert!(status.exists);
+    assert_eq!(status.kind, "file");
+    assert_eq!(status.size, Some(8));
+    assert_eq!(status.modified_ms, Some(123));
+
+    assert_eq!(
+        *requests.lock().expect("request log"),
+        vec![
+            ApiRequest::ArchiveSession {
+                session_id: "s1".to_string(),
+            },
+            ApiRequest::RestoreSession {
+                session_id: "s1".to_string(),
+            },
+            ApiRequest::SetRetentionPolicy {
+                archive_after_days: Some(30),
+            },
+            ApiRequest::Ping,
+            ApiRequest::GetRuntimeInfo {
+                session_id: "s1".to_string(),
+            },
+            ApiRequest::SetApiKey {
+                provider: "gemini-api".to_string(),
+                api_key: "secret".to_string(),
+            },
+            ApiRequest::ClearApiKey {
+                provider: "jcode".to_string(),
+            },
+            ApiRequest::ReadFile {
+                session_id: "s1".to_string(),
+                path: "src/a.rs".to_string(),
+                max_bytes: Some(5),
+            },
+            ApiRequest::FindFiles {
+                session_id: "s1".to_string(),
+                query: "a.rs".to_string(),
+                limit: Some(4),
+            },
+            ApiRequest::SearchText {
+                session_id: "s1".to_string(),
+                query: "hello".to_string(),
+                path: Some("src".to_string()),
+                limit: Some(2),
+            },
+            ApiRequest::FileStatus {
+                session_id: "s1".to_string(),
+                path: "src/a.rs".to_string(),
+            },
+        ]
     );
 }
 

@@ -30,8 +30,8 @@ mod launch;
 mod parity_tests;
 
 pub use client::{
-    ConnectOptions, EventStream, JcodeClient, RunOptions, ToolCall, Transport, TurnResult,
-    UnixTransport, Usage,
+    ConnectOptions, EventStream, FileContent, FileStatus, JcodeClient, RunOptions, RuntimeInfo,
+    SearchTextOptions, ToolCall, Transport, TurnResult, UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
@@ -40,5 +40,6 @@ pub use launch::{LaunchOptions, ensure_runtime, socket_accepts, wait_for_socket}
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
-    ApiEvent, ApiRequest, HistoryMessage, PermissionDecision, SessionInfo, api_socket_path,
+    ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, SessionInfo,
+    TextMatch, api_socket_path,
 };
