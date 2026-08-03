@@ -22,7 +22,10 @@ use jcode_harness_api::{API_VERSION_MAJOR, ApiEvent, ErrorCode, ServerFrame};
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+// Unix sockets on Unix, named pipes on Windows, one API. Without this the
+// bridge simply did not compile for Windows, so the SDK could not run there at
+// all.
+use jcode_transport::{Listener, Stream};
 
 // Socket paths live in `jcode-harness-api` so clients and the bridge can never
 // resolve different directories (they once did, and the desktop app could not
@@ -60,11 +63,17 @@ where
 
 /// Run the bridge accept loop forever.
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {
+    // A stale socket file blocks bind on Unix. On Windows there is no file to
+    // remove: the pipe namespace is not the filesystem.
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&api_socket);
     if let Some(parent) = api_socket.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let listener = UnixListener::bind(&api_socket)
+    // `mut` because the Windows named-pipe listener republishes a pipe
+    // instance on every accept, so accepting takes `&mut self`. Harmless on
+    // Unix, and it keeps one accept loop for both platforms.
+    let mut listener = Listener::bind(&api_socket)
         .with_context(|| format!("bind API socket {}", api_socket.display()))?;
     // Restrict the socket to its owner, matching the daemon socket it fronts.
     //
@@ -73,6 +82,9 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
     // any local user could drive sessions, read transcripts, and spend the
     // owner's provider tokens. A bridge must never be more permissive than
     // the thing it bridges to.
+    //
+    // Unix only: a Windows named pipe carries an ACL rather than a file mode,
+    // and the transport applies it when publishing the pipe.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -95,7 +107,7 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
     }
 }
 
-async fn handle_api_client(stream: UnixStream, legacy_socket: PathBuf) -> Result<()> {
+async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -146,7 +158,7 @@ async fn handle_api_client(stream: UnixStream, legacy_socket: PathBuf) -> Result
     write_json_line(&mut write_half, &hello_ok).await?;
 
     // 2. Dial the legacy daemon for this client.
-    let legacy = UnixStream::connect(&legacy_socket)
+    let legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let (legacy_read, mut legacy_write) = legacy.into_split();
