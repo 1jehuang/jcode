@@ -107,7 +107,49 @@ is reserved for transport faults.
 | `getHistory(id)` / `peekSession(id, limit?)` | Read a transcript (peek works unattached) |
 | `clear(id)` / `rewind(id, index)` | Edit history |
 | `respondToPermission(id, requestId, decision)` | Answer a permission prompt |
+| `listModels(id)` / `setModel(id, model)` | List and choose the session's model |
+| `setReasoningEffort(id, effort)` | Set the cost/quality dial |
+| `compact(id)` | Schedule transcript compaction to free context |
+| `renameSession(id, title?)` | Set a session title, or clear it |
+| `rewindUndo(id)` | Restore what the last `rewind` removed |
+| `cancelSoftInterrupts(id)` | Retract queued soft interrupts |
 | `ping()` | Liveness |
+
+## Models
+
+A client that cannot enumerate models cannot offer a picker, so the catalog is
+first-class. It is served from the push the daemon sends on attach, meaning
+opening a picker costs no round trip:
+
+```ts
+const { models, current } = await client.listModels(session.session_id);
+await client.setModel(session.session_id, "claude-opus-5");
+```
+
+An unknown model, or one the provider refuses, rejects with `invalid_request`
+rather than silently leaving the session where it was. When the model changes,
+every client attached to that session receives a `model_info` event, so a UI
+that did not make the change still updates.
+
+`setReasoningEffort(id, effort)` sets how much the model deliberates. The
+accepted values are per-provider (typically `minimal` through `max`), so this
+takes a string and reports what the provider says instead of guessing at a
+union that would go stale.
+
+## Long sessions
+
+`compact(id)` summarizes the transcript so far, freeing context. It is
+asynchronous: the daemon summarizes at the next safe point rather than
+interrupting a turn, so it resolving means the request was accepted, not that
+the transcript has already shrunk. Read the history afterwards for the result.
+Refusals (nothing to compact, a turn in flight) reject with the reason.
+
+```ts
+await client.renameSession(id, "nightly refactor");  // omit the title to clear it
+await client.rewind(id, 4);
+await client.rewindUndo(id);                          // rewind is reversible
+await client.cancelSoftInterrupts(id);                // retract what is queued
+```
 
 ## Configuration
 
@@ -141,6 +183,9 @@ it speaks.
   major.
 - **Additive changes are minor releases.** New events, new request fields, and
   new methods arrive in minors. Existing frames keep their shape.
+- **The API covers what real clients need.** A test diffs the API against every
+  request the terminal app makes and fails on an untriaged gap, so the surface
+  cannot quietly fall behind the app it mirrors.
 - **Drift is checked mechanically, in both directions.** A Rust test reads
   `src/protocol.ts` and fails if a variant *or a field* is missing here; a Node
   test reads the Rust enums and fails if the tag sets diverge. Neither side can
