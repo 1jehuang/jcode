@@ -25,6 +25,20 @@ pub enum ErrorKind {
     Transport,
     /// Starting a runtime (daemon or bridge) failed.
     LaunchFailed,
+    /// The configured jcode executable could not be started.
+    JcodeNotFound,
+    /// The private bridge exited before its socket became ready.
+    StartupFailed,
+    /// The private bridge did not become ready before its deadline.
+    StartupTimeout,
+    /// An instance home was unsafe or aliased the user's own home.
+    InvalidInstanceHome,
+    /// An option was outside its documented range.
+    InvalidOption,
+    /// An operation requires a cloneable native socket transport.
+    UnsupportedTransport,
+    /// A global event consumer fell behind its bounded queue.
+    EventBufferOverflow,
 }
 
 impl ErrorKind {
@@ -39,6 +53,13 @@ impl ErrorKind {
             Self::UnexpectedReply => "unexpected_reply",
             Self::Transport => "transport",
             Self::LaunchFailed => "launch_failed",
+            Self::JcodeNotFound => "jcode_not_found",
+            Self::StartupFailed => "startup_failed",
+            Self::StartupTimeout => "startup_timeout",
+            Self::InvalidInstanceHome => "invalid_instance_home",
+            Self::InvalidOption => "invalid_option",
+            Self::UnsupportedTransport => "unsupported_transport",
+            Self::EventBufferOverflow => "event_buffer_overflow",
             Self::Harness(code) => match code {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",

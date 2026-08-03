@@ -31,12 +31,16 @@ mod structured;
 mod parity_tests;
 
 pub use client::{
-    ConnectOptions, EventStream, FileContent, FileStatus, JcodeClient, RunOptions, RuntimeInfo,
-    SearchTextOptions, ToolCall, Transport, TurnResult, UnixTransport, Usage,
+    ConnectOptions, EventStream, FileContent, FileStatus, GlobalEventStream, GlobalEventsOptions,
+    JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall, Transport, TurnResult,
+    UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
-pub use launch::{LaunchOptions, ensure_runtime, socket_accepts, wait_for_socket};
+pub use launch::{
+    LaunchOptions, LaunchedInstance, ensure_runtime, inherit_credentials, launch_instance,
+    socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
+};
 pub use structured::{
     RunStructuredError, RunStructuredOptions, StructuredEventCallback, StructuredOutputAttempt,
     StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,
