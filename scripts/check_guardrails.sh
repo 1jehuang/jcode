@@ -101,6 +101,15 @@ run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_bu
 run_gate "desktop2 frame budget (state-space sweep)" \
     cargo test --profile selfdev -p jcode-desktop2 -j "$JOBS" profile:: -- --test-threads=1
 
+# Onboarding state-space invariants. The onboarding flow is a graph, and the
+# properties that keep users unstuck (no dead ends, every failure has a recovery
+# edge, an escape hatch everywhere, bounded keystrokes to a settled state) are
+# checkable in microseconds. Every onboarding bug we have shipped was a violated
+# invariant that nobody could see by reading one screen's code, so this gate is
+# cheap insurance against the whole class.
+run_gate "onboarding state-space invariants" \
+    cargo test --profile selfdev -p jcode-tui -j "$JOBS" onboarding_graph::
+
 if $SKIP_SLOW; then
     :
 elif command -v cargo-machete >/dev/null 2>&1; then

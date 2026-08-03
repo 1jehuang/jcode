@@ -1,12 +1,12 @@
 # Robust Onboarding: An Explicit State-Space Graph + Privacy-Preserving Trace Telemetry
 
-Status: design proposal
+Status: partially implemented (steps 1, 2, 5, 6 landed; see §5)
 Owner: onboarding
 Related code: `crates/jcode-tui/src/tui/app/onboarding_flow.rs`,
-`onboarding_flow_control.rs`, `onboarding_repair.rs`, `onboarding_sim.rs`,
-`crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs`,
-`crates/jcode-base/src/auth/{login_diagnostics,refresh_state,status_types}.rs`,
-`crates/jcode-telemetry-core/src/lib.rs`
+`onboarding_flow_control.rs`, `onboarding_graph.rs`, `onboarding_repair.rs`,
+`onboarding_sim.rs`, `crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs`,
+`crates/jcode-base/src/auth/{env_facts,login_diagnostics,refresh_state,status_types}.rs`,
+`crates/jcode-telemetry-core/src/{lib,onboarding_trace}.rs`
 
 ---
 
@@ -286,26 +286,41 @@ whack-a-mole:
 
 The existing code is in decent shape; this is mostly consolidation.
 
-1. **`CredState` enum + universal rejection fingerprints.** Small, self-contained,
-   fixes a live bug. Extend `auth-refresh-state.json` (already has the shape for
-   Claude) and derive every UI auth label from it. Ship first.
-2. **`EnvFacts` probe** as a standalone module with its own tests, initially used only
-   to *annotate* failures (compare probe result vs actual failure) to validate accuracy.
-3. **Extract the transition table.** Move the logic in `onboarding_flow_control.rs`
-   (1.7k lines) behind `step(node, ev) -> Transition`, keeping the current behavior
-   byte-identical; the golden tests in `onboarding_golden.rs` are the safety net.
-4. **Effect interpreter split.** Live interpreter + sim interpreter; delete the
-   hand-seeded phase list in `onboarding_sim.rs` (drift risk gone).
-5. **Invariant tests** over the graph; wire into `scripts/check_guardrails.sh`.
-6. **Trace telemetry** behind the existing consent tiers, `--dry-run` first, then
-   `NoContent` default.
-7. **Method selection from `EnvFacts`** (the table in 2.3) once probe accuracy is
-   proven in step 2.
+1. **`CredState` enum + universal rejection fingerprints.** *Landed.*
+   `auth::refresh_state::CredState` is the lifecycle in §2.2, and every OAuth
+   provider now records refresh outcomes through `record_refresh_outcome`, so no
+   provider can silently opt out of terminal rejection. `ensure_refresh_allowed`
+   is the guard callers use before spending a round-trip.
+2. **`EnvFacts` probe.** *Landed.* `auth::env_facts` probes tty, browser,
+   loopback bind, writable config, container, and proxy in under a millisecond,
+   with the §2.3 selection table tested exhaustively over the whole 3^5 fact
+   space. It is wired into `auth::browser_suppressed`, so a machine that
+   positively cannot use a browser skips straight to a device/paste flow instead
+   of waiting out a callback timeout.
+3. **Extract the transition table.** *Not started.* Move the logic in
+   `onboarding_flow_control.rs` (1.7k lines) behind `step(node, ev) ->
+   Transition`, keeping current behavior byte-identical; the golden tests in
+   `onboarding_golden.rs` are the safety net.
+4. **Effect interpreter split.** *Not started.* Live interpreter + sim
+   interpreter; deletes the hand-seeded phase list in `onboarding_sim.rs`.
+5. **Invariant tests.** *Landed.* `onboarding_graph.rs` declares the graph as
+   data (including the `EnvBlocked`, `LoginFailed`, and `CredRejected` states the
+   flow always had but never modelled) and `check_invariants` enforces the §2.4
+   properties. Wired into `scripts/check_guardrails.sh`.
+6. **Trace telemetry.** *Landed as a library.*
+   `jcode_telemetry_core::onboarding_trace` records traversals with bucketed
+   timings, a hard step cap, and a closed vocabulary enforced by a test that
+   walks the serialized payload and rejects any free text. Not yet emitted from
+   the live flow: that waits on step 3, which is what produces the edge events.
+7. **Method selection from `EnvFacts`.** *Partially landed* via
+   `browser_suppressed`; the full table drives only the browser/no-browser
+   decision so far, not device-code vs paste-callback.
 8. **Aggregation + k-anonymity** on the receiving side, plus a `steps-to-ready` /
-   `ready-rate` dashboard with an error budget.
+   `ready-rate` dashboard with an error budget. *Not started.*
 
 Rough ordering principle: every step is independently shippable and independently
-valuable, and steps 1 and 5 alone would have prevented both bugs visible in today's log.
+valuable, and steps 1 and 5 alone would have prevented both bugs visible in the
+log that prompted this document.
 
 ---
 

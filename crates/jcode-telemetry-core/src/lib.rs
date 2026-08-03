@@ -1,5 +1,6 @@
 use jcode_logging as logging;
 use jcode_storage as storage;
+pub mod onboarding_trace;
 mod lifecycle;
 mod state_support;
 use chrono::{DateTime, NaiveDate, Utc};
