@@ -1118,3 +1118,107 @@ async fn test_context_guard_refusal_reads_clearly_for_todays_regression() {
     assert!(result.output.contains("accept_large_output"));
     assert!(result.output.contains("paths_only"));
 }
+
+/// Tool that returns a fixed-size payload, for exercising the guard through the
+/// real `execute()` path rather than by calling the guard directly.
+struct BigOutputTool {
+    chars: usize,
+}
+
+#[async_trait]
+impl Tool for BigOutputTool {
+    fn name(&self) -> &str {
+        "big_output"
+    }
+
+    fn description(&self) -> &str {
+        "Returns a large fixed payload for context guard tests."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        Ok(ToolOutput::new("x".repeat(self.chars)))
+    }
+}
+
+async fn execute_big_output(input: Value) -> String {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let mut mgr = registry.compaction.write().await;
+        *mgr = CompactionManager::new().with_budget(10_000);
+    }
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 400_000 }),
+        )
+        .await;
+
+    let ctx = ToolContext {
+        session_id: "test-context-guard-execute".to_string(),
+        message_id: "test".to_string(),
+        tool_call_id: "test".to_string(),
+        working_dir: Some(std::env::temp_dir()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+
+    registry
+        .execute("big_output", input, ctx)
+        .await
+        .expect("tool should succeed")
+        .output
+}
+
+#[tokio::test]
+async fn test_execute_withholds_oversized_output_by_default() {
+    // The guard is only useful if it runs on the real call path. Every other
+    // test calls guard_context_overflow directly, which would still pass if the
+    // flag were never plumbed through execute().
+    let output = execute_big_output(serde_json::json!({ "intent": "test" })).await;
+    assert!(
+        output.contains("OUTPUT WITHHELD"),
+        "execute() must apply the guard, got: {output}"
+    );
+    assert!(
+        output.len() < 1_500,
+        "withheld output should be cheap, got {} chars",
+        output.len()
+    );
+}
+
+#[tokio::test]
+async fn test_execute_honors_accept_large_output_from_raw_input() {
+    // Proves the flag survives the trip through execute(): the tool itself never
+    // declares or reads `accept_large_output`, so this only works because the
+    // registry reads it off the raw input.
+    let output =
+        execute_big_output(serde_json::json!({ "intent": "test", "accept_large_output": true }))
+            .await;
+    assert!(
+        output.contains("OUTPUT TRUNCATED"),
+        "opt-in should return truncated payload, got: {}",
+        &output[..output.len().min(200)]
+    );
+    assert!(
+        output.starts_with(&"x".repeat(200)),
+        "opt-in must actually return payload"
+    );
+}
+
+#[tokio::test]
+async fn test_execute_ignores_a_non_boolean_accept_flag() {
+    // A truthy-looking value must not spend the window.
+    let output =
+        execute_big_output(serde_json::json!({ "intent": "test", "accept_large_output": 1 })).await;
+    assert!(
+        output.contains("OUTPUT WITHHELD"),
+        "numeric 1 must not opt in, got: {}",
+        &output[..output.len().min(200)]
+    );
+}
