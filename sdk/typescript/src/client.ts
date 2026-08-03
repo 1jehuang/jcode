@@ -135,6 +135,18 @@ export class JcodeClient extends EventEmitter {
   /** Capability strings advertised by the server. */
   capabilities: string[] = [];
 
+  /**
+   * Whether the server advertises a capability.
+   *
+   * Capabilities are how a client learns what this particular server can do
+   * before depending on it. `permissions`, for instance, is absent from the
+   * current bridge: it never issues permission prompts, so a client that waits
+   * for one waits forever. Check rather than assume.
+   */
+  supports(capability: string): boolean {
+    return this.capabilities.includes(capability);
+  }
+
   private constructor(transport: Transport, requestTimeoutMs: number) {
     super();
     this.setMaxListeners(0);
@@ -472,7 +484,12 @@ export class JcodeClient extends EventEmitter {
     options: {
       images?: ImageAttachment[];
       onEvent?: (event: ApiEvent) => void;
-      /** Auto-answer permission prompts; omit to handle them yourself. */
+      /**
+       * Auto-answer permission prompts.
+       *
+       * Only meaningful when the server advertises the `permissions`
+       * capability; otherwise no prompt is ever issued and this is a no-op.
+       */
       autoApprove?: boolean;
     } = {},
   ): Promise<TurnResult> {

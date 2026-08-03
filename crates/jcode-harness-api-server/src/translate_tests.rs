@@ -437,3 +437,116 @@ fn ping_after_attach_reaches_the_daemon() {
         other => panic!("expected a forwarded ping: {other:?}"),
     }
 }
+
+/// The daemon closes the connection on a stateful request that arrives before
+/// a subscribe. Forwarding one therefore does not just fail the request: it
+/// destroys the client's whole connection, taking every other in-flight
+/// request with it, and the SDK sees a bare EPIPE. Answer locally.
+#[test]
+fn stateful_requests_before_attach_are_refused_locally() {
+    for req in [
+        "send_message",
+        "cancel",
+        "soft_interrupt",
+        "clear",
+        "rewind",
+        "get_history",
+    ] {
+        let mut state = BridgeState::default();
+        let out = state.api_request_to_legacy(&json!({
+            "req": req,
+            "id": 7,
+            "session_id": "session_does_not_exist",
+        }));
+        assert_eq!(out.len(), 1, "{req} should produce exactly one reply");
+        let Outbound::Reply(frame) = &out[0] else {
+            panic!("{req} was forwarded to the daemon, which will close the connection");
+        };
+        assert_eq!(frame.reply_to, Some(7));
+        match &frame.event {
+            ApiEvent::Error { code, message } => {
+                assert_eq!(*code, ErrorCode::UnknownSession, "{req}");
+                assert!(
+                    message.contains("session_does_not_exist"),
+                    "{req} error should name the session: {message}"
+                );
+            }
+            other => panic!("{req} expected an error frame, got {other:?}"),
+        }
+    }
+}
+
+/// The legacy protocol has no session field, so a request naming a *different*
+/// session than the attached one would be applied to the attached one. A
+/// `clear` or `rewind` aimed at the wrong id would then destroy a transcript
+/// the caller never named.
+#[test]
+fn requests_for_another_session_do_not_hit_the_attached_one() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "clear",
+        "id": 9,
+        "session_id": "some_other_session",
+    }));
+    let Outbound::Reply(frame) = &out[0] else {
+        panic!("clear for another session must not reach the daemon");
+    };
+    match &frame.event {
+        ApiEvent::Error { code, message } => {
+            assert_eq!(*code, ErrorCode::UnknownSession);
+            assert!(message.contains("s1") && message.contains("some_other_session"));
+        }
+        other => panic!("expected an error frame, got {other:?}"),
+    }
+}
+
+/// The guard must not break the normal path: the attached session's own id,
+/// and an omitted id, both still reach the daemon.
+#[test]
+fn attached_requests_still_reach_the_daemon() {
+    let mut state = state_with_session();
+    let named = state.api_request_to_legacy(&json!({
+        "req": "get_history", "id": 1, "session_id": "s1",
+    }));
+    assert!(matches!(named[0], Outbound::Legacy(_)), "explicit id");
+
+    let bare = state.api_request_to_legacy(&json!({"req": "get_history", "id": 2}));
+    assert!(matches!(bare[0], Outbound::Legacy(_)), "omitted id");
+}
+
+/// Reading around without attaching is the entire point of `peek_session` and
+/// `list_sessions`, so the attach guard must leave them alone.
+#[test]
+fn browsing_requests_work_without_attaching() {
+    let mut state = BridgeState::default();
+    for req in ["list_sessions", "peek_session", "ping"] {
+        let out = state.api_request_to_legacy(&json!({
+            "req": req, "id": 1, "session_id": "whatever",
+        }));
+        let Outbound::Reply(frame) = &out[0] else {
+            panic!("{req} should be answered locally");
+        };
+        assert!(
+            !matches!(frame.event, ApiEvent::Error { .. }),
+            "{req} must not be refused by the attach guard: {:?}",
+            frame.event
+        );
+    }
+}
+
+/// A client may pipeline: `create_session` then `send_message` without
+/// awaiting the attach. The subscribe is already on the wire, so the daemon
+/// will have a session by the time the message lands. Refusing here would
+/// break the SDK's own `run()` path.
+#[test]
+fn a_message_pipelined_behind_create_session_is_forwarded() {
+    let mut state = BridgeState::default();
+    state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 2, "content": "hi",
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("a pipelined message must reach the daemon, not be refused");
+    };
+    assert_eq!(value["type"], "message");
+}

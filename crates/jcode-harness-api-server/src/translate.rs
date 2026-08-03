@@ -9,6 +9,19 @@ use jcode_harness_api::{ApiEvent, ErrorCode, HistoryMessage, ServerFrame, Sessio
 /// conversation it is, few enough that peeking a dozen sessions stays cheap.
 const PEEK_LIMIT: u64 = 12;
 
+/// Requests the daemon only accepts on an attached (subscribed) connection.
+///
+/// `peek_session` and `list_sessions` are deliberately absent: they are served
+/// from stored records precisely so a client can look around before attaching.
+const REQUIRES_ATTACH: &[&str] = &[
+    "send_message",
+    "cancel",
+    "soft_interrupt",
+    "clear",
+    "rewind",
+    "get_history",
+];
+
 /// Flatten a stored message's `content` to plain text.
 ///
 /// The daemon writes content either as a bare string or as an array of typed
@@ -84,6 +97,61 @@ impl BridgeState {
     pub fn api_request_to_legacy(&mut self, request: &Value) -> Vec<Outbound> {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
+
+        // Stateful requests only mean something once this connection is
+        // attached. Forwarding one before then is not merely useless: the
+        // daemon answers "Client must Subscribe with a working_dir before
+        // sending stateful requests" and *closes the connection*, so a client
+        // that mistypes a session id loses every other session it was
+        // streaming, and the SDK reports a bare EPIPE. Answer locally instead,
+        // with the code that actually says what went wrong.
+        // `pending_attach_id` means a subscribe is already on the wire, so the
+        // daemon will have a session by the time this arrives: a client that
+        // pipelines `create_session` and `send_message` without awaiting must
+        // still work. Only a connection that never asked to attach is refused.
+        if self.session_id.is_none()
+            && self.pending_attach_id.is_none()
+            && REQUIRES_ATTACH.contains(&req)
+        {
+            let requested = request["session_id"].as_str().unwrap_or("");
+            return vec![Outbound::Reply(ServerFrame::reply(
+                api_id,
+                ApiEvent::Error {
+                    code: ErrorCode::UnknownSession,
+                    message: if requested.is_empty() {
+                        format!(
+                            "`{req}` needs an attached session; call create_session or attach_session first"
+                        )
+                    } else {
+                        format!(
+                            "not attached to session `{requested}`; call attach_session first (it is not attached, or does not exist)"
+                        )
+                    },
+                },
+            ))];
+        }
+
+        // A request naming a session other than the attached one would be
+        // silently applied to the attached session, because the legacy
+        // protocol has no session field: `clear` on a typo'd id would wipe the
+        // wrong transcript. Refuse rather than destroy the wrong thing.
+        if let Some(attached) = self.session_id.as_deref()
+            && REQUIRES_ATTACH.contains(&req)
+            && let Some(requested) = request["session_id"].as_str()
+            && !requested.is_empty()
+            && requested != attached
+        {
+            return vec![Outbound::Reply(ServerFrame::reply(
+                api_id,
+                ApiEvent::Error {
+                    code: ErrorCode::UnknownSession,
+                    message: format!(
+                        "this connection is attached to `{attached}`, not `{requested}`; attach to it first or use another connection"
+                    ),
+                },
+            ))];
+        }
+
         match req {
             "create_session" | "attach_session" => {
                 let id = self.legacy_id();
@@ -247,13 +315,19 @@ impl BridgeState {
             }
             "detach_session" => vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok))],
             "permission_response" => {
-                // Permission flow is not yet exposed by the legacy protocol on
-                // this path. Surface a clear error instead of silence.
+                // The legacy protocol does not surface permission prompts on
+                // this path, so the bridge never emits `permission_request`
+                // and there is nothing for a response to answer. Say that,
+                // rather than "not supported", which reads like a bug the
+                // caller should work around. Clients discover this up front
+                // via the absence of the `permissions` capability in `hello`.
                 vec![Outbound::Reply(ServerFrame::reply(
                     api_id,
                     ApiEvent::Error {
                         code: ErrorCode::InvalidRequest,
-                        message: "permission_response not yet supported by bridge".into(),
+                        message: "this server does not issue permission prompts \
+                                  (no `permissions` capability), so there is nothing to respond to"
+                            .into(),
                     },
                 ))]
             }
