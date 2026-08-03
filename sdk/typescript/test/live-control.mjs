@@ -122,6 +122,39 @@ await step("peekSession works without attaching", async () => {
   other.close();
 });
 
+// A typo'd session id used to be forwarded to the daemon, which answered
+// "Client must Subscribe first" and *closed the connection*. Every other
+// in-flight request on it died, and the SDK reported a bare EPIPE. The whole
+// point is that one bad id costs one request, not the connection.
+await step("a bad session id fails that request only, not the connection", async () => {
+  const probe = await JcodeClient.connect({
+    clientName: "sdk-control-e2e-bad-id/0.1",
+    requestTimeoutMs: 20_000,
+  });
+  try {
+    for (const [name, call] of [
+      ["getHistory", () => probe.getHistory("session_does_not_exist")],
+      ["clear", () => probe.clear("session_does_not_exist")],
+      ["rewind", () => probe.rewind("session_does_not_exist", 1)],
+      ["cancel", () => probe.cancel("session_does_not_exist")],
+    ]) {
+      let code;
+      try {
+        await call();
+      } catch (error) {
+        code = error.code;
+      }
+      assert.equal(code, "unknown_session", `${name} should fail with unknown_session`);
+    }
+    // The connection must still be usable after all of those.
+    await probe.ping();
+    const session = await probe.createSession(process.cwd());
+    assert.ok(session.session_id, "should still be able to create a session");
+  } finally {
+    probe.close();
+  }
+});
+
 await step("detachSession is accepted", async () => {
   await client.detachSession(id);
 });
