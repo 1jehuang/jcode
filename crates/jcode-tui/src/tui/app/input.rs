@@ -1526,9 +1526,7 @@ impl App {
                 // very first todo-free turn: every later turn that *does*
                 // leave incomplete todos would never be poked. Stay armed and
                 // simply do nothing this turn.
-                crate::logging::info(
-                    "AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0",
-                );
+                crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
