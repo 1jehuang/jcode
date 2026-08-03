@@ -167,24 +167,57 @@ Protocol `error` frames arrive on the `harness_error` channel, not `error`.
 Node treats an unlistened `error` event as a fatal throw, so the plain channel
 is reserved for transport faults.
 
+### All-session events
+
+`globalEvents()` is the process-wide stream for dashboards and integrations. The
+bridge attaches one session per connection, so the SDK discovers every persisted
+session, opens one child connection for each, and fans their streams into one
+bounded iterator. Discovery repeats to include sessions created later.
+
+```ts
+const stop = new AbortController();
+for await (const event of client.globalEvents({ signal: stop.signal })) {
+  if ("session_id" in event) console.log(event.session_id, event.ev);
+}
+```
+
+Delivery is **at-least-from-attach**, not historical replay. Protocol v1 cannot
+recover events emitted before a child attaches or during an unexpected
+disconnect and reattach. Per-session order is preserved, but there is no total
+ordering across sessions. `return()`, aborting the signal, or closing the parent
+closes all children. The iterator fails with `event_buffer_overflow` rather than
+silently dropping events if its bounded queue fills. A custom `Transport` is
+rejected with `unsupported_transport` because it cannot be cloned safely into
+independent child connections. Set `discoveryIntervalMs: 0` for one initial
+discovery pass only.
+
 ## API surface
 
 | Method | Purpose |
 | --- | --- |
 | `JcodeClient.launch(options)` | Start a private instance and connect to it |
 | `JcodeClient.connect(options)` | Attach to the jcode already running on this machine |
-| `listSessions()` | Sessions visible to this client |
+| `listSessions({ includeArchived? })` | Every persisted session, optionally including archived sessions |
+| `archiveSession(id)` / `restoreSession(id)` | Reversibly hide or restore a session |
+| `setRetentionPolicy(days?)` | Auto-archive inactive sessions, or disable retention |
 | `createSession(workingDir?)` | Create and attach |
 | `attachSession(id)` / `detachSession(id)` | Subscribe / unsubscribe |
 | `sendMessage(id, content, images?)` | Send a user message (awaits `message_accepted`) |
 | `run(id, content, options?)` | Send and collect one full turn |
 | `runStructured(id, content, options)` | Send, validate JSON Schema output, and retry corrections |
 | `events(sessionId?)` | Async iterator over stream events |
+| `globalEvents(options?)` | Bounded fan-in stream over all persisted and newly created sessions |
 | `cancel(id)` / `softInterrupt(id, content, urgent?)` | Interrupt a turn |
 | `getHistory(id)` / `peekSession(id, limit?)` | Read a transcript (peek works unattached) |
 | `clear(id)` / `rewind(id, index)` | Edit history |
 | `respondToPermission(id, requestId, decision)` | Answer a permission prompt |
 | `listModels(id)` / `setModel(id, model)` | List and choose the session's model |
+| `getRuntimeInfo(id)` | Provider, model route, protocol, capability, and health metadata |
+| `setApiKey(provider, key)` / `clearApiKey(provider)` | Atomically provision or remove owner-only API-key files |
+| `readFile(id, path, maxBytes?)` | Read bounded UTF-8 text under the session root |
+| `findFiles(id, query, limit?)` | Find rooted files by path substring |
+| `searchText(id, query, options?)` | Bounded rooted literal text search |
+| `fileStatus(id, path)` | Read safe rooted file metadata |
 | `setReasoningEffort(id, effort)` | Set the cost/quality dial |
 | `compact(id)` | Schedule transcript compaction to free context |
 | `renameSession(id, title?)` | Set a session title, or clear it |
@@ -212,6 +245,27 @@ that did not make the change still updates.
 accepted values are per-provider (typically `minimal` through `max`), so this
 takes a string and reports what the provider says instead of guessing at a
 union that would go stale.
+
+`getRuntimeInfo(id)` adds the active provider/model, every available model route,
+the negotiated protocol version, advertised capability strings, and a live ping.
+API-key provisioning accepts the supported provider aliases, normalizes Gemini
+aliases to `gemini`, supports the jcode subscription key, writes owner-only files
+atomically, and asks the daemon to reload credentials. OAuth tokens are not part
+of this API.
+
+File methods are rooted at the persisted session working directory. Absolute
+paths, `..`, and symlink escapes are rejected. Directory walks do not follow
+symlinks and both file count and byte scanning are bounded. `readFile()` accepts
+UTF-8 text only and reports when its byte limit truncated the result.
+
+## Session archive and retention
+
+Archiving never deletes a transcript. It removes the session from the default
+`listSessions()` result and records an archive timestamp in owner-only state.
+Pass `includeArchived: true` to display and restore archived sessions.
+`setRetentionPolicy(days)` applies the same reversible archive operation to
+inactive persisted sessions when sessions are listed. Omit `days` to disable
+automatic retention.
 
 ## Long sessions
 
@@ -258,10 +312,9 @@ up for you:
 | `cleanupTimeoutMs` | How long `close()` spends removing an ephemeral home. Defaults to 30000. |
 | `inheritStderr` | Forward the instance's stderr to your process. Defaults to `false`. |
 
-A fixed `jcodeHome` persists transcripts on disk, but `listSessions()` reports
-only the sessions the daemon has announced to the current connection, so a
-fresh process starts with an empty list. Keep your own session ids and read
-them back with `peekSession(id)`, which is served from the stored record.
+A fixed `jcodeHome` persists transcripts on disk. `listSessions()` discovers
+those records even on a fresh, unattached connection, so a restarted process can
+rebuild its complete session index without keeping a separate id registry.
 
 ## Configuration
 
@@ -287,6 +340,8 @@ Every failure is a `HarnessError` with a `code`:
 | `timeout` | No reply within `requestTimeoutMs` (30s by default). |
 | `structured_schema_invalid` | `runStructured()` received an invalid JSON Schema. |
 | `structured_output_invalid` | The model did not produce valid structured output within the retry budget. |
+| `unsupported_transport` | `globalEvents()` was requested on a custom transport that cannot be cloned safely. |
+| `event_buffer_overflow` | A `globalEvents()` consumer fell behind its bounded queue. |
 | `unknown_session`, `invalid_request`, ... | Protocol errors relayed from the harness. |
 
 ## Stability

@@ -121,6 +121,8 @@ fn run_demo() {
                             title: Some("demo".into()),
                             status: "idle".into(),
                             transcript_bytes: None,
+                            archived: false,
+                            archived_at_ms: None,
                         },
                     },
                 )),

@@ -1,10 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { JcodeClient, HarnessError, NdjsonDecoder } from "../dist/index.js";
+import {
+  JcodeClient,
+  HarnessError,
+  NdjsonDecoder,
+  unixSocketTransport,
+} from "../dist/index.js";
 import { startMockHarness } from "./mock-harness.ts";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition was not met before timeout");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 test("ndjson decoder reassembles frames split across chunks", () => {
   const decoder = new NdjsonDecoder();
@@ -213,6 +226,17 @@ test("events() buffers while the consumer is busy and filters by session", async
   await server.close();
 });
 
+test("events() return settles a pending next call", async () => {
+  const server = await startMockHarness();
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const stream = client.events("s1");
+  const pending = stream.next();
+  await stream.return();
+  assert.deepEqual(await pending, { value: undefined, done: true });
+  await client.close();
+  await server.close();
+});
+
 test("unknown event kinds still surface on the generic channel", async () => {
   const server = await startMockHarness();
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
@@ -263,5 +287,293 @@ test("a stale socket file reports a dead bridge, not a missing one", async () =>
     );
   } finally {
     fs.rmSync(stale, { force: true });
+  }
+});
+
+test("GA methods send stable request shapes and map typed replies", async () => {
+  const requests: any[] = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      requests.push(request);
+      const reply = (frame: any) => send({ v: 1, reply_to: request.id, ...frame });
+      switch (request.req) {
+        case "list_sessions":
+          reply({
+            ev: "sessions",
+            sessions: [{ session_id: "s1", status: "idle", archived: true }],
+          });
+          break;
+        case "archive_session":
+        case "restore_session":
+        case "set_retention_policy":
+          reply({ ev: "ok" });
+          break;
+        case "ping":
+          reply({ ev: "pong" });
+          break;
+        case "get_runtime_info":
+          reply({
+            ev: "runtime_info",
+            session_id: "s1",
+            provider: "anthropic",
+            model: "claude",
+            routes: [
+              {
+                model: "claude",
+                provider: "anthropic",
+                api_method: "messages",
+                available: true,
+                detail: "ready",
+              },
+              {
+                model: "claude-fast",
+                provider: "anthropic",
+                api_method: "messages",
+                available: true,
+                detail: "ready",
+              },
+            ],
+          });
+          break;
+        case "set_api_key":
+          reply({ ev: "credential_updated", provider: "gemini", configured: true });
+          break;
+        case "clear_api_key":
+          reply({ ev: "credential_updated", provider: "jcode", configured: false });
+          break;
+        case "read_file":
+          reply({
+            ev: "file_content",
+            session_id: "s1",
+            path: "src/a.ts",
+            content: "hello",
+            size: 8,
+            truncated: true,
+          });
+          break;
+        case "find_files":
+          reply({ ev: "files", session_id: "s1", paths: ["src/a.ts"] });
+          break;
+        case "search_text":
+          reply({
+            ev: "text_matches",
+            session_id: "s1",
+            matches: [{ path: "src/a.ts", line: 2, column: 3, preview: "  hello" }],
+          });
+          break;
+        case "file_status":
+          reply({
+            ev: "file_status",
+            session_id: "s1",
+            path: "src/a.ts",
+            exists: true,
+            kind: "file",
+            size: 8,
+            modified_ms: 123,
+          });
+          break;
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    assert.deepEqual(await client.listSessions({ includeArchived: true }), [
+      { session_id: "s1", status: "idle", archived: true },
+    ]);
+    await client.archiveSession("s1");
+    await client.restoreSession("s1");
+    await client.setRetentionPolicy(30);
+
+    const runtime = await client.getRuntimeInfo("s1");
+    assert.equal(runtime.healthy, true);
+    assert.deepEqual(runtime.providers, ["anthropic"]);
+    assert.equal(runtime.routes.length, 2);
+
+    await client.setApiKey("gemini-api", "secret");
+    await client.clearApiKey("jcode");
+    assert.deepEqual(await client.readFile("s1", "src/a.ts", 5), {
+      path: "src/a.ts",
+      content: "hello",
+      size: 8,
+      truncated: true,
+    });
+    assert.deepEqual(await client.findFiles("s1", "a.ts", 4), ["src/a.ts"]);
+    assert.deepEqual(await client.searchText("s1", "hello", { path: "src", limit: 2 }), [
+      { path: "src/a.ts", line: 2, column: 3, preview: "  hello" },
+    ]);
+    assert.deepEqual(await client.fileStatus("s1", "src/a.ts"), {
+      path: "src/a.ts",
+      exists: true,
+      kind: "file",
+      size: 8,
+      modifiedMs: 123,
+    });
+
+    const byKind = (kind: string) => requests.find((request) => request.req === kind);
+    assert.equal(byKind("list_sessions").include_archived, true);
+    assert.equal(byKind("archive_session").session_id, "s1");
+    assert.equal(byKind("set_retention_policy").archive_after_days, 30);
+    assert.deepEqual(
+      {
+        provider: byKind("set_api_key").provider,
+        api_key: byKind("set_api_key").api_key,
+      },
+      { provider: "gemini-api", api_key: "secret" },
+    );
+    assert.equal(byKind("read_file").max_bytes, 5);
+    assert.deepEqual(
+      { path: byKind("search_text").path, limit: byKind("search_text").limit },
+      { path: "src", limit: 2 },
+    );
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("globalEvents discovers persisted and newly-created sessions and cleans up children", async () => {
+  const sessions = ["persisted-1", "persisted-2"];
+  const listRequests: any[] = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "list_sessions") {
+        listRequests.push(request);
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "sessions",
+          sessions: sessions.map((session_id) => ({ session_id, status: "idle" })),
+        });
+      } else if (request.req === "attach_session") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "attached",
+          session: { session_id: request.session_id, status: "attached" },
+        });
+        queueMicrotask(() =>
+          send({
+            v: 1,
+            ev: "text_delta",
+            session_id: request.session_id,
+            text: request.session_id,
+          }),
+        );
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const stream = client.globalEvents({ discoveryIntervalMs: 10 });
+  try {
+    const first = await stream.next();
+    const second = await stream.next();
+    assert.deepEqual(
+      new Set([first.value.session_id, second.value.session_id]),
+      new Set(["persisted-1", "persisted-2"]),
+    );
+    assert.equal(listRequests[0].include_archived, true);
+
+    sessions.push("new-3");
+    const third = await stream.next();
+    assert.equal(third.value.session_id, "new-3");
+    await waitFor(() => server.clientCount() === 4);
+
+    await stream.return();
+    await waitFor(() => server.clientCount() === 1);
+  } finally {
+    await stream.return();
+    await client.close();
+    await server.close();
+  }
+});
+
+test("globalEvents aborts a pending consumer and closes every child", async () => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "list_sessions") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "sessions",
+          sessions: [{ session_id: "s1", status: "idle" }],
+        });
+      } else if (request.req === "attach_session") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "attached",
+          session: { session_id: "s1", status: "attached" },
+        });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const abort = new AbortController();
+  const stream = client.globalEvents({ signal: abort.signal, discoveryIntervalMs: 0 });
+  try {
+    await waitFor(() => server.clientCount() === 2);
+    const pending = stream.next();
+    abort.abort();
+    assert.deepEqual(await pending, { value: undefined, done: true });
+    await waitFor(() => server.clientCount() === 1);
+  } finally {
+    await stream.return();
+    await client.close();
+    await server.close();
+  }
+});
+
+test("globalEvents fails loudly when its bounded event queue overflows", async () => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "list_sessions") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "sessions",
+          sessions: [{ session_id: "s1", status: "idle" }],
+        });
+      } else if (request.req === "attach_session") {
+        send({
+          v: 1,
+          reply_to: request.id,
+          ev: "attached",
+          session: { session_id: "s1", status: "attached" },
+        });
+        setTimeout(() => {
+          for (const text of ["one", "two"]) {
+            send({ v: 1, ev: "text_delta", session_id: "s1", text });
+          }
+        }, 10);
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const stream = client.globalEvents({ discoveryIntervalMs: 0, maxBufferedEvents: 1 });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await assert.rejects(
+      () => stream.next(),
+      (error: HarnessError) => error.code === "event_buffer_overflow",
+    );
+  } finally {
+    await stream.return();
+    await client.close();
+    await server.close();
+  }
+});
+
+test("globalEvents explicitly rejects custom transports", async () => {
+  const server = await startMockHarness();
+  const transport = await unixSocketTransport(server.socketPath);
+  const client = await JcodeClient.connect({ transport });
+  try {
+    assert.throws(
+      () => client.globalEvents(),
+      (error: HarnessError) => error.code === "unsupported_transport",
+    );
+  } finally {
+    await client.close();
+    await server.close();
   }
 });

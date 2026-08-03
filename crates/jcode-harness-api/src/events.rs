@@ -157,6 +157,52 @@ pub enum ApiEvent {
         current: Option<String>,
     },
 
+    /// Provider/runtime identity and every route the daemon currently exposes.
+    RuntimeInfo {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        routes: Vec<ModelRouteInfo>,
+    },
+
+    /// An API-key credential was persisted or removed.
+    CredentialUpdated { provider: String, configured: bool },
+
+    /// Reply to `ReadFile`.
+    FileContent {
+        session_id: String,
+        path: String,
+        content: String,
+        size: u64,
+        truncated: bool,
+    },
+
+    /// Reply to `FindFiles`.
+    Files {
+        session_id: String,
+        paths: Vec<String>,
+    },
+
+    /// Reply to `SearchText`.
+    TextMatches {
+        session_id: String,
+        matches: Vec<TextMatch>,
+    },
+
+    /// Reply to `FileStatus`.
+    FileStatus {
+        session_id: String,
+        path: String,
+        exists: bool,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modified_ms: Option<u64>,
+    },
+
     /// Reply to `Compact`: compaction was scheduled.
     ///
     /// Compaction is not synchronous. The daemon summarizes at the next safe
@@ -211,6 +257,28 @@ pub struct SessionInfo {
     /// could not determine it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_bytes: Option<u64>,
+    /// Archived sessions are hidden from the default list but never deleted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelRouteInfo {
+    pub model: String,
+    pub provider: String,
+    pub api_method: String,
+    pub available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextMatch {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub preview: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

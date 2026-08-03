@@ -25,8 +25,12 @@ export type { LaunchOptions, LaunchedInstance } from "./launch.js";
 export { JcodeClient, unixSocketTransport } from "./client.js";
 export type {
   ConnectOptions,
+  FileContent,
+  FileStatus,
+  GlobalEventsOptions,
   RunOptions,
   RunStructuredOptions,
+  RuntimeInfo,
   SendMessageOptions,
   StructuredTurnResult,
   Transport,

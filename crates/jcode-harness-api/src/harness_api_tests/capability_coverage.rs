@@ -49,7 +49,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetModelCatalog", Covered),
     ("InputShell", ClientInternal),
     ("Message", Covered),
-    ("NotifyAuthChanged", ClientInternal),
+    ("NotifyAuthChanged", Covered),
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),

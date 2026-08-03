@@ -26,6 +26,23 @@ export interface SessionInfo {
   status: string;
   /** Approximate size of the stored transcript, in bytes. */
   transcript_bytes?: number;
+  archived?: boolean;
+  archived_at_ms?: number;
+}
+
+export interface ModelRouteInfo {
+  model: string;
+  provider: string;
+  api_method: string;
+  available: boolean;
+  detail: string;
+}
+
+export interface TextMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
 }
 
 export interface HistoryMessage {
@@ -39,7 +56,10 @@ export type ImageAttachment = [string, string];
 
 export type ApiRequest =
   | { req: "hello"; min_version: number; max_version: number; client: string }
-  | { req: "list_sessions" }
+  | { req: "list_sessions"; include_archived?: boolean }
+  | { req: "archive_session"; session_id: string }
+  | { req: "restore_session"; session_id: string }
+  | { req: "set_retention_policy"; archive_after_days?: number }
   | { req: "create_session"; working_dir?: string }
   | { req: "attach_session"; session_id: string }
   | { req: "detach_session"; session_id: string }
@@ -68,6 +88,13 @@ export type ApiRequest =
       decision: PermissionDecision;
     }
   | { req: "list_models"; session_id: string }
+  | { req: "get_runtime_info"; session_id: string }
+  | { req: "set_api_key"; provider: string; api_key: string }
+  | { req: "clear_api_key"; provider: string }
+  | { req: "read_file"; session_id: string; path: string; max_bytes?: number }
+  | { req: "find_files"; session_id: string; query: string; limit?: number }
+  | { req: "search_text"; session_id: string; query: string; path?: string; limit?: number }
+  | { req: "file_status"; session_id: string; path: string }
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
@@ -126,6 +153,33 @@ export type ApiEvent =
   | { ev: "session_status"; session_id: string; status: string }
   | { ev: "model_info"; session_id: string; provider?: string; model?: string }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
+  | {
+      ev: "runtime_info";
+      session_id: string;
+      provider?: string;
+      model?: string;
+      routes: ModelRouteInfo[];
+    }
+  | { ev: "credential_updated"; provider: string; configured: boolean }
+  | {
+      ev: "file_content";
+      session_id: string;
+      path: string;
+      content: string;
+      size: number;
+      truncated: boolean;
+    }
+  | { ev: "files"; session_id: string; paths: string[] }
+  | { ev: "text_matches"; session_id: string; matches: TextMatch[] }
+  | {
+      ev: "file_status";
+      session_id: string;
+      path: string;
+      exists: boolean;
+      kind: string;
+      size?: number;
+      modified_ms?: number;
+    }
   | { ev: "compacted"; session_id: string; message: string }
   | {
       ev: "session_renamed";
@@ -188,6 +242,12 @@ export const KNOWN_EVENT_KINDS = [
   "session_status",
   "model_info",
   "models",
+  "runtime_info",
+  "credential_updated",
+  "file_content",
+  "files",
+  "text_matches",
+  "file_status",
   "compacted",
   "session_renamed",
 ] as const;
@@ -196,6 +256,9 @@ export const KNOWN_EVENT_KINDS = [
 export const KNOWN_REQUEST_KINDS = [
   "hello",
   "list_sessions",
+  "archive_session",
+  "restore_session",
+  "set_retention_policy",
   "create_session",
   "attach_session",
   "detach_session",
@@ -208,6 +271,13 @@ export const KNOWN_REQUEST_KINDS = [
   "rewind",
   "permission_response",
   "list_models",
+  "get_runtime_info",
+  "set_api_key",
+  "clear_api_key",
+  "read_file",
+  "find_files",
+  "search_text",
+  "file_status",
   "set_model",
   "set_reasoning_effort",
   "compact",
