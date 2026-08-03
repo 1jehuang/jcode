@@ -9,6 +9,20 @@ use std::path::{Path, PathBuf};
 pub const TOOL_INTENT_DESCRIPTION: &str =
     "Required short label shown in the UI: why this call is being made.";
 
+/// Input key a caller sets to accept the token cost of an oversized result.
+///
+/// The context guard withholds any tool result too large for the remaining
+/// context and states its token cost. Setting this repeats the call and spends
+/// that cost deliberately. Kept in sync with the registry constant of the same
+/// name, which reads the flag off raw tool input.
+pub const ACCEPT_LARGE_OUTPUT_KEY: &str = "accept_large_output";
+
+/// Deliberately terse: this rides on every tool schema on every request, so
+/// each word is paid forever. The full explanation lives in the refusal
+/// message, which is only ever shown when it is actually relevant.
+pub const ACCEPT_LARGE_OUTPUT_DESCRIPTION: &str =
+    "Re-run accepting the stated token cost of a withheld result.";
+
 pub fn intent_schema_property() -> Value {
     serde_json::json!({
         "type": "string",
@@ -16,10 +30,21 @@ pub fn intent_schema_property() -> Value {
     })
 }
 
+pub fn accept_large_output_schema_property() -> Value {
+    serde_json::json!({
+        "type": "boolean",
+        "description": ACCEPT_LARGE_OUTPUT_DESCRIPTION,
+    })
+}
+
 /// Ensure a tool parameter schema declares the shared `intent` property and
 /// marks it required. Applied centrally when converting tools to provider
 /// definitions so every tool (including MCP proxies) asks the model for an
 /// intent without each tool wiring it manually.
+///
+/// The optional `accept_large_output` escape hatch is added the same way. Any
+/// tool can produce a result too large to return, so documenting it per tool
+/// would mean editing dozens of schemas and missing MCP proxies entirely.
 pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
     let Some(object) = schema.as_object_mut() else {
         return schema;
@@ -41,6 +66,10 @@ pub fn ensure_intent_in_schema(mut schema: Value) -> Value {
         properties
             .entry("intent")
             .or_insert_with(intent_schema_property);
+        // Optional, so it is deliberately not added to `required`.
+        properties
+            .entry(ACCEPT_LARGE_OUTPUT_KEY)
+            .or_insert_with(accept_large_output_schema_property);
     } else {
         return schema;
     }
