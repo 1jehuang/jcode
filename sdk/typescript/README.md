@@ -68,6 +68,14 @@ no credentials cannot reach a model. Pass `inheritLogins: false` to start empty
 and supply your own. Pass `jcodeHome` to keep sessions across runs instead of
 using a temporary directory.
 
+Inheritance shares only recognized credential **files**, never whole config or
+tool directories. This keeps rotating OAuth tokens coherent without exposing
+unrelated transcripts and state, and instance cleanup cannot recurse into the
+user's credential directories. Temporary homes are owner-only and cleanup is
+restricted to SDK-created temp paths. The launched process still runs as the
+current OS user and can spend those accounts' quota, so disable inheritance
+when running untrusted application code (`inheritLogins: false`).
+
 **Automate the user's own jcode** (`connect`). Attaches to the jcode already
 running on the machine, sharing its live sessions. This is what an editor
 plugin or a status dashboard wants. Anything it does is visible in the user's
