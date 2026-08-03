@@ -550,3 +550,271 @@ fn a_message_pipelined_behind_create_session_is_forwarded() {
     };
     assert_eq!(value["type"], "message");
 }
+
+// --- Capabilities added to close the API coverage gaps --------------------
+
+/// The catalog arrives on attach, so a picker must open without a round trip.
+#[test]
+fn list_models_is_answered_from_the_cached_catalog() {
+    let mut state = state_with_session();
+    state.legacy_event_to_api(&json!({
+        "type": "available_models_updated",
+        "provider_model": "claude-opus-5",
+        "available_models": ["claude-opus-5", "claude-fable-5"],
+    }));
+
+    let out = state.api_request_to_legacy(&json!({"id": 9, "req": "list_models"}));
+    match &out[..] {
+        [Outbound::Reply(frame)] => match &frame.event {
+            ApiEvent::Models {
+                models, current, ..
+            } => {
+                assert_eq!(models, &["claude-opus-5", "claude-fable-5"]);
+                assert_eq!(current.as_deref(), Some("claude-opus-5"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        },
+        other => panic!("expected one local reply, got {other:?}"),
+    }
+}
+
+/// A client can ask before the catalog lands. Answering "no models" then would
+/// be a lie that empties its picker, so the request waits for the real answer.
+#[test]
+fn list_models_before_the_catalog_asks_the_daemon() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"id": 9, "req": "list_models"}));
+    match &out[..] {
+        [Outbound::Legacy(value)] => assert_eq!(value["type"], "get_model_catalog"),
+        other => panic!("expected a daemon round trip, got {other:?}"),
+    }
+
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "history", "id": legacy_id, "session_id": "s1",
+        "available_models": ["a", "b"], "provider_model": "a",
+    }));
+    match &frames[0].event {
+        ApiEvent::Models { models, .. } => assert_eq!(models, &["a", "b"]),
+        other => panic!("unexpected: {other:?}"),
+    }
+    assert_eq!(frames[0].reply_to, Some(9));
+}
+
+/// A switch must resolve the caller's request *and* tell every other client
+/// watching the session that the model moved under them.
+#[test]
+fn a_requested_model_change_replies_and_broadcasts() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "set_model", "model": "claude-fable-5",
+    }));
+    let legacy_id = match &out[..] {
+        [Outbound::Legacy(value)] => {
+            assert_eq!(value["type"], "set_model");
+            assert_eq!(value["model"], "claude-fable-5");
+            value["id"].as_u64().unwrap()
+        }
+        other => panic!("expected a daemon request, got {other:?}"),
+    };
+
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": legacy_id,
+        "model": "claude-fable-5", "provider_name": "anthropic",
+    }));
+    assert_eq!(frames.len(), 2, "expected a reply and a broadcast");
+    assert_eq!(frames[0].reply_to, Some(4));
+    assert!(matches!(frames[0].event, ApiEvent::Ok));
+    assert_eq!(frames[1].reply_to, None);
+    assert!(matches!(frames[1].event, ApiEvent::ModelInfo { .. }));
+    // The cache must follow, or a picker reopened after the switch is wrong.
+    assert_eq!(state.current_model.as_deref(), Some("claude-fable-5"));
+}
+
+/// The daemon reports a rejected switch in-band, on a success-shaped event.
+/// Reporting success there would leave the client's picker showing a model
+/// the session is not using.
+#[test]
+fn a_rejected_model_change_fails_the_request() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "set_model", "model": "nope",
+    }));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": legacy_id,
+        "model": "nope", "error": "unknown model",
+    }));
+    match &frames[..] {
+        [frame] => {
+            assert_eq!(frame.reply_to, Some(4));
+            match &frame.event {
+                ApiEvent::Error { code, message } => {
+                    assert_eq!(*code, ErrorCode::InvalidRequest);
+                    assert_eq!(message, "unknown model");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+        other => panic!("expected one error reply, got {other:?}"),
+    }
+    assert_eq!(
+        state.current_model, None,
+        "a failed switch must not be cached"
+    );
+}
+
+#[test]
+fn an_empty_model_is_refused_locally() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"id": 4, "req": "set_model", "model": ""}));
+    match &out[..] {
+        [Outbound::Reply(frame)] => {
+            assert!(matches!(frame.event, ApiEvent::Error { .. }));
+        }
+        other => panic!("expected a local rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn reasoning_effort_reports_provider_refusal() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 5, "req": "set_reasoning_effort", "effort": "max",
+    }));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["effort"], "max");
+            value["id"].as_u64().unwrap()
+        }
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": legacy_id,
+        "error": "provider does not support reasoning effort",
+    }));
+    assert_eq!(frames[0].reply_to, Some(5));
+    assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
+}
+
+/// Compaction can be refused (nothing to compact, a turn in flight) and the
+/// daemon says so with `success: false`, not an error frame. Telling the
+/// client "done" would claim work that never happened.
+#[test]
+fn a_refused_compaction_is_an_error_not_a_success() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"id": 6, "req": "compact"}));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "compact_result", "id": legacy_id,
+        "message": "nothing to compact", "success": false,
+    }));
+    match &frames[0].event {
+        ApiEvent::Error { message, .. } => assert_eq!(message, "nothing to compact"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn a_scheduled_compaction_reports_its_status() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"id": 6, "req": "compact"}));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "compact_result", "id": legacy_id,
+        "message": "compacting in the background", "success": true,
+    }));
+    match &frames[0].event {
+        ApiEvent::Compacted { message, .. } => assert_eq!(message, "compacting in the background"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Clearing a title is distinct from setting an empty one, so an absent title
+/// must not be sent as `""`, which the daemon would store as a real title.
+#[test]
+fn renaming_distinguishes_clearing_from_setting() {
+    let mut state = state_with_session();
+    let set = state.api_request_to_legacy(&json!({
+        "id": 7, "req": "rename_session", "title": "my session",
+    }));
+    match &set[0] {
+        Outbound::Legacy(value) => assert_eq!(value["title"], "my session"),
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let clear = state.api_request_to_legacy(&json!({"id": 8, "req": "rename_session"}));
+    match &clear[0] {
+        Outbound::Legacy(value) => assert!(
+            value.get("title").is_none(),
+            "a cleared title must be absent, not empty: {value}"
+        ),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rename_push_becomes_a_typed_event() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "session_renamed", "session_id": "s1",
+        "title": "my session", "display_title": "my session",
+    }));
+    match &frames[0].event {
+        ApiEvent::SessionRenamed {
+            session_id,
+            title,
+            display_title,
+        } => {
+            assert_eq!(session_id, "s1");
+            assert_eq!(title.as_deref(), Some("my session"));
+            assert_eq!(display_title, "my session");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Every capability request is stateful, so none may be forwarded before the
+/// connection is attached: the daemon closes the connection on those.
+#[test]
+fn capability_requests_need_an_attached_session() {
+    for (req, extra) in [
+        ("list_models", json!({})),
+        ("set_model", json!({"model": "x"})),
+        ("set_reasoning_effort", json!({"effort": "high"})),
+        ("compact", json!({})),
+        ("rename_session", json!({})),
+        ("rewind_undo", json!({})),
+        ("cancel_soft_interrupts", json!({})),
+    ] {
+        let mut state = BridgeState::default();
+        let mut request = json!({"id": 1, "req": req});
+        for (key, value) in extra.as_object().unwrap() {
+            request[key] = value.clone();
+        }
+        let out = state.api_request_to_legacy(&request);
+        match &out[..] {
+            [Outbound::Reply(frame)] => match &frame.event {
+                ApiEvent::Error { code, .. } => assert_eq!(
+                    *code,
+                    ErrorCode::UnknownSession,
+                    "{req} should report an unattached session"
+                ),
+                other => panic!("{req}: unexpected {other:?}"),
+            },
+            other => panic!("{req} reached the daemon unattached: {other:?}"),
+        }
+    }
+}
