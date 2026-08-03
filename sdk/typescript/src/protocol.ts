@@ -48,6 +48,7 @@ export type ApiRequest =
       session_id: string;
       content: string;
       images?: ImageAttachment[];
+      no_reply?: boolean;
     }
   | { req: "cancel"; session_id: string }
   | {

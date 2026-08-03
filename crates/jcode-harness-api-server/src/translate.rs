@@ -68,6 +68,9 @@ pub struct BridgeState {
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
+    /// Legacy and API ids for a context-only message. Its daemon completion
+    /// event is a request reply, not a model turn boundary.
+    pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
     pending_attach_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
@@ -226,12 +229,20 @@ impl BridgeState {
             }
             "send_message" => {
                 let id = self.legacy_id();
-                self.pending_message_id = Some(id);
+                let no_reply = request["no_reply"].as_bool().unwrap_or(false);
+                if no_reply {
+                    self.pending_no_reply_message_id = Some((id, api_id));
+                } else {
+                    self.pending_message_id = Some(id);
+                }
                 let mut message = json!({
                     "type": "message",
                     "id": id,
                     "content": request["content"].as_str().unwrap_or(""),
                 });
+                if no_reply {
+                    message["no_reply"] = json!(true);
+                }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()
                 {
@@ -552,6 +563,18 @@ impl BridgeState {
                     vec![]
                 }
             }
+            "context_message_added" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                if self
+                    .pending_no_reply_message_id
+                    .is_some_and(|(legacy_id, _)| legacy_id == id)
+                {
+                    let (_, api_id) = self.pending_no_reply_message_id.take().unwrap();
+                    vec![ServerFrame::reply(api_id, ApiEvent::Ok)]
+                } else {
+                    vec![]
+                }
+            }
             "pong" => self
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
                 .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Pong)])
@@ -741,12 +764,20 @@ impl BridgeState {
                 if self.pending_message_id == Some(id) {
                     self.pending_message_id = None;
                 }
+                let no_reply_api_id = self
+                    .pending_no_reply_message_id
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                    .map(|(_, api_id)| api_id);
+                if no_reply_api_id.is_some() {
+                    self.pending_no_reply_message_id = None;
+                }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = self
-                    .pending_simple
-                    .iter()
-                    .position(|(legacy_id, _, _)| *legacy_id == id)
-                    .map(|index| self.pending_simple.remove(index).1);
+                let reply_to = no_reply_api_id.or_else(|| {
+                    self.pending_simple
+                        .iter()
+                        .position(|(legacy_id, _, _)| *legacy_id == id)
+                        .map(|index| self.pending_simple.remove(index).1)
+                });
                 let frame_event = ApiEvent::Error {
                     code: ErrorCode::Internal,
                     message,

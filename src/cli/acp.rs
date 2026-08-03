@@ -593,6 +593,7 @@ impl AcpRuntime {
                 content: text,
                 images,
                 system_reminder: None,
+                no_reply: false,
             })
             .await;
         if let Err(err) = send_result {
