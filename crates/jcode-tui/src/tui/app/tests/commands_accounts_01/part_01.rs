@@ -651,6 +651,46 @@ fn test_fast_release_prompt_uses_selfdev_cache() {
 }
 
 #[test]
+fn test_fast_macos_release_command_uses_prepared_cross_build() {
+    let mut app = create_test_app();
+    app.input = "/fast-macos-release".to_string();
+    app.submit_input();
+
+    assert!(app.is_processing);
+    assert!(app.pending_turn);
+    let notice = app
+        .display_messages()
+        .last()
+        .expect("missing launch notice");
+    assert!(notice.content.contains("fast macOS release"));
+
+    let prompt = super::commands::build_fast_macos_release_prompt();
+    assert!(prompt.contains("quick-release.sh --prepare-fast-macos"));
+    assert!(prompt.contains("quick-release.sh --fast-macos-local"));
+    assert!(prompt.contains("macOS arm64"));
+    let prepare = prompt.find("--prepare-fast-macos").unwrap();
+    let bump = prompt.find("Bump the version").unwrap();
+    assert!(prepare < bump);
+}
+
+#[test]
+fn test_help_topic_shows_fast_macos_release_details() {
+    let mut app = create_test_app();
+    app.input = "/help fast-macos-release".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing help response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("/fast-macos-release"));
+    assert!(msg.content.contains("--prepare-fast-macos"));
+    assert!(msg.content.contains("--fast-macos-local"));
+    assert!(msg.content.contains("osxcross"));
+}
+
+#[test]
 fn test_remote_release_command_uses_tag_only_ci_path() {
     let mut app = create_test_app();
     app.input = "/remote-release".to_string();
