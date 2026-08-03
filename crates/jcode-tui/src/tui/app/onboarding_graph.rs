@@ -540,6 +540,39 @@ pub fn graph() -> Vec<Edge> {
     ]
 }
 
+/// Map a live [`OnboardingPhase`] onto its graph node.
+///
+/// This is what connects the description to the implementation: the running
+/// flow reports its transitions in graph terms, so a debug log (and, later, a
+/// telemetry trace) describes a path we can replay and check. Wildcard-free, so
+/// a new phase variant fails to compile until it has a node.
+pub fn node_for_phase(phase: &super::onboarding_flow::OnboardingPhase) -> NodeId {
+    use super::onboarding_flow::OnboardingPhase as P;
+    match phase {
+        P::Login { import: Some(_) } => NodeId::LoginImport,
+        P::Login { import: None } => NodeId::LoginRecovery,
+        P::LoginOpenAi { .. } => NodeId::LoginOpenAi,
+        P::ModelSelect => NodeId::ModelSelect,
+        P::ContinuePrompt { .. } => NodeId::ContinuePrompt,
+        P::StartChoice { .. } => NodeId::StartChoice,
+        P::Suggestions => NodeId::Suggestions,
+        P::Done => NodeId::Done,
+    }
+}
+
+/// Whether the live flow just took a transition the graph actually declares.
+///
+/// A `false` here means the running code and the written-down graph disagree,
+/// which is precisely the drift this module exists to catch. Callers log it
+/// rather than panicking: a mismatch is a bug in our model, and crashing a
+/// user's first run over a bookkeeping disagreement would be much worse than
+/// the bug itself.
+pub fn transition_is_declared(from: NodeId, to: NodeId) -> bool {
+    // A phase can be re-entered with different inner data (e.g. the import
+    // review advancing a candidate) without being a graph transition.
+    from == to || graph().iter().any(|e| e.from == from && e.to == to)
+}
+
 /// A violated structural property, with enough detail to fix it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Violation {
