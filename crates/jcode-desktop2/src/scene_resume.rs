@@ -20,10 +20,12 @@ use vello::kurbo::{Affine, Rect, RoundedRect};
 /// How far the page is dimmed behind the overlay. Lighter than the overview's
 /// veil: the overview replaces the page, while this one sits on it.
 const VEIL_OPACITY: f64 = 0.42;
-/// Opacity of the card itself over that veil. Not fully opaque, so the overlay
-/// reads as a sheet of glass laid on the conversation rather than as a
-/// separate screen.
-const CARD_OPACITY: f32 = 0.93;
+/// Opacity of the card itself over that veil.
+///
+/// All but opaque: the conversation shows *around* the card, not through it.
+/// A translucent card let the page's own words run behind the session rows,
+/// which is the one thing a list of names cannot survive.
+const CARD_OPACITY: f32 = 0.995;
 /// Indent of a session row under its project heading.
 const ROW_INDENT: f64 = 14.0;
 /// Leading for the preview's lines.
@@ -51,7 +53,8 @@ pub fn draw_resume(
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
 
-    let card = frame.resume_card();
+    let rows = model.resume.rows();
+    let card = frame.resume_card_for(rows.len());
     scene.fill(
         vello::peniko::Fill::NonZero,
         Affine::scale(scale),
@@ -67,8 +70,27 @@ pub fn draw_resume(
         &RoundedRect::from_rect(card, layout::RESUME_RADIUS),
     );
 
+    // A hairline between the list and the preview, so the two columns read as
+    // two things: without it the preview's first line looks like a very long
+    // session row.
+    if let Some(preview) = frame.resume_preview_for(rows.len()) {
+        let x = (frame.resume_panel_for(rows.len()).x1 + preview.x0) / 2.0;
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            Affine::scale(scale),
+            theme.rule,
+            None,
+            &Rect::new(
+                x,
+                card.y0 + layout::RESUME_PAD,
+                x + 1.0,
+                card.y1 - layout::RESUME_PAD,
+            ),
+        );
+    }
+
     draw_search(scene, text, model, frame, scale);
-    draw_list(scene, text, model, frame, scale);
+    draw_list(scene, text, model, &rows, frame, scale);
     draw_preview(scene, text, model, frame, scale);
 }
 
@@ -85,7 +107,7 @@ fn draw_search(
     scale: f64,
 ) {
     let theme = &model.theme;
-    let box_ = frame.resume_search();
+    let box_ = frame.resume_search_for(model.resume.rows().len());
     let query = model.resume.query();
     let (label, color) = match query.is_empty() {
         true => (
@@ -140,14 +162,14 @@ fn draw_list(
     scene: &mut Scene,
     text: &mut text::TextSystem,
     model: &Model,
+    rows: &[resume::Row],
     frame: &layout::Frame,
     scale: f64,
 ) {
     let theme = &model.theme;
-    let rows = model.resume.rows();
-    let visible = frame.resume_visible_rows();
+    let visible = frame.resume_visible_rows_for(rows.len());
     if rows.is_empty() {
-        let list = frame.resume_list();
+        let list = frame.resume_list_for(rows.len());
         let message = match model.resume.is_scanning() {
             true => "reading sessions...",
             false => "no stored sessions match",
@@ -168,7 +190,7 @@ fn draw_list(
     }
     let start = window_start(model.resume.cursor(), rows.len(), visible);
     for (slot, row) in rows.iter().skip(start).take(visible).enumerate() {
-        let band = frame.resume_row(slot);
+        let band = frame.resume_row_for(rows.len(), slot);
         let selected = start + slot == model.resume.cursor();
         if selected {
             scene.fill(
@@ -276,7 +298,7 @@ fn draw_preview(
     frame: &layout::Frame,
     scale: f64,
 ) {
-    let Some(region) = frame.resume_preview() else {
+    let Some(region) = frame.resume_preview_for(model.resume.rows().len()) else {
         return;
     };
     let theme = &model.theme;

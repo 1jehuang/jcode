@@ -170,12 +170,12 @@ impl App {
     /// the other, which is what keeps the row that lights up the row that
     /// fires.
     pub(crate) fn resume_row_under(&self, x: f64, y: f64) -> Option<usize> {
-        let slot = self.frame.resume_row_at(x, y)?;
         let total = self.model.resume.rows().len();
+        let slot = self.frame.resume_row_at(total, x, y)?;
         let start = crate::scene_resume::window_start(
             self.model.resume.cursor(),
             total,
-            self.frame.resume_visible_rows(),
+            self.frame.resume_visible_rows_for(total),
         );
         let row = start + slot;
         (row < total).then_some(row)

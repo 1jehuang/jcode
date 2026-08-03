@@ -39,6 +39,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--check-clipboard-image") => Some(check_clipboard_image()),
         Some("--check-primary-selection") => Some(check_primary_selection()),
         Some("--check-reconnect") => Some(check_reconnect()),
+        Some("--check-resume-scan") => Some(check_resume_scan()),
         Some("--e2e") => Some(run_e2e(
             args.get(1)
                 .map(String::as_str)
@@ -593,6 +594,63 @@ fn run_capture(args: &[String]) -> Result<()> {
 /// there accepting input into nothing. Checked against the real runtime because
 /// the bug was in the wiring, not in a pure function: attach, drop the bridge,
 /// then require both a reported failure and a re-attach to *the same* session.
+/// Scan the real session store the way Ctrl+R does, and report what it found.
+///
+/// A unit test scans a directory it wrote itself, which proves the parser and
+/// nothing about the store on this machine: record shapes have changed over
+/// months of sessions, and a picker that silently resolved no working
+/// directories would look like an empty store rather than a parse that stopped
+/// matching. This is the check that runs against the real thing.
+fn check_resume_scan() -> Result<()> {
+    let dir = crate::resume::sessions_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the session store: no HOME"))?;
+    let started = std::time::Instant::now();
+    let records = crate::resume::scan(&dir, crate::resume::SCAN_LIMIT);
+    let elapsed = started.elapsed();
+    if records.is_empty() {
+        anyhow::bail!("scanned {} and found no sessions", dir.display());
+    }
+    let picker = crate::resume::Picker::pinned(records.clone(), 0, "");
+    let rows = picker.rows();
+    let projects = rows
+        .iter()
+        .filter(|row| matches!(row, crate::resume::Row::Group { .. }))
+        .count();
+    let with_dir = records
+        .iter()
+        .filter(|record| record.working_dir.is_some())
+        .count();
+    println!(
+        "resume scan ok: {} sessions in {} projects from {} in {:.0}ms; {} resolved a directory",
+        records.len(),
+        projects,
+        dir.display(),
+        elapsed.as_secs_f64() * 1000.0,
+        with_dir,
+    );
+    for row in rows.iter().take(12) {
+        match row {
+            crate::resume::Row::Group { label, count, .. } => println!("  {label} ({count})"),
+            crate::resume::Row::Session { index } => {
+                if let Some(record) = records.get(*index) {
+                    println!(
+                        "    {} · {}",
+                        record.label(),
+                        crate::resume::human_bytes(record.bytes)
+                    );
+                }
+            }
+        }
+    }
+    // A store where nothing resolved a directory is a parse that stopped
+    // matching the records, not a user with no projects: the picker would file
+    // every session under "(unknown project)" and be useless.
+    if with_dir == 0 {
+        anyhow::bail!("no session resolved a working directory; the record shape may have changed");
+    }
+    Ok(())
+}
+
 fn check_reconnect() -> Result<()> {
     // Its own *bridge* socket, on the shared daemon. The check works by killing
     // the bridge, and the developer's live desktop windows talk to the shared
