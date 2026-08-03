@@ -379,10 +379,20 @@ fn test_pending_placeholder_line_detection() {
     assert!(!line_is_mermaid_pending_placeholder(&Line::from(
         "↗ mermaid diagram (image protocols unavailable)"
     )));
-    assert!(!line_is_mermaid_pending_placeholder(&Line::from(vec![
-        Span::raw(MERMAID_PENDING_PLACEHOLDER_TEXT),
-        Span::raw("extra content"),
+    // The wrapping pass splits a line into one span per word, so a placeholder
+    // that has been through it must still be recognized.
+    assert!(line_is_mermaid_pending_placeholder(&Line::from(vec![
+        Span::raw("\u{21bb}"),
+        Span::raw(" "),
+        Span::raw("rendering"),
+        Span::raw(" "),
+        Span::raw("math..."),
     ])));
+    // Real content that merely follows the placeholder text is not a
+    // placeholder line.
+    assert!(!line_is_mermaid_pending_placeholder(&Line::from(
+        "a sentence about rendering mermaid diagrams"
+    )));
 }
 
 /// A completed background mermaid render advances the deferred epoch without
