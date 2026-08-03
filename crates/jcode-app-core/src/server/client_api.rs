@@ -51,6 +51,7 @@ impl Client {
             content: content.to_string(),
             images: vec![],
             system_reminder: None,
+            no_reply: false,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

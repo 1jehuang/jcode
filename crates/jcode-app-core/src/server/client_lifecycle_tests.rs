@@ -1,5 +1,5 @@
 use super::*;
-use crate::message::{Message, StreamEvent, ToolDefinition};
+use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use futures::stream;
@@ -191,6 +191,92 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
         &client_event_tx,
     ));
     assert!(client_event_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn context_message_persists_without_starting_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_context_only_no_reply";
+    let forked = Arc::new(AtomicBool::new(false));
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::clone(&forked),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.model = Some("panic-on-fork".to_string());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let before = agent.lock().await.message_count();
+
+    append_context_message(
+        77,
+        "remember this context",
+        vec![("image/png".to_string(), "AAA".to_string())],
+        session_id,
+        false,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::ContextMessageAdded { id: 77 })
+    ));
+    assert!(client_event_rx.try_recv().is_err());
+    assert!(!forked.load(Ordering::SeqCst));
+
+    let persisted = crate::session::Session::load(session_id).expect("persisted session");
+    assert_eq!(persisted.messages.len(), before + 1);
+    let message = persisted.messages.last().unwrap();
+    assert_eq!(format!("{:?}", message.role), "User");
+    assert!(matches!(
+        &message.content[0],
+        ContentBlock::Image { media_type, data }
+            if media_type == "image/png" && data == "AAA"
+    ));
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::Text { text, .. } if text == "remember this context"
+    ));
+}
+
+#[tokio::test]
+async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let _busy_agent_lock = agent.lock().await;
+
+    tokio::time::timeout(Duration::from_millis(100), async {
+        append_context_message(
+            78,
+            "too busy",
+            Vec::new(),
+            "session_context_busy",
+            true,
+            &agent,
+            &client_event_tx,
+        )
+        .await;
+    })
+    .await
+    .expect("busy rejection must not wait for the agent mutex");
+
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Error {
+            id: 78,
+            retry_after_secs: Some(1),
+            ..
+        })
+    ));
 }
 
 #[tokio::test]

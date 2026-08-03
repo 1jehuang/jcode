@@ -128,3 +128,47 @@ fn repeated_failures_do_not_flood_the_page() {
         "a notice left the reveal running with nothing to reveal"
     );
 }
+
+/// A lost connection must name what was happening and what state the bridge is
+/// in. "disconnected: harness API stream closed" was the same sentence for a
+/// bridge that exited, a bridge that got replaced, and a failed attach.
+#[test]
+fn a_disconnect_names_the_stage_and_the_socket() {
+    let socket = std::path::Path::new("/run/user/1000/jcode-api.sock");
+    let replaced = harness::describe_disconnect(
+        harness::Stage::Streaming,
+        "harness API stream closed",
+        Some(std::time::Duration::from_secs(90)),
+        socket,
+        harness::SocketState::Listening,
+    );
+    assert!(replaced.contains("streaming the conversation"), "{replaced}");
+    assert!(replaced.contains("replacement bridge"), "{replaced}");
+    assert!(replaced.contains("1m30s"), "{replaced}");
+
+    let exited = harness::describe_disconnect(
+        harness::Stage::Attaching,
+        "harness API stream closed",
+        None,
+        socket,
+        harness::SocketState::Gone,
+    );
+    assert!(exited.contains("attaching a session"), "{exited}");
+    assert!(exited.contains("exited"), "{exited}");
+    assert!(exited.contains("jcode-api.sock"), "{exited}");
+
+    // An error that already explains itself is passed through, with the stage
+    // added; guessing a cause on top of a real one would be worse than nothing.
+    let offline = harness::describe_disconnect(
+        harness::Stage::Connecting,
+        "dns error: failed to lookup address information",
+        None,
+        socket,
+        harness::SocketState::Gone,
+    );
+    assert!(offline.contains("no network connection"), "{offline}");
+    assert!(
+        offline.contains("connecting to the harness API socket"),
+        "{offline}"
+    );
+}

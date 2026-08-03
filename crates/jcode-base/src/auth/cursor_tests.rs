@@ -132,6 +132,33 @@ fn cursor_auth_file_path_respects_jcode_home() {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn cursor_auth_file_path_does_not_escape_jcode_home_on_windows() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_appdata = std::env::var_os("APPDATA");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("APPDATA", r"C:\real-user-profile");
+
+    let path = cursor_auth_file_path().unwrap();
+
+    match old_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    match old_appdata {
+        Some(value) => crate::env::set_var("APPDATA", value),
+        None => crate::env::remove_var("APPDATA"),
+    }
+    assert_eq!(
+        path,
+        temp.path()
+            .join("external/AppData/Roaming/Cursor/auth.json")
+    );
+}
+
 #[test]
 fn cursor_vscdb_paths_respect_jcode_home() {
     let _guard = crate::storage::lock_test_env();

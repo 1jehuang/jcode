@@ -14,5 +14,31 @@
 export * from "./protocol.js";
 export * from "./sockets.js";
 export * from "./framing.js";
-export { JcodeClient, HarnessError, unixSocketTransport } from "./client.js";
-export type { ConnectOptions, Transport, TurnResult } from "./client.js";
+export { HarnessError } from "./errors.js";
+export {
+  launchInstance,
+  inheritCredentials,
+  userJcodeHome,
+  userAppConfigDir,
+} from "./launch.js";
+export type { LaunchOptions, LaunchedInstance } from "./launch.js";
+export { JcodeClient, unixSocketTransport } from "./client.js";
+export type {
+  ConnectOptions,
+  FileContent,
+  FileStatus,
+  GlobalEventsOptions,
+  RunOptions,
+  RunStructuredOptions,
+  RuntimeInfo,
+  SendMessageOptions,
+  StructuredTurnResult,
+  Transport,
+  TurnResult,
+} from "./client.js";
+export { StructuredOutputError } from "./structured.js";
+export type {
+  StructuredOutputAttempt,
+  StructuredOutputSchema,
+  StructuredValidationIssue,
+} from "./structured.js";

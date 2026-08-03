@@ -19,6 +19,8 @@ export interface MockOptions {
 export interface MockServer {
   socketPath: string;
   close(): Promise<void>;
+  /** Number of currently open client connections. */
+  clientCount(): number;
   /** Push an unsolicited event to every connected client. */
   broadcast(event: any): void;
 }
@@ -57,6 +59,9 @@ export async function startMockHarness(options: MockOptions = {}): Promise<MockS
 
   return {
     socketPath,
+    clientCount() {
+      return clients.size;
+    },
     broadcast(event: any) {
       for (const socket of clients) socket.write(`${JSON.stringify(event)}\n`);
     },

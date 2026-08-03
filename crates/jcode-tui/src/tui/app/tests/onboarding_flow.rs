@@ -84,6 +84,35 @@ fn onboarding_test_app() -> App {
 }
 
 #[test]
+fn direct_api_key_login_does_not_advertise_a_static_model_default() {
+    let mut app = create_test_app();
+
+    app.start_login_provider(
+        crate::provider_catalog::resolve_login_provider("openai-api")
+            .expect("OpenAI API provider descriptor"),
+    );
+    let openai_prompt = &app
+        .display_messages()
+        .last()
+        .expect("missing OpenAI API key prompt")
+        .content;
+    assert!(openai_prompt.contains("Endpoint: https://api.openai.com/v1"));
+    assert!(!openai_prompt.contains("Suggested default model:"));
+
+    app.start_login_provider(
+        crate::provider_catalog::resolve_login_provider("anthropic-api")
+            .expect("Anthropic API provider descriptor"),
+    );
+    let anthropic_prompt = &app
+        .display_messages()
+        .last()
+        .expect("missing Anthropic API key prompt")
+        .content;
+    assert!(anthropic_prompt.contains("Endpoint: https://api.anthropic.com"));
+    assert!(!anthropic_prompt.contains("Suggested default model:"));
+}
+
+#[test]
 fn onboarding_strongest_model_only_runs_without_explicit_defaults() {
     with_temp_jcode_home(|| {
         let previous_explicit = std::env::var_os("JCODE_INITIAL_PROVIDER_EXPLICIT");

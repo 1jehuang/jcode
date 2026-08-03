@@ -12,12 +12,10 @@
 //! holding it back (the agent is mid-turn, and the daemon rejects a second
 //! message outright), `Sent` the moment it leaves the composer, `Acked` when
 //! the daemon confirms the agent took it (`ApiEvent::MessageAccepted`). The
-//! difference is shown twice over, because one channel is not enough: a small
-//! dot beside the card (hollow while pending, solid once acked) is the
-//! *state*, and a short damped wiggle of the card is the *transition*. Motion
-//! is what the eye notices without looking, which is exactly the right weight
-//! for "it arrived". A queued card is additionally drawn in a fainter tone,
-//! because "this has not gone anywhere yet" is a bigger claim than a dot.
+//! difference is shown two ways: a pending card is drawn in a fainter tone
+//! (the *state*), and a short damped wiggle of the card reports the
+//! acknowledgement (the *transition*). Motion is what the eye notices without
+//! looking, which is exactly the right weight for "it arrived".
 //!
 //! Like the rest of this app's animation, the wiggle is derived from
 //! (state, now) rather than driven by a timer: a frame stays a pure function of
@@ -42,12 +40,6 @@ const WIGGLE_CYCLES: f64 = 2.0;
 /// Frame interval requested while a wiggle runs, so the motion is paced by the
 /// display rather than by whatever else happens to want frames.
 pub const FRAME: Duration = Duration::from_millis(8);
-
-/// Radius of the delivery dot, in logical pixels.
-pub const DOT_RADIUS: f64 = 2.6;
-
-/// Gap between the dot and the card's right text edge.
-pub const DOT_GAP: f64 = 7.0;
 
 /// Opacity of a message the agent has not confirmed yet: queued in this
 /// window, or written to the socket without an acknowledgement. Faint enough

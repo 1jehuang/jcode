@@ -76,6 +76,14 @@ struct AgentGrepInput {
     paths_only: Option<bool>,
 }
 
+/// Default cap on rendered grep matches.
+///
+/// Generous enough that ordinary code searches are unaffected (most return far
+/// fewer), while bounding the pathological case of a common string inside large
+/// data files. The match header always reports the true total, so a caller who
+/// needs more can raise `max_regions` knowing what they are asking for.
+const DEFAULT_GREP_MAX_REGIONS: usize = 200;
+
 fn default_agentgrep_mode() -> String {
     "grep".to_string()
 }
@@ -312,8 +320,16 @@ fn execute_linked_agentgrep(
                 run_grep(&root, &args).map_err(anyhow::Error::msg)?,
                 exact_file.as_deref(),
             );
+            // Bound the rendered matches by default. `find` and `outline` already
+            // default to 5 files / 6 regions, but grep passed `None` straight
+            // through, so one unscoped query over a repo containing large data
+            // files rendered every match: a search for a common key across 2,027
+            // benchmark transcripts produced 923k chars in a single call. The
+            // header still reports the true total, so the caller sees that more
+            // matches exist and can raise the cap deliberately.
+            let max_regions = params.max_regions.or(Some(DEFAULT_GREP_MAX_REGIONS));
             Ok(
-                ToolOutput::new(render_grep_output(&result, &args, params.max_regions))
+                ToolOutput::new(render_grep_output(&result, &args, max_regions))
                     .with_title("agentgrep grep"),
             )
         }

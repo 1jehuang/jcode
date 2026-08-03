@@ -191,19 +191,13 @@ impl App {
         }
     }
 
-    /// Switch to whichever session the strip now points at.
+    /// Drop everything that belonged to the session being left.
     ///
-    /// The transcript belongs to the session, so it is cleared rather than
-    /// carried across: appending another conversation's output to the one on
-    /// screen would be actively misleading. Reloading real history needs
-    /// `GetHistory`; until that is wired, an empty page is the honest state.
-    pub(crate) fn attach_focused_session(&mut self) {
-        let Some(target) = self.model.strip.focused_session().map(str::to_string) else {
-            return;
-        };
-        if self.model.session_id.as_deref() == Some(target.as_str()) {
-            return;
-        }
+    /// Shared by attaching to an existing session and by creating a new one:
+    /// both put a different conversation on screen, and a transcript, a
+    /// reveal, or a progress clock carried across from the old one would be
+    /// output attributed to the wrong session.
+    pub(crate) fn clear_for_session_change(&mut self) {
         // Switching sessions changes the conversation, not the user's view
         // preferences: the thinking-display mode is carried across so a new
         // session does not silently revert to the structural default.
@@ -221,6 +215,44 @@ impl App {
         // Attaching is a jump, not a scroll: easing here would sweep through
         // the previous session's layout.
         self.model.smooth.settle();
+    }
+
+    /// Start a fresh session and attach to it.
+    ///
+    /// The id is the daemon's to assign, so the app clears the page now and
+    /// adopts whatever comes back on the `Attached` event. Until then the
+    /// session id is `None`, which is the same state the app boots in, so
+    /// every consumer already handles it.
+    pub(crate) fn new_session(&mut self) {
+        let Some((_, outgoing)) = self.harness.as_ref() else {
+            self.model.notice = Some("not connected: cannot start a session".into());
+            return;
+        };
+        if outgoing.send(harness::Command::New).is_err() {
+            self.model.notice = Some("not connected: cannot start a session".into());
+            return;
+        }
+        self.clear_for_session_change();
+        self.model.session_id = None;
+        self.model.working_dir = None;
+        self.model.status = "starting a new session...".into();
+        self.retitle();
+    }
+
+    /// Switch to whichever session the strip now points at.
+    ///
+    /// The transcript belongs to the session, so it is cleared rather than
+    /// carried across: appending another conversation's output to the one on
+    /// screen would be actively misleading. Reloading real history needs
+    /// `GetHistory`; until that is wired, an empty page is the honest state.
+    pub(crate) fn attach_focused_session(&mut self) {
+        let Some(target) = self.model.strip.focused_session().map(str::to_string) else {
+            return;
+        };
+        if self.model.session_id.as_deref() == Some(target.as_str()) {
+            return;
+        }
+        self.clear_for_session_change();
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());
         // The new session's directory arrives with its `Attached` event; until

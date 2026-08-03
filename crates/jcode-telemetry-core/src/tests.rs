@@ -89,11 +89,23 @@ fn test_is_ci_detects_ci_env() {
     // Clear any inherited CI markers so the baseline is deterministic.
     for key in [
         "CI",
+        "CONTINUOUS_INTEGRATION",
+        "BUILD_NUMBER",
         "GITHUB_ACTIONS",
         "BUILDKITE",
         "JENKINS_URL",
         "GITLAB_CI",
         "CIRCLECI",
+        "TRAVIS",
+        "TEAMCITY_VERSION",
+        "TF_BUILD",
+        "CODEBUILD_BUILD_ID",
+        "DRONE",
+        "APPVEYOR",
+        "WOODPECKER",
+        "BITBUCKET_BUILD_NUMBER",
+        "NEXTEST",
+        "JCODE_E2E_BIN",
     ] {
         jcode_core::env::remove_var(key);
     }
@@ -107,6 +119,26 @@ fn test_is_ci_detects_ci_env() {
         "CI env var should mark the run as CI (gates install skip)"
     );
     jcode_core::env::remove_var("CI");
+    assert!(!is_ci());
+
+    // Vendor-specific markers count on their own: several providers never set
+    // the generic `CI` variable, and those runners used to look like people.
+    for key in [
+        "TEAMCITY_VERSION",
+        "TF_BUILD",
+        "DRONE",
+        "BITBUCKET_BUILD_NUMBER",
+    ] {
+        jcode_core::env::set_var(key, "1");
+        assert!(is_ci(), "{key} should mark the run as CI");
+        jcode_core::env::remove_var(key);
+        assert!(!is_ci());
+    }
+
+    // Test harnesses are automation: they mint a throwaway id per process.
+    jcode_core::env::set_var("NEXTEST", "1");
+    assert!(is_ci(), "nextest runs should be tagged as automation");
+    jcode_core::env::remove_var("NEXTEST");
     assert!(!is_ci());
 }
 
@@ -686,4 +718,240 @@ fn test_install_conversion_id_is_removed_when_telemetry_is_disabled() {
     } else {
         jcode_core::env::remove_var("JCODE_HOME");
     }
+}
+
+fn current_todo_payload(reason: SessionEndReason) -> serde_json::Value {
+    let state = SESSION_STATE
+        .lock()
+        .expect("session state lock")
+        .as_ref()
+        .expect("active telemetry session")
+        .clone();
+    serde_json::to_value(lifecycle::todo_session_event(
+        &state,
+        reason,
+        TELEMETRY_SCHEMA_VERSION,
+        "test".to_string(),
+        false,
+        false,
+        false,
+    ))
+    .expect("todo telemetry serializes")
+}
+
+#[test]
+fn todo_session_aggregates_transitions_abandonment_and_high_water_mark() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session("test", "test");
+
+    record_todo_update(TodoTelemetryUpdate {
+        todos_created: 3,
+        current_incomplete: 2,
+        list_size: 3,
+        groups_completed: 1,
+        groups_total: 2,
+        confidence: TelemetryScoreSummary::from_scores([70, 80, 90]),
+        ..Default::default()
+    });
+    record_todo_update(TodoTelemetryUpdate {
+        todos_created: 1,
+        todos_completed: 2,
+        todos_abandoned: 1,
+        current_incomplete: 1,
+        list_size: 2,
+        groups_completed: 2,
+        groups_total: 3,
+        confidence: TelemetryScoreSummary::from_scores([75, 95]),
+        completion_confidence: TelemetryScoreSummary::from_scores([96, 100]),
+        understands_user_intent: TelemetryScoreSummary::from_scores([94]),
+        closed_feedback_loop: TelemetryScoreSummary::from_scores([85, 95]),
+        end_to_end_ownership: TelemetryScoreSummary::from_scores([96, 100]),
+    });
+    {
+        let mut session = SESSION_STATE.lock().unwrap();
+        let state = session.as_mut().unwrap();
+        increment_tool_category(state, ToolCategory::Todo);
+        increment_tool_category(state, ToolCategory::Todo);
+    }
+
+    let payload = current_todo_payload(SessionEndReason::NormalExit);
+    assert_eq!(payload["todos_created"], 4);
+    assert_eq!(payload["todos_completed"], 2);
+    assert_eq!(payload["todos_abandoned"], 2);
+    assert_eq!(payload["todo_updates"], 2);
+    assert_eq!(payload["groups_completed"], 2);
+    assert_eq!(payload["groups_total"], 3);
+    assert_eq!(payload["max_todo_list_size"], 3);
+    assert_eq!(payload["confidence_min"], 75);
+    assert_eq!(payload["confidence_mean"], 85.0);
+    assert_eq!(payload["completion_confidence_count"], 2);
+    *SESSION_STATE.lock().unwrap() = None;
+}
+
+#[test]
+fn todo_session_with_zero_todos_emits_zero_numeric_state() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session("test", "test");
+    let payload = current_todo_payload(SessionEndReason::NormalExit);
+    for field in [
+        "todos_created",
+        "todos_completed",
+        "todos_abandoned",
+        "todo_updates",
+        "groups_completed",
+        "groups_total",
+        "max_todo_list_size",
+        "confidence_count",
+        "completion_confidence_count",
+        "understands_user_intent_count",
+        "closed_feedback_loop_count",
+        "end_to_end_ownership_count",
+    ] {
+        assert_eq!(payload[field], 0, "{field}");
+    }
+    assert!(payload["confidence_min"].is_null());
+    assert!(payload["confidence_mean"].is_null());
+    *SESSION_STATE.lock().unwrap() = None;
+}
+
+#[test]
+fn todo_session_payload_has_no_unapproved_string_fields() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session(
+        "provider text must not appear",
+        "model text must not appear",
+    );
+    record_todo_update(TodoTelemetryUpdate {
+        todos_created: 1,
+        current_incomplete: 1,
+        list_size: 1,
+        confidence: TelemetryScoreSummary::from_scores([88]),
+        ..Default::default()
+    });
+    let payload = current_todo_payload(SessionEndReason::Disconnect);
+    let allowed_string_fields = [
+        "event_id",
+        "id",
+        "correlation_id",
+        "event",
+        "version",
+        "os",
+        "arch",
+        "session_end_reason",
+        "build_channel",
+    ];
+
+    fn reject_unapproved_strings(value: &serde_json::Value, field: Option<&str>, allowed: &[&str]) {
+        match value {
+            serde_json::Value::String(_) => assert!(
+                field.is_some_and(|field| allowed.contains(&field)),
+                "unapproved string field in todo telemetry: {field:?}"
+            ),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    reject_unapproved_strings(value, field, allowed);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    reject_unapproved_strings(value, Some(key), allowed);
+                }
+            }
+            _ => {}
+        }
+    }
+    reject_unapproved_strings(&payload, None, &allowed_string_fields);
+    assert_eq!(payload["id"], payload["correlation_id"]);
+    assert_eq!(payload["event"], "todo_session");
+    let correlation = payload["correlation_id"].as_str().unwrap();
+    assert_eq!(
+        uuid::Uuid::parse_str(correlation)
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+    assert!(!payload.to_string().contains("provider text"));
+    assert!(!payload.to_string().contains("model text"));
+    *SESSION_STATE.lock().unwrap() = None;
+}
+
+#[test]
+fn todo_correlation_id_is_fresh_for_each_session() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    begin_session("test", "test");
+    let first = current_session_correlation_id().expect("first correlation id");
+    begin_session("test", "test");
+    let second = current_session_correlation_id().expect("second correlation id");
+    assert_ne!(first, second);
+    assert_eq!(uuid::Uuid::parse_str(&first).unwrap().get_version_num(), 4);
+    assert_eq!(uuid::Uuid::parse_str(&second).unwrap().get_version_num(), 4);
+    *SESSION_STATE.lock().unwrap() = None;
+}
+
+#[test]
+fn todo_telemetry_opt_out_emits_nothing() {
+    let _guard = lock_telemetry_test_state();
+    *SESSION_STATE.lock().unwrap() = None;
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
+
+    begin_session("private-provider", "private-model");
+    record_todo_update(TodoTelemetryUpdate {
+        todos_created: 1,
+        current_incomplete: 1,
+        list_size: 1,
+        ..Default::default()
+    });
+    end_session("private-provider", "private-model");
+    let correlation = current_session_correlation_id();
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    assert!(SESSION_STATE.lock().unwrap().is_none());
+    assert!(correlation.is_none());
+    assert!(emitted.is_empty(), "opt-out emitted payloads: {emitted:?}");
+}
+
+/// Regression: `begin_session` used to overwrite a live `SESSION_STATE`
+/// without ending it, orphaning the previous `session_start`. That is why
+/// only ~25% of release `session_start` events ever had a matching
+/// `session_end`. Starting a second session must close the first.
+#[test]
+fn test_begin_session_closes_superseded_session() {
+    let _guard = lock_telemetry_test_state();
+    jcode_core::env::set_var("JCODE_TELEMETRY_DISABLED", "1");
+
+    begin_session("prov-a", "model-a");
+    let first_id = SESSION_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.session_id.clone());
+
+    begin_session("prov-b", "model-b");
+    let second = SESSION_STATE.lock().unwrap();
+    let second_state = second.as_ref().expect("second session should be live");
+
+    assert_ne!(
+        first_id.as_deref(),
+        Some(second_state.session_id.as_str()),
+        "second begin_session should install a distinct session"
+    );
+    assert_eq!(second_state.provider_start, "prov-b");
+    assert!(
+        !second_state.start_event_sent,
+        "a fresh session must not inherit the superseded session's sent flag"
+    );
+    drop(second);
+
+    jcode_core::env::remove_var("JCODE_TELEMETRY_DISABLED");
+}
+
+#[test]
+fn test_superseded_reason_has_label() {
+    assert_eq!(SessionEndReason::Superseded.as_str(), "superseded");
 }

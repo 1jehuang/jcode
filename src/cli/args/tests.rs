@@ -759,3 +759,44 @@ fn onboarding_repair_brief_commands_are_valid_cli() {
     ])
     .expect("provider add --base-url --model --api-key-stdin must parse");
 }
+
+/// The bridge has two sockets and the global `--socket` already owns one of
+/// them. When the subcommand flag was also `--socket`, clap bound the global
+/// and the bridge listened on, and dialled, the same path: it came up looking
+/// healthy and every SDK client got ECONNREFUSED. Keep the names distinct.
+#[cfg(unix)]
+#[test]
+fn api_bridge_socket_flags_do_not_collide() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--socket",
+        "/tmp/daemon.sock",
+        "api-bridge",
+        "--api-socket",
+        "/tmp/api.sock",
+    ])
+    .expect("api-bridge should accept both socket flags");
+    assert_eq!(args.socket.as_deref(), Some("/tmp/daemon.sock"));
+    assert!(matches!(
+        args.command,
+        Some(Command::ApiBridge { api_socket: Some(ref path) }) if path == "/tmp/api.sock"
+    ));
+
+    // The bare form must resolve both paths from the environment.
+    let bare = Args::try_parse_from(["jcode", "api-bridge"]).expect("bare api-bridge should parse");
+    assert!(matches!(
+        bare.command,
+        Some(Command::ApiBridge { api_socket: None })
+    ));
+
+    // `--socket` after the subcommand must not be silently accepted as the
+    // API socket, which is the exact confusion this test exists to prevent.
+    let ambiguous = Args::try_parse_from(["jcode", "api-bridge", "--socket", "/tmp/x.sock"]).ok();
+    assert!(
+        matches!(
+            ambiguous.map(|args| (args.socket, args.command)),
+            None | Some((Some(_), Some(Command::ApiBridge { api_socket: None })))
+        ),
+        "`--socket` after api-bridge must bind the daemon socket, never the API socket"
+    );
+}

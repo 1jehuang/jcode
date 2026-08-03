@@ -45,6 +45,26 @@ const PREVIEW_OPACITY: f64 = 0.72;
 /// Fraction of the window height the preview may occupy, measured from the
 /// top. Bounded so it can never reach the rows, whichever session is hovered.
 const PREVIEW_BAND: f64 = 0.22;
+/// Type size and leading for the conversation drawn inside a card. Tiny: this
+/// is a thumbnail of a session's shape, in the same sense as a compositor's
+/// window preview, so it is recognised rather than read.
+const THUMB_SIZE: f32 = 7.5;
+const THUMB_LEADING: f64 = 1.55;
+/// Inset from a card's edge to its thumbnail text.
+const THUMB_PAD: f64 = 7.0;
+/// Smallest card that carries a thumbnail at all. Below this the text would be
+/// two clipped words, which reads as damage rather than as content.
+const MIN_THUMB_WIDTH: f64 = 92.0;
+const MIN_THUMB_HEIGHT: f64 = 54.0;
+/// Room kept clear on a busy card's first lines, for its spinner.
+const SPINNER_CLEARANCE: f64 = 22.0;
+/// How much of a card's height the thumbnail may fill before it stops, leaving
+/// the rest to the name band underneath.
+const THUMB_BAND: f64 = 0.62;
+/// Ink for a card's thumbnail. Only slightly under full strength: the first
+/// attempt set this at two thirds and the preview was a grey smudge, which is
+/// worse than no preview because it costs the same space and says nothing.
+const THUMB_OPACITY: f64 = 0.9;
 /// Smallest card that carries a busy spinner. Below this the spinner would be
 /// larger than the session it belongs to.
 const MIN_SPINNER_WIDTH: f64 = 44.0;
@@ -123,6 +143,116 @@ fn draw_preview(
         );
         y += f64::from(PREVIEW_SIZE) * PREVIEW_LEADING;
     }
+}
+
+/// Cut a line to fit, keeping the front.
+///
+/// Deliberately not [`elide`]: dropping the middle of a sentence produces
+/// "why is the halftone...n in logical units?", which the eye reads as a
+/// rendering fault rather than as an abbreviation. A thumbnail line only has to
+/// be recognisable, and the front of a message is what identifies it, so the
+/// tail is the part that can be spent.
+fn truncate(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut out: String = text.chars().take(max_chars - 1).collect();
+    // Trailing space before an ellipsis reads as a gap in the text.
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// Draw a session's conversation inside its own card.
+///
+/// This is what makes the field an actual view of several sessions at once
+/// rather than a set of labelled boxes: a compositor's overview shows you the
+/// *windows*, not their titles, and the equivalent for a conversation is the
+/// last few things said in it. Every card carries its own, so "which one was
+/// the refactor" is answered by looking rather than by visiting each in turn.
+///
+/// Set faint and clipped to the card, one line per message, alternating ink by
+/// role. The alternation is the only structure kept: at this size it is the
+/// texture of a conversation that identifies it, and wrapped paragraphs would
+/// push the messages that distinguish one session from another off the tile.
+fn draw_card_thumbnail(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    card: &crate::overview::Card,
+    rect: Rect,
+    phase: f64,
+    scale: f64,
+) {
+    if rect.width() < MIN_THUMB_WIDTH || rect.height() < MIN_THUMB_HEIGHT {
+        return;
+    }
+    let Some(transcript) = model.peeks.get(&card.session_id) else {
+        return;
+    };
+    // A busy card carries a spinner in its top-right corner, so the text stops
+    // short of it: overprinting the two made the first line unreadable on
+    // exactly the cards whose state the user most wants to check.
+    let width = rect.width()
+        - THUMB_PAD * 2.0
+        - match card.busy && rect.width() > MIN_SPINNER_WIDTH {
+            true => SPINNER_CLEARANCE,
+            false => 0.0,
+        };
+    // The band the thumbnail may use, leaving the lower part of the tile to the
+    // session's name: a preview that ran under the label would make both
+    // illegible, and the name is what the user acts on.
+    let ceiling = rect.y0 + rect.height() * THUMB_BAND;
+    let mut y = rect.y0 + THUMB_PAD;
+    // Clipped to the tile so a long line can never bleed onto a neighbour: at
+    // this density two cards' text running together would read as one session.
+    scene.push_layer(
+        vello::peniko::Fill::NonZero,
+        vello::peniko::Mix::Normal,
+        1.0,
+        Affine::scale(scale),
+        &RoundedRect::from_rect(rect, CARD_CORNER),
+    );
+    // Newest last, like the page itself, but only as many as the band holds:
+    // the tail is what a session is *doing*, so it is what a preview owes.
+    let budget = (width / (f64::from(THUMB_SIZE) * 0.6)) as usize;
+    for message in transcript.messages() {
+        if y + f64::from(THUMB_SIZE) > ceiling {
+            break;
+        }
+        let source = message.source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        let line = truncate(&source.replace('\n', " "), budget.max(8));
+        text.draw_paragraph_scaled(
+            scene,
+            &line,
+            (rect.x0 + THUMB_PAD, y),
+            width as f32,
+            ParagraphStyle {
+                font_size: THUMB_SIZE,
+                color: if message.role == crate::transcript::Role::User {
+                    model.theme.muted
+                } else {
+                    model.theme.faint
+                }
+                .with_alpha((THUMB_OPACITY * phase) as f32),
+                line_height: THUMB_LEADING as f32,
+                ..Default::default()
+            },
+            scale,
+        );
+        y += f64::from(THUMB_SIZE) * THUMB_LEADING;
+    }
+    scene.pop_layer();
 }
 
 /// Draw the session overview: every live session as a card in a row of
@@ -292,6 +422,11 @@ pub(crate) fn draw_overview(
             );
         }
 
+        // The session's own conversation, inside its tile. Drawn after the
+        // fill and border so it sits on the card, and before the label so a
+        // name is never overprinted by the text it describes.
+        draw_card_thumbnail(scene, text, model, card, rect, phase, scale);
+
         // The label goes inside the card, centred. It is scaled to what the
         // card can actually hold instead of elided into ellipses: "m..." on
         // every card is strictly worse than a small "mushroom", because the
@@ -299,6 +434,15 @@ pub(crate) fn draw_overview(
         // Clamped so it never becomes unreadable, and a card too narrow even
         // for that carries no label at all rather than a row of dots.
         let name = crate::overview::short_id(&card.session_id);
+        // Whether the tile above the name is carrying a preview. Recomputed
+        // from the same conditions the thumbnail draws under, so the label can
+        // never sit in a band the preview has taken.
+        let has_thumbnail = rect.width() >= MIN_THUMB_WIDTH
+            && rect.height() >= MIN_THUMB_HEIGHT
+            && model
+                .peeks
+                .get(&card.session_id)
+                .is_some_and(|tail| !tail.messages().is_empty());
         // Monospace at this size runs about 0.62em per character.
         let fitted = (rect.width() * 0.85 / (name.chars().count().max(1) as f64 * 0.62)) as f32;
         let size = fitted.clamp(CARD_LABEL_MIN, CARD_LABEL_SIZE);
@@ -306,7 +450,21 @@ pub(crate) fn draw_overview(
             text.draw_paragraph_scaled(
                 scene,
                 &name,
-                (rect.x0, (rect.y0 + rect.y1) / 2.0 - f64::from(size) * 0.6),
+                // Centred on an empty card, and moved down into the band the
+                // thumbnail leaves when there is a conversation to show: the
+                // name has to stay legible, and the preview above it is what
+                // it is naming.
+                (
+                    rect.x0,
+                    match has_thumbnail {
+                        true => {
+                            rect.y0
+                                + rect.height() * THUMB_BAND
+                                + (rect.height() * (1.0 - THUMB_BAND) - f64::from(size)) / 2.0
+                        }
+                        false => (rect.y0 + rect.y1) / 2.0 - f64::from(size) * 0.6,
+                    },
+                ),
                 rect.width() as f32,
                 ParagraphStyle {
                     font_size: size,

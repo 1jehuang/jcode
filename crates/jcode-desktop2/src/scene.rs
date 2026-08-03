@@ -43,43 +43,6 @@ const CIRCLE_TOLERANCE: f64 = 0.05;
 /// bolted next to it.
 pub(crate) const SPINNER_SIZE: f64 = 13.0;
 
-/// The delivery mark beside a user's message: a small dot, hollow while the
-/// message is only on its way and solid once the agent has acknowledged it.
-///
-/// A dot rather than a word ("sent", "delivered") because the transcript is
-/// prose: a label would be read as something someone said. Hollow-to-solid is
-/// the same grammar as the app's halftone dots elsewhere, so it needs no key.
-fn draw_delivery_dot(
-    scene: &mut Scene,
-    delivery: crate::ack::Delivery,
-    center: (f64, f64),
-    theme: &crate::theme::Theme,
-    scale: f64,
-) {
-    use crate::ack::DOT_RADIUS;
-    let circle = vello::kurbo::Circle::new((center.0, center.1), DOT_RADIUS);
-    if delivery.is_acked() {
-        scene.fill(
-            vello::peniko::Fill::NonZero,
-            Affine::scale(scale),
-            theme.muted,
-            None,
-            &circle,
-        );
-        return;
-    }
-    // Pending: a ring, so the mark is present from the moment the message is
-    // sent. An absent mark would be indistinguishable from a message the app
-    // never tried to send.
-    scene.stroke(
-        &vello::kurbo::Stroke::new(1.2),
-        Affine::scale(scale),
-        theme.faint,
-        None,
-        &circle,
-    );
-}
-
 /// The activity spinner: a ring of halftone dots with a bright head that walks
 /// around it. Same visual language as the hero donut, so "the agent is working"
 /// looks like part of the app rather than a stock throbber.
@@ -645,8 +608,8 @@ fn draw_transcript(
             .map_or(0.0, |delivery| delivery.wiggle(now));
         // The delivery tone: a message the agent has not confirmed yet is
         // drawn faint, and the acknowledgement ramps it to full ink over the
-        // wiggle. One layer over the whole card, so the wash, the dot, and
-        // the text fade as one object rather than as three.
+        // wiggle. One layer over the whole card, so the wash and the text
+        // fade as one object rather than as two.
         let tone = placed
             .message
             .delivery
@@ -682,22 +645,6 @@ fn draw_transcript(
                     USER_RADIUS,
                 ),
             );
-            // The delivery mark: hollow while the message is only *sent*,
-            // solid once the agent has it. The dot is the state the wiggle
-            // announces, and it stays after the motion is over, so a user who
-            // looked away can still tell what landed.
-            if let Some(delivery) = placed.message.delivery {
-                draw_delivery_dot(
-                    scene,
-                    delivery,
-                    (
-                        frame.right + wiggle - USER_PAD_X + crate::ack::DOT_GAP,
-                        message_top + placed.message.height - USER_PAD_Y,
-                    ),
-                    theme,
-                    scale,
-                );
-            }
         }
         let text_left = frame.left + USER_PAD_X + wiggle;
         let text_top = message_top + placed.message.top_padding();
@@ -1358,6 +1305,11 @@ pub fn build_scene(
             std::time::Instant::now(),
         );
     }
+
+    // The resume overlay is drawn last of all: it is a mode over the page, and
+    // unlike the overview it deliberately leaves the conversation legible
+    // underneath, which only works if nothing paints over it afterwards.
+    crate::scene_resume::draw_resume(scene, text, model, &frame, scale);
 
     if revealing {
         scene.pop_layer();

@@ -54,6 +54,13 @@ test("event tags match the Rust ApiEvent enum", () => {
   assert.deepEqual([...KNOWN_EVENT_KINDS].sort(), rust);
 });
 
+test("send_message no_reply field matches the Rust schema", () => {
+  const rust = fs.readFileSync(path.join(rustCrate, "requests.rs"), "utf8");
+  const typescript = fs.readFileSync(path.resolve(here, "../src/protocol.ts"), "utf8");
+  assert.match(rust, /SendMessage\s*{[\s\S]*?no_reply:\s*bool/);
+  assert.match(typescript, /req:\s*"send_message"[\s\S]*?no_reply\?:\s*boolean/);
+});
+
 test("protocol major version matches the Rust constant", () => {
   const source = fs.readFileSync(path.join(rustCrate, "lib.rs"), "utf8");
   const match = /API_VERSION_MAJOR: u32 = (\d+)/.exec(source);

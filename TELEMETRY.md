@@ -2,7 +2,7 @@
 
 jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. **We do not collect your prompts, your code, or your conversation transcripts.**
 
-Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, and schema v5 agent-time / autonomy / pain-attribution metrics.
+Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, schema v5 agent-time / autonomy / pain-attribution metrics, and numeric-only todo progress aggregates.
 
 ## What We Collect
 
@@ -87,6 +87,53 @@ arbitrary strings.
 The benchmark runner sets `JCODE_DISCOVERY_BENCHMARK=1`. Discovery requests then
 carry `x-jcode-discovery-benchmark: 1`, and the corresponding telemetry event has
 `benchmark_run: true`.
+
+When telemetry is enabled, discovery API requests also carry
+`x-jcode-session-correlation-id`. It is a fresh random UUID for the current
+runtime session, is not derived from the persistent telemetry ID, and is never
+reused across sessions. The same UUID appears on the numeric-only Todo Session
+event below. When telemetry is disabled, this header is omitted.
+
+### Todo Session Event
+
+This does not replace the todo counters added in migration 0021. Those live on
+`session_details` / `turn_details` and count how often todo gates fired
+(`tool_cat_todo`, `feature_todo_used`, `todo_gate_*_count`). This event is the
+complement: the lifecycle outcome of the list and the score values themselves,
+plus the per-session join key. Read 0021 for "how often did gates fire" and this
+event for "did the work finish, and how confident was the agent".
+
+One aggregate event is sent when an active session ends. Its `id` and
+`correlation_id` fields are the same fresh per-session UUID. The persistent
+telemetry ID, account ID, internal session ID, todo IDs, and all user/model text
+are absent, so the event is joinable to discovery requests from that session but
+not to an install, account, or another session.
+
+That join is not yet possible in practice. The discovery service stores its rows
+in the `jcode-subscriptions` D1 while this event lands in `jcode-telemetry`, and
+nothing on the receiving side reads
+`x-jcode-session-correlation-id` yet, so the header is currently sent and
+discarded. The correlation design is what makes the join possible later; it does
+not by itself make the number available.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `event` | `"todo_session"` | Event type |
+| `id` / `correlation_id` | UUID strings | Same random, single-session join key; never the persistent telemetry ID |
+| `session_end_reason` | enum string | Coarse lifecycle end reason |
+| `todos_created` / `todos_completed` / `todos_abandoned` | non-negative integers | Todo lifecycle transitions and items ending non-complete |
+| `todo_updates` | non-negative integer | Number of todo tool calls |
+| `groups_completed` / `groups_total` | non-negative integers | Final coherent-goal completion summary |
+| `max_todo_list_size` | non-negative integer | Todo list high-water mark |
+| `confidence_min` / `confidence_mean` / `confidence_count` | number / number / integer | Distribution-safe current confidence summary |
+| `completion_confidence_min` / `completion_confidence_mean` / `completion_confidence_count` | number / number / integer | Distribution-safe completion-confidence summary |
+| `understands_user_intent_min` / `understands_user_intent_mean` / `understands_user_intent_count` | number / number / integer | Distribution-safe plan-level intent-understanding summary; count is 0 or 1 |
+| `closed_feedback_loop_min` / `closed_feedback_loop_mean` / `closed_feedback_loop_count` | number / number / integer | Distribution-safe per-goal feedback-loop score summary |
+| `end_to_end_ownership_min` / `end_to_end_ownership_mean` / `end_to_end_ownership_count` | number / number / integer | Distribution-safe per-goal ownership summary |
+| `schema_version` / `version` / `os` / `arch` / build flags | numbers, booleans, and enum/identifier strings | Compatibility and coarse release filtering |
+
+Todo content, goal labels, feedback-loop text, user-intention text, task content,
+file paths, code, prompts, item IDs, and per-item rows are **never sent**.
 
 ### Session Start Event
 

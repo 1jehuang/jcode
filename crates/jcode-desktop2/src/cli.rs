@@ -36,8 +36,10 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--profile-scroll") => Some(profile_scroll()),
         Some("--bench-donut") => Some(bench_donut()),
         Some("--capture") => Some(run_capture(&args[1..])),
+        Some("--check-clipboard-image") => Some(check_clipboard_image()),
         Some("--check-primary-selection") => Some(check_primary_selection()),
         Some("--check-reconnect") => Some(check_reconnect()),
+        Some("--check-resume-scan") => Some(check_resume_scan()),
         Some("--e2e") => Some(run_e2e(
             args.get(1)
                 .map(String::as_str)
@@ -45,6 +47,30 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+/// `--check-clipboard-image`: prove Ctrl+V's image path against the *real*
+/// compositor.
+///
+/// The unit tests keep the system clipboard sandboxed so they cannot read or
+/// clobber a developer's clipboard, which means nothing in the suite exercises
+/// Wayland image negotiation at all. That is exactly where pasting a screenshot
+/// breaks without a single test failing, so this reads whatever image is on the
+/// clipboard right now and reports its type, size, and payload cost.
+fn check_clipboard_image() -> Result<()> {
+    let mut clipboard = crate::clipboard::Clipboard::system();
+    let image = clipboard
+        .get_image()
+        .map_err(|error| anyhow::anyhow!("clipboard image unavailable: {error}"))?
+        .ok_or_else(|| anyhow::anyhow!("clipboard does not contain an image"))?;
+    println!(
+        "clipboard image ok: {} {}, {} bytes, {} base64 chars",
+        image.media_type,
+        image.label(),
+        image.bytes.len(),
+        crate::png::base64(&image.bytes).len()
+    );
+    Ok(())
 }
 
 /// `--check-primary-selection`: prove auto-copy against the *real* compositor.
@@ -290,7 +316,10 @@ fn run_e2e(message: &str) -> Result<()> {
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);
                 model.transcript.push(transcript::Message::user(message));
-                outgoing.send(harness::Command::Send(message.to_string()))?;
+                outgoing.send(harness::Command::Send {
+                    content: message.to_string(),
+                    images: vec![],
+                })?;
                 sent = true;
             }
             // The e2e probe drives one session, so another session's tail is
@@ -565,6 +594,63 @@ fn run_capture(args: &[String]) -> Result<()> {
 /// there accepting input into nothing. Checked against the real runtime because
 /// the bug was in the wiring, not in a pure function: attach, drop the bridge,
 /// then require both a reported failure and a re-attach to *the same* session.
+/// Scan the real session store the way Ctrl+R does, and report what it found.
+///
+/// A unit test scans a directory it wrote itself, which proves the parser and
+/// nothing about the store on this machine: record shapes have changed over
+/// months of sessions, and a picker that silently resolved no working
+/// directories would look like an empty store rather than a parse that stopped
+/// matching. This is the check that runs against the real thing.
+fn check_resume_scan() -> Result<()> {
+    let dir = crate::resume::sessions_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot locate the session store: no HOME"))?;
+    let started = std::time::Instant::now();
+    let records = crate::resume::scan(&dir, crate::resume::SCAN_LIMIT);
+    let elapsed = started.elapsed();
+    if records.is_empty() {
+        anyhow::bail!("scanned {} and found no sessions", dir.display());
+    }
+    let picker = crate::resume::Picker::pinned(records.clone(), 0, "");
+    let rows = picker.rows();
+    let projects = rows
+        .iter()
+        .filter(|row| matches!(row, crate::resume::Row::Group { .. }))
+        .count();
+    let with_dir = records
+        .iter()
+        .filter(|record| record.working_dir.is_some())
+        .count();
+    println!(
+        "resume scan ok: {} sessions in {} projects from {} in {:.0}ms; {} resolved a directory",
+        records.len(),
+        projects,
+        dir.display(),
+        elapsed.as_secs_f64() * 1000.0,
+        with_dir,
+    );
+    for row in rows.iter().take(12) {
+        match row {
+            crate::resume::Row::Group { label, count, .. } => println!("  {label} ({count})"),
+            crate::resume::Row::Session { index } => {
+                if let Some(record) = records.get(*index) {
+                    println!(
+                        "    {} · {}",
+                        record.label(),
+                        crate::resume::human_bytes(record.bytes)
+                    );
+                }
+            }
+        }
+    }
+    // A store where nothing resolved a directory is a parse that stopped
+    // matching the records, not a user with no projects: the picker would file
+    // every session under "(unknown project)" and be useless.
+    if with_dir == 0 {
+        anyhow::bail!("no session resolved a working directory; the record shape may have changed");
+    }
+    Ok(())
+}
+
 fn check_reconnect() -> Result<()> {
     // Its own *bridge* socket, on the shared daemon. The check works by killing
     // the bridge, and the developer's live desktop windows talk to the shared

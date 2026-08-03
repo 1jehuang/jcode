@@ -509,6 +509,49 @@ fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
 }
 
 #[test]
+fn test_new_local_session_does_not_run_post_login_model_refresh() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+
+    let authed = StdArc::new(AtomicBool::new(false));
+    let refreshes = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(AuthUxStateSpaceProvider {
+        authed: StdArc::clone(&authed),
+        refreshes: StdArc::clone(&refreshes),
+        model: StdArc::new(StdMutex::new("existing-model".to_string())),
+        set_model_requests: StdArc::new(StdMutex::new(Vec::new())),
+        provider_id: "state-space",
+        provider_label: "StateSpace",
+        models: &["state-space-alpha", "state-space-beta"],
+        include_wrong_profile_first: false,
+        include_generic_profile_duplicate: false,
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let _guard = rt.enter();
+    let app = App::new_for_test_harness(provider, registry);
+
+    // Give any accidentally spawned startup work a chance to execute.
+    std::thread::sleep(Duration::from_millis(50));
+
+    assert!(!authed.load(Ordering::SeqCst), "startup called on_auth_changed");
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        0,
+        "startup refreshed a provider catalog"
+    );
+    assert!(!app.auth_catalog_refresh_pending);
+    assert!(!app
+        .onboarding_auto_model_selection_active
+        .load(Ordering::SeqCst));
+    assert!(app
+        .onboarding_auto_model_selection_baseline
+        .lock()
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
@@ -2483,7 +2526,9 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         app.pending_queued_dispatch = false;
         app.is_processing = true;
         super::local::finish_turn(&mut app);
-        assert!(!app.auto_poke_incomplete_todos);
+        // Auto-poke is default-on, so a completed cycle re-arms for the next
+        // batch of work rather than silently switching the feature off.
+        assert_eq!(app.auto_poke_incomplete_todos, app.auto_poke_default_on);
         assert!(!app.pending_queued_dispatch);
         assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());

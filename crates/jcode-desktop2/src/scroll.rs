@@ -16,10 +16,28 @@
 
 use std::time::{Duration, Instant};
 
-/// Time constant of the scroll ease, in seconds. One notch should land in
-/// well under a tenth of a second: this is smoothing, not an animation the
-/// user has to wait out.
-const TAU: f64 = 0.075;
+/// Angular frequency of the scroll ease's spring, in radians per second.
+///
+/// The ease used to be an exponential decay of the lag, and an exponential is
+/// the wrong shape for a discrete jump: its speed is *highest* on the first
+/// frame and decays from there, so a wheel notch read as a teleport followed
+/// by a crawl, and the crawl is what the eye reads as the page still settling
+/// long after the notch landed. A critically damped spring starts at rest,
+/// peaks in the middle and arrives at rest, which is the shape of something
+/// that moved rather than something that snapped and then leaked.
+///
+/// Critical damping (no overshoot) settles a jump to about 1% in `6.6 / ω`, so
+/// 30 rad/s is a ~220ms glide: shorter than the ~450ms exponential tail it
+/// replaces, with the motion in the middle where it is legible.
+const EASE_OMEGA: f64 = 30.0;
+
+/// Longest sub-step the ease's spring is integrated over, in seconds.
+///
+/// A semi-implicit step with `ω = 30` is stable past a 16ms frame, but the loop
+/// also hands over the 100ms catch-up `dt` a stall produces, and one step that
+/// long both overshoots and rings. Sub-stepping keeps the glide identical
+/// whatever cadence the display or a hitch delivers.
+const EASE_STEP: f64 = 1.0 / 240.0;
 
 /// Time constant of the kinetic friction that bleeds a fling away, in seconds.
 ///
@@ -94,6 +112,12 @@ const VELOCITY_BLEND: f64 = 0.45;
 /// the window repainting for something nobody can see.
 const EPSILON: f64 = 0.2;
 
+/// Below this speed, in logical pixels per second, the ease's spring is at
+/// rest. Checked *alongside* [`EPSILON`], not instead of it: a spring passing
+/// through zero lag at speed is mid-glide, and stopping it there would clip the
+/// motion it was carrying.
+const EASE_REST: f64 = 4.0;
+
 /// Largest lag carried, in logical pixels. A jump to the top of a long history
 /// should still be immediate-ish rather than a long cinematic sweep.
 const MAX_LAG: f64 = 260.0;
@@ -116,6 +140,13 @@ pub struct Smooth {
     /// Pixels the drawn view is behind the logical position. Positive means
     /// the view still has to travel up (toward older content).
     lag: f64,
+    /// Rate the lag is closing at, in logical pixels per second.
+    ///
+    /// The ease is a spring, so it carries its own velocity. That is also what
+    /// makes a burst of notches one continuous glide: a second notch arriving
+    /// mid-ease adds to a lag that is already moving, instead of restarting the
+    /// motion from rest the way a memoryless decay does.
+    lag_velocity: f64,
     /// Scrollbar opacity in `0..=1`.
     alpha: f64,
     /// When the bar may start fading.
@@ -145,6 +176,10 @@ pub struct Smooth {
     phase_known: bool,
     /// Momentum travel accumulated since the caller last collected it.
     pending: f64,
+    /// Distance to the edge the fling is heading for, as the caller last
+    /// measured it. `None` means nobody has said, so the coast runs unshaped.
+    /// See [`Smooth::approach_edge`].
+    room: Option<f64>,
 }
 
 impl Smooth {
@@ -232,11 +267,51 @@ impl Smooth {
         self.pending != 0.0
     }
 
+    /// Whether the fling is travelling toward older content, so the caller can
+    /// measure the room to the edge that is actually in front of it.
+    pub fn heading_up(&self) -> bool {
+        self.velocity > 0.0
+    }
+
+    /// Tell the fling how much room is left before the edge it is heading for,
+    /// in logical pixels, so it can land instead of slam.
+    ///
+    /// Without this, a coast into the top or the tail runs at full speed until
+    /// the clamp swallows a frame's travel and [`Self::stop`] kills it: the view
+    /// goes from hand speed to nothing between two frames. That discontinuity is
+    /// what reads as the page hitting a wall, and it is what the bench's `stop`
+    /// column measures.
+    ///
+    /// The room is *remembered* here and spent as extra deceleration in
+    /// [`Self::advance`]. Clamping the speed to `sqrt(2·a·s)` on the spot is the
+    /// obvious version and it is worse than the wall it replaces: the first
+    /// frame where the edge comes into range loses most of the speed in one
+    /// step, which measured a higher peak jerk than the hard stop did. Spread
+    /// over the frames that remain, the same arithmetic is a landing.
+    pub fn approach_edge(&mut self, room: f64) {
+        self.room = Some(room.max(0.0));
+    }
+
+    /// Deceleration that would bring the coast to rest in the room left, in
+    /// logical pixels per second squared, or 0 where no edge is in range.
+    ///
+    /// `v² = 2·a·s` rearranged. Unbounded above on purpose: a fling that
+    /// arrives with five pixels of room does have to stop hard, and a cap here
+    /// would only move the wall a few pixels instead of removing it. What keeps
+    /// it gentle in practice is that the term grows as the room shrinks, so an
+    /// ordinary flick is already slow by the time it is large.
+    fn edge_brake(&self) -> Option<f64> {
+        let room = self.room.filter(|room| *room > 0.0)?;
+        let speed = self.velocity.abs();
+        (speed > MIN_VELOCITY).then(|| speed * speed / (2.0 * room))
+    }
+
     /// Kill the fling: the view has hit the top or the tail, and coasting into
     /// a wall keeps the window repainting for no visible movement.
     pub fn stop(&mut self) {
         self.velocity = 0.0;
         self.pending = 0.0;
+        self.room = None;
     }
 
     /// Light the scrollbar without moving anything, e.g. while a drag holds a
@@ -260,6 +335,8 @@ impl Smooth {
     /// session, clearing the transcript) and easing would replay history.
     pub fn settle(&mut self) {
         self.lag = 0.0;
+        self.lag_velocity = 0.0;
+        self.room = None;
         self.stop();
         self.holding_gesture = false;
         self.last_event = None;
@@ -279,9 +356,39 @@ impl Smooth {
 
     pub fn is_animating(&self) -> bool {
         self.lag.abs() >= EPSILON
+            || self.lag_velocity.abs() >= EASE_REST
             || self.alpha > ALPHA_EPSILON
             || self.velocity.abs() >= MIN_VELOCITY
             || self.pending != 0.0
+    }
+
+    /// Drive the lag to zero over `dt` seconds with a critically damped spring.
+    ///
+    /// Semi-implicit (velocity first, then position) because that is the
+    /// variant that stays stable as the frame interval grows: the explicit form
+    /// gains energy and rings, and ringing here would draw the page bouncing
+    /// past the line the user scrolled to.
+    fn ease(&mut self, dt: f64) {
+        if self.lag == 0.0 && self.lag_velocity == 0.0 {
+            return;
+        }
+        let mut left = dt;
+        while left > 0.0 {
+            let step = left.min(EASE_STEP);
+            left -= step;
+            // Critically damped: acceleration = -ω²x - 2ωv, the damping that
+            // returns to rest in the shortest time without overshooting.
+            let accel = -EASE_OMEGA * EASE_OMEGA * self.lag - 2.0 * EASE_OMEGA * self.lag_velocity;
+            self.lag_velocity += accel * step;
+            self.lag += self.lag_velocity * step;
+        }
+        // Both have to be small: a spring at zero lag still moving is halfway
+        // through its glide, and one parked off-centre with no speed left would
+        // otherwise pin the drawn view away from the logical scroll forever.
+        if self.lag.abs() < EPSILON && self.lag_velocity.abs() < EASE_REST {
+            self.lag = 0.0;
+            self.lag_velocity = 0.0;
+        }
     }
 
     /// Decay the lag and the bar to `now`.
@@ -295,10 +402,7 @@ impl Smooth {
         if dt <= 0.0 {
             return;
         }
-        self.lag *= (-dt / TAU).exp();
-        if self.lag.abs() < EPSILON {
-            self.lag = 0.0;
-        }
+        self.ease(dt);
         // While the gesture is still under the user's fingers, their own deltas
         // move the view; integrating the estimate too would double the travel.
         let idle = |limit: Duration| {
@@ -321,12 +425,28 @@ impl Smooth {
             // flick early (short tau) or leaves it sliding for seconds (long
             // tau). The linear term dominates at low speed and is negligible
             // at high speed, which is the shape a browser fling has.
-            let braked = self.velocity.abs() - FRICTION_BRAKE * dt;
+            //
+            // An approaching edge raises that deceleration to whatever will
+            // actually stop the fling in the room that is left. Applied as an
+            // acceleration rather than as a cap on the speed, so the slowdown is
+            // spread over the frames before the edge instead of landing in the
+            // single frame the edge came into range.
+            let brake = self.edge_brake().unwrap_or(0.0).max(FRICTION_BRAKE);
+            let braked = self.velocity.abs() - brake * dt;
             self.velocity = self.velocity.signum() * braked.max(0.0);
             if self.velocity.abs() < MIN_VELOCITY {
                 self.stop();
             } else {
-                self.pending += self.velocity * dt;
+                // Never coast past the edge: the last frame of a landing would
+                // otherwise overshoot by whatever the integration rounded, and
+                // the clamp would swallow that as a stall.
+                let step = self.velocity * dt;
+                let step = match self.room {
+                    Some(room) => step.signum() * step.abs().min(room),
+                    None => step,
+                };
+                self.room = self.room.map(|room| (room - step.abs()).max(0.0));
+                self.pending += step;
             }
         }
         let holding = self.hold_until.is_some_and(|until| now < until);
@@ -447,6 +567,110 @@ mod tests {
         assert!(!smooth.is_animating());
     }
 
+    /// Per-frame travel of the ease, given a `dt`-second cadence.
+    fn glide_steps(jump: f64, dt: Duration) -> Vec<f64> {
+        let start = Instant::now();
+        let mut smooth = Smooth::default();
+        smooth.nudge(jump, start);
+        let mut now = start;
+        let mut previous = smooth.lag();
+        let mut steps = Vec::new();
+        for _ in 0..400 {
+            now += dt;
+            smooth.advance(now);
+            steps.push(previous - smooth.lag());
+            previous = smooth.lag();
+            if !smooth.is_animating() {
+                break;
+            }
+        }
+        steps
+    }
+
+    /// The ease accelerates into the glide instead of teleporting on the first
+    /// frame and then crawling.
+    ///
+    /// This is the shape, not a constant: an exponential decay of the lag puts
+    /// its whole speed on frame one, which is what made a wheel notch read as a
+    /// jump trailed by a long settle. A critically damped spring has to peak
+    /// somewhere in the middle, and it has to arrive without overshooting past
+    /// the line the user scrolled to.
+    #[test]
+    fn the_ease_peaks_in_the_middle_and_does_not_overshoot() {
+        let steps = glide_steps(120.0, FRAME);
+        assert!(steps.len() > 8, "the glide was over in {} frames", steps.len());
+        let peak = steps
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a glide has frames");
+        assert!(
+            peak.0 > 0 && peak.0 < steps.len() - 1,
+            "the fastest frame was #{} of {}, so this is a teleport, not a glide",
+            peak.0,
+            steps.len()
+        );
+        assert!(
+            steps.iter().all(|step| *step >= -0.01),
+            "the ease overshot and drew the page bouncing back"
+        );
+        let travelled: f64 = steps.iter().sum();
+        assert!(
+            (travelled - 120.0).abs() < 1.0,
+            "the glide delivered {travelled:.1}px of a 120px scroll"
+        );
+    }
+
+    /// The same jump takes the same time whatever cadence the frames arrive at,
+    /// including the 100ms catch-up step a stall hands over. An unsubstepped
+    /// spring rings or diverges there, and ringing is visible as a bounce.
+    #[test]
+    fn the_ease_is_the_same_glide_at_any_cadence() {
+        let duration = |dt: Duration| {
+            let steps = glide_steps(200.0, dt);
+            (steps.len() as f64 * dt.as_secs_f64(), steps)
+        };
+        let (fast, _) = duration(Duration::from_millis(4));
+        let (slow, slow_steps) = duration(Duration::from_millis(33));
+        assert!(
+            (fast - slow).abs() < 0.06,
+            "the same scroll took {fast:.2}s at 250Hz and {slow:.2}s at 30Hz"
+        );
+        assert!(
+            slow_steps.iter().all(|step| *step >= -0.01),
+            "a slow cadence made the ease ring"
+        );
+        // A stall's catch-up step must land the glide, not launch it.
+        let stalled = glide_steps(200.0, Duration::from_millis(100));
+        assert!(
+            stalled.iter().all(|step| *step >= -0.01),
+            "a 100ms catch-up step overshot: {stalled:?}"
+        );
+    }
+
+    /// A notch arriving mid-glide continues the motion rather than restarting
+    /// it: the spring keeps the speed it already had, so a burst of notches is
+    /// one accelerating glide instead of a sequence of little lurches.
+    #[test]
+    fn a_second_notch_continues_the_glide() {
+        let start = Instant::now();
+        let mut smooth = Smooth::default();
+        smooth.nudge(60.0, start);
+        let mut now = start;
+        for _ in 0..6 {
+            now += FRAME;
+            smooth.advance(now);
+        }
+        let moving = smooth.lag_velocity;
+        assert!(moving < 0.0, "the ease was not closing the lag");
+        smooth.nudge(60.0, now);
+        assert_eq!(
+            smooth.lag_velocity, moving,
+            "a second notch threw away the speed the glide already had"
+        );
+    }
+
     #[test]
     fn a_huge_jump_is_not_a_long_sweep() {
         let start = Instant::now();
@@ -544,6 +768,57 @@ mod tests {
             coasted += smooth.take_momentum();
         }
         assert_eq!(coasted, 0.0, "a lone event flung the view");
+    }
+
+    /// A fling told about an approaching edge decelerates into it, and delivers
+    /// exactly the room it was given rather than coasting through the wall.
+    ///
+    /// The old behaviour was to run at full speed until the clamp swallowed a
+    /// frame and `stop` killed the coast, which took the view from hand speed
+    /// to nothing between two frames. So the assertion is about the *last*
+    /// frame's travel, not about the total: that is the discontinuity the eye
+    /// sees, and it is what the bench's `stop` column gates.
+    #[test]
+    fn a_fling_lands_on_an_edge_instead_of_slamming_into_it() {
+        let start = Instant::now();
+        let mut smooth = Smooth::default();
+        let mut now = start;
+        smooth.gesture_held(true);
+        for _ in 0..8 {
+            now += Duration::from_millis(8);
+            smooth.glide_from(60.0, now);
+        }
+        smooth.gesture_held(false);
+        // 300px of room, against a fling that would otherwise carry far past it.
+        let mut room = 300.0;
+        let mut last_step = 0.0;
+        let mut travelled = 0.0;
+        for _ in 0..400 {
+            now += FRAME;
+            smooth.approach_edge(room);
+            smooth.advance(now);
+            let step = smooth.take_momentum();
+            if step.abs() > 0.05 {
+                last_step = step;
+            }
+            travelled += step;
+            room = (room - step).max(0.0);
+            if !smooth.has_momentum() && smooth.velocity.abs() < MIN_VELOCITY {
+                break;
+            }
+        }
+        assert!(
+            travelled <= 300.5,
+            "the fling coasted {travelled:.1}px through a 300px gap"
+        );
+        assert!(
+            travelled > 200.0,
+            "the brake ate the whole fling: only {travelled:.1}px of 300"
+        );
+        assert!(
+            last_step.abs() < 6.0,
+            "the fling was still doing {last_step:.1}px/frame when it stopped"
+        );
     }
 
     /// Hitting an edge ends the fling instead of grinding against the clamp.
