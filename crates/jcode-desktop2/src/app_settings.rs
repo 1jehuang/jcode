@@ -53,6 +53,14 @@ impl App {
         let Some(row) = ROWS.get(index).copied() else {
             return;
         };
+        // The one row that is a door rather than a dial: it acts and shuts the
+        // menu, because leaving it open over a newly-focused editor window
+        // would be stale chrome.
+        if row == Row::More {
+            self.open_config_file();
+            self.model.panel.close();
+            return;
+        }
         // The desktop's own preference is part of the answer for the theme
         // row, so it is read once here and handed down rather than consulted
         // twice with a chance of disagreeing between the step and the resolve.
@@ -87,10 +95,40 @@ impl App {
                     .motion
                     .then(|| crate::donut::Donut::new(crate::DONUT_GRID));
             }
-            // Nothing to push: the next selection reads the flag directly, and
-            // copying whatever happens to be highlighted at the moment the row
-            // is toggled would be a surprise.
-            Row::CopyOnSelect => {}
+            // Handled before it gets here: it opens a file rather than
+            // changing state.
+            Row::More => {}
+        }
+    }
+
+    /// Open `~/.jcode/config.toml` in whatever the desktop uses for text, so
+    /// the panel can stop at the settings worth a click and still be a route
+    /// to the rest of jcode's configuration.
+    ///
+    /// The file is created empty if missing: handing an editor a path that
+    /// does not exist is how "nothing happened" bugs are made.
+    fn open_config_file(&mut self) {
+        let Some(path) = crate::settings::config_path() else {
+            self.model.set_notice("no HOME to find config.toml in");
+            return;
+        };
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(error) = std::fs::write(&path, "") {
+                self.model.set_notice(format!("config.toml: {error}"));
+                return;
+            }
+        }
+        // Tests must not spawn an editor on the developer's desktop.
+        if cfg!(test) {
+            self.model.set_notice(format!("opened {}", path.display()));
+            return;
+        }
+        match std::process::Command::new("xdg-open").arg(&path).spawn() {
+            Ok(_) => self.model.set_notice(format!("opened {}", path.display())),
+            Err(error) => self.model.set_notice(format!("xdg-open: {error}")),
         }
     }
 
