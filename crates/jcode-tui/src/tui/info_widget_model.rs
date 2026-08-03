@@ -334,7 +334,11 @@ fn append_model_runtime_metadata(spans: &mut Vec<Span<'static>>, data: &InfoWidg
         ));
     }
 
-    if let Some(tier) = data.service_tier.as_deref().and_then(short_service_tier) {
+    let is_openai = data
+        .provider_name
+        .as_deref()
+        .is_some_and(|provider| provider.trim().to_ascii_lowercase().starts_with("openai"));
+    if is_openai && let Some(tier) = data.service_tier.as_deref().and_then(short_service_tier) {
         spans.push(Span::styled(" ", Style::default()));
         spans.push(Span::styled(
             format!("[{tier}]"),
@@ -436,7 +440,8 @@ mod tests {
     #[test]
     fn model_widget_and_overview_show_same_runtime_metadata() {
         let rect = Rect::new(0, 0, 40, 8);
-        let data = data();
+        let mut data = data();
+        data.provider_name = Some("openai".to_string());
 
         let independent = first_line_text(render_model_widget(&data, rect));
         let overview = first_line_text(render_model_info(&data, rect));
@@ -445,5 +450,16 @@ mod tests {
         assert!(independent.contains("[fast]"));
         assert!(overview.contains("(hi)"));
         assert!(overview.contains("[fast]"));
+    }
+
+    #[test]
+    fn non_openai_provider_hides_openai_service_tier() {
+        let rect = Rect::new(0, 0, 40, 8);
+        let mut data = data();
+        data.model = Some("deepseek-v4-flash".to_string());
+        data.provider_name = Some("deepseek".to_string());
+
+        assert!(!first_line_text(render_model_widget(&data, rect)).contains("[fast]"));
+        assert!(!first_line_text(render_model_info(&data, rect)).contains("[fast]"));
     }
 }
