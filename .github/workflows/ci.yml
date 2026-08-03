@@ -586,6 +586,30 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  typescript-sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      # The SDK mirrors crates/jcode-harness-api by hand. Without this job the
+      # only guard that runs on a change is the Rust-side variant check, and a
+      # typo in the TypeScript itself (or a broken client) reaches consumers.
+      - name: Install
+        run: npm ci --no-audit --no-fund
+        working-directory: sdk/typescript
+
+      - name: Typecheck, build, and test
+        run: npm run check
+        working-directory: sdk/typescript
+
   setup-friction:
     name: Setup Friction Eval (Linux installer)
     runs-on: ubuntu-latest
