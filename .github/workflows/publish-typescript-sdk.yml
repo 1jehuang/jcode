@@ -28,6 +28,13 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Enforce Rust and TypeScript SDK surface parity
+        working-directory: ${{ github.workspace }}
+        run: cargo test -p jcode-sdk parity -- --nocapture
+
       - name: Install dependencies
         run: npm ci
 

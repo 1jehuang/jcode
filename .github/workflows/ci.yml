@@ -94,6 +94,10 @@ jobs:
         shell: bash
         run: python3 scripts/check_dependency_boundaries.py
 
+      - name: Enforce Rust and TypeScript SDK surface parity
+        shell: bash
+        run: cargo test -p jcode-sdk parity -- --nocapture
+
       - name: Enforce wildcard re-export ratchet
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
