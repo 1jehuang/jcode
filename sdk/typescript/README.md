@@ -142,7 +142,11 @@ union that would go stale.
 asynchronous: the daemon summarizes at the next safe point rather than
 interrupting a turn, so it resolving means the request was accepted, not that
 the transcript has already shrunk. Read the history afterwards for the result.
-Refusals (nothing to compact, a turn in flight) reject with the reason.
+
+It is refused below about 10% context usage, on the grounds that there is
+nothing worth compacting yet, and the rejection carries the current usage. So
+treat `invalid_request` here as information for the user rather than an error
+to retry.
 
 ```ts
 await client.renameSession(id, "nightly refactor");  // omit the title to clear it
