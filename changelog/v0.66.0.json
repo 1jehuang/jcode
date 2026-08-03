@@ -1,0 +1,22 @@
+{
+  "version": "0.66.0",
+  "date": "2026-08-03",
+  "title": "Build on jcode",
+  "highlights": [
+    "A production-ready TypeScript SDK and Rust SDK can now launch isolated jcode agents or connect to a running instance",
+    "SDK clients can stream turns, request validated structured output, inspect models and providers, manage session retention, search project files, and subscribe to events",
+    "The desktop app can resume stored sessions and paste clipboard images directly"
+  ],
+  "improvements": [
+    "Desktop scrolling is faster and smoother across mouse wheels, trackpads, and keyboard controls",
+    "Desktop settings expose reasoning display and copy-on-select controls",
+    "Ctrl+L now behaves like a terminal clear while keeping earlier history available above the viewport",
+    "Tool output limits prevent oversized command results from overwhelming agent context"
+  ],
+  "fixes": [
+    "Private SDK instances inherit logins safely, isolate sessions, and clean up their processes and state on close or crash",
+    "Desktop reconnects now recover their retry timing and clearly report successful reconnection",
+    "Authentication guidance no longer suggests stale static API models",
+    "Session cancellation remains correct after a session rename"
+  ]
+}
