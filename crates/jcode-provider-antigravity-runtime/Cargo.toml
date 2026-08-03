@@ -21,6 +21,7 @@ jcode-message-types = { path = "../jcode-message-types" }
 jcode-provider-antigravity = { path = "../jcode-provider-antigravity" }
 jcode-provider-core = { path = "../jcode-provider-core" }
 jcode-provider-gemini = { path = "../jcode-provider-gemini" }
+jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "time", "rt"] }

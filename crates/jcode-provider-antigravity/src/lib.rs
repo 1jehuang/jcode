@@ -439,63 +439,39 @@ pub fn remap_unsupported_model(model: &str) -> &str {
 }
 
 /// Whether a resolved Antigravity model id targets a Gemini model.
-///
-/// Gemini is the backend's native path and accepts every JSON Schema construct
-/// jcode emits, so no schema rewriting is needed for these models.
 pub fn model_is_gemini(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("gemini")
 }
 
-/// Normalize a tool-parameter JSON schema for the Antigravity backend path that
-/// the resolved model uses.
+/// The schema dialect the Antigravity backend will validate a request against,
+/// which depends on which upstream the resolved model is routed to.
 ///
-/// The Antigravity Cloud Code backend multiplexes several upstreams behind one
-/// `generateContent` endpoint, and each upstream validates tool schemas
-/// differently. jcode's emitted schemas are valid JSON Schema draft 2020-12
-/// (verified against the metaschema), but two upstreams reject specific
-/// constructs after their own re-translation:
+/// The Cloud Code backend multiplexes several upstreams behind one
+/// `generateContent` endpoint, and each validates tool schemas differently:
 ///
+/// - **Gemini** (native): an OpenAPI 3.0 subset. Rejects draft keywords such as
+///   `propertyNames` (#754) and `required` naming an undeclared property (#655).
 /// - **Claude** (Gemini->Anthropic translation): rejects combiners
-///   (`anyOf`/`oneOf`/`allOf`) with HTTP 400 "must match JSON Schema draft
-///   2020-12". We collapse each combiner to its first branch.
-/// - **gpt-oss / other OpenAI-compatible bridges**: round-trip numeric schema
-///   bounds through a protobuf `int64`, which proto3 JSON re-encodes as a
-///   string, then reject it ("'10' is not of type 'integer'"). We drop
-///   `minItems`/`maxItems`/`minLength`/`maxLength`/`minProperties`/
-///   `maxProperties` for these models. These are advisory bounds the model does
-///   not need to satisfy a call, so dropping them is safe.
-///
-/// Gemini (the native path) rejects `propertyNames`, so that keyword is
-/// removed recursively while the rest of the schema is preserved.
-pub fn antigravity_compatible_schema(schema: &Value, model: &str) -> Value {
+///   (`anyOf`/`oneOf`/`allOf`) at any depth with HTTP 400 "must match JSON
+///   Schema draft 2020-12".
+/// - **gpt-oss / other OpenAI-compatible bridges**: round-trip numeric bounds
+///   through a protobuf `int64`, which proto3 JSON re-encodes as a string, then
+///   reject the string ("'10' is not of type 'integer'").
+pub fn antigravity_dialect(model: &str) -> &'static jcode_schema_dialect::DialectSpec {
     if model_is_gemini(model) {
-        return strip_schema_key(schema, "propertyNames");
+        &jcode_schema_dialect::registry::GEMINI
+    } else if model_is_claude(model) {
+        &jcode_schema_dialect::registry::ANTIGRAVITY_CLAUDE
+    } else {
+        &jcode_schema_dialect::registry::ANTIGRAVITY_BRIDGE
     }
-    if model_is_claude(model) {
-        return flatten_schema_combiners(schema);
-    }
-    // Non-Gemini, non-Claude models (e.g. gpt-oss) reach an OpenAI-compatible
-    // bridge that mangles numeric bounds; also flatten combiners defensively
-    // since those bridges share Anthropic's strictness about them.
-    strip_numeric_schema_bounds(&flatten_schema_combiners(schema))
 }
 
-fn strip_schema_key(schema: &Value, rejected_key: &str) -> Value {
-    match schema {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .filter(|(key, _)| key.as_str() != rejected_key)
-                .map(|(key, value)| (key.clone(), strip_schema_key(value, rejected_key)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|value| strip_schema_key(value, rejected_key))
-                .collect(),
-        ),
-        _ => schema.clone(),
-    }
+/// Normalize a tool-parameter JSON schema for the Antigravity backend path the
+/// resolved model uses. See [`antigravity_dialect`] for the per-upstream rules
+/// and `jcode-schema-dialect` for why the subsets are allow-lists.
+pub fn antigravity_compatible_schema(schema: &Value, model: &str) -> Value {
+    jcode_schema_dialect::normalize(schema, antigravity_dialect(model))
 }
 
 /// Numeric JSON Schema bounds an OpenAI-compatible Antigravity bridge corrupts

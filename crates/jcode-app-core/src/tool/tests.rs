@@ -1444,3 +1444,92 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
         );
     }
 }
+
+/// Every built-in tool, normalized for every provider dialect, must be
+/// sendable.
+///
+/// This is the guard the recurring schema-outage class never had. #446, #495,
+/// #543, #655, #687, #713 and #754 were each discovered by a user whose
+/// provider had gone down, then fixed by appending one keyword to one
+/// provider's deny-list. Nothing checked the *other* providers for the same
+/// construct, which is exactly how #754 hit Gemini through Antigravity months
+/// after the same class was fixed for OpenAI.
+///
+/// Running the real registry through every registered dialect turns "some
+/// provider is about to break" into a failing test on the commit that
+/// introduces it.
+#[tokio::test]
+async fn tool_schemas_are_sendable_to_every_provider_dialect() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs = registry.definitions(None).await;
+    assert!(!defs.is_empty(), "the sweep must not pass vacuously");
+
+    let mut failures = Vec::new();
+    for spec in jcode_schema_dialect::registry::ALL {
+        for def in &defs {
+            let normalized = jcode_schema_dialect::dialect::apply(&def.input_schema, spec);
+            for error in
+                jcode_schema_dialect::must_not_contain_unsupported_constructs(&normalized, spec)
+            {
+                failures.push(format!("[{}] tool `{}` {error}", spec.id, def.name));
+            }
+            // Over-stripping is the hazard an allow-list introduces: a dialect
+            // that forgot to list `description` would produce requests that
+            // succeed while silently deleting every tool's prompt text.
+            for error in jcode_schema_dialect::must_preserve_meaning(&def.input_schema, &normalized)
+            {
+                failures.push(format!(
+                    "[{}] tool `{}` lost meaning: {error}",
+                    spec.id, def.name
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "tool schemas are not sendable to every provider:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The sweep above must fail when a tool really does carry a construct a
+/// provider rejects, otherwise it is decorative. Feeds the exact
+/// `@playwright/mcp` schema from #754 through the same checker to prove the
+/// detection works end to end.
+#[test]
+fn the_dialect_sweep_catches_the_issue_754_schema() {
+    let hostile = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "propertyNames": { "type": "string" }
+            }
+        }
+    });
+
+    let unnormalized = jcode_schema_dialect::must_not_contain_unsupported_constructs(
+        &hostile,
+        &jcode_schema_dialect::registry::GEMINI,
+    );
+    assert!(
+        unnormalized.iter().any(|e| e.message.contains("propertyNames")),
+        "the checker must flag the raw schema, got {unnormalized:?}"
+    );
+
+    let normalized = jcode_schema_dialect::dialect::apply(
+        &hostile,
+        &jcode_schema_dialect::registry::GEMINI,
+    );
+    assert!(
+        jcode_schema_dialect::must_not_contain_unsupported_constructs(
+            &normalized,
+            &jcode_schema_dialect::registry::GEMINI,
+        )
+        .is_empty(),
+        "and must pass once normalized"
+    );
+}

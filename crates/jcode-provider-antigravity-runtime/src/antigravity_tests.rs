@@ -477,9 +477,11 @@ fn strip_numeric_schema_bounds_drops_array_and_string_and_object_bounds() {
 }
 
 #[test]
-fn antigravity_compatible_schema_only_strips_property_names_for_gemini() {
-    // Gemini keeps combiners and bounds, but generateContent rejects the
-    // `propertyNames` keyword even when it is nested.
+fn antigravity_gemini_uses_the_same_dialect_as_the_native_gemini_provider() {
+    // Antigravity's Gemini route reaches the same `generateContent` validator
+    // as the native Gemini provider, so it must apply the identical dialect.
+    // Historically it applied a laxer one and inherited every Gemini schema
+    // outage a release late (#754), which is what the shared dialect prevents.
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -499,7 +501,23 @@ fn antigravity_compatible_schema_only_strips_property_names_for_gemini() {
     });
 
     let out = antigravity_compatible_schema(&schema, "gemini-3-flash");
+
+    // Byte-identical to what the native Gemini provider would send.
+    assert_eq!(
+        out,
+        jcode_provider_gemini::gemini_compatible_schema(&schema),
+        "the two Gemini routes must not drift apart"
+    );
+
+    // Both keywords Gemini rejects are gone, at depth.
     assert!(out["properties"]["data"].get("propertyNames").is_none());
+    assert!(
+        out["properties"]["data"]
+            .get("additionalProperties")
+            .is_none()
+    );
+
+    // Everything load-bearing survives: combiner branches, types, bounds.
     assert_eq!(
         out["properties"]["status_filter"],
         schema["properties"]["status_filter"]
@@ -508,10 +526,7 @@ fn antigravity_compatible_schema_only_strips_property_names_for_gemini() {
         out["properties"]["tool_calls"],
         schema["properties"]["tool_calls"]
     );
-    assert_eq!(
-        out["properties"]["data"]["additionalProperties"],
-        serde_json::json!({ "type": "string" })
-    );
+    assert_eq!(out["properties"]["data"]["type"], "object");
 }
 
 #[test]
