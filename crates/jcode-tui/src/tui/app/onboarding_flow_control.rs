@@ -41,6 +41,34 @@ impl App {
             .map(|flow| &flow.phase)
     }
 
+    /// The single place the onboarding phase changes.
+    ///
+    /// Routing every transition through here is what keeps the written-down
+    /// graph (`onboarding_graph`) honest: the running flow reports each move in
+    /// graph terms, and a move the graph does not declare is logged as model
+    /// drift. We log rather than panic, because a bookkeeping disagreement must
+    /// never be the reason a user's first run dies.
+    ///
+    /// It is also the natural seam for trace telemetry: the edge events a trace
+    /// needs are exactly the transitions that pass through this function.
+    pub(super) fn set_onboarding_phase(&mut self, next: OnboardingPhase) {
+        use super::onboarding_graph::{node_for_phase, transition_is_declared};
+        let Some(flow) = self.onboarding_flow.as_mut() else {
+            return;
+        };
+        let from = node_for_phase(&flow.phase);
+        let to = node_for_phase(&next);
+        if !transition_is_declared(from, to) {
+            crate::logging::warn(&format!(
+                "onboarding transition {} -> {} is not declared in onboarding_graph; \
+                 the graph and the live flow have drifted",
+                from.label(),
+                to.label()
+            ));
+        }
+        flow.phase = next;
+    }
+
     /// Gate + start the flow after a successful login. Only fires for brand-new
     /// users (no prior onboarding flow this session) so returning users who
     /// re-auth aren't dragged through onboarding.
@@ -272,9 +300,7 @@ impl App {
         if !self.onboarding_telemetry_choice_made {
             crate::telemetry::set_content_sharing_enabled(false);
         }
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::ModelSelect;
-        }
+        self.set_onboarding_phase(OnboardingPhase::ModelSelect);
         self.onboarding_after_model_select();
     }
 
@@ -296,13 +322,11 @@ impl App {
     /// opens the two-action start choice directly.
     #[allow(dead_code)]
     fn onboarding_enter_continue_prompt(&mut self, cli: ExternalCli) {
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::ContinuePrompt {
-                cli,
-                yes_highlighted: true,
-                shown_at: Instant::now(),
-            };
-        }
+        self.set_onboarding_phase(OnboardingPhase::ContinuePrompt {
+            cli,
+            yes_highlighted: true,
+            shown_at: Instant::now(),
+        });
         // The continue prompt is rendered by the onboarding welcome screen
         // (`onboarding_welcome_kind`) so it survives in remote mode.
         self.update_onboarding_continue_prompt_status(cli);
@@ -867,11 +891,9 @@ impl App {
         picker.activate_onboarding_banner(Self::onboarding_start_choice_banner_lines());
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Onboarding;
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::StartChoice {
-                shown_at: Instant::now(),
-            };
-        }
+        self.set_onboarding_phase(OnboardingPhase::StartChoice {
+            shown_at: Instant::now(),
+        });
         self.onboarding_prefetch_recent_project();
         self.set_status_notice("Choose a suggested review or start a new session (↑↓, Enter)");
     }
@@ -1037,9 +1059,7 @@ impl App {
     /// kick off a single lightweight live validation of the auto-selected
     /// default model and report it as one tidy "ready"/"failed" line.
     pub(super) fn onboarding_show_suggestions(&mut self) {
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Suggestions;
-        }
+        self.set_onboarding_phase(OnboardingPhase::Suggestions);
         let suggestions = self.suggestion_prompts();
         if suggestions.is_empty() {
             self.onboarding_finish();
@@ -1528,9 +1548,7 @@ impl App {
     pub(super) fn onboarding_finish(&mut self) {
         self.onboarding_auto_model_selection_active
             .store(false, std::sync::atomic::Ordering::Release);
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Done;
-        }
+        self.set_onboarding_phase(OnboardingPhase::Done);
     }
 
     /// A login/import attempt failed while onboarding was driving the Login
