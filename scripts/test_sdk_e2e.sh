@@ -69,6 +69,9 @@ node "$sdk_dir/test/live-launch.mjs" "$jcode_bin"
 echo "== checking instance isolation and path safety =="
 node "$sdk_dir/test/live-isolation.mjs" "$jcode_bin"
 
+echo "== checking every documented launch option =="
+node "$sdk_dir/test/live-options.mjs" "$jcode_bin"
+
 echo "== bridge log =="
 cat "$log"
 echo "SDK e2e passed."

@@ -164,6 +164,14 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
     if (!fs.existsSync(source)) continue;
     const destination = path.join(toHome, name);
     if (SHARED_FILES.has(name)) {
+      // A reused `jcodeHome` already has these links, and symlinkSync throws
+      // EEXIST rather than replacing. Relinking also repoints a stale link
+      // from an older run, so replace rather than skip.
+      try {
+        fs.unlinkSync(destination);
+      } catch {
+        // Nothing there, which is the common case.
+      }
       fs.symlinkSync(source, destination);
     } else {
       fs.copyFileSync(source, destination);
@@ -363,6 +371,20 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
   const runtimeDir = path.join(jcodeHome, "run");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   const socketPath = path.join(runtimeDir, "jcode-api.sock");
+
+  // A reused `jcodeHome` still holds the previous run's socket files. The
+  // startup loop waits for the API socket to *appear*, so a leftover one makes
+  // launch() return immediately against a socket nothing is listening on, and
+  // the first request fails with ECONNREFUSED. Clearing them is safe: a live
+  // instance on this home would mean two daemons sharing one state directory,
+  // which is already unsupported.
+  for (const stale of ["jcode-api.sock", "jcode.sock", "jcode-debug.sock", "jcode.sock.hash"]) {
+    try {
+      fs.unlinkSync(path.join(runtimeDir, stale));
+    } catch {
+      // Absent, which is the normal case for a fresh home.
+    }
+  }
 
   if (options.inheritLogins ?? true) {
     inheritCredentials(userJcodeHome(), jcodeHome);
