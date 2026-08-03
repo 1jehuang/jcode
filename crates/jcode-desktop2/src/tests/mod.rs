@@ -12,6 +12,7 @@ mod delivery;
 mod editor_selection;
 mod failures;
 mod hero_visual;
+mod model_picker;
 mod overview_gesture;
 mod overview_visual;
 mod page_bands;

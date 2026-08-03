@@ -122,6 +122,16 @@ pub const PANEL_GAP: f64 = 6.0;
 /// Inset from the panel's edge to a row's text.
 pub const PANEL_TEXT_PAD: f64 = 10.0;
 
+/// Model picker anchored to the active-model caption below the composer. It
+/// opens upward so the ordinary bottom margin never clips the catalog.
+pub const MODEL_BUTTON_MIN_WIDTH: f64 = 150.0;
+pub const MODEL_MENU_WIDTH: f64 = 320.0;
+pub const MODEL_MENU_ROW_HEIGHT: f64 = 26.0;
+pub const MODEL_MENU_PAD: f64 = 6.0;
+pub const MODEL_MENU_RADIUS: f64 = 6.0;
+pub const MODEL_MENU_GAP: f64 = 6.0;
+pub const MODEL_MENU_TEXT_PAD: f64 = 10.0;
+
 /// The resume overlay: a left panel of stored sessions, a preview to its
 /// right, both floating over the conversation rather than replacing it.
 ///
@@ -434,6 +444,60 @@ impl Frame {
     pub fn composer_lines(&self) -> usize {
         let extra = (self.composer_bottom - self.composer_top - COMPOSER_HEIGHT).max(0.0);
         1 + (extra / COMPOSER_LINE_HEIGHT).round() as usize
+    }
+
+    /// The active model caption's visible button and pointer hit target.
+    pub fn model_button(&self) -> vello::kurbo::Rect {
+        let width = (self.column() / 3.0)
+            .max(MODEL_BUTTON_MIN_WIDTH)
+            .min(self.column());
+        vello::kurbo::Rect::new(
+            self.right - width,
+            self.footnote_top,
+            self.right,
+            self.footnote_bottom,
+        )
+    }
+
+    pub fn hits_model_button(&self, x: f64, y: f64) -> bool {
+        self.model_button().contains(vello::kurbo::Point::new(x, y))
+    }
+
+    /// The model catalog floats above the composer, trailing-edge aligned with
+    /// the caption that opened it. Like the settings panel it overlays content
+    /// rather than shifting the page.
+    pub fn model_menu(&self, rows: usize) -> vello::kurbo::Rect {
+        let rows = rows.max(1);
+        let height = rows as f64 * MODEL_MENU_ROW_HEIGHT + MODEL_MENU_PAD * 2.0;
+        let x1 = self.right;
+        let x0 = (x1 - MODEL_MENU_WIDTH).max(0.0);
+        let y1 = (self.composer_top - MODEL_MENU_GAP).max(height);
+        vello::kurbo::Rect::new(x0, y1 - height, x1, y1)
+    }
+
+    pub fn model_menu_row(&self, rows: usize, index: usize) -> vello::kurbo::Rect {
+        let menu = self.model_menu(rows);
+        let y0 = menu.y0 + MODEL_MENU_PAD + index as f64 * MODEL_MENU_ROW_HEIGHT;
+        vello::kurbo::Rect::new(
+            menu.x0 + MODEL_MENU_PAD,
+            y0,
+            menu.x1 - MODEL_MENU_PAD,
+            y0 + MODEL_MENU_ROW_HEIGHT,
+        )
+    }
+
+    pub fn model_menu_row_at(&self, rows: usize, x: f64, y: f64) -> Option<usize> {
+        let rows = rows.max(1);
+        let menu = self.model_menu(rows);
+        if !menu.contains(vello::kurbo::Point::new(x, y)) {
+            return None;
+        }
+        let offset = y - menu.y0 - MODEL_MENU_PAD;
+        if offset < 0.0 {
+            return None;
+        }
+        let index = (offset / MODEL_MENU_ROW_HEIGHT) as usize;
+        (index < rows).then_some(index)
     }
 
     /// The caret must stay inside the composer well at any size.
@@ -1363,5 +1427,40 @@ mod tests {
                 None
             );
         });
+    }
+
+    #[test]
+    fn model_caption_button_is_the_trailing_footnote_target() {
+        sweep(|frame| {
+            let button = frame.model_button();
+            assert_eq!(button.x1, frame.right);
+            assert_eq!(button.y0, frame.footnote_top);
+            assert_eq!(button.y1, frame.footnote_bottom);
+            assert!(frame.hits_model_button(
+                button.x0 + button.width() / 2.0,
+                button.y0 + button.height() / 2.0
+            ));
+            assert!(!frame.hits_model_button(frame.left, frame.body_top));
+        });
+    }
+
+    #[test]
+    fn model_menu_rows_round_trip_and_stay_above_the_composer() {
+        let frame = Frame::new((1100, 720), 1.0);
+        let rows = 4;
+        let menu = frame.model_menu(rows);
+        assert!(menu.y1 <= frame.composer_top);
+        assert_eq!(menu.x1, frame.right);
+        for index in 0..rows {
+            let row = frame.model_menu_row(rows, index);
+            assert_eq!(
+                frame.model_menu_row_at(
+                    rows,
+                    row.x0 + row.width() / 2.0,
+                    row.y0 + row.height() / 2.0,
+                ),
+                Some(index)
+            );
+        }
     }
 }

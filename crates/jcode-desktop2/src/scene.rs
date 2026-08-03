@@ -458,6 +458,133 @@ fn draw_settings_panel(
     }
 }
 
+/// Draw the active model caption as a quiet button and, when open, the catalog
+/// returned by the SDK. The menu follows the settings panel's visual grammar so
+/// both pieces of desktop chrome feel like one app.
+fn draw_model_picker(
+    scene: &mut Scene,
+    text: &mut text::TextSystem,
+    model: &Model,
+    frame: &layout::Frame,
+    caption: &str,
+    scale: f64,
+) {
+    let theme = &model.theme;
+    let button = frame.model_button();
+    if model.model_picker.button_hover() || model.model_picker.is_open() {
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            Affine::scale(scale),
+            theme.wash,
+            None,
+            &button,
+        );
+    }
+    scene.stroke(
+        &vello::kurbo::Stroke::new(frame.hairline()),
+        Affine::scale(scale),
+        theme.rule,
+        None,
+        &RoundedRect::from_rect(button, layout::MODEL_MENU_RADIUS / 2.0),
+    );
+    let baseline = button.y0 + (button.height() - f64::from(layout::CAPTION_SIZE) * 1.4) / 2.0;
+    let left = button.x0 + layout::MODEL_MENU_TEXT_PAD;
+    let chevron_space = 12.0;
+    text.draw_paragraph_scaled(
+        scene,
+        caption,
+        (left, baseline),
+        (button.width() - layout::MODEL_MENU_TEXT_PAD * 2.0 - chevron_space).max(1.0) as f32,
+        ParagraphStyle {
+            font_size: layout::CAPTION_SIZE,
+            color: theme.faint,
+            letter_spacing_em: 0.1,
+            align: text::Align::End,
+            ..Default::default()
+        },
+        scale,
+    );
+    let cx = button.x1 - layout::MODEL_MENU_TEXT_PAD + 1.0;
+    let cy = (button.y0 + button.y1) / 2.0;
+    let mut chevron = BezPath::new();
+    chevron.move_to((cx - 3.0, cy - 1.5));
+    chevron.line_to((cx, cy + 1.5));
+    chevron.line_to((cx + 3.0, cy - 1.5));
+    scene.stroke(
+        &vello::kurbo::Stroke::new(frame.hairline()),
+        Affine::scale(scale),
+        theme.faint,
+        None,
+        &chevron,
+    );
+
+    if !model.model_picker.is_open() {
+        return;
+    }
+    let rows = model.model_picker.visual_rows();
+    let menu = frame.model_menu(rows);
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        theme.field,
+        None,
+        &RoundedRect::from_rect(menu, layout::MODEL_MENU_RADIUS),
+    );
+    scene.stroke(
+        &vello::kurbo::Stroke::new(layout::COMPOSER_BORDER),
+        Affine::scale(scale),
+        theme.field_border,
+        None,
+        &RoundedRect::from_rect(menu, layout::MODEL_MENU_RADIUS),
+    );
+    for index in 0..rows {
+        let band = frame.model_menu_row(rows, index);
+        if model.model_picker.hover() == Some(index) {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.wash,
+                None,
+                &RoundedRect::from_rect(band, layout::MODEL_MENU_RADIUS / 2.0),
+            );
+        }
+        let value = model.model_picker.models().get(index);
+        let label = value.map(String::as_str).unwrap_or_else(|| {
+            if model.model_picker.is_loading() {
+                "loading models…"
+            } else {
+                "no models available"
+            }
+        });
+        let current =
+            value.is_some_and(|value| model.model_picker.current() == Some(value.as_str()));
+        let left = band.x0 + layout::MODEL_MENU_TEXT_PAD;
+        let baseline = band.y0 + (band.height() - f64::from(layout::CAPTION_SIZE) * 1.4) / 2.0;
+        text.draw_paragraph_scaled(
+            scene,
+            label,
+            (left, baseline),
+            (band.width() - layout::MODEL_MENU_TEXT_PAD * 2.0).max(1.0) as f32,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: if current { theme.text } else { theme.muted },
+                letter_spacing_em: 0.05,
+                ..Default::default()
+            },
+            scale,
+        );
+        if current {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.text,
+                None,
+                &Circle::new((band.x1 - 8.0, band.y0 + band.height() / 2.0), 2.0),
+            );
+        }
+    }
+}
+
 /// Body paragraph style for transcript prose. One definition, so measuring in
 /// [`crate::viewport`] and drawing here can never disagree.
 pub fn transcript_body_style(model: &Model) -> ParagraphStyle {
@@ -1268,21 +1395,8 @@ pub fn build_scene(
     // footnote row. Right-aligned so it reads as metadata about the session
     // rather than as another message to the user, and drawn after the footnote
     // so a long notice is the thing that gets elided, not this.
-    if let Some(caption) = model_caption {
-        text.draw_paragraph_scaled(
-            scene,
-            &caption,
-            (frame.left, frame.footnote_top),
-            frame.column() as f32,
-            ParagraphStyle {
-                font_size: layout::CAPTION_SIZE,
-                color: theme.faint,
-                letter_spacing_em: 0.1,
-                align: text::Align::End,
-                ..Default::default()
-            },
-            scale,
-        );
+    if let Some(caption) = model_caption.as_deref() {
+        draw_model_picker(scene, text, model, &frame, caption, scale);
     }
 
     // The settings panel sits over the page, under the overview: it is a

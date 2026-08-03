@@ -7,6 +7,7 @@
 mod ack;
 mod activity;
 mod app_harness;
+mod app_model_picker;
 mod app_overview;
 mod app_resume;
 mod app_selection;
@@ -28,6 +29,7 @@ mod keymap;
 mod layout;
 mod mem;
 mod meta;
+mod model_picker;
 mod overview;
 mod paint;
 mod place;
@@ -362,6 +364,8 @@ pub struct Model {
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
     pub model: Option<ModelId>,
+    /// The clickable model caption and the SDK catalog menu it opens.
+    pub model_picker: model_picker::Picker,
     /// The boot-up reveal: black paper, the donut growing in, then the rest of
     /// the window. Default is *finished*, so captures and tests see the settled
     /// frame; the real window replaces it on the first paint.
@@ -448,6 +452,7 @@ impl Default for Model {
             resume: resume::Picker::default(),
             working_dir: None,
             model: None,
+            model_picker: model_picker::Picker::default(),
             boot: boot::Boot::default(),
             progress_clock: None,
             settings,
@@ -824,6 +829,11 @@ impl App {
             }
             return;
         }
+        // The model menu hangs from the caption below the composer. It is a
+        // modal menu while open, so it gets the press before page content.
+        if self.model_picker_press(x, y) {
+            return;
+        }
         // The gear and its panel sit above the page, so they get first look
         // at a press: a menu that the click behind it also acted on is a menu
         // you cannot safely dismiss.
@@ -997,6 +1007,12 @@ impl App {
             return;
         }
         let wanted = if self.frame.hits_gear(x, y)
+            || (self.has_model_caption() && self.frame.hits_model_button(x, y))
+            || (self.model.model_picker.is_open()
+                && self
+                    .frame
+                    .model_menu_row_at(self.model.model_picker.visual_rows(), x, y)
+                    .is_some())
             || (self.model.panel.is_open() && self.frame.panel_row_at(panel_rows, x, y).is_some())
         {
             // A pointing hand over the gear and its rows, so the one clickable
@@ -1066,6 +1082,9 @@ impl App {
             self.model.spin.drag_to(self.pointer.0);
             self.request_redraw();
             return;
+        }
+        if self.model_picker_hover(self.pointer.0, self.pointer.1) {
+            self.request_redraw();
         }
         if self.settings_hover(self.pointer.0, self.pointer.1) {
             self.request_redraw();
@@ -1412,7 +1431,9 @@ impl App {
             // keystrokes: the composer keeps the keyboard, so typing through
             // an accidentally-opened panel still lands in the message.
             Action::ToggleSettings => {
-                self.model.panel.toggle();
+                if self.model.panel.toggle() {
+                    self.model.model_picker.close();
+                }
             }
 
             // The palette, on a key. The notice names what it landed on, so
