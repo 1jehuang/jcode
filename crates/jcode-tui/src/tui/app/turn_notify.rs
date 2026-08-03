@@ -355,7 +355,7 @@ mod tests {
         done.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(35));
         let n = build_turn_notification(None, 200.0, &[done], None);
         assert_eq!(n.subtitle.as_deref(), Some("✓ all 1 todos"));
-        assert_eq!(n.body, "✓ risky refactor (low conf 35%)");
+        assert_eq!(n.body, "✓ risky refactor (low conf: speculative)");
     }
 
     #[test]
