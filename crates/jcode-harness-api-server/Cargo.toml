@@ -13,6 +13,9 @@ serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "sync"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The parser in `background_progress` reads markdown produced by the daemon's
 # own formatter, so the contract test builds that formatter rather than a copy
