@@ -14,5 +14,12 @@
 export * from "./protocol.js";
 export * from "./sockets.js";
 export * from "./framing.js";
+export {
+  launchInstance,
+  inheritCredentials,
+  userJcodeHome,
+  userAppConfigDir,
+} from "./launch.js";
+export type { LaunchOptions, LaunchedInstance } from "./launch.js";
 export { JcodeClient, HarnessError, unixSocketTransport } from "./client.js";
 export type { ConnectOptions, Transport, TurnResult } from "./client.js";
