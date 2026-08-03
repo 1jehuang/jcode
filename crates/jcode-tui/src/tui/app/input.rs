@@ -1513,6 +1513,17 @@ impl App {
         }
 
         let todos = super::commands::poke_todos(self);
+        if !todos.is_empty()
+            && crate::todo::take_long_session_review_if_due(&self.session.id).unwrap_or(false)
+        {
+            self.push_display_message(DisplayMessage::system(
+                "🔍 Rechecking the plan and assessments after extended work...",
+            ));
+            self.queued_messages
+                .push(crate::todo::TODO_LONG_SESSION_REVIEW_MESSAGE.to_string());
+            self.pending_queued_dispatch = true;
+            return true;
+        }
         let incomplete: Vec<_> = todos
             .iter()
             .filter(|todo| super::commands::is_incomplete_poke_todo(todo))

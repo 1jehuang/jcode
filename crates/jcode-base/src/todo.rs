@@ -3,6 +3,22 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
+/// it is intentionally private so the model reassesses from evidence rather
+/// than targeting a timer or evaluator boundary.
+pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop quality, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
+
+/// Private policy. Do not include this duration in model-facing schemas or
+/// continuation text.
+const TODO_LONG_SESSION_REVIEW_AFTER: chrono::Duration = chrono::Duration::minutes(30);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TodoReviewState {
+    cycle_started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    review_delivered: bool,
+}
+
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopState, IntentUnderstanding,
     IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
@@ -480,6 +496,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
         || trimmed.starts_with(TODO_GATE_DIGEST_PREFIX)
+        || trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE)
 }
 
 /// Short, user-facing stand-in for a synthetic auto-poke/gate continuation.
@@ -506,6 +523,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     }
     if trimmed.starts_with(TODO_GATE_DIGEST_PREFIX) {
         return Some("🔍 Reviewing the weak points of this turn for you...");
+    }
+    if trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE) {
+        return Some("🔍 Rechecking the plan and assessments after extended work...");
     }
     if trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE)
@@ -546,6 +566,62 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
 fn todo_path(session_id: &str) -> Result<PathBuf> {
     let base = storage::jcode_dir()?;
     Ok(base.join("todos").join(format!("{}.json", session_id)))
+}
+
+fn todo_review_path(session_id: &str) -> Result<PathBuf> {
+    let base = storage::jcode_dir()?;
+    Ok(base
+        .join("todos")
+        .join(format!("{}-review-state.json", session_id)))
+}
+
+/// Record the beginning of a fresh todo cycle without exposing timing metadata
+/// through the model-facing todo payload. Replacing a fully completed list with
+/// new open work starts a new cycle; ordinary edits retain the original clock.
+pub fn update_todo_review_cycle(
+    session_id: &str,
+    previous: &[TodoItem],
+    incoming: &[TodoItem],
+) -> Result<()> {
+    if incoming.is_empty() {
+        return Ok(());
+    }
+    let path = todo_review_path(session_id)?;
+    let previous_complete = !previous.is_empty()
+        && previous
+            .iter()
+            .all(|todo| todo.status.eq_ignore_ascii_case("completed"));
+    let incoming_has_open = incoming
+        .iter()
+        .any(|todo| !todo.status.eq_ignore_ascii_case("completed"));
+    if !path.exists() || (previous_complete && incoming_has_open) {
+        storage::write_json_fast(
+            &path,
+            &TodoReviewState {
+                cycle_started_at: chrono::Utc::now(),
+                review_delivered: false,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Atomically decide and mark whether the one-shot long-session assessment
+/// review is due. Marking before queueing prevents reloads from duplicating it.
+pub fn take_long_session_review_if_due(session_id: &str) -> Result<bool> {
+    let path = todo_review_path(session_id)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut state: TodoReviewState = storage::read_json(&path)?;
+    if state.review_delivered
+        || chrono::Utc::now() - state.cycle_started_at < TODO_LONG_SESSION_REVIEW_AFTER
+    {
+        return Ok(false);
+    }
+    state.review_delivered = true;
+    storage::write_json_fast(&path, &state)?;
+    Ok(true)
 }
 
 /// Goal-level assessments live beside the todo list in a separate file so the
@@ -1195,6 +1271,45 @@ mod tests {
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
+        }
+    }
+
+    #[test]
+    fn long_session_review_is_private_durable_and_one_shot() {
+        let _guard = storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "long-review-one-shot";
+        let todos = vec![todo("work", "in_progress", Some("ship"))];
+
+        update_todo_review_cycle(session, &[], &todos).expect("start cycle");
+        assert!(!take_long_session_review_if_due(session).expect("fresh cycle"));
+
+        let path = todo_review_path(session).expect("review path");
+        storage::write_json_fast(
+            &path,
+            &TodoReviewState {
+                cycle_started_at: chrono::Utc::now()
+                    - TODO_LONG_SESSION_REVIEW_AFTER
+                    - chrono::Duration::seconds(1),
+                review_delivered: false,
+            },
+        )
+        .expect("age cycle");
+        assert!(take_long_session_review_if_due(session).expect("due review"));
+        assert!(!take_long_session_review_if_due(session).expect("one shot"));
+        assert!(!TODO_LONG_SESSION_REVIEW_MESSAGE.contains("30"));
+        assert!(
+            !TODO_LONG_SESSION_REVIEW_MESSAGE
+                .to_ascii_lowercase()
+                .contains("threshold")
+        );
+        assert!(is_auto_poke_message(TODO_LONG_SESSION_REVIEW_MESSAGE));
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
         }
     }
 

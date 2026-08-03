@@ -5,7 +5,7 @@ use crate::todo::{
     TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE, TodoGoal, TodoGoalChange, TodoGoalField,
     TodoItem, TodoPlan, TodoPlanChange, TodoPlanField, append_gate_observations,
     feedback_loop_passes, intent_understanding_passes, load_goals, load_plan, load_todos,
-    save_goals, save_plan, save_todos,
+    save_goals, save_plan, save_todos, update_todo_review_cycle,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -781,6 +781,12 @@ impl Tool for TodoTool {
                 save_todos(&ctx.session_id, &todos)?;
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;
+                if let Err(err) = update_todo_review_cycle(&ctx.session_id, &previous, &todos) {
+                    crate::logging::warn(&format!(
+                        "[tool:todo] failed to update review cycle session_id={} error={}",
+                        ctx.session_id, err
+                    ));
+                }
                 record_todo_telemetry(&previous, &todos, &goals, &plan);
 
                 Bus::global().publish(BusEvent::TodoUpdated(TodoEvent {
