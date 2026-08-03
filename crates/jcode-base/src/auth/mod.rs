@@ -112,6 +112,25 @@ pub fn browser_suppressed(cli_no_browser: bool) -> bool {
         || env_truthy("NO_BROWSER")
         || env_truthy("JCODE_NO_BROWSER")
         || running_in_test_harness()
+        || browser_unusable_here()
+}
+
+/// True when the probed environment says a browser launch cannot work.
+///
+/// Without this, jcode would open a browser that does not exist (or that opens
+/// on the wrong machine, over SSH) and then wait out a callback timeout before
+/// telling the user anything. Probing first turns a 60-second dead end into an
+/// immediate fallback to a paste/device flow.
+///
+/// Deliberately conservative: only a *positive* determination suppresses the
+/// browser, so an inconclusive probe never downgrades a working setup.
+fn browser_unusable_here() -> bool {
+    use crate::auth::env_facts::{AuthMethodChoice, EnvFacts};
+    static CHOICE: std::sync::OnceLock<AuthMethodChoice> = std::sync::OnceLock::new();
+    matches!(
+        CHOICE.get_or_init(|| EnvFacts::probe().preferred_auth_method()),
+        AuthMethodChoice::DeviceCode | AuthMethodChoice::ApiKeyNonInteractive
+    )
 }
 
 /// True when the current process is a Rust test binary (`cargo test` /

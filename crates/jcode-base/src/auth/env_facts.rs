@@ -123,9 +123,13 @@ impl EnvFacts {
         if self.tty.is_definitely_not() {
             return AuthMethodChoice::ApiKeyNonInteractive;
         }
-        // A browser redirect inside a container/SSH session usually opens on the
-        // wrong machine, so prefer a code the user can carry across.
-        if self.container == Tri::Yes || self.browser.is_definitely_not() {
+        // No confirmed browser means a redirect has nowhere to land. A remote
+        // or containerized session counts here only when we could not confirm a
+        // browser: SSH with X forwarding has a real, working browser, and
+        // downgrading that user would be a regression.
+        if self.browser.is_definitely_not()
+            || (self.container == Tri::Yes && self.browser != Tri::Yes)
+        {
             return AuthMethodChoice::DeviceCode;
         }
         if self.loopback_bind.is_definitely_not() {
@@ -331,7 +335,16 @@ mod tests {
                 AuthMethodChoice::ApiKeyNonInteractive,
             ),
             (
+                // Container with a *confirmed* browser (e.g. SSH with X
+                // forwarding): keep the best flow rather than downgrading a
+                // user whose browser demonstrably works.
                 facts(Tri::Yes, Tri::Yes, Tri::Yes, Tri::Yes, Tri::Yes),
+                AuthMethodChoice::OAuthLoopback,
+            ),
+            (
+                // Container with no confirmed browser: a redirect would land on
+                // the wrong machine, so carry a code across instead.
+                facts(Tri::Yes, Tri::Unknown, Tri::Yes, Tri::Yes, Tri::Yes),
                 AuthMethodChoice::DeviceCode,
             ),
             (
@@ -398,6 +411,33 @@ mod tests {
                 method.label()
             );
         }
+    }
+
+    #[test]
+    fn a_normal_desktop_keeps_the_browser_flow() {
+        // Regression guard for the probe's integration with
+        // `auth::browser_suppressed`: a plain desktop must never be downgraded
+        // out of the browser flow by the probe. Only DeviceCode and
+        // ApiKeyNonInteractive suppress the browser there.
+        let desktop = facts(Tri::Yes, Tri::Yes, Tri::Yes, Tri::Yes, Tri::No);
+        assert_eq!(
+            desktop.preferred_auth_method(),
+            AuthMethodChoice::OAuthLoopback
+        );
+
+        // And the most pessimistic reading of an inconclusive probe still keeps
+        // the browser, because Unknown is optimistic everywhere.
+        let inconclusive = facts(
+            Tri::Unknown,
+            Tri::Unknown,
+            Tri::Unknown,
+            Tri::Unknown,
+            Tri::Unknown,
+        );
+        assert!(matches!(
+            inconclusive.preferred_auth_method(),
+            AuthMethodChoice::OAuthLoopback | AuthMethodChoice::OAuthPasteCallback
+        ));
     }
 
     #[test]

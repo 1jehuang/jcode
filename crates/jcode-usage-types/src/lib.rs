@@ -27,6 +27,7 @@ pub struct ProviderUsageProgress {
 }
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CopilotUsageTracker {
@@ -334,6 +335,59 @@ pub struct OnboardingStepEvent {
     pub auth_failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub milestone_elapsed_ms: Option<u64>,
+    pub schema_version: u32,
+    pub build_channel: String,
+    pub is_git_checkout: bool,
+    pub is_ci: bool,
+    pub ran_from_cargo: bool,
+}
+
+/// One traversal of one edge of the onboarding graph.
+///
+/// Every string field is a `&'static str` drawn from the closed vocabulary
+/// defined by `onboarding_graph` (`NodeId::label`, `EdgeId::label`) or by the
+/// auth failure taxonomy. There is deliberately no free-text field, so this
+/// payload is structurally incapable of carrying prompts, paths, hostnames, or
+/// credentials. That is a guarantee of the type, not of a scrubbing pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingTraceStep {
+    /// Node the user was on, e.g. "login_openai".
+    pub node: &'static str,
+    /// Edge taken out of it, e.g. "login_fail". `None` on the final step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<&'static str>,
+    /// Classified reason, only for failure edges, e.g. "callback_timeout".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// Time spent on this node, bucketed to 100ms and capped, so timings
+    /// cannot act as a behavioral fingerprint.
+    pub dt_ms: u64,
+}
+
+/// A complete onboarding traversal: the shape of one user's first run.
+///
+/// Because it is a path through a known graph, aggregating these answers the
+/// questions we could never answer before (which edge fails, where users
+/// abandon, which screens nobody reaches) while carrying no user data at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingTraceEvent {
+    pub event_id: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub event: &'static str,
+    pub version: String,
+    pub os: &'static str,
+    pub arch: &'static str,
+    /// Probed environment capabilities, all three-valued enums.
+    pub env: BTreeMap<String, &'static str>,
+    pub steps: Vec<OnboardingTraceStep>,
+    /// "ready" | "abandoned" | "degraded" | "stuck".
+    pub outcome: &'static str,
+    /// Total in-TUI keystrokes across the traversal.
+    pub keystrokes: u32,
+    /// True when the trace hit the step cap and was cut short.
+    pub truncated: bool,
     pub schema_version: u32,
     pub build_channel: String,
     pub is_git_checkout: bool,

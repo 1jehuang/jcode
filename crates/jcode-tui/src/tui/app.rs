@@ -79,6 +79,7 @@ mod model_context;
 mod navigation;
 mod observe;
 pub(crate) mod onboarding_flow;
+pub(crate) mod onboarding_graph;
 mod onboarding_flow_control;
 mod onboarding_repair;
 mod onboarding_sim;
