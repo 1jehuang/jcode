@@ -20,6 +20,12 @@ echo "== building SDK =="
 npm --prefix "$sdk_dir" install --no-audit --no-fund --silent
 npm --prefix "$sdk_dir" run build --silent
 
+# The full binary, for the `launch()` checks: those start a real instance via
+# `jcode api-bridge`, which only the shipped binary provides.
+echo "== building jcode =="
+cargo build --profile selfdev -p jcode --bin jcode
+jcode_bin="$repo_root/target/selfdev/jcode"
+
 echo "== building bridge =="
 # The standalone bridge binary, not `jcode api-bridge`, because the full jcode
 # binary takes minutes to link and this script must stay fast enough to run
@@ -52,6 +58,16 @@ JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-control.mjs"
 
 echo "== exercising models, effort, compaction, rename, and undo =="
 JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-capabilities.mjs"
+
+# `launch()` starts its own daemon and bridge, so these run against a private
+# instance rather than the shared socket above. That is the point: the
+# isolation they check is a property of a *separate* instance, and running
+# them against the shared bridge would prove nothing.
+echo "== launching a private instance =="
+node "$sdk_dir/test/live-launch.mjs" "$jcode_bin"
+
+echo "== checking instance isolation and path safety =="
+node "$sdk_dir/test/live-isolation.mjs" "$jcode_bin"
 
 echo "== bridge log =="
 cat "$log"
