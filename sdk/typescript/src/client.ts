@@ -9,6 +9,16 @@ import { apiSocketPath, transportEndpoint } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import { HarnessError } from "./errors.js";
 import {
+  assertRetryCount,
+  buildStructuredCorrectionPrompt,
+  buildStructuredPrompt,
+  compileStructuredSchema,
+  StructuredOutputError,
+  validateStructuredText,
+  type StructuredOutputAttempt,
+  type StructuredOutputSchema,
+} from "./structured.js";
+import {
   API_VERSION_MAJOR,
   type AnyApiEvent,
   type ApiEvent,
@@ -103,6 +113,25 @@ export interface ConnectOptions {
   transport?: Transport;
   /** Milliseconds before a request without a reply rejects. 0 disables. */
   requestTimeoutMs?: number;
+}
+
+export interface RunOptions {
+  images?: ImageAttachment[];
+  onEvent?: (event: ApiEvent) => void;
+  /**
+   * Auto-answer permission prompts.
+   *
+   * Only meaningful when the server advertises the `permissions` capability;
+   * otherwise no prompt is ever issued and this is a no-op.
+   */
+  autoApprove?: boolean;
+}
+
+export interface RunStructuredOptions<T = unknown> extends RunOptions {
+  /** JSON Schema the assistant's JSON response must satisfy. */
+  schema: StructuredOutputSchema<T>;
+  /** Corrective retries after the first invalid response. Defaults to 2. */
+  maxRetries?: number;
 }
 
 interface Pending {
@@ -583,17 +612,7 @@ export class JcodeClient extends EventEmitter {
   async run(
     sessionId: string,
     content: string,
-    options: {
-      images?: ImageAttachment[];
-      onEvent?: (event: ApiEvent) => void;
-      /**
-       * Auto-answer permission prompts.
-       *
-       * Only meaningful when the server advertises the `permissions`
-       * capability; otherwise no prompt is ever issued and this is a no-op.
-       */
-      autoApprove?: boolean;
-    } = {},
+    options: RunOptions = {},
   ): Promise<TurnResult> {
     const stream = this.events(sessionId);
     await this.sendMessage(sessionId, content, options.images ?? []);
@@ -642,6 +661,41 @@ export class JcodeClient extends EventEmitter {
   }
 
   /**
+   * Send a message and parse the assistant's answer as JSON validated by schema.
+   *
+   * This is an SDK-level contract: it does not require a special bridge or model
+   * feature. The initial prompt asks for JSON only; if the response is not JSON
+   * or fails Ajv validation, the client sends a bounded number of corrective
+   * prompts that include the normalized validation errors and the prior text.
+   */
+  async runStructured<T = unknown>(
+    sessionId: string,
+    content: string,
+    options: RunStructuredOptions<T>,
+  ): Promise<StructuredTurnResult<T>> {
+    const { schema, maxRetries = 2, ...runOptions } = options;
+    assertRetryCount(maxRetries);
+    const validate = compileStructuredSchema(schema);
+    const attempts: StructuredOutputAttempt[] = [];
+    let prompt = buildStructuredPrompt(content, schema);
+
+    for (let attemptNumber = 1; attemptNumber <= maxRetries + 1; attemptNumber += 1) {
+      const turn = await this.run(sessionId, prompt, runOptions);
+      const validation = validateStructuredText(turn.text, validate);
+      const attempt: StructuredOutputAttempt = {
+        attempt: attemptNumber,
+        text: turn.text,
+        errors: validation.errors,
+      };
+      attempts.push(attempt);
+      if (validation.ok) return { ...turn, data: validation.data, attempts };
+      prompt = buildStructuredCorrectionPrompt(schema, attempt);
+    }
+
+    throw new StructuredOutputError(attempts);
+  }
+
+  /**
    * Disconnect, and stop the instance if this client launched one.
    *
    * Returns a promise so a launched instance can be awaited to a stop; for a
@@ -660,6 +714,13 @@ export interface TurnResult {
   reasoning: string;
   toolCalls: Array<{ callId: string; name: string; output: string; error?: string }>;
   usage?: { input: number; output: number; cacheReadInput?: number };
+}
+
+export interface StructuredTurnResult<T> extends TurnResult {
+  /** Parsed JSON value validated against the caller's schema. */
+  data: T;
+  /** All attempts, including invalid retries and the final successful response. */
+  attempts: StructuredOutputAttempt[];
 }
 
 export { HarnessError };

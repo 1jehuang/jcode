@@ -104,6 +104,38 @@ console.log("tokens:", turn.usage);
 client.close();
 ```
 
+## Structured output
+
+`runStructured()` asks the model for JSON, validates the response with Ajv, and
+sends bounded corrective retries when the response is not valid JSON or does not
+match your JSON Schema. It returns the normal turn metadata plus validated
+`data` and an `attempts` audit trail.
+
+```ts
+const result = await client.runStructured<{ summary: string; count: number }>(
+  session.session_id,
+  "Summarize the current changes",
+  {
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["summary", "count"],
+      properties: {
+        summary: { type: "string" },
+        count: { type: "integer", minimum: 0 },
+      },
+    },
+    maxRetries: 2, // default
+  },
+);
+
+console.log(result.data.summary);
+```
+
+If all attempts fail validation, the promise rejects with
+`StructuredOutputError`. Its `validationErrors`, `lastText`, and `attempts`
+fields are stable for logging or user-facing diagnostics.
+
 ## Streaming
 
 `run()` is the batch convenience path. For live UIs, iterate events directly:
@@ -146,6 +178,7 @@ is reserved for transport faults.
 | `attachSession(id)` / `detachSession(id)` | Subscribe / unsubscribe |
 | `sendMessage(id, content, images?)` | Send a user message (awaits `message_accepted`) |
 | `run(id, content, options?)` | Send and collect one full turn |
+| `runStructured(id, content, options)` | Send, validate JSON Schema output, and retry corrections |
 | `events(sessionId?)` | Async iterator over stream events |
 | `cancel(id)` / `softInterrupt(id, content, urgent?)` | Interrupt a turn |
 | `getHistory(id)` / `peekSession(id, limit?)` | Read a transcript (peek works unattached) |
@@ -252,6 +285,8 @@ Every failure is a `HarnessError` with a `code`:
 | `connect_failed` | The bridge is not running, or the socket path is wrong. The message names the path and the command to start it. |
 | `disconnected` | The connection dropped mid-request. |
 | `timeout` | No reply within `requestTimeoutMs` (30s by default). |
+| `structured_schema_invalid` | `runStructured()` received an invalid JSON Schema. |
+| `structured_output_invalid` | The model did not produce valid structured output within the retry budget. |
 | `unknown_session`, `invalid_request`, ... | Protocol errors relayed from the harness. |
 
 ## Stability
