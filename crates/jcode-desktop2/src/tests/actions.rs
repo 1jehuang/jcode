@@ -1380,3 +1380,73 @@ fn zoom_round_trips_through_the_saved_geometry() {
         saved.zoom
     );
 }
+
+/// A new session has to be reachable from the keyboard. The strip and the
+/// overview can only walk sessions that already exist, so without a chord the
+/// app can never add one: it inherits whatever the daemon happens to be
+/// running and is stuck there.
+#[test]
+fn ctrl_shift_n_starts_a_new_session() {
+    assert_eq!(
+        keymap::resolve(&ch('n'), ModifiersState::CONTROL | ModifiersState::SHIFT),
+        Some(Action::SessionNew),
+        "Ctrl+Shift+N did not resolve to a new session"
+    );
+    // Unshifted Ctrl+N must stay out of the way: it is a typing reflex, and
+    // silently swapping the conversation under a keystroke is unrecoverable.
+    assert_ne!(
+        keymap::resolve(&ch('n'), ModifiersState::CONTROL),
+        Some(Action::SessionNew),
+        "plain Ctrl+N started a session"
+    );
+}
+
+/// Starting a session clears the page it is leaving. A transcript carried
+/// across would attribute the old session's output to the new one, which is
+/// the one thing the strip's attach path already refuses to do.
+#[test]
+fn a_new_session_clears_the_page_it_leaves() {
+    let mut app = app_with("a draft");
+    app.model
+        .transcript
+        .append_assistant("previous session output");
+    app.model.busy = true;
+    app.model.scroll = 120.0;
+    app.clear_for_session_change();
+    assert!(!app.model.busy, "the new session inherited a running turn");
+    assert_eq!(
+        app.model.scroll, 0.0,
+        "the new session kept a scroll offset"
+    );
+    assert_eq!(
+        app.model.transcript.streaming_len(),
+        0,
+        "the new session inherited the old transcript"
+    );
+}
+
+/// With no harness there is nothing to create a session on. Clearing the page
+/// anyway would throw the conversation away in exchange for nothing, so the
+/// request is refused out loud instead.
+#[test]
+fn a_new_session_without_a_connection_keeps_the_page_and_says_why() {
+    let mut app = app_with("a draft");
+    app.model
+        .transcript
+        .append_assistant("previous session output");
+    let before = app.model.transcript.streaming_len();
+    app.apply(Action::SessionNew, None);
+    assert_eq!(
+        app.model.transcript.streaming_len(),
+        before,
+        "a failed session start still cleared the transcript"
+    );
+    assert!(
+        app.model
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.contains("not connected")),
+        "a failed session start said nothing: {:?}",
+        app.model.notice
+    );
+}

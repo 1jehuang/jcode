@@ -62,6 +62,23 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
+        self.append_user_context_message(user_message, images)?;
+        crate::telemetry::record_turn();
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("chat");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.current_turn_system_reminder = None;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
+    /// Append and persist a user message without starting a model turn.
+    pub(crate) fn append_user_context_message(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+    ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -79,15 +96,7 @@ impl Agent {
         }
 
         self.add_message(Role::User, blocks);
-        crate::telemetry::record_turn();
-        self.session.save()?;
-        let turn_started_at = Instant::now();
-        let start_message_index = self.message_count();
-        self.fire_turn_start_hook("chat");
-        let result = self.run_turn_streaming_mpsc(event_tx).await;
-        self.current_turn_system_reminder = None;
-        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
-        result
+        self.session.save()
     }
 
     /// Fire the `turn_start` observer hook when a turn begins, before the model

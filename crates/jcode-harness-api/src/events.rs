@@ -147,6 +147,84 @@ pub enum ApiEvent {
         model: Option<String>,
     },
 
+    /// Reply to `ListModels`: the models this session can switch to.
+    Models {
+        session_id: String,
+        /// Model ids, in the daemon's preferred order.
+        models: Vec<String>,
+        /// The model currently serving the session, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current: Option<String>,
+    },
+
+    /// Provider/runtime identity and every route the daemon currently exposes.
+    RuntimeInfo {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        routes: Vec<ModelRouteInfo>,
+    },
+
+    /// An API-key credential was persisted or removed.
+    CredentialUpdated { provider: String, configured: bool },
+
+    /// Reply to `ReadFile`.
+    FileContent {
+        session_id: String,
+        path: String,
+        content: String,
+        size: u64,
+        truncated: bool,
+    },
+
+    /// Reply to `FindFiles`.
+    Files {
+        session_id: String,
+        paths: Vec<String>,
+    },
+
+    /// Reply to `SearchText`.
+    TextMatches {
+        session_id: String,
+        matches: Vec<TextMatch>,
+    },
+
+    /// Reply to `FileStatus`.
+    FileStatus {
+        session_id: String,
+        path: String,
+        exists: bool,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modified_ms: Option<u64>,
+    },
+
+    /// Reply to `Compact`: compaction was scheduled.
+    ///
+    /// Compaction is not synchronous. The daemon summarizes at the next safe
+    /// point rather than interrupting a turn mid-flight, so this confirms the
+    /// request was accepted, not that the transcript has already shrunk. A
+    /// client that wants the result should re-read the history afterwards.
+    Compacted {
+        session_id: String,
+        /// Human-readable status, e.g. why compaction was refused.
+        message: String,
+    },
+
+    /// A session's title changed, whether set by a client or generated.
+    SessionRenamed {
+        session_id: String,
+        /// The explicit title, absent when it was cleared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// What a client should display, generated when no title is set.
+        display_title: String,
+    },
+
     /// Forward-compatibility catch-all: clients must skip this silently.
     #[serde(other)]
     Unknown,
@@ -179,6 +257,28 @@ pub struct SessionInfo {
     /// could not determine it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_bytes: Option<u64>,
+    /// Archived sessions are hidden from the default list but never deleted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelRouteInfo {
+    pub model: String,
+    pub provider: String,
+    pub api_method: String,
+    pub available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextMatch {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub preview: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

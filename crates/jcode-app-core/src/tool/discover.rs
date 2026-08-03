@@ -13,6 +13,7 @@ use std::time::Instant;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const DISCOVERY_REQUEST_ID_HEADER: &str = "x-jcode-discovery-request-id";
+const DISCOVERY_CORRELATION_ID_HEADER: &str = "x-jcode-session-correlation-id";
 const DISCOVERY_BENCHMARK_HEADER: &str = "x-jcode-discovery-benchmark";
 const DISCOVERY_SESSION_ID_HEADER: &str = "x-jcode-discovery-session-id";
 const DISCOVERY_SESSION_METADATA_HEADER: &str = "x-jcode-discovery-session-metadata";
@@ -70,6 +71,7 @@ struct DiscoveryRequestContext<'a> {
 #[derive(Debug, Clone)]
 struct DiscoveryRequestProvenance {
     session_id: String,
+    correlation_id: Option<String>,
     session_metadata_available: bool,
     is_self_dev: bool,
     is_debug: bool,
@@ -87,6 +89,7 @@ impl DiscoveryRequestProvenance {
         let runtime = crate::telemetry::runtime_provenance();
         Self {
             session_id: ctx.session_id.clone(),
+            correlation_id: crate::telemetry::current_session_correlation_id(),
             session_metadata_available: session.is_some(),
             is_self_dev: session
                 .as_ref()
@@ -105,7 +108,7 @@ impl DiscoveryRequestProvenance {
     }
 
     fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request
+        let request = request
             .header(DISCOVERY_SESSION_ID_HEADER, &self.session_id)
             .header(
                 DISCOVERY_SESSION_METADATA_HEADER,
@@ -124,7 +127,12 @@ impl DiscoveryRequestProvenance {
             .header(
                 DISCOVERY_RAN_FROM_CARGO_HEADER,
                 bool_header(self.ran_from_cargo),
-            )
+            );
+        if let Some(correlation_id) = &self.correlation_id {
+            request.header(DISCOVERY_CORRELATION_ID_HEADER, correlation_id)
+        } else {
+            request
+        }
     }
 }
 
@@ -1464,6 +1472,52 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
 mod tests {
     use super::*;
 
+    fn header_test_provenance(correlation_id: Option<&str>) -> DiscoveryRequestProvenance {
+        DiscoveryRequestProvenance {
+            session_id: "internal-session".to_string(),
+            correlation_id: correlation_id.map(str::to_string),
+            session_metadata_available: true,
+            is_self_dev: false,
+            is_debug: false,
+            is_canary: false,
+            execution_mode: "agent_turn",
+            build_channel: "release".to_string(),
+            is_git_checkout: false,
+            is_ci: false,
+            ran_from_cargo: false,
+        }
+    }
+
+    #[test]
+    fn discovery_requests_attach_only_the_ephemeral_session_correlation_id() {
+        let correlation_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let request = header_test_provenance(Some(correlation_id))
+            .apply(reqwest::Client::new().get("https://api.jcode.sh/v1/discovery"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(DISCOVERY_CORRELATION_ID_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(correlation_id)
+        );
+    }
+
+    #[test]
+    fn discovery_requests_omit_correlation_header_when_telemetry_has_no_id() {
+        let request = header_test_provenance(None)
+            .apply(reqwest::Client::new().get("https://api.jcode.sh/v1/discovery"))
+            .build()
+            .unwrap();
+        assert!(
+            request
+                .headers()
+                .get(DISCOVERY_CORRELATION_ID_HEADER)
+                .is_none()
+        );
+    }
+
     #[test]
     fn render_listing_includes_disclosure_and_tools() {
         let listing = json!({
@@ -1868,6 +1922,7 @@ mod tests {
     fn test_provenance() -> DiscoveryRequestProvenance {
         DiscoveryRequestProvenance {
             session_id: "session-test-1".to_string(),
+            correlation_id: Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string()),
             session_metadata_available: true,
             is_self_dev: true,
             is_debug: false,
@@ -1912,6 +1967,7 @@ mod tests {
         );
         for expected in [
             "x-jcode-discovery-session-id: session-test-1",
+            "x-jcode-session-correlation-id: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "x-jcode-discovery-session-metadata: 1",
             "x-jcode-discovery-self-dev: 1",
             "x-jcode-discovery-debug: 0",

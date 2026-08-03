@@ -372,6 +372,27 @@ mod tests {
 
     static BUSY_PIPE_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// The TypeScript SDK derives this name independently, so the two must
+    /// agree exactly or a Windows client dials a pipe nobody is listening on.
+    /// Pinning literal values here gives that duplicate a fixed contract to
+    /// match, and `sockets.test.ts` asserts the same strings.
+    #[test]
+    fn pipe_name_matches_the_typescript_sdk() {
+        for (path, expected) in [
+            (
+                r"C:\Users\jeremy\AppData\Local\jcode\run\jcode-api.sock",
+                r"\\.\pipe\jcode-api-5e00c01702e8cfe4",
+            ),
+            (r"C:\a\b\jcode.sock", r"\\.\pipe\jcode-52dfdb00b2f35a71"),
+        ] {
+            assert_eq!(
+                path_to_pipe_name(Path::new(path)),
+                expected,
+                "pipe name for {path} drifted from the SDK's derivation"
+            );
+        }
+    }
+
     #[test]
     fn pipe_name_is_stable_and_normalizes_case_and_separators() {
         let a = path_to_pipe_name(Path::new(r"C:\Temp\Jcode\server.sock"));

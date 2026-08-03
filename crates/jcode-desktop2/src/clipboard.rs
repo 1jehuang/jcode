@@ -22,6 +22,37 @@ impl std::fmt::Display for Unavailable {
     }
 }
 
+/// An image read from the clipboard, ready to be sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Image {
+    /// Pixel size, when the container declares one. `None` rather than a guess:
+    /// the size exists only to tell the user what they attached, and a wrong
+    /// number would be worse than saying nothing.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// IANA media type of [`Self::bytes`]. Not always PNG: a JPEG on the
+    /// clipboard is forwarded as a JPEG rather than re-encoded, because those
+    /// bytes are already smaller than anything this app would produce.
+    pub media_type: String,
+    /// The encoded image, exactly as it will be sent.
+    pub bytes: Vec<u8>,
+}
+
+impl Image {
+    /// Short description for the caption that tells the user what they
+    /// attached: the pixel size when it is known, else the kind.
+    pub fn label(&self) -> String {
+        match (self.width, self.height) {
+            (Some(width), Some(height)) => format!("{width}x{height}"),
+            _ => self
+                .media_type
+                .strip_prefix("image/")
+                .unwrap_or("image")
+                .to_string(),
+        }
+    }
+}
+
 /// Which system buffer an operation refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -122,6 +153,49 @@ impl Clipboard {
             return Ok(());
         };
         write(backend, target, text).map_err(|error| Unavailable(error.to_string()))
+    }
+
+    /// Read an image from the ordinary clipboard.
+    ///
+    /// The compositor is asked first (see [`crate::clipboard_image`]) because it
+    /// hands back the source's own encoded bytes; arboard only offers raw RGBA,
+    /// which would have to be re-encoded. `Ok(None)` means "no image on the
+    /// clipboard", the ordinary case for a text paste, and must not be reported
+    /// to the user as a failure.
+    pub fn get_image(&mut self) -> Result<Option<Image>, Unavailable> {
+        if self.system
+            && let Some(image) = crate::clipboard_image::from_wayland()
+        {
+            let (width, height) = match image.dimensions() {
+                Some((width, height)) => (Some(width), Some(height)),
+                None => (None, None),
+            };
+            return Ok(Some(Image {
+                width,
+                height,
+                media_type: image.media_type,
+                bytes: image.bytes,
+            }));
+        }
+        let Some(backend) = self.backend() else {
+            return Ok(None);
+        };
+        match backend.get_image() {
+            Ok(image) => {
+                let width = image.width as u32;
+                let height = image.height as u32;
+                let bytes = crate::png::encode_rgba(width, height, image.bytes.as_ref());
+                Ok(Some(Image {
+                    width: Some(width),
+                    height: Some(height),
+                    media_type: "image/png".to_string(),
+                    bytes,
+                }))
+            }
+            // Nothing image-shaped on the clipboard: an absence, not an error.
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(error) => Err(Unavailable(error.to_string())),
+        }
     }
 
     /// Read the clipboard, preferring the system and falling back to the last

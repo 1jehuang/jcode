@@ -3260,6 +3260,7 @@ dependencies = [
  "global-hotkey",
  "hex",
  "jcode-build-meta",
+ "jcode-harness-api-server",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
  "jcode-provider-claude-cli-runtime",
@@ -3446,6 +3447,7 @@ dependencies = [
  "jcode-terminal-launch",
  "jcode-tool-core",
  "jcode-tool-types",
+ "jcode-transport",
  "jcode-usage-types",
  "libc",
  "open",
@@ -3587,6 +3589,7 @@ dependencies = [
  "jcode-background-types",
  "jcode-base",
  "jcode-harness-api",
+ "jcode-transport",
  "serde",
  "serde_json",
  "tokio",
@@ -4172,6 +4175,16 @@ name = "jcode-tool-types"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "jcode-transport"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sha2 0.10.9",
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

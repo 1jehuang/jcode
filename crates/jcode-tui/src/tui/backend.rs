@@ -562,6 +562,7 @@ impl RemoteConnection {
             content,
             images,
             system_reminder,
+            no_reply: false,
         };
         self.next_request_id += 1;
         self.send_request(request).await?;

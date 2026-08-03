@@ -184,6 +184,36 @@ Three things to know before quoting the number:
   If coverage drops, re-run the sync before trusting the dollar figure.
 
 
+## Reading DAU without fooling yourself
+
+`npm run dau` leads with `headline_users_24h` (= `meaningful_release_24h_noci`):
+real users, release channel, CI excluded. Use that number.
+
+Two traps the panel now guards against:
+
+- **Partial day.** The `today` tiers cover a partial UTC day, so every morning
+  they look like a cliff. `day_elapsed_pct` plus `release_users_sofar` /
+  `..._yday` / `..._7d` compare today against the *same clock window* on prior
+  days, and `pace_vs_yday` / `pace_vs_7d` are the ratios (>1.0 = ahead). These
+  are same-window comparisons, not extrapolations, because DAU is a distinct
+  count and does not scale linearly with elapsed time.
+- **Dev-build traffic.** `debug` and `git_checkout` ids are overwhelmingly
+  throwaway: a `session_start` and an `onboarding_step`, no `session_end`
+  (7-day completion ratio 0.02 for `debug` vs 0.21 for `release`). Their volume
+  swings ~5x day to day, which is enough to make a flat week look like
+  alternating spikes and cliffs in any raw-id metric. `dev_build_24h` tracks
+  them so the swing is visible instead of silently moving the headline.
+
+This is also why the overall `lifecycle_completion_ratio` in `health.sql` is
+low: it is a blend across channels, and the dev channels drag it down.
+
+Release's own ratio was ~0.25 for a separate reason: `begin_session` replaced
+a live in-process session without ending it, so every superseded session's
+`session_start` was orphaned. Those now emit a `session_end` with
+`session_stop_reason = 'superseded'`. Expect the release ratio to climb as
+clients upgrade, and expect `superseded` to be a large share of ends: it means
+one process opened several sessions, not that anything failed.
+
 ## Event types
 
 CLI events (sent by jcode itself): `install`, `upgrade`, `auth_success`,
