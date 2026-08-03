@@ -86,6 +86,9 @@ terminal, and it needs a bridge already running (`jcode api-bridge`).
 Swap `launch` for `connect` to drive the user's own jcode instead of a private
 instance; everything after that line is identical.
 
+A complete runnable application is available in
+[`examples/demo-app`](./examples/demo-app).
+
 ```ts
 import { JcodeClient } from "@1jehuang/jcode-sdk";
 

@@ -1,0 +1,15 @@
+{
+  "name": "jcode-sdk-demo-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@1jehuang/jcode-sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
