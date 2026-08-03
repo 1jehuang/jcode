@@ -807,6 +807,36 @@ impl BridgeState {
         false
     }
 
+    /// Path of a session's persisted record, or `None` if the id is not a
+    /// plain session id.
+    ///
+    /// One funnel for three reasons. It honours `JCODE_HOME`, without which a
+    /// launched instance reads the *user's* sessions: `peek_session` served
+    /// the real transcripts of the jcode the user runs interactively, which
+    /// defeats the isolation an embedded instance exists to provide. It
+    /// rejects ids that are not bare session ids, since the id comes straight
+    /// off the wire and is interpolated into a path, so `../../.ssh/id_rsa`
+    /// would otherwise be read and returned. And it keeps the three callers
+    /// from drifting apart, which is how the first two problems survived
+    /// being fixed anywhere else.
+    fn session_record_path(session_id: &str) -> Option<std::path::PathBuf> {
+        // Session ids are `session_<name>_<millis>_<hex>`; anything with a
+        // separator or a parent reference is not one.
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || !session_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return None;
+        }
+        let home = match std::env::var_os("JCODE_HOME") {
+            Some(home) => std::path::PathBuf::from(home),
+            None => std::path::Path::new(&std::env::var_os("HOME")?).join(".jcode"),
+        };
+        Some(home.join("sessions").join(format!("{session_id}.json")))
+    }
+
     /// Working directory of a session, read from its persisted record.
     ///
     /// The legacy `history` event lists session *ids* only, but the strip
@@ -815,11 +845,7 @@ impl BridgeState {
     /// record simply leaves the session ungrouped rather than failing the
     /// list, and results are cached because this is on a poll path.
     fn resolve_working_dir(session_id: &str) -> Option<String> {
-        let home = std::env::var_os("HOME")?;
-        let path = std::path::Path::new(&home)
-            .join(".jcode")
-            .join("sessions")
-            .join(format!("{session_id}.json"));
+        let path = Self::session_record_path(session_id)?;
         // A missing or malformed record is expected (a session may predate the
         // field, or be mid-write), and the only cost is an ungrouped bar, so
         // this degrades rather than failing the whole session list.
@@ -836,11 +862,7 @@ impl BridgeState {
     /// almost entirely message content, so its size tracks the conversation
     /// closely enough for a client to size or sort by.
     fn transcript_bytes(session_id: &str) -> Option<u64> {
-        let home = std::env::var_os("HOME")?;
-        let path = std::path::Path::new(&home)
-            .join(".jcode")
-            .join("sessions")
-            .join(format!("{session_id}.json"));
+        let path = Self::session_record_path(session_id)?;
         std::fs::metadata(path).ok().map(|meta| meta.len())
     }
 
@@ -850,13 +872,9 @@ impl BridgeState {
     /// wants: a reader glancing at another session needs the words, not the
     /// tool-call structure around them.
     fn stored_tail(session_id: &str, limit: usize) -> Vec<HistoryMessage> {
-        let Some(home) = std::env::var_os("HOME") else {
+        let Some(path) = Self::session_record_path(session_id) else {
             return vec![];
         };
-        let path = std::path::Path::new(&home)
-            .join(".jcode")
-            .join("sessions")
-            .join(format!("{session_id}.json"));
         let Ok(text) = std::fs::read_to_string(path) else {
             return vec![];
         };
