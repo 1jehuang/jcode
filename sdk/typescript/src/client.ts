@@ -5,7 +5,7 @@
 import net from "node:net";
 import { EventEmitter } from "node:events";
 import { NdjsonDecoder, encodeFrame } from "./framing.js";
-import { apiSocketPath } from "./sockets.js";
+import { apiSocketPath, transportEndpoint } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import { HarnessError } from "./errors.js";
 import {
@@ -32,7 +32,9 @@ export interface Transport {
 
 export function unixSocketTransport(socketPath: string): Promise<Transport> {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath);
+    // On Windows the bridge listens on a named pipe derived from this path,
+    // not on the path itself.
+    const socket = net.createConnection(transportEndpoint(socketPath));
     socket.setNoDelay(true);
     // A bare `connect ENOENT /run/user/1000/jcode-api.sock` names the syscall
     // and hides the actual cause: the bridge is not running. The first thing

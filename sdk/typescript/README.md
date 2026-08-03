@@ -26,8 +26,12 @@ npm run build
 
 ## Requirements
 
-jcode must be installed, and Node 20 or newer, on macOS or Linux. Windows is
-not supported yet, because the API is served over a Unix socket.
+jcode must be installed, and Node 20 or newer.
+
+macOS and Linux are exercised end to end in CI. Windows builds and is wired up
+(the bridge listens on a named pipe rather than a Unix socket, and the SDK
+resolves the same pipe name), but it has no live end-to-end coverage yet, so
+treat it as untested rather than unsupported and please report what breaks.
 
 `launch()` needs nothing else: it starts its own daemon and bridge. `connect()`
 needs a bridge already running, which the user starts once and leaves running.
@@ -264,8 +268,8 @@ it speaks.
   it, installs it into a throwaway project, and imports it as ESM, as CJS, and
   through `tsc`.
 
-Compatibility: Node 20+, ESM and CJS, Linux and macOS. Windows is not
-supported yet, since the API is served over a Unix socket.
+Compatibility: Node 20+, ESM and CJS. Linux and macOS are covered end to end in
+CI; Windows builds and is wired up but is not yet exercised live.
 
 ## Forward compatibility
 
