@@ -495,6 +495,80 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
     Ok(())
 }
 
+/// A cancel that arrives while the session is idle must not arm the cancel
+/// signal at all.
+///
+/// The no-local-task branch cannot tell an idle session from one whose turn
+/// another connection owns, so it used to fire the signal and clear it on a
+/// 500ms timer. Any message sent inside that window began with the flag
+/// already set and was aborted the instant it started: no reply, no error,
+/// just a message that vanished. Pressing Esc on an idle prompt and typing
+/// immediately is an ordinary thing to do, so this must be a true no-op.
+#[test]
+fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_idle_cancel_noop";
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let stop_signal = InterruptSignal::new();
+        let control = SessionControlHandle::cancel_only(
+            session_id,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+            stop_signal.clone(),
+        );
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+        let mut client_is_processing = false;
+        let mut message_id = None;
+        let mut cancel_session_id = None;
+        let mut task = None;
+
+        assert!(
+            !crate::turn_cancel_registry::has_active_turn(session_id),
+            "test precondition: the session must be idle"
+        );
+
+        cancel_processing_message(
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut cancel_session_id,
+                task: &mut task,
+            },
+            &control,
+            &client_event_tx,
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+            Some(1),
+            None,
+        )
+        .await;
+
+        assert!(
+            !stop_signal.is_set(),
+            "an idle cancel must not arm the stop signal; the next turn would die instantly"
+        );
+        // The client still learns the cancel was handled, so a UI showing
+        // "Interrupting..." resolves rather than hanging.
+        match client_event_rx.try_recv() {
+            Ok(ServerEvent::Interrupted) => {}
+            other => panic!("idle cancel must still report Interrupted, got {other:?}"),
+        }
+    });
+    Ok(())
+}
+
 struct PanicOnForkProvider {
     forked: Arc<AtomicBool>,
 }
