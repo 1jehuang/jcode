@@ -933,3 +933,49 @@ fn input_accepts_legacy_grep_param_aliases() {
     assert_eq!(input.path.as_deref(), Some("src"));
     assert_eq!(input.mode, "grep");
 }
+
+#[test]
+fn grep_defaults_to_a_bounded_match_count() {
+    // grep was the only mode with no default cap: find defaults to 5 files and
+    // outline to 6 regions, but grep passed `None` through and rendered every
+    // match. One unscoped query over a repo with large data files produced 923k
+    // chars in a single call.
+    let unbounded = grep_input("x", None);
+    assert_eq!(
+        unbounded.max_regions.or(Some(DEFAULT_GREP_MAX_REGIONS)),
+        Some(DEFAULT_GREP_MAX_REGIONS),
+        "grep must be bounded when the caller sets no cap"
+    );
+
+    // An explicit cap must win in either direction, including a larger one, so
+    // the default is a floor on safety and not a ceiling on capability.
+    for explicit in [5usize, 5_000] {
+        let params = grep_input("x", Some(explicit));
+        assert_eq!(
+            params.max_regions.or(Some(DEFAULT_GREP_MAX_REGIONS)),
+            Some(explicit),
+            "an explicit cap must win over the default"
+        );
+    }
+
+    // The default has to be generous enough that ordinary code searches are
+    // untouched; a cap that clips normal work trades one problem for another.
+    // Checked against a real search rather than as a constant comparison, which
+    // the compiler would fold away: this repo's own uses of a common internal
+    // symbol must fit under the cap.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let args = build_grep_args(&grep_input("guard_context_overflow", None), &test_ctx(root))
+        .expect("grep args");
+    let result = ::agentgrep::search::run_grep(root, &args).expect("grep should run");
+    assert!(
+        result.total_matches > 0,
+        "sanity: the probe symbol should exist in this crate"
+    );
+    assert!(
+        result.total_matches < DEFAULT_GREP_MAX_REGIONS,
+        "an ordinary in-repo search returned {} matches, which the default cap \
+         of {} would clip",
+        result.total_matches,
+        DEFAULT_GREP_MAX_REGIONS
+    );
+}
