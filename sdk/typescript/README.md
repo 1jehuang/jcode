@@ -187,6 +187,37 @@ await client.rewindUndo(id);                          // rewind is reversible
 await client.cancelSoftInterrupts(id);                // retract what is queued
 ```
 
+## Instance lifecycle
+
+A launched instance owns a daemon and a state directory, and both are cleaned
+up for you:
+
+- `close()` stops the daemon and removes an ephemeral home. It waits for the
+  process to actually be gone, so the directory cannot be recreated behind the
+  delete. Expect it to take a few seconds.
+- If your process exits without calling `close()`, including after an uncaught
+  exception, the instance is still reaped. Without this a server that restarts
+  would accumulate one daemon and one temp directory per restart.
+- `SIGKILL` is the one case nothing can cover, since no handler runs.
+
+### `launch()` options
+
+| Option | Effect |
+| --- | --- |
+| `workingDir` | Working directory for sessions. Defaults to `process.cwd()`. |
+| `jcodeHome` | Keep state at a fixed path across runs. Defaults to a temporary directory that is removed on `close()`. See the note below. |
+| `inheritLogins` | Inherit the user's provider logins. Defaults to `true`. |
+| `binary` | Path to the jcode binary. Defaults to `jcode` on `PATH`. |
+| `env` | Extra environment variables for the instance. |
+| `startupTimeoutMs` | How long to wait for the instance to come up. Defaults to 30000. |
+| `cleanupTimeoutMs` | How long `close()` spends removing an ephemeral home. Defaults to 30000. |
+| `inheritStderr` | Forward the instance's stderr to your process. Defaults to `false`. |
+
+A fixed `jcodeHome` persists transcripts on disk, but `listSessions()` reports
+only the sessions the daemon has announced to the current connection, so a
+fresh process starts with an empty list. Keep your own session ids and read
+them back with `peekSession(id)`, which is served from the stored record.
+
 ## Configuration
 
 | Env var | Effect |
@@ -203,6 +234,9 @@ Every failure is a `HarnessError` with a `code`:
 
 | Code | Meaning |
 | --- | --- |
+| `jcode_not_found` | `launch()` could not run jcode: not installed, or not on `PATH`. Pass `binary` with a full path. |
+| `startup_failed` | The instance exited while starting. The message carries its stderr. |
+| `startup_timeout` | The instance never opened its socket within `startupTimeoutMs`. |
 | `connect_failed` | The bridge is not running, or the socket path is wrong. The message names the path and the command to start it. |
 | `disconnected` | The connection dropped mid-request. |
 | `timeout` | No reply within `requestTimeoutMs` (30s by default). |
