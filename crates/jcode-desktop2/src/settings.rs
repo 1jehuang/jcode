@@ -21,15 +21,24 @@ pub enum Row {
     Theme,
     Reasoning,
     Motion,
+    CopyOnSelect,
     /// Not a setting of its own: opens `~/.jcode/config.toml`, where the rest
     /// of jcode's configuration lives. The panel is for the handful of choices
     /// worth a click; everything else belongs in the file, and this row is the
     /// way there rather than a second copy of it.
     More,
+    Back,
 }
 
 /// Every row, in the order the panel draws them.
 pub const ROWS: &[Row] = &[Row::Theme, Row::Reasoning, Row::Motion, Row::More];
+pub const CONFIG_ROWS: &[Row] = &[
+    Row::Theme,
+    Row::Reasoning,
+    Row::Motion,
+    Row::CopyOnSelect,
+    Row::Back,
+];
 
 impl Row {
     pub fn label(self) -> &'static str {
@@ -37,7 +46,9 @@ impl Row {
             Self::Theme => "theme",
             Self::Reasoning => "reasoning display",
             Self::Motion => "motion",
+            Self::CopyOnSelect => "copy on select",
             Self::More => "more",
+            Self::Back => "back",
         }
     }
 }
@@ -89,14 +100,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
     }
 }
 
-/// jcode's own configuration file, the one the `more` row opens. Not read
-/// here: the desktop only needs to know where it is so the user can get to
-/// the settings that have no row.
-pub fn config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".jcode").join("config.toml"))
-}
-
 impl Settings {
     /// The value shown beside a row's label.
     pub fn value(&self, row: Row) -> &'static str {
@@ -108,7 +111,9 @@ impl Settings {
             },
             Row::Reasoning => self.reasoning.label(),
             Row::Motion => on_off(self.motion),
-            Row::More => "config.toml",
+            Row::CopyOnSelect => on_off(self.copy_on_select),
+            Row::More => "settings",
+            Row::Back => "general",
         }
     }
 
@@ -122,9 +127,10 @@ impl Settings {
             Row::Theme => self.theme = self.next_theme(system_dark),
             Row::Reasoning => self.reasoning = self.reasoning.cycle(),
             Row::Motion => self.motion = !self.motion,
+            Row::CopyOnSelect => self.copy_on_select = !self.copy_on_select,
             // Nothing to cycle: the app opens the file. Kept a no-op here so
             // the pure state can never be surprised by a row that acts.
-            Row::More => {}
+            Row::More | Row::Back => {}
         }
     }
 
@@ -290,6 +296,7 @@ impl Settings {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Panel {
     open: bool,
+    config: bool,
     hover: Option<usize>,
 }
 
@@ -304,6 +311,7 @@ impl Panel {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.config = false;
         self.hover = None;
     }
 
@@ -321,10 +329,24 @@ impl Panel {
         self.hover.filter(|_| self.open)
     }
 
+    pub fn rows(&self) -> &'static [Row] {
+        if self.config { CONFIG_ROWS } else { ROWS }
+    }
+
+    pub fn show_config(&mut self) {
+        self.config = true;
+        self.hover = None;
+    }
+
+    pub fn show_general(&mut self) {
+        self.config = false;
+        self.hover = None;
+    }
+
     /// Point the highlight at a row. Returns whether anything changed, so the
     /// caller only repaints on a real move.
     pub fn set_hover(&mut self, row: Option<usize>) -> bool {
-        let row = row.filter(|index| *index < ROWS.len());
+        let row = row.filter(|index| *index < self.rows().len());
         if self.hover == row {
             return false;
         }

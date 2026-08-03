@@ -5,10 +5,81 @@
 //! possible.
 
 use crate::text::ParagraphStyle;
-use crate::{Model, donut, layout, text};
+use crate::{Model, donut, icons, layout, text};
 use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Circle, Rect, RoundedRect, Shape};
 use vello::peniko::Color;
+
+pub const ATTACHMENT_PREVIEW_ROWS: usize = 4;
+const ATTACHMENT_PREVIEW_HEIGHT: f64 = 72.0;
+const ATTACHMENT_PREVIEW_GAP: f64 = 8.0;
+const ATTACHMENT_CLOSE_SIZE: f64 = 18.0;
+
+pub fn attachment_thumbnail_rects(frame: &layout::Frame, model: &Model) -> Vec<Rect> {
+    if model.attachment_previews.is_empty() {
+        return Vec::new();
+    }
+    let prompt_y = frame.composer_top
+        + layout::COMPOSER_TEXT_OFFSET
+        + ATTACHMENT_PREVIEW_ROWS as f64 * layout::COMPOSER_LINE_HEIGHT;
+    let top = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
+    let bottom = (top + ATTACHMENT_PREVIEW_HEIGHT).min(prompt_y - ATTACHMENT_PREVIEW_GAP);
+    let mut left = frame.composer_text_left();
+    model
+        .attachment_previews
+        .iter()
+        .filter_map(|image| {
+            let ratio = image.width as f64 / image.height.max(1) as f64;
+            let width = ((bottom - top) * ratio).clamp(36.0, 112.0);
+            let rect = Rect::new(left, top, left + width, bottom);
+            left += width + ATTACHMENT_PREVIEW_GAP;
+            (rect.x1 <= frame.right - layout::COMPOSER_PAD_X).then_some(rect)
+        })
+        .collect()
+}
+
+pub fn attachment_thumbnail_close_rect(rect: Rect) -> Rect {
+    Rect::new(
+        rect.x1 - ATTACHMENT_CLOSE_SIZE,
+        rect.y0,
+        rect.x1,
+        rect.y0 + ATTACHMENT_CLOSE_SIZE,
+    )
+}
+
+pub fn attachment_overlay_close_rect(frame: &layout::Frame) -> Rect {
+    Rect::new(frame.width - 58.0, 26.0, frame.width - 26.0, 58.0)
+}
+
+fn draw_close(scene: &mut Scene, rect: Rect, scale: f64, fill: Color, ink: Color) {
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        fill,
+        None,
+        &vello::kurbo::Circle::new(rect.center(), rect.width() * 0.5),
+    );
+    let inset = rect.width() * 0.31;
+    let stroke = vello::kurbo::Stroke::new(1.6);
+    for (a, b) in [
+        (
+            (rect.x0 + inset, rect.y0 + inset),
+            (rect.x1 - inset, rect.y1 - inset),
+        ),
+        (
+            (rect.x1 - inset, rect.y0 + inset),
+            (rect.x0 + inset, rect.y1 - inset),
+        ),
+    ] {
+        scene.stroke(
+            &stroke,
+            Affine::scale(scale),
+            ink,
+            None,
+            &vello::kurbo::Line::new(a, b),
+        );
+    }
+}
 
 /// Halftone dot pitch in logical units. Fixed rather than a fraction of the
 /// box: a screen is a physical thing, so the dots stay the same size (and so
@@ -263,6 +334,7 @@ fn draw_hero_text(
 /// room to name them.
 fn draw_strip(
     scene: &mut Scene,
+    text: &mut text::TextSystem,
     model: &Model,
     band: (f64, f64),
     frame: &layout::Frame,
@@ -342,45 +414,37 @@ fn draw_strip(
             }
         }
     }
+
+    // The conversation earns a heading only once it has begun. Until the
+    // asynchronous title generator catches up, identify it by its ordinal in
+    // the same stable session order used by the strip.
+    if model.transcript.has_user_message() {
+        let heading = model
+            .strip
+            .focused_title()
+            .map(str::to_string)
+            .or_else(|| model.transcript.provisional_heading())
+            .or_else(|| model.strip.focused_heading())
+            .unwrap_or_else(|| "1st chat".to_string());
+        text.draw_paragraph_scaled(
+            scene,
+            &heading,
+            (frame.left, top),
+            frame.column() as f32,
+            ParagraphStyle {
+                font_size: layout::CAPTION_SIZE,
+                color: model.theme.muted,
+                align: text::Align::Center,
+                line_height: 1.0,
+                ..Default::default()
+            },
+            scale,
+        );
+    }
 }
 
 /// The tagline under the donut, matching the website's hero copy.
 const HERO_TAGLINE: &str = "an open source coding agent, written in rust";
-
-/// Draw the settings gear in the top margin's trailing corner.
-///
-/// A drawn gear rather than a glyph: the app ships no icon font, and a "⚙"
-/// from whatever the system happens to have installed renders at a different
-/// weight and baseline on every machine. Six teeth around a ring, built as one
-/// path so it is a single fill, in the same faint ink as the other chrome so
-/// it waits to be looked for rather than competing with the conversation.
-fn draw_gear(scene: &mut Scene, box_: Rect, ink: Color, scale: f64) {
-    let cx = box_.x0 + box_.width() / 2.0;
-    let cy = box_.y0 + box_.height() / 2.0;
-    let side = box_.width().min(box_.height());
-    let radius = side * layout::GEAR_RADIUS;
-    // Teeth first, as stubby spokes poking out of the ring: drawn as strokes
-    // rather than as a star polygon, so the tooth width stays legible at 18
-    // logical pixels instead of collapsing into the ring's own thickness.
-    let tooth = vello::kurbo::Stroke::new(side * 0.11);
-    for index in 0..layout::GEAR_TEETH {
-        let angle = std::f64::consts::TAU * index as f64 / layout::GEAR_TEETH as f64;
-        let (sin, cos) = angle.sin_cos();
-        let mut spoke = BezPath::new();
-        spoke.move_to((cx + cos * radius * 0.75, cy + sin * radius * 0.75));
-        spoke.line_to((cx + cos * radius * 1.55, cy + sin * radius * 1.55));
-        scene.stroke(&tooth, Affine::scale(scale), ink, None, &spoke);
-    }
-    // The ring, with a hole: the hub is what makes the mark read as a gear
-    // rather than as a sun.
-    scene.stroke(
-        &vello::kurbo::Stroke::new(side * 0.14),
-        Affine::scale(scale),
-        ink,
-        None,
-        &Circle::new((cx, cy), radius),
-    );
-}
 
 /// Draw the settings panel the gear opens: one row per setting, each a label
 /// on the left and its current value on the right.
@@ -396,7 +460,7 @@ fn draw_settings_panel(
     scale: f64,
 ) {
     let theme = &model.theme;
-    let rows = crate::settings::ROWS;
+    let rows = model.panel.rows();
     let panel = frame.panel(rows.len());
     scene.fill(
         vello::peniko::Fill::NonZero,
@@ -537,7 +601,8 @@ fn draw_model_picker(
         None,
         &RoundedRect::from_rect(menu, layout::MODEL_MENU_RADIUS),
     );
-    for index in 0..rows {
+    let labels = model.model_picker.row_labels();
+    for (index, label) in labels.iter().enumerate() {
         let band = frame.model_menu_row(rows, index);
         if model.model_picker.hover() == Some(index) {
             scene.fill(
@@ -548,16 +613,15 @@ fn draw_model_picker(
                 &RoundedRect::from_rect(band, layout::MODEL_MENU_RADIUS / 2.0),
             );
         }
-        let value = model.model_picker.models().get(index);
-        let label = value.map(String::as_str).unwrap_or_else(|| {
-            if model.model_picker.is_loading() {
-                "loading models…"
-            } else {
-                "no models available"
-            }
-        });
-        let current =
-            value.is_some_and(|value| model.model_picker.current() == Some(value.as_str()));
+        let current = if model.model_picker.stage() == crate::model_picker::Stage::Model {
+            model
+                .model_picker
+                .visible_models()
+                .get(index)
+                .is_some_and(|value| model.model_picker.current() == Some(*value))
+        } else {
+            false
+        };
         let left = band.x0 + layout::MODEL_MENU_TEXT_PAD;
         let baseline = band.y0 + (band.height() - f64::from(layout::CAPTION_SIZE) * 1.4) / 2.0;
         text.draw_paragraph_scaled(
@@ -683,7 +747,18 @@ fn draw_transcript(
     frame: &layout::Frame,
     scale: f64,
 ) {
-    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_PAD_Y, USER_RADIUS};
+    use crate::transcript::{CODE_PAD_Y, Role, USER_PAD_X, USER_RADIUS};
+    /// Width of the plan card's header gauge. Short on purpose: it is a
+    /// glanceable fraction beside the words that state it, not a download bar.
+    const TODO_GAUGE_WIDTH: f64 = 72.0;
+    /// Centre of a task's state dot, right of the item's text edge. Sits in
+    /// the column markdown's own `• ` marker occupied, so the text never
+    /// moves when the dot replaces the bullet.
+    const TODO_DOT_X: f64 = 7.0;
+    /// Radius of a task's state dot.
+    const TODO_DOT_RADIUS: f64 = 6.0;
+    /// Air between the stepper rail's ends and the dots it links.
+    const TODO_RAIL_GAP: f64 = 3.0;
     use jcode_render_core::BlockKind;
 
     let theme = &model.theme;
@@ -716,7 +791,7 @@ fn draw_transcript(
         .rposition(|message| {
             !matches!(
                 message.role,
-                Role::Tool | Role::Notice | Role::Edit | Role::Progress
+                Role::Tool | Role::Notice | Role::Edit | Role::Progress | Role::Todo
             ) && message.delivery != Some(crate::ack::Delivery::Queued)
         })
         .filter(|_| model.stream.is_revealing())
@@ -759,6 +834,24 @@ fn draw_transcript(
         // The user's card: the same fill and radius as the composer, so the
         // message and the field it came from are visibly one object.
         if is_user {
+            if placed.sticky {
+                // The reply continues to scroll at its natural position behind
+                // the pinned prompt. Clear the prompt's full band first so text
+                // cannot show through its rounded corners or the breathing room
+                // below the card.
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    Affine::scale(scale),
+                    theme.background,
+                    None,
+                    &Rect::new(
+                        frame.left,
+                        message_top,
+                        frame.right,
+                        message_top + placed.message.height + crate::transcript::MESSAGE_GAP,
+                    ),
+                );
+            }
             scene.fill(
                 vello::peniko::Fill::NonZero,
                 Affine::scale(scale),
@@ -864,6 +957,82 @@ fn draw_transcript(
             );
         }
 
+        // A plan snapshot is history rather than live activity. It gets a quiet
+        // card with a document edge, and its completion is a compact gauge on
+        // the header line: the header already says "2 of 5 tasks" in words, so
+        // the bar sits beside the words it illustrates instead of underlining
+        // the whole card like a download.
+        if placed.message.role == Role::Todo {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.wash,
+                None,
+                &RoundedRect::new(
+                    frame.left,
+                    message_top,
+                    frame.right,
+                    message_top + placed.message.height,
+                    USER_RADIUS,
+                ),
+            );
+            // A hairline gives this durable snapshot a document edge. Live
+            // activity cards intentionally have no border, which makes the
+            // plan read as something retained rather than another spinner.
+            scene.stroke(
+                &vello::kurbo::Stroke::new(frame.hairline()),
+                Affine::scale(scale),
+                theme.rule,
+                None,
+                &RoundedRect::new(
+                    frame.left + frame.hairline() / 2.0,
+                    message_top + frame.hairline() / 2.0,
+                    frame.right - frame.hairline() / 2.0,
+                    message_top + placed.message.height - frame.hairline() / 2.0,
+                    USER_RADIUS,
+                ),
+            );
+            // The gauge, right-aligned on the header's first line. Centred on
+            // the line's own middle so the words and the bar share a baseline
+            // band rather than the bar floating between rows. Drawn here
+            // rather than via `draw_progress_bar`, whose track is the page
+            // wash and would vanish against the card's identical wash.
+            let line = f64::from(layout::BODY_SIZE) * layout::BODY_LEADING;
+            let gauge_mid = message_top + placed.message.top_padding() + line / 2.0;
+            let gauge_right = frame.right - USER_PAD_X;
+            let track = Rect::new(
+                gauge_right - TODO_GAUGE_WIDTH,
+                gauge_mid - crate::transcript::PROGRESS_BAR_HEIGHT / 2.0,
+                gauge_right,
+                gauge_mid + crate::transcript::PROGRESS_BAR_HEIGHT / 2.0,
+            );
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.code_wash,
+                None,
+                &RoundedRect::from_rect(track, crate::transcript::PROGRESS_BAR_RADIUS),
+            );
+            let fraction = placed.message.fraction().unwrap_or(0.0).clamp(0.0, 1.0);
+            if fraction > 0.0 {
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    Affine::scale(scale),
+                    theme.muted,
+                    None,
+                    &RoundedRect::from_rect(
+                        Rect::new(
+                            track.x0,
+                            track.y0,
+                            track.x0 + track.width() * fraction,
+                            track.y1,
+                        ),
+                        crate::transcript::PROGRESS_BAR_RADIUS,
+                    ),
+                );
+            }
+        }
+
         // An edit card carries no furniture down its left edge. The diff body
         // is already the loudest object on the page (a wash, per-row bands,
         // and hue), and a rule beside it only narrowed the measure while
@@ -900,12 +1069,149 @@ fn draw_transcript(
         };
         let mut drawn_glyphs = 0usize;
 
+        let mut todo_index = 0usize;
+        // The plan card's stepper rail: a faint line linking consecutive tasks
+        // of one group, drawn before the blocks so every dot sits on top of
+        // it. The rail is what makes the checklist read as one route through
+        // the work rather than as five disconnected bullets; it breaks at a
+        // group label because the label already breaks the sequence.
+        if placed.message.role == Role::Todo {
+            let line = f64::from(layout::BODY_SIZE) * layout::BODY_LEADING;
+            let mut previous: Option<(usize, f64, f64)> = None;
+            for (block_index, block) in placed.message.blocks.iter().enumerate() {
+                if !matches!(block.kind, BlockKind::ListItem { .. }) {
+                    continue;
+                }
+                let x = text_left + block.edge() + TODO_DOT_X;
+                let y = text_top + block.top + line / 2.0;
+                if let Some((prev_index, prev_x, prev_y)) = previous
+                    && prev_index + 1 == block_index
+                    && (prev_x - x).abs() < 0.5
+                {
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        Affine::scale(scale),
+                        theme.rule,
+                        None,
+                        &Rect::new(
+                            x - frame.hairline() / 2.0,
+                            prev_y + TODO_DOT_RADIUS + TODO_RAIL_GAP,
+                            x + frame.hairline() / 2.0,
+                            y - TODO_DOT_RADIUS - TODO_RAIL_GAP,
+                        ),
+                    );
+                }
+                previous = Some((block_index, x, y));
+            }
+        }
         for (block_index, block) in placed.message.blocks.iter().enumerate() {
             let block_top = text_top + block.top;
             // The block's own left edge: inside any list indent it inherited,
             // so a fenced block written under an item keeps its wash under that
             // item instead of back at the margin.
             let block_left = text_left + block.edge();
+            if placed.message.role == Role::Todo && matches!(block.kind, BlockKind::ListItem { .. })
+            {
+                use crate::todos::TodoState;
+                let state = placed
+                    .message
+                    .todo_states
+                    .get(todo_index)
+                    .copied()
+                    .unwrap_or(TodoState::Pending);
+                todo_index += 1;
+
+                // The active task gets a full-width row highlight. State is
+                // spatial and graphical here, not text pretending to be UI.
+                if state == TodoState::Active {
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        Affine::scale(scale),
+                        theme.code_wash,
+                        None,
+                        &RoundedRect::new(
+                            frame.left + USER_PAD_X / 2.0,
+                            block_top - 3.0,
+                            frame.right - USER_PAD_X / 2.0,
+                            block_top + block.height + 3.0,
+                            USER_RADIUS,
+                        ),
+                    );
+                }
+
+                // Paint over markdown's list marker, then draw a precise native
+                // control in its place. The task text remains normal selectable
+                // transcript text, while the state belongs to the scene. The
+                // dot is centred on the item's first text line, so a wrapped
+                // task keeps its control beside the words it belongs to.
+                let line = f64::from(layout::BODY_SIZE) * layout::BODY_LEADING;
+                let center = (block_left + TODO_DOT_X, block_top + line / 2.0);
+                // Clear the glyph marker and a dot's worth of rail behind the
+                // control, in the row's own surface colour.
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    Affine::scale(scale),
+                    if state == TodoState::Active {
+                        theme.code_wash
+                    } else {
+                        theme.wash
+                    },
+                    None,
+                    &Circle::new(center, TODO_DOT_RADIUS + 3.0),
+                );
+                match state {
+                    // Yet to do: an empty ring, the unfilled hole in the route.
+                    TodoState::Pending => scene.stroke(
+                        &vello::kurbo::Stroke::new(1.4),
+                        Affine::scale(scale),
+                        theme.faint,
+                        None,
+                        &Circle::new(center, TODO_DOT_RADIUS - 0.7),
+                    ),
+                    // In progress: a bullseye in full ink, the loudest of the
+                    // three states because it marks where the work *is*.
+                    TodoState::Active => {
+                        scene.stroke(
+                            &vello::kurbo::Stroke::new(1.4),
+                            Affine::scale(scale),
+                            theme.text,
+                            None,
+                            &Circle::new(center, TODO_DOT_RADIUS - 0.7),
+                        );
+                        scene.fill(
+                            vello::peniko::Fill::NonZero,
+                            Affine::scale(scale),
+                            theme.text,
+                            None,
+                            &Circle::new(center, TODO_DOT_RADIUS - 3.2),
+                        );
+                    }
+                    // Done: a filled disc with a check cut out of it. Muted,
+                    // because finished work is context rather than news.
+                    TodoState::Completed => {
+                        scene.fill(
+                            vello::peniko::Fill::NonZero,
+                            Affine::scale(scale),
+                            theme.muted,
+                            None,
+                            &Circle::new(center, TODO_DOT_RADIUS),
+                        );
+                        let mut check = BezPath::new();
+                        check.move_to((center.0 - 2.7, center.1 + 0.1));
+                        check.line_to((center.0 - 0.7, center.1 + 2.1));
+                        check.line_to((center.0 + 3.0, center.1 - 2.2));
+                        scene.stroke(
+                            &vello::kurbo::Stroke::new(1.5)
+                                .with_caps(vello::kurbo::Cap::Round)
+                                .with_join(vello::kurbo::Join::Round),
+                            Affine::scale(scale),
+                            theme.wash,
+                            None,
+                            &check,
+                        );
+                    }
+                }
+            }
             match &block.kind {
                 // A code block gets a wash and an inset, so it reads as a
                 // quoted artefact rather than as more prose.
@@ -1027,7 +1333,10 @@ fn draw_transcript(
                     // need the stronger band: the paper-tuned one is nearly
                     // invisible against the card the user's own message is in.
                     let on_wash = is_user
-                        || matches!(placed.message.role, Role::Tool | Role::Progress)
+                        || matches!(
+                            placed.message.role,
+                            Role::Tool | Role::Progress | Role::Todo
+                        )
                         || matches!(block.kind, BlockKind::CodeBlock { .. });
                     let band_color = if on_wash {
                         theme.selection_on_wash
@@ -1062,13 +1371,24 @@ fn draw_transcript(
             if revealed <= 0.0 {
                 break;
             }
-            text::TextSystem::draw_layout_revealed(
-                scene,
-                &block.layout,
-                (text_left + inset_x, block_top + inset_y),
-                scale,
-                revealed,
-            );
+            if let Some(formula) = block.math.as_ref() {
+                crate::math::shared().draw(
+                    scene,
+                    formula,
+                    (text_left + inset_x, block_top + inset_y),
+                    theme.text,
+                    scale,
+                    revealed,
+                );
+            } else {
+                text::TextSystem::draw_layout_revealed(
+                    scene,
+                    &block.layout,
+                    (text_left + inset_x, block_top + inset_y),
+                    scale,
+                    revealed,
+                );
+            }
             drawn_glyphs += block.glyphs;
         }
         if toned {
@@ -1170,14 +1490,29 @@ pub fn build_scene(
 
     // Top chrome row: the session strip.
     if let Some(band) = frame.strip() {
-        draw_strip(scene, model, band, &frame, scale);
+        draw_strip(scene, text, model, band, &frame, scale);
     }
+
+    // Session overview and settings, in the margin above the column's trailing
+    // edge. Both stay quiet until used so they do not compete with the page.
+    icons::draw(
+        scene,
+        icons::Icon::Sessions,
+        frame.sessions(),
+        if model.overview.is_open() {
+            theme.text
+        } else {
+            theme.faint
+        },
+        scale,
+    );
 
     // The settings gear, in the margin above the column's trailing edge. Faint
     // until the panel is open, when it takes full ink so the mark and the menu
     // it opened read as one thing.
-    draw_gear(
+    icons::draw(
         scene,
+        icons::Icon::Settings,
         frame.gear(),
         if model.panel.is_open() {
             theme.text
@@ -1247,8 +1582,47 @@ pub fn build_scene(
     // glyphs and moves with Ctrl+A/E, word motion, and the arrows.
     let prompt_style = composer_text_style(model);
     let prompt_x = frame.composer_text_left();
-    let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET;
+    let preview_height = if model.attachment_previews.is_empty() {
+        0.0
+    } else {
+        ATTACHMENT_PREVIEW_ROWS as f64 * layout::COMPOSER_LINE_HEIGHT
+    };
+    let prompt_y = frame.composer_top + layout::COMPOSER_TEXT_OFFSET + preview_height;
     let prompt_width = frame.composer_text_width() as f32;
+
+    if !model.attachment_previews.is_empty() {
+        let clip = RoundedRect::new(
+            frame.left,
+            frame.composer_top,
+            frame.right,
+            prompt_y,
+            layout::COMPOSER_RADIUS,
+        );
+        scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &clip);
+        for (image, rect) in model
+            .attachment_previews
+            .iter()
+            .zip(attachment_thumbnail_rects(&frame, model))
+        {
+            scene.draw_image(
+                image,
+                Affine::scale(scale)
+                    * Affine::translate((rect.x0, rect.y0))
+                    * Affine::scale_non_uniform(
+                        rect.width() / image.width.max(1) as f64,
+                        rect.height() / image.height.max(1) as f64,
+                    ),
+            );
+            draw_close(
+                scene,
+                attachment_thumbnail_close_rect(rect),
+                scale,
+                theme.background.with_alpha(0.82),
+                theme.text,
+            );
+        }
+        scene.pop_layer();
+    }
 
     {
         // One Parley layout drives wrapping, the selection bands, the glyphs,
@@ -1264,8 +1638,15 @@ pub fn build_scene(
         );
         // Scroll the well to the caret's line when the text is taller than the
         // well, so typing never runs out of sight.
-        let origin_y =
-            prompt_y - input.scroll_offset(model.editor.cursor(), frame.composer_lines());
+        let visible_lines =
+            frame
+                .composer_lines()
+                .saturating_sub(if model.attachment_previews.is_empty() {
+                    0
+                } else {
+                    ATTACHMENT_PREVIEW_ROWS
+                });
+        let origin_y = prompt_y - input.scroll_offset(model.editor.cursor(), visible_lines);
         let clip_top = frame.composer_top;
         let clip_bottom = frame.composer_bottom;
 
@@ -1299,17 +1680,26 @@ pub fn build_scene(
         // phase/elapsed line here fought the caret and the next message the
         // user was already typing.
         if model.editor.is_empty() {
-            text.draw_paragraph_scaled(
-                scene,
+            let hint = crate::input::InputLayout::new(
+                text,
                 crate::hints::hint(model.hint),
-                (prompt_x, prompt_y),
-                prompt_width,
+                f64::from(prompt_width),
                 ParagraphStyle {
                     color: theme.faint,
                     ..prompt_style
                 },
                 scale,
             );
+            let band = Rect::new(
+                frame.left,
+                prompt_y,
+                frame.right,
+                (prompt_y + frame.composer_lines() as f64 * layout::COMPOSER_LINE_HEIGHT)
+                    .min(clip_bottom),
+            );
+            scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &band);
+            crate::text::TextSystem::draw_layout(scene, hint.layout(), (prompt_x, prompt_y), scale);
+            scene.pop_layer();
         } else {
             // Draw the whole layout in one pass: Parley already wrapped it to
             // the well, so per-row drawing would only reintroduce drift.
@@ -1361,8 +1751,35 @@ pub fn build_scene(
     // Elided to a third of the column: a route-prefixed model id can be long,
     // and it must never crowd out the footnote, which is the actionable half.
     let model_caption = model.model.as_ref().and_then(|id| id.caption()).map(|id| {
-        let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72) / 3.0) as usize;
-        elide(&id, chars.max(10))
+        let route = model
+            .model_picker
+            .current()
+            .map(crate::model_picker::Route::parse);
+        let provider = route
+            .as_ref()
+            .map(|route| route.provider)
+            .or_else(|| model.model.as_ref().and_then(|id| id.provider.as_deref()));
+        let connection = route.as_ref().map(|route| route.connection).or_else(|| {
+            provider.and_then(|provider| {
+                provider
+                    .strip_suffix("-oauth")
+                    .map(|_| "OAuth")
+                    .or_else(|| provider.strip_suffix("-api").map(|_| "API"))
+            })
+        });
+        let provider_label = provider.map(|provider| {
+            provider
+                .strip_suffix("-oauth")
+                .or_else(|| provider.strip_suffix("-api"))
+                .unwrap_or(provider)
+        });
+        let details = match (provider_label, connection) {
+            (Some(provider), Some(connection)) => format!("{id} · {provider} · {connection}"),
+            (Some(provider), None) => format!("{id} · {provider}"),
+            _ => id,
+        };
+        let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72) / 2.0) as usize;
+        elide(&details, chars.max(18))
     });
     let footnote = model.footnote().map(|line| {
         let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72)) as usize;
@@ -1406,8 +1823,8 @@ pub fn build_scene(
         draw_settings_panel(scene, text, model, &frame, scale);
     }
 
-    // The session overview sits over everything: it is a mode, not a panel,
-    // and drawing it last is what lets it wash the page it replaces.
+    // The session overview sits over everything as a bounded panel. Drawing it
+    // last preserves the current transcript behind its light scrim.
     if model.overview.is_visible() {
         crate::scene_overview::draw_overview(
             scene,
@@ -1423,6 +1840,67 @@ pub fn build_scene(
     // unlike the overview it deliberately leaves the conversation legible
     // underneath, which only works if nothing paints over it afterwards.
     crate::scene_resume::draw_resume(scene, text, model, &frame, scale);
+
+    if let Some((index, opened, automatic)) = model.attachment_preview
+        && let Some(image) = model.attachment_previews.get(index)
+    {
+        let elapsed = std::time::Instant::now().saturating_duration_since(opened);
+        let transition = if automatic {
+            ((elapsed.as_secs_f64() - 0.65) / 0.40).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if !automatic || transition < 1.0 {
+            let max_w = frame.width * 0.72;
+            let max_h = frame.height * 0.68;
+            let fit = (max_w / image.width.max(1) as f64).min(max_h / image.height.max(1) as f64);
+            let large_w = image.width as f64 * fit;
+            let large_h = image.height as f64 * fit;
+            let large = Rect::new(
+                (frame.width - large_w) * 0.5,
+                (frame.height - large_h) * 0.42,
+                (frame.width + large_w) * 0.5,
+                (frame.height - large_h) * 0.42 + large_h,
+            );
+            let target = attachment_thumbnail_rects(&frame, model)
+                .get(index)
+                .copied()
+                .unwrap_or(large);
+            let eased = transition * transition * (3.0 - 2.0 * transition);
+            let lerp = |a: f64, b: f64| a + (b - a) * eased;
+            let shown = Rect::new(
+                lerp(large.x0, target.x0),
+                lerp(large.y0, target.y0),
+                lerp(large.x1, target.x1),
+                lerp(large.y1, target.y1),
+            );
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::scale(scale),
+                theme.background.with_alpha((0.76 * (1.0 - eased)) as f32),
+                None,
+                &Rect::new(0.0, 0.0, frame.width, frame.height),
+            );
+            scene.draw_image(
+                image,
+                Affine::scale(scale)
+                    * Affine::translate((shown.x0, shown.y0))
+                    * Affine::scale_non_uniform(
+                        shown.width() / image.width.max(1) as f64,
+                        shown.height() / image.height.max(1) as f64,
+                    ),
+            );
+            if eased < 0.55 {
+                draw_close(
+                    scene,
+                    attachment_overlay_close_rect(&frame),
+                    scale,
+                    theme.field,
+                    theme.text,
+                );
+            }
+        }
+    }
 
     if revealing {
         scene.pop_layer();

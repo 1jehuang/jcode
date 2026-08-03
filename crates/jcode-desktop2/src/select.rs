@@ -357,9 +357,21 @@ fn nearest_message<'a, 'b>(
     view: &'a Viewport<'b>,
     y: f64,
 ) -> Option<&'a crate::viewport::Placed<'b>> {
-    view.visible.iter().min_by(|a, b| {
-        distance_to(a.top, a.message.height, y).total_cmp(&distance_to(b.top, b.message.height, y))
-    })
+    // `visible` is paint order. Prefer the last containing item so a sticky
+    // prompt painted over a scrolling reply also receives the pointer event.
+    view.visible
+        .iter()
+        .rev()
+        .find(|placed| distance_to(placed.top, placed.message.height, y) == 0.0)
+        .or_else(|| {
+            view.visible.iter().min_by(|a, b| {
+                distance_to(a.top, a.message.height, y).total_cmp(&distance_to(
+                    b.top,
+                    b.message.height,
+                    y,
+                ))
+            })
+        })
 }
 
 /// The block containing `y` within a message, or the closest one.

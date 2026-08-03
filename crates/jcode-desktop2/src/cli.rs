@@ -178,6 +178,7 @@ fn run_script(steps: &[String]) -> Result<()> {
                     let (id, project) = part.split_once('=').unwrap_or((part, "project"));
                     crate::strip::Entry {
                         session_id: id.to_string(),
+                        title: None,
                         working_dir: Some(format!("/w/{project}")),
                         busy: false,
                         weight: 1_000.0 * (index as f64 + 1.0),
@@ -375,6 +376,10 @@ fn run_e2e(message: &str) -> Result<()> {
             harness::HarnessUpdate::Edit(card) => {
                 println!("[e2e] edit: +{} -{}", card.added, card.removed);
                 model.transcript.push_edit(&card);
+            }
+            harness::HarnessUpdate::Todo(card) => {
+                println!("[e2e] plan updated");
+                model.transcript.set_todo(&card);
             }
             harness::HarnessUpdate::Sessions(_) => {}
             // Background progress is folded into the model so the captured

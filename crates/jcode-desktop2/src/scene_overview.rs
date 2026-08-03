@@ -6,7 +6,7 @@
 //! [`draw_overview`] last, which is what lets the field wash the page it
 //! replaces.
 
-use crate::scene::{draw_spinner, elide};
+use crate::scene::draw_spinner;
 use crate::text::ParagraphStyle;
 use crate::{Model, layout, text};
 use vello::Scene;
@@ -36,15 +36,7 @@ const BUSY_PERIOD: f32 = 1.6;
 /// How far the page is veiled behind the field, at full zoom. Short of opaque
 /// on purpose: the transcript underneath is context, not clutter, and seeing
 /// it is what keeps the overview a layer rather than a separate screen.
-const VEIL_OPACITY: f64 = 0.82;
-/// Type size, leading, and ink for the hovered session's preview. Small and
-/// faint: it is the page *behind* the decision, not the decision.
-const PREVIEW_SIZE: f32 = 11.0;
-const PREVIEW_LEADING: f64 = 1.7;
-const PREVIEW_OPACITY: f64 = 0.72;
-/// Fraction of the window height the preview may occupy, measured from the
-/// top. Bounded so it can never reach the rows, whichever session is hovered.
-const PREVIEW_BAND: f64 = 0.22;
+const VEIL_OPACITY: f64 = 0.28;
 /// Type size and leading for the conversation drawn inside a card. Tiny: this
 /// is a thumbnail of a session's shape, in the same sense as a compositor's
 /// window preview, so it is recognised rather than read.
@@ -68,82 +60,6 @@ const THUMB_OPACITY: f64 = 0.9;
 /// Smallest card that carries a busy spinner. Below this the spinner would be
 /// larger than the session it belongs to.
 const MIN_SPINNER_WIDTH: f64 = 44.0;
-
-/// Draw the highlighted session's conversation behind the field.
-///
-/// The cards say how big each session is and what it is called, which is
-/// enough to *navigate* and not enough to *choose*: "clover" and "pebble" are
-/// only names until you can see what is in them. Hovering a card puts that
-/// session's last exchanges on the page underneath, so picking is recognition
-/// rather than recall.
-///
-/// Set faint and behind the veil on purpose: this is context for a decision
-/// being made in the foreground, and a preview that competed with the cards
-/// would make the field unreadable at exactly the moment it is being used.
-fn draw_preview(
-    scene: &mut Scene,
-    text: &mut text::TextSystem,
-    model: &Model,
-    frame: &layout::Frame,
-    scale: f64,
-    phase: f64,
-) {
-    let Some(focus) = model.overview.focus() else {
-        return;
-    };
-    // The session we are attached to is already on the page underneath, so
-    // previewing it would draw the same conversation twice.
-    if model.session_id.as_deref() == Some(focus) {
-        return;
-    }
-    let Some(transcript) = model.peeks.get(focus) else {
-        return;
-    };
-
-    // Top-down from the head of the page, oldest of the tail first, so the
-    // preview reads in conversation order. It lives at the top because that is
-    // the band the rows leave clear, and because the foot already carries the
-    // hint.
-    let mut y = frame.body_top;
-    let width = frame.column() as f32;
-    let ceiling = frame.height * PREVIEW_BAND;
-    for message in transcript.messages() {
-        if y >= ceiling {
-            break;
-        }
-        let source = message.source.trim();
-        if source.is_empty() {
-            continue;
-        }
-        // One line per message: the preview is a shape to recognise, not a
-        // transcript to read, and a wrapped paragraph would push the older
-        // exchanges (the ones that identify the session) off the page.
-        let budget = (frame.column() / (f64::from(PREVIEW_SIZE) * 0.6)) as usize;
-        let line = elide(&source.replace('\n', " "), budget.max(16));
-        text.draw_paragraph_scaled(
-            scene,
-            &line,
-            (frame.left, y),
-            width,
-            ParagraphStyle {
-                font_size: PREVIEW_SIZE,
-                // A user's line is set darker than a reply, the only structure
-                // the preview keeps: it is what makes the alternation legible
-                // as a conversation rather than as a paragraph of noise.
-                color: if message.role == crate::transcript::Role::User {
-                    model.theme.muted
-                } else {
-                    model.theme.faint
-                }
-                .with_alpha((PREVIEW_OPACITY * phase) as f32),
-                line_height: PREVIEW_LEADING as f32,
-                ..Default::default()
-            },
-            scale,
-        );
-        y += f64::from(PREVIEW_SIZE) * PREVIEW_LEADING;
-    }
-}
 
 /// Cut a line to fit, keeping the front.
 ///
@@ -291,8 +207,7 @@ pub(crate) fn draw_overview(
     // instead of as a different screen you have been taken to: you never lose
     // your place, and the switch is a glance rather than a context change.
     //
-    // Just opaque enough that the cards and their labels win the foreground,
-    // and no more. A full cover made the gesture feel like navigating away.
+    // Only a light scrim is needed because the field now has its own paper.
     let veil = (VEIL_OPACITY * phase) as f32;
     scene.fill(
         vello::peniko::Fill::NonZero,
@@ -302,9 +217,25 @@ pub(crate) fn draw_overview(
         &Rect::new(0.0, 0.0, frame.width, frame.height),
     );
 
-    // The hovered session's own conversation, on the page the veil just
-    // cleared: drawn before the cards so it is unambiguously behind them.
-    draw_preview(scene, text, model, frame, scale, phase);
+    // A real bounded surface, inset from every window edge. This is the visual
+    // contract of the button: sessions are rendered inside an overlay while
+    // the transcript the user was working on remains visible around it.
+    let (x0, y0, x1, y1) = crate::overview::area(frame);
+    let panel = RoundedRect::new(x0, y0, x1, y1, 12.0);
+    scene.fill(
+        vello::peniko::Fill::NonZero,
+        Affine::scale(scale),
+        theme.background.with_alpha((0.96 * phase) as f32),
+        None,
+        &panel,
+    );
+    scene.stroke(
+        &vello::kurbo::Stroke::new(1.0),
+        Affine::scale(scale),
+        theme.rule.with_alpha(phase as f32),
+        None,
+        &panel,
+    );
 
     // Everything flies out from the card you came from, so the session on
     // screen stays under the eye through the whole transition.

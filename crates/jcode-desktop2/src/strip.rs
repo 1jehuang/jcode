@@ -18,6 +18,8 @@
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub session_id: String,
+    /// User- or agent-generated session title, once one has been assigned.
+    pub title: Option<String>,
     /// Working directory, which is what the strip groups on.
     pub working_dir: Option<String>,
     /// Whether the session is currently generating, so a bar can show that a
@@ -34,6 +36,7 @@ impl Entry {
     pub fn new(session_id: &str, working_dir: Option<&str>) -> Self {
         Self {
             session_id: session_id.to_string(),
+            title: None,
             working_dir: working_dir.map(str::to_string),
             busy: false,
             weight: 0.0,
@@ -162,6 +165,31 @@ impl Strip {
             .map(|entry| entry.session_id.as_str())
     }
 
+    /// Heading for the focused conversation. Before a title is generated, its
+    /// stable position in the session list gives the user a useful name.
+    pub fn focused_heading(&self) -> Option<String> {
+        let focused = self.focused_session()?;
+        let (index, entry) = self
+            .groups
+            .iter()
+            .flat_map(|group| group.entries.iter())
+            .enumerate()
+            .find(|(_, entry)| entry.session_id == focused)?;
+        match entry.title.as_deref().map(str::trim) {
+            Some(title) if !title.is_empty() => Some(title.to_string()),
+            _ => Some(format!("{} chat", ordinal(index + 1))),
+        }
+    }
+
+    /// The focused session's assigned title, excluding the ordinal fallback.
+    pub fn focused_title(&self) -> Option<&str> {
+        self.focused_group()
+            .and_then(|group| group.entries.get(self.index))
+            .and_then(|entry| entry.title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    }
+
     /// The focused session's working directory, if the strip knows one.
     pub fn focused_working_dir(&self) -> Option<&str> {
         self.focused_group()
@@ -219,6 +247,20 @@ impl Strip {
         self.index = self.index.min(len.saturating_sub(1));
         true
     }
+}
+
+fn ordinal(number: usize) -> String {
+    let suffix = if (11..=13).contains(&(number % 100)) {
+        "th"
+    } else {
+        match number % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        }
+    };
+    format!("{number}{suffix}")
 }
 
 /// One drawable item in the strip: a group's frame or a session block.
@@ -409,6 +451,30 @@ mod tests {
         ];
         let strip = Strip::build(entries, Some("a2"));
         assert_eq!(strip.focused_session(), Some("a2"));
+    }
+
+    #[test]
+    fn heading_uses_the_session_title_when_available() {
+        let mut entry = Entry::new("a1", Some("/tmp"));
+        entry.title = Some("  Fix the renderer  ".into());
+        let strip = Strip::build(vec![entry], Some("a1"));
+        assert_eq!(strip.focused_heading().as_deref(), Some("Fix the renderer"));
+    }
+
+    #[test]
+    fn heading_falls_back_to_the_chat_ordinal() {
+        let strip = Strip::build(
+            (1..=13)
+                .map(|number| Entry::new(&format!("s{number}"), Some("/tmp")))
+                .collect(),
+            Some("s13"),
+        );
+        assert_eq!(strip.focused_heading().as_deref(), Some("13th chat"));
+        assert_eq!(ordinal(1), "1st");
+        assert_eq!(ordinal(2), "2nd");
+        assert_eq!(ordinal(3), "3rd");
+        assert_eq!(ordinal(11), "11th");
+        assert_eq!(ordinal(12), "12th");
     }
 
     /// A session that disappeared must not leave focus pointing at nothing.

@@ -13,7 +13,7 @@
 //! additionally clips to it, so an arithmetic mistake degrades to cropped text
 //! rather than text painted across the input box.
 
-use crate::transcript::{LaidMessage, MESSAGE_GAP};
+use crate::transcript::{LaidMessage, MESSAGE_GAP, Role};
 
 /// One message placed in the region's coordinate space.
 pub struct Placed<'a> {
@@ -26,6 +26,9 @@ pub struct Placed<'a> {
     /// (that is, relative to `region_top`). May be negative when a tall
     /// message is partly scrolled off the top.
     pub top: f64,
+    /// The newest user prompt has reached the top edge and is painted after the
+    /// scrolling conversation, like a native sticky header.
+    pub sticky: bool,
 }
 
 /// The laid-out, positioned transcript for one frame.
@@ -69,16 +72,35 @@ impl<'a> Viewport<'a> {
         let content_top = top;
 
         let mut visible = Vec::new();
+        let latest_user = laid.iter().rposition(|message| message.role == Role::User);
+        let mut sticky_user = None;
         for (index, message) in laid.iter().enumerate() {
             let height = message.height;
-            if top + height > 0.0 && top < region_height {
+            let sticky = latest_user == Some(index)
+                && index + 1 < laid.len()
+                && top <= 0.0
+                && height < region_height;
+            if sticky {
+                sticky_user = Some(Placed {
+                    index,
+                    message,
+                    top: 0.0,
+                    sticky: true,
+                });
+            } else if top + height > 0.0 && top < region_height {
                 visible.push(Placed {
                     index,
                     message,
                     top,
+                    sticky: false,
                 });
             }
             top += height + MESSAGE_GAP;
+        }
+        // Sticky content is last in paint order so later response text scrolls
+        // behind the opaque user card rather than over it.
+        if let Some(sticky_user) = sticky_user {
+            visible.push(sticky_user);
         }
 
         Self {
@@ -110,6 +132,45 @@ pub fn clamp_scroll(scroll: f64, content_height: f64, region_height: f64) -> f64
     scroll.clamp(0.0, max)
 }
 
+/// Scroll offset that pins the adjacent user prompt to the top of the region.
+///
+/// `older` moves away from the live tail. Moving newer past the newest prompt
+/// returns to offset zero, which is the live-following position.
+pub fn adjacent_prompt_scroll(
+    messages: &[LaidMessage],
+    region_height: f64,
+    current: f64,
+    older: bool,
+) -> f64 {
+    let content_height = total_height(messages);
+    let max = (content_height - region_height).max(0.0);
+    let mut top = 0.0;
+    let mut anchors = Vec::new();
+    for message in messages {
+        if message.role == Role::User {
+            anchors.push((max - top).clamp(0.0, max));
+        }
+        top += message.height + MESSAGE_GAP;
+    }
+    // Several prompts can clamp to the tail in a short final screen. They are
+    // one visual destination, so do not make repeated presses appear broken.
+    anchors.sort_by(f64::total_cmp);
+    anchors.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    const SLOP: f64 = 0.5;
+    if older {
+        anchors
+            .into_iter()
+            .find(|anchor| *anchor > current + SLOP)
+            .unwrap_or(max)
+    } else {
+        anchors
+            .into_iter()
+            .rev()
+            .find(|anchor| *anchor < current - SLOP)
+            .unwrap_or(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +200,38 @@ mod tests {
             )));
         }
         transcript
+    }
+
+    #[test]
+    fn prompt_navigation_walks_anchors_and_returns_to_live_tail() {
+        let transcript = long_conversation(5);
+        with_viewport(&transcript, 0.0, |viewport| {
+            let laid: Vec<_> = viewport
+                .visible
+                .iter()
+                .map(|placed| placed.message)
+                .collect();
+            // Use the full laid conversation below. The visible slice is not an
+            // anchor index and must never be used for prompt navigation.
+            assert!(!laid.is_empty());
+        });
+
+        let mut cache = TranscriptCache::default();
+        let mut text = TextSystem::default();
+        let laid = cache.lay_out(
+            &mut text,
+            &transcript,
+            WIDTH,
+            &Theme::print_light(),
+            base(),
+            1.0,
+        );
+        let first = adjacent_prompt_scroll(laid, REGION, 0.0, true);
+        let second = adjacent_prompt_scroll(laid, REGION, first, true);
+        assert!(first > 0.0, "older prompt should leave the live tail");
+        assert!(second > first, "repeated Ctrl+K should keep moving older");
+        assert_eq!(adjacent_prompt_scroll(laid, REGION, second, false), first);
+        assert_eq!(adjacent_prompt_scroll(laid, REGION, first, false), 0.0);
     }
 
     /// Run `check` against a viewport over `transcript` at `scroll`, keeping
@@ -203,6 +296,28 @@ mod tests {
                 "not bottom-aligned: bottom {bottom:.1} vs region {:.1}",
                 view.region_height
             );
+        });
+    }
+
+    #[test]
+    fn the_latest_prompt_sticks_to_the_top_above_its_reply() {
+        let transcript = long_conversation(8);
+        with_viewport_sized(&transcript, 0.0, 100.0, |view| {
+            let prompt = view.visible.last().expect("a sticky prompt");
+            assert_eq!(prompt.message.role, Role::User);
+            assert!(prompt.sticky);
+            assert_eq!(prompt.index, 14);
+            assert_eq!(prompt.top, 0.0);
+        });
+    }
+
+    #[test]
+    fn an_unanswered_prompt_is_not_pinned_out_of_document_order() {
+        let mut transcript = long_conversation(8);
+        transcript.push(Message::user("the newest prompt"));
+        with_viewport(&transcript, 0.0, |view| {
+            assert!(view.visible.iter().all(|placed| !placed.sticky));
+            assert_eq!(view.visible.last().map(|placed| placed.index), Some(16));
         });
     }
 

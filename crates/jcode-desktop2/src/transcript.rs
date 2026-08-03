@@ -64,6 +64,9 @@ pub enum Role {
     /// test sweep, and a swarm plan at the same time, and collapsing them into
     /// one line would hide the one that is stuck.
     Progress,
+    /// The latest structured plan reported by the `todo` tool. Persistent, but
+    /// singular: each call replaces the prior snapshot rather than logging it.
+    Todo,
 }
 
 /// One turn of the conversation.
@@ -91,6 +94,8 @@ pub struct Message {
     /// is compared wholesale in tests and in the paint cache) and so two ticks
     /// reporting the same progress are byte-identical.
     pub permille: Option<u16>,
+    /// Native task controls for a todo card, in list-item order.
+    pub todo_states: Vec<crate::todos::TodoState>,
 }
 
 impl Message {
@@ -103,6 +108,7 @@ impl Message {
             call_id: None,
             delivery: None,
             permille: None,
+            todo_states: Vec::new(),
         }
     }
 
@@ -131,6 +137,7 @@ impl Message {
             call_id: None,
             delivery: None,
             permille: None,
+            todo_states: Vec::new(),
         }
     }
 
@@ -141,6 +148,7 @@ impl Message {
             call_id: None,
             delivery: None,
             permille: None,
+            todo_states: Vec::new(),
         }
     }
 
@@ -151,6 +159,7 @@ impl Message {
             call_id: Some(call_id.into()),
             delivery: None,
             permille: None,
+            todo_states: Vec::new(),
         }
     }
 
@@ -162,6 +171,7 @@ impl Message {
             call_id: None,
             delivery: None,
             permille: None,
+            todo_states: Vec::new(),
         }
     }
 
@@ -181,6 +191,18 @@ impl Message {
             call_id: Some(task_id.into()),
             delivery: None,
             permille: percent.map(|percent| (percent.clamp(0.0, 100.0) * 10.0).round() as u16),
+            todo_states: Vec::new(),
+        }
+    }
+
+    pub fn todo(card: &crate::todos::TodoCard) -> Self {
+        Self {
+            role: Role::Todo,
+            source: card.source.clone(),
+            call_id: None,
+            delivery: None,
+            permille: Some(card.permille),
+            todo_states: card.states.clone(),
         }
     }
 
@@ -199,6 +221,7 @@ impl Message {
             call_id: None,
             delivery: None,
             permille: None,
+            todo_states: Vec::new(),
         }
     }
 }
@@ -350,6 +373,40 @@ impl Transcript {
 
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Whether this conversation has actually begun. Notices and connection
+    /// failures can appear on an otherwise fresh page, but they must not make a
+    /// session heading appear before the user's first query.
+    pub fn has_user_message(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.role == Role::User)
+    }
+
+    /// A short local heading while the daemon's generated session title is not
+    /// available yet. The first user line names a conversation more usefully
+    /// than an ordinal, and is available immediately after submit.
+    pub fn provisional_heading(&self) -> Option<String> {
+        const MAX_CHARS: usize = 64;
+        let source = self
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User)?
+            .source
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if source.is_empty() {
+            return None;
+        }
+        let mut chars = source.chars();
+        let heading: String = chars.by_ref().take(MAX_CHARS).collect();
+        Some(if chars.next().is_some() {
+            format!("{}…", heading.trim_end())
+        } else {
+            heading
+        })
     }
 
     pub fn push(&mut self, message: Message) {
@@ -605,6 +662,23 @@ impl Transcript {
         self.messages.insert(at, updated);
     }
 
+    /// Show the newest plan snapshot as one durable card. The card retains its
+    /// original conversation position while its contents refine in place.
+    pub fn set_todo(&mut self, card: &crate::todos::TodoCard) {
+        if let Some(existing) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.role == Role::Todo)
+        {
+            existing.source.clone_from(&card.source);
+            existing.permille = Some(card.permille);
+            existing.todo_states.clone_from(&card.states);
+            return;
+        }
+        let at = self.text_tail();
+        self.messages.insert(at, Message::todo(card));
+    }
+
     /// Retire one task's progress card, because the task finished.
     ///
     /// Returns whether a card was actually removed, so the caller can skip a
@@ -740,6 +814,7 @@ pub struct LaidMessage {
     /// on a cache hit like `delivery`: a bar advancing changes a drawn width,
     /// never a wrap.
     pub permille: Option<u16>,
+    pub todo_states: Vec<crate::todos::TodoState>,
     /// Laid-out blocks, in order, with their vertical offset from the top of
     /// the message and the kind that produced them.
     pub blocks: Vec<LaidBlock>,
@@ -760,6 +835,9 @@ impl LaidMessage {
             // A notice is a card too: it has to be visibly an interjection
             // from the app rather than a line the model wrote.
             Role::Tool | Role::Notice | Role::Progress => TOOL_PAD_Y,
+            // The plan card is a durable document, not a status line, so it
+            // breathes like the user card rather than hugging its border.
+            Role::Todo => USER_PAD_Y,
             // An edit card is a card too: the diff sits on a wash that must
             // not crop the first line of it.
             Role::Edit => TOOL_PAD_Y,
@@ -776,6 +854,9 @@ impl LaidMessage {
 
 pub struct LaidBlock {
     pub layout: Layout<Brush>,
+    /// Native OpenType-MATH layout for a display equation. When present the
+    /// scene draws this instead of the terminal-oriented Unicode fallback.
+    pub math: Option<crate::math::Formula>,
     /// The block's flattened plain text, the same string the layout was built
     /// from. Kept so a pointer selection can slice it for the clipboard
     /// without re-parsing the markdown or reading back from the GPU.
@@ -1016,7 +1097,7 @@ pub fn lay_out_message_reusing(
             // a rule down its left edge; the rule is gone (the diff's own wash
             // and hue already mark it), so the indent would only narrow the
             // one block on the page that most wants the measure.
-            None if message.role == Role::Edit => (base, 0.0),
+            None if matches!(message.role, Role::Edit | Role::Todo) => (base, 0.0),
             None => (base, 0.0),
         },
     };
@@ -1062,11 +1143,15 @@ pub fn lay_out_message_reusing(
         // carries no text at all. Laying out render-core's `───` placeholder
         // as well would draw the rule twice, once in glyphs and once in ink.
         let is_rule = block.kind == BlockKind::ThematicBreak;
-        let (source, spans) = if is_rule {
+        let (mut source, spans) = if is_rule {
             (String::new(), Vec::new())
         } else {
             flatten(&lines)
         };
+        let math = block.latex.as_deref().map(|latex| {
+            source = latex.to_owned();
+            crate::math::shared().typeset(latex, f64::from(base.font_size))
+        });
         // An edit card's code block is a diff, so each of its lines takes the
         // ink of the side it is on. Applied here, over the flattened block,
         // because "which side" is a property of the whole line and markdown has
@@ -1100,7 +1185,15 @@ pub fn lay_out_message_reusing(
         } else {
             spans
         };
-        if !is_rule && source.trim().is_empty() {
+        // The plan card's ink carries its states: the header count and the
+        // group labels are captions, and a finished task recedes to faint so
+        // the eye lands on what is left to do rather than on what is done.
+        let spans = if message.role == Role::Todo {
+            todo_spans(&block.kind, blocks.is_empty(), theme, spans)
+        } else {
+            spans
+        };
+        if !is_rule && math.is_none() && source.trim().is_empty() {
             continue;
         }
         // Space above this block. It depends on *both* neighbours, so it is
@@ -1134,17 +1227,21 @@ pub fn lay_out_message_reusing(
             matching = false;
         }
         let style = block_style(&block.kind, base, theme);
+        let layout_source = if math.is_some() { "" } else { &source };
+        let layout_spans = if math.is_some() { &[][..] } else { &spans };
         let layout = layout_rich(
             text,
-            &source,
-            &spans,
+            layout_source,
+            layout_spans,
             (width - inset * 2.0).max(1.0),
             style,
             Palette { theme, tint },
             scale,
         );
         fresh += 1;
-        let mut height = if is_rule {
+        let mut height = if let Some(formula) = math.as_ref() {
+            formula.height
+        } else if is_rule {
             RULE_HEIGHT
         } else {
             f64::from(layout.height()) / scale
@@ -1167,8 +1264,12 @@ pub fn lay_out_message_reusing(
             Vec::new()
         };
         blocks.push(LaidBlock {
-            glyphs: crate::text::glyph_count(&layout),
+            glyphs: math.as_ref().map_or_else(
+                || crate::text::glyph_count(&layout),
+                |formula| formula.glyphs(),
+            ),
             layout,
+            math,
             source,
             top,
             height,
@@ -1191,6 +1292,9 @@ pub fn lay_out_message_reusing(
         // reserves its height here: measuring it anywhere else would let the
         // bar paint over the message below.
         Role::Progress => TOOL_PAD_Y * 2.0 + PROGRESS_BAR_GAP + PROGRESS_BAR_HEIGHT,
+        // The plan card's gauge sits on its header line rather than under the
+        // list, so the card only reserves its own breathing room.
+        Role::Todo => USER_PAD_Y * 2.0,
         Role::Assistant | Role::Reasoning => 0.0,
     };
     (
@@ -1198,6 +1302,7 @@ pub fn lay_out_message_reusing(
             role: message.role,
             delivery: message.delivery,
             permille: message.permille,
+            todo_states: message.todo_states.clone(),
             blocks,
             height,
         },
@@ -1287,8 +1392,52 @@ fn diff_spans(source: &str, language: Option<&str>, theme: &Theme) -> Vec<SpanSt
     spans
 }
 
-/// Bytes of a diff line taken by its gutter: the line number and the sign.
-/// Per-token ink for an ordinary fenced code block.
+/// Ink for a plan card's blocks, by their place in the card.
+///
+/// The card has three voices and markdown alone gives it one: the header's
+/// count and the group labels are *captions* over the checklist, so they take
+/// caption ink, and a struck-through task is already read, so its ink recedes
+/// to faint. Bold survives where it means something (the "Plan" word, the
+/// active task) because weight and ink are different axes: the active task is
+/// bold *body* ink, which is exactly "the line you are on".
+fn todo_spans(
+    kind: &BlockKind,
+    is_header: bool,
+    theme: &Theme,
+    mut spans: Vec<SpanStyle>,
+) -> Vec<SpanStyle> {
+    match kind {
+        // The header paragraph: "Plan · n of m tasks". The count is a
+        // caption, so everything outside the bold word takes muted ink.
+        BlockKind::Paragraph if is_header => {
+            for span in &mut spans {
+                if !span.bold {
+                    span.color = Some(theme.muted);
+                }
+            }
+        }
+        // A group label is a caption over its tasks, not a heading in a
+        // document: smallcaps-adjacent muted ink keeps it legible as
+        // structure without competing with the tasks it labels.
+        BlockKind::Paragraph => {
+            for span in &mut spans {
+                span.color = Some(theme.muted);
+            }
+        }
+        // A finished task recedes: the strikethrough says "done" and the
+        // faint ink stops five done lines from shouting over the two left.
+        BlockKind::ListItem { .. } => {
+            for span in &mut spans {
+                if span.strikethrough {
+                    span.color = Some(theme.faint);
+                }
+            }
+        }
+        _ => {}
+    }
+    spans
+}
+
 /// Ink for the `+n -m` counts at the end of an edit card's header.
 ///
 /// Only the two tokens are recoloured, and only when they are the last thing
@@ -2238,6 +2387,32 @@ mod tests {
     /// Streaming must continue one reply, not create a block per chunk:
     /// markdown spanning a chunk boundary would otherwise never parse.
     #[test]
+    fn provisional_heading_uses_the_first_user_message() {
+        let transcript = Transcript::from(
+            [
+                Message::notice("connected"),
+                Message::user("  fix   the chat title\nplease  "),
+                Message::user("not this later message"),
+            ]
+            .as_slice(),
+        );
+        assert_eq!(
+            transcript.provisional_heading().as_deref(),
+            Some("fix the chat title please")
+        );
+    }
+
+    #[test]
+    fn provisional_heading_is_unicode_safe_and_bounded() {
+        let transcript =
+            Transcript::from([Message::user(format!("{} rest", "🙂".repeat(64)))].as_slice());
+        assert_eq!(
+            transcript.provisional_heading().as_deref(),
+            Some(format!("{}…", "🙂".repeat(64)).as_str())
+        );
+    }
+
+    #[test]
     fn streaming_deltas_accumulate_into_one_message() {
         let mut transcript = Transcript::default();
         transcript.push(Message::user("hi"));
@@ -2361,6 +2536,40 @@ mod tests {
         assert_eq!(cards.len(), 1, "a tick added a row instead of updating one");
         assert_eq!(cards[0].source, "bash · 90% · linking");
         assert_eq!(cards[0].fraction(), Some(0.9));
+    }
+
+    #[test]
+    fn todo_snapshots_replace_one_persistent_card() {
+        let mut transcript = Transcript::default();
+        let first = crate::todos::parse(Some(
+            r#"{"todos":[{"content":"First","status":"in_progress"},{"content":"Second","status":"pending"}]}"#,
+        ))
+        .unwrap();
+        transcript.set_todo(&first);
+        transcript.clear_live_tool();
+
+        let next = crate::todos::parse(Some(
+            r#"{"todos":[{"content":"First","status":"completed"},{"content":"Second","status":"in_progress"}]}"#,
+        ))
+        .unwrap();
+        transcript.set_todo(&next);
+
+        let cards: Vec<_> = transcript
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::Todo)
+            .collect();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].permille, Some(500));
+        assert!(cards[0].source.contains("- ~~First~~"));
+        assert!(cards[0].source.contains("- **Second**"));
+        assert_eq!(
+            cards[0].todo_states,
+            [
+                crate::todos::TodoState::Completed,
+                crate::todos::TodoState::Active
+            ]
+        );
     }
 
     /// Two tasks are two bars, in the order they started: collapsing them would
@@ -2882,6 +3091,21 @@ mod tests {
             "inline latex was not rendered to math: {text:?}"
         );
         assert!(!text.contains("x^2"), "raw latex source survived: {text:?}");
+    }
+
+    #[test]
+    fn numeric_parenthesized_latex_is_not_mistaken_for_currency() {
+        let document = parse_markdown(r"constants \(1\) and \(0\), but a price is $5");
+        let line = document.lines().next().expect("paragraph");
+        let text = line.plain_text();
+        assert_eq!(text, "constants 1 and 0, but a price is $5");
+        let math: Vec<_> = line
+            .spans
+            .iter()
+            .filter(|span| span.role == StyleRole::Math)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(math, ["1", "0"]);
     }
 
     #[test]
@@ -3575,9 +3799,8 @@ mod tests {
 
     /// Reuse must not change the geometry it is an optimisation for. The
     /// A nested item steps in, and does so geometrically rather than by keeping
-    /// The rows of a rendered equation are parts of one picture, so they must be
-    /// set tighter than prose. At body leading a fraction comes apart into three
-    /// unrelated lines with its bar floating between them.
+    /// Native math layout must replace the terminal-oriented fallback and keep
+    /// a fraction tighter than the equivalent number of prose rows.
     #[test]
     fn display_math_is_set_tighter_than_prose() {
         let mut text = TextSystem::default();
@@ -3595,8 +3818,8 @@ mod tests {
             .iter()
             .find(|block| block.kind == BlockKind::MathDisplay)
             .expect("no display math block");
-        assert_eq!(math.layout.len(), 3, "the fraction did not lay out as rows");
-        let rows = math.layout.len() as f64;
+        assert!(math.math.is_some(), "the fraction used the text fallback");
+        let rows = 3.0;
         let prose = f64::from(base().font_size) * f64::from(base().line_height) * rows;
         assert!(
             math.height < prose,

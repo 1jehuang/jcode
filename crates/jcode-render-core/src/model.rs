@@ -187,6 +187,11 @@ pub enum BlockKind {
 pub struct Block {
     pub kind: BlockKind,
     pub lines: Vec<StyledLine>,
+    /// Original TeX for a display-math block. Text front-ends use `lines` as a
+    /// readable fallback; graphical front-ends use this source for real math
+    /// typesetting instead of trying to reconstruct TeX from the fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latex: Option<String>,
     /// Raw table cells (row-major, first row is the header). Only populated for
     /// [`BlockKind::Table`]; layout is deferred to the front-end adapter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -215,6 +220,7 @@ impl Block {
         Self {
             kind,
             lines,
+            latex: None,
             table: Vec::new(),
             alignments: Vec::new(),
             list_depth: 0,
@@ -226,6 +232,7 @@ impl Block {
         Self {
             kind: BlockKind::Table,
             lines: Vec::new(),
+            latex: None,
             table: rows,
             alignments: Vec::new(),
             list_depth: 0,
