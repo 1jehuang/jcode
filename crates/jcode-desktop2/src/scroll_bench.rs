@@ -757,8 +757,8 @@ pub fn report(reports: &[Report]) -> bool {
         "\n  latency: to first drawn movement. settle: motion after the last event.\n  \
          ratio: drawn travel / input travel, whole script; drag: the same while\n  \
          the fingers were down, which must be 1.00. track: worst fingers-down\n  \
-         disagreement. rev: frames moving backwards. jerk: peak per-frame speed change.\n  \
-         stop: px/frame still\n  being drawn on the last frame that moved, i.e. how abruptly it ended.\n  mid: the frame cost a hand actually feels. max@fN: worst frame and where it\n  \
+         disagreement. rev: frames moving backwards. jerk: peak per-frame speed change,\n  with the frame it landed on and `d` if the fingers were down there. A `d`\n  spike at the gated cadence is usually the replay handing one frame two\n  8ms events, not the model: compare the same script at 8ms before chasing it.\n  \
+         stop: px/frame still being drawn on the last frame that moved, i.e. how\n  abruptly the scroll ended. mid: the frame cost a hand actually feels. max@fN: worst frame and where it\n  \
          landed; on frame 0 it is the replay warming its own buffers, not a stutter."
     );
     ok
