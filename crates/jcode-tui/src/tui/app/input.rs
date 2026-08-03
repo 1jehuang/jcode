@@ -1520,10 +1520,15 @@ impl App {
             .collect();
         if incomplete.is_empty() {
             if todos.is_empty() {
+                // No todo list exists yet for this session. Auto-poke is armed
+                // by default (`features.auto_poke`), so disarming here would
+                // silently kill the feature for the whole session after the
+                // very first todo-free turn: every later turn that *does*
+                // leave incomplete todos would never be poked. Stay armed and
+                // simply do nothing this turn.
                 crate::logging::info(
-                    "AUTO_POKE_DECISION action=disarm reason=no_todos incomplete=0",
+                    "AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0",
                 );
-                self.auto_poke_incomplete_todos = false;
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
@@ -1586,7 +1591,10 @@ impl App {
                 self.pending_queued_dispatch = false;
                 return false;
             }
-            self.auto_poke_incomplete_todos = false;
+            // Cycle finished cleanly. When auto-poke is the configured default
+            // it stays armed so the next batch of work is covered too; only an
+            // explicit /poke off (or a circuit breaker above) disarms it.
+            self.auto_poke_incomplete_todos = self.auto_poke_default_on;
             self.todo_confidence_spike_challenged = false;
             // A finished cycle re-arms the review for whatever work comes next;
             // without this a session could only ever deliver one digest.

@@ -106,6 +106,10 @@ pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
 pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     let cleared = clear_queued_poke_messages(app);
     app.auto_poke_incomplete_todos = false;
+    // Disarming is explicit (/poke off) or a circuit breaker; either way it must
+    // stick for the rest of the session instead of being re-armed by the
+    // default-on re-arm in `schedule_auto_poke_followup_if_needed`.
+    app.auto_poke_default_on = false;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.todo_gate_digest_delivered = false;
@@ -235,6 +239,8 @@ pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String 
 pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     let incomplete = incomplete_poke_todos(app);
     app.auto_poke_incomplete_todos = true;
+    // Explicitly turning poke on also restores default-on re-arming.
+    app.auto_poke_default_on = true;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is

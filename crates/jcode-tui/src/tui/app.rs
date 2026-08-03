@@ -932,6 +932,12 @@ pub struct App {
     pending_turn: bool,
     // When armed by /poke, automatically continue prompting until todos are complete.
     auto_poke_incomplete_todos: bool,
+    /// Whether auto-poke is on by default for this session (`features.auto_poke`).
+    /// When true, finishing a poke cycle (all todos complete, or a turn with no
+    /// todo list at all) must leave auto-poke armed for the next batch of work;
+    /// otherwise the default-on feature would silently switch itself off after
+    /// the first turn and never poke again. Explicit `/poke off` still wins.
+    auto_poke_default_on: bool,
     /// Whether the current auto-poke cycle has already challenged an abrupt
     /// final confidence increase. Low or missing completion confidence keeps
     /// retrying, but a spike gets one dedicated independent-validation turn.

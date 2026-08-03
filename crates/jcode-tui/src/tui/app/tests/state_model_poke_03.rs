@@ -2483,7 +2483,9 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         app.pending_queued_dispatch = false;
         app.is_processing = true;
         super::local::finish_turn(&mut app);
-        assert!(!app.auto_poke_incomplete_todos);
+        // Auto-poke is default-on, so a completed cycle re-arms for the next
+        // batch of work rather than silently switching the feature off.
+        assert_eq!(app.auto_poke_incomplete_todos, app.auto_poke_default_on);
         assert!(!app.pending_queued_dispatch);
         assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
