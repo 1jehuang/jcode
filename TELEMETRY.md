@@ -106,8 +106,15 @@ event for "did the work finish, and how confident was the agent".
 One aggregate event is sent when an active session ends. Its `id` and
 `correlation_id` fields are the same fresh per-session UUID. The persistent
 telemetry ID, account ID, internal session ID, todo IDs, and all user/model text
-are absent, so the event can be joined to discovery requests from that session
-but not to an install, account, or another session.
+are absent, so the event is joinable to discovery requests from that session but
+not to an install, account, or another session.
+
+That join is not yet possible in practice. The discovery service stores its rows
+in the `jcode-subscriptions` D1 while this event lands in `jcode-telemetry`, and
+nothing on the receiving side reads
+`x-jcode-session-correlation-id` yet, so the header is currently sent and
+discarded. The correlation design is what makes the join possible later; it does
+not by itself make the number available.
 
 | Field | Type | Purpose |
 |-------|------|---------|
