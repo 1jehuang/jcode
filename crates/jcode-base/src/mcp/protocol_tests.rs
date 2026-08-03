@@ -42,6 +42,16 @@ fn test_json_rpc_request_serialization() {
 }
 
 #[test]
+fn test_json_rpc_notification_serialization_omits_id() {
+    let notification = JsonRpcNotification::new("notifications/initialized", None);
+    let value = serde_json::to_value(notification).unwrap();
+    assert_eq!(value["jsonrpc"], "2.0");
+    assert_eq!(value["method"], "notifications/initialized");
+    assert!(value.get("id").is_none());
+    assert!(value.get("params").is_none());
+}
+
+#[test]
 fn test_json_rpc_response_deserialization() {
     let json = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
     let response: JsonRpcResponse = serde_json::from_str(json).unwrap();

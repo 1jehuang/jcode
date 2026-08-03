@@ -465,10 +465,11 @@ pub fn model_is_gemini(model: &str) -> bool {
 ///   `maxProperties` for these models. These are advisory bounds the model does
 ///   not need to satisfy a call, so dropping them is safe.
 ///
-/// Gemini (the native path) is returned unchanged.
+/// Gemini (the native path) rejects `propertyNames`, so that keyword is
+/// removed recursively while the rest of the schema is preserved.
 pub fn antigravity_compatible_schema(schema: &Value, model: &str) -> Value {
     if model_is_gemini(model) {
-        return schema.clone();
+        return strip_schema_key(schema, "propertyNames");
     }
     if model_is_claude(model) {
         return flatten_schema_combiners(schema);
@@ -477,6 +478,24 @@ pub fn antigravity_compatible_schema(schema: &Value, model: &str) -> Value {
     // bridge that mangles numeric bounds; also flatten combiners defensively
     // since those bridges share Anthropic's strictness about them.
     strip_numeric_schema_bounds(&flatten_schema_combiners(schema))
+}
+
+fn strip_schema_key(schema: &Value, rejected_key: &str) -> Value {
+    match schema {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| key.as_str() != rejected_key)
+                .map(|(key, value)| (key.clone(), strip_schema_key(value, rejected_key)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|value| strip_schema_key(value, rejected_key))
+                .collect(),
+        ),
+        _ => schema.clone(),
+    }
 }
 
 /// Numeric JSON Schema bounds an OpenAI-compatible Antigravity bridge corrupts

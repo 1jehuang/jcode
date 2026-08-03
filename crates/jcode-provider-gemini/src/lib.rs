@@ -460,6 +460,7 @@ const GEMINI_UNSUPPORTED_SCHEMA_KEYS: &[&str] = &[
     "$defs",
     "definitions",
     "$comment",
+    "propertyNames",
 ];
 
 fn gemini_compatible_schema(schema: &Value) -> Value {
@@ -743,6 +744,28 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn compatible_schema_strips_nested_property_names() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "propertyNames": { "type": "string" },
+                    "additionalProperties": { "type": "string" }
+                }
+            }
+        });
+        let out = gemini_compatible_schema(&schema);
+        assert!(out["properties"]["data"].get("propertyNames").is_none());
+        // Existing Gemini normalization still drops additionalProperties.
+        assert!(
+            out["properties"]["data"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
 
     #[test]
     fn fallback_models_skip_current_model() {

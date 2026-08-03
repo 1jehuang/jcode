@@ -477,9 +477,9 @@ fn strip_numeric_schema_bounds_drops_array_and_string_and_object_bounds() {
 }
 
 #[test]
-fn antigravity_compatible_schema_passes_gemini_through_unchanged() {
-    // Gemini is the native backend path; it accepts everything jcode emits, so
-    // the schema must be byte-identical (combiners and numeric bounds intact).
+fn antigravity_compatible_schema_only_strips_property_names_for_gemini() {
+    // Gemini keeps combiners and bounds, but generateContent rejects the
+    // `propertyNames` keyword even when it is nested.
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -489,14 +489,28 @@ fn antigravity_compatible_schema_passes_gemini_through_unchanged() {
                     { "items": { "type": "string" }, "type": "array" }
                 ]
             },
-            "tool_calls": { "type": "array", "minItems": 1, "maxItems": 10 }
+            "tool_calls": { "type": "array", "minItems": 1, "maxItems": 10 },
+            "data": {
+                "type": "object",
+                "propertyNames": { "type": "string" },
+                "additionalProperties": { "type": "string" }
+            }
         }
     });
 
+    let out = antigravity_compatible_schema(&schema, "gemini-3-flash");
+    assert!(out["properties"]["data"].get("propertyNames").is_none());
     assert_eq!(
-        antigravity_compatible_schema(&schema, "gemini-3-flash"),
-        schema,
-        "Gemini path must not rewrite the schema"
+        out["properties"]["status_filter"],
+        schema["properties"]["status_filter"]
+    );
+    assert_eq!(
+        out["properties"]["tool_calls"],
+        schema["properties"]["tool_calls"]
+    );
+    assert_eq!(
+        out["properties"]["data"]["additionalProperties"],
+        serde_json::json!({ "type": "string" })
     );
 }
 
