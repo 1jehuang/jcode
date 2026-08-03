@@ -314,7 +314,12 @@ impl JcodeClient {
     // --- Curated surface -----------------------------------------------------
 
     pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        match self.request_ok(ApiRequest::ListSessions)?.event {
+        match self
+            .request_ok(ApiRequest::ListSessions {
+                include_archived: false,
+            })?
+            .event
+        {
             ApiEvent::Sessions { sessions } => Ok(sessions),
             other => Err(unexpected("sessions", &other)),
         }

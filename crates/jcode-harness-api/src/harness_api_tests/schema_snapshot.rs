@@ -94,7 +94,18 @@ fn request_roundtrip() {
             max_version: 1,
             client: "test/0".into(),
         },
-        ApiRequest::ListSessions,
+        ApiRequest::ListSessions {
+            include_archived: false,
+        },
+        ApiRequest::ArchiveSession {
+            session_id: "s1".into(),
+        },
+        ApiRequest::RestoreSession {
+            session_id: "s1".into(),
+        },
+        ApiRequest::SetRetentionPolicy {
+            archive_after_days: Some(30),
+        },
         ApiRequest::CreateSession { working_dir: None },
         ApiRequest::AttachSession {
             session_id: "s1".into(),
@@ -106,6 +117,36 @@ fn request_roundtrip() {
             session_id: "s1".into(),
             request_id: "p1".into(),
             decision: PermissionDecision::Allow,
+        },
+        ApiRequest::GetRuntimeInfo {
+            session_id: "s1".into(),
+        },
+        ApiRequest::SetApiKey {
+            provider: "gemini".into(),
+            api_key: "secret".into(),
+        },
+        ApiRequest::ClearApiKey {
+            provider: "gemini".into(),
+        },
+        ApiRequest::ReadFile {
+            session_id: "s1".into(),
+            path: "src/lib.rs".into(),
+            max_bytes: Some(1024),
+        },
+        ApiRequest::FindFiles {
+            session_id: "s1".into(),
+            query: "lib".into(),
+            limit: Some(10),
+        },
+        ApiRequest::SearchText {
+            session_id: "s1".into(),
+            query: "needle".into(),
+            path: Some("src".into()),
+            limit: Some(10),
+        },
+        ApiRequest::FileStatus {
+            session_id: "s1".into(),
+            path: "src/lib.rs".into(),
         },
         ApiRequest::Ping,
     ];

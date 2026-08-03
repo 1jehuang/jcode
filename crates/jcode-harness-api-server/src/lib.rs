@@ -216,7 +216,19 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
         ApiEvent::HelloOk {
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
-            capabilities: vec!["sessions".into(), "streaming".into()],
+            capabilities: [
+                "sessions",
+                "streaming",
+                "persisted_session_discovery",
+                "runtime_info",
+                "api_key_provisioning",
+                "session_archive",
+                "session_retention",
+                "session_files",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         },
     );
     write_json_line(&mut write_half, &hello_ok).await?;

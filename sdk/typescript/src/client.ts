@@ -25,10 +25,39 @@ import {
   type ApiRequest,
   type HistoryMessage,
   type ImageAttachment,
+  type ModelRouteInfo,
   type PermissionDecision,
   type ServerFrame,
   type SessionInfo,
+  type TextMatch,
 } from "./protocol.js";
+
+export interface RuntimeInfo {
+  server: string;
+  protocolVersion: number;
+  capabilities: string[];
+  healthy: true;
+  sessionId: string;
+  provider?: string;
+  model?: string;
+  providers: string[];
+  routes: ModelRouteInfo[];
+}
+
+export interface FileContent {
+  path: string;
+  content: string;
+  size: number;
+  truncated: boolean;
+}
+
+export interface FileStatus {
+  path: string;
+  exists: boolean;
+  kind: string;
+  size?: number;
+  modifiedMs?: number;
+}
 
 
 
@@ -115,6 +144,15 @@ export interface ConnectOptions {
   requestTimeoutMs?: number;
 }
 
+export interface GlobalEventsOptions {
+  /** Stop discovery and close every per-session child connection. */
+  signal?: AbortSignal;
+  /** Milliseconds between checks for newly created sessions. Defaults to 1000. */
+  discoveryIntervalMs?: number;
+  /** Maximum events waiting for the consumer before the iterator fails loudly. Defaults to 10000. */
+  maxBufferedEvents?: number;
+}
+
 export interface RunOptions {
   images?: ImageAttachment[];
   onEvent?: (event: ApiEvent) => void;
@@ -163,6 +201,8 @@ export class JcodeClient extends EventEmitter {
   private readonly decoder = new NdjsonDecoder();
   private readonly pending = new Map<number, Pending>();
   private readonly requestTimeoutMs: number;
+  private readonly socketPath?: string;
+  private readonly clientName: string;
   private nextId = 1;
   private closed = false;
   private closeError?: Error;
@@ -184,11 +224,18 @@ export class JcodeClient extends EventEmitter {
     return this.capabilities.includes(capability);
   }
 
-  private constructor(transport: Transport, requestTimeoutMs: number) {
+  private constructor(
+    transport: Transport,
+    requestTimeoutMs: number,
+    socketPath: string | undefined,
+    clientName: string,
+  ) {
     super();
     this.setMaxListeners(0);
     this.transport = transport;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.socketPath = socketPath;
+    this.clientName = clientName;
     transport.onData((chunk) => this.ingest(chunk));
     transport.onClose((error) => this.handleClose(error));
   }
@@ -239,14 +286,20 @@ export class JcodeClient extends EventEmitter {
    * instead, use {@link JcodeClient.launch}.
    */
   static async connect(options: ConnectOptions = {}): Promise<JcodeClient> {
-    const transport =
-      options.transport ?? (await unixSocketTransport(options.socketPath ?? apiSocketPath()));
-    const client = new JcodeClient(transport, options.requestTimeoutMs ?? 30_000);
+    const socketPath = options.transport ? undefined : (options.socketPath ?? apiSocketPath());
+    const transport = options.transport ?? (await unixSocketTransport(socketPath!));
+    const clientName = options.clientName ?? "jcode-sdk-ts";
+    const client = new JcodeClient(
+      transport,
+      options.requestTimeoutMs ?? 30_000,
+      socketPath,
+      clientName,
+    );
     const frame = await client.request({
       req: "hello",
       min_version: API_VERSION_MAJOR,
       max_version: API_VERSION_MAJOR,
-      client: options.clientName ?? "jcode-sdk-ts",
+      client: clientName,
     });
     if (frame.ev !== "hello_ok") {
       client.close();
@@ -358,9 +411,26 @@ export class JcodeClient extends EventEmitter {
 
   // --- Curated surface -----------------------------------------------------
 
-  async listSessions(): Promise<SessionInfo[]> {
-    const frame = await this.expectReply({ req: "list_sessions" }, "sessions");
+  async listSessions(options: { includeArchived?: boolean } = {}): Promise<SessionInfo[]> {
+    const frame = await this.expectReply(
+      { req: "list_sessions", include_archived: options.includeArchived },
+      "sessions",
+    );
     return frame.sessions ?? [];
+  }
+
+  /** Reversibly hide a session from the default list. No transcript is deleted. */
+  async archiveSession(sessionId: string): Promise<void> {
+    await this.requestOk({ req: "archive_session", session_id: sessionId });
+  }
+
+  async restoreSession(sessionId: string): Promise<void> {
+    await this.requestOk({ req: "restore_session", session_id: sessionId });
+  }
+
+  /** Auto-archive inactive sessions after this many days; omit to disable. */
+  async setRetentionPolicy(archiveAfterDays?: number): Promise<void> {
+    await this.requestOk({ req: "set_retention_policy", archive_after_days: archiveAfterDays });
   }
 
   async createSession(workingDir?: string): Promise<SessionInfo> {
@@ -521,6 +591,84 @@ export class JcodeClient extends EventEmitter {
     return { models: frame.models ?? [], current: frame.current };
   }
 
+  /** Runtime identity, route catalog, protocol metadata, and a live health check. */
+  async getRuntimeInfo(sessionId: string): Promise<RuntimeInfo> {
+    await this.ping();
+    const frame = await this.expectReply(
+      { req: "get_runtime_info", session_id: sessionId },
+      "runtime_info",
+    );
+    const routes = frame.routes ?? [];
+    return {
+      server: this.server,
+      protocolVersion: API_VERSION_MAJOR,
+      capabilities: [...this.capabilities],
+      healthy: true,
+      sessionId: frame.session_id,
+      provider: frame.provider,
+      model: frame.model,
+      providers: [
+        ...new Set(
+          [frame.provider, ...routes.map((route) => route.provider)].filter(
+            (provider): provider is string => provider !== undefined,
+          ),
+        ),
+      ],
+      routes,
+    };
+  }
+
+  /** Persist an API key in jcode's owner-only provider store and hot-reload it. */
+  async setApiKey(provider: string, apiKey: string): Promise<void> {
+    await this.expectReply({ req: "set_api_key", provider, api_key: apiKey }, "credential_updated");
+  }
+
+  async clearApiKey(provider: string): Promise<void> {
+    await this.expectReply({ req: "clear_api_key", provider }, "credential_updated");
+  }
+
+  async readFile(sessionId: string, path: string, maxBytes?: number): Promise<FileContent> {
+    const frame = await this.expectReply(
+      { req: "read_file", session_id: sessionId, path, max_bytes: maxBytes },
+      "file_content",
+    );
+    return { path: frame.path, content: frame.content, size: frame.size, truncated: frame.truncated };
+  }
+
+  async findFiles(sessionId: string, query: string, limit?: number): Promise<string[]> {
+    const frame = await this.expectReply(
+      { req: "find_files", session_id: sessionId, query, limit },
+      "files",
+    );
+    return frame.paths;
+  }
+
+  async searchText(
+    sessionId: string,
+    query: string,
+    options: { path?: string; limit?: number } = {},
+  ): Promise<TextMatch[]> {
+    const frame = await this.expectReply(
+      { req: "search_text", session_id: sessionId, query, ...options },
+      "text_matches",
+    );
+    return frame.matches;
+  }
+
+  async fileStatus(sessionId: string, path: string): Promise<FileStatus> {
+    const frame = await this.expectReply(
+      { req: "file_status", session_id: sessionId, path },
+      "file_status",
+    );
+    return {
+      path: frame.path,
+      exists: frame.exists,
+      kind: frame.kind,
+      size: frame.size,
+      modifiedMs: frame.modified_ms,
+    };
+  }
+
   /**
    * Switch the session to a different model.
    *
@@ -604,22 +752,24 @@ export class JcodeClient extends EventEmitter {
       }
     };
     const onClose = () => {
+      void stop();
+    };
+
+    const stop = (): Promise<IteratorResult<ApiEvent>> => {
       done = true;
+      queue.length = 0;
+      this.off("event", onEvent);
+      this.off("close", onClose);
       if (resolveNext) {
         const resolve = resolveNext;
         resolveNext = undefined;
         resolve({ value: undefined as never, done: true });
       }
-    };
-    this.on("event", onEvent);
-    this.once("close", onClose);
-
-    const stop = (): Promise<IteratorResult<ApiEvent>> => {
-      done = true;
-      this.off("event", onEvent);
-      this.off("close", onClose);
       return Promise.resolve({ value: undefined as never, done: true });
     };
+
+    this.on("event", onEvent);
+    this.once("close", onClose);
 
     return {
       [Symbol.asyncIterator]() {
@@ -636,6 +786,224 @@ export class JcodeClient extends EventEmitter {
       },
       return: stop,
       throw: stop,
+    };
+  }
+
+  /**
+   * Stream events from every session through per-session child connections.
+   *
+   * The bridge has one attachment per connection, so a server-wide stream is
+   * implemented by discovering persisted sessions, attaching one child client
+   * to each, and fanning their events into this iterator. Discovery repeats so
+   * sessions created after subscription are included.
+   *
+   * Delivery is at-least-from-attach, not historical replay: events emitted
+   * before a child finishes attaching, or during an unexpected disconnect and
+   * reattach, cannot be recovered by protocol v1. Ordering is preserved within
+   * each session; no total ordering across sessions is claimed.
+   *
+   * Calling `return()`, aborting `signal`, or closing this client closes every
+   * child connection. Custom transports are rejected because the SDK cannot
+   * safely clone an arbitrary transport into independent session connections.
+   */
+  globalEvents(options: GlobalEventsOptions = {}): AsyncIterableIterator<ApiEvent> {
+    if (!this.socketPath) {
+      throw new HarnessError(
+        "unsupported_transport",
+        "globalEvents requires a native socket connection; custom transports cannot be cloned into per-session child connections",
+      );
+    }
+    if (this.closed) {
+      throw this.closeError ?? new HarnessError("disconnected", "harness connection closed");
+    }
+
+    const discoveryIntervalMs = options.discoveryIntervalMs ?? 1_000;
+    const maxBufferedEvents = options.maxBufferedEvents ?? 10_000;
+    if (!Number.isFinite(discoveryIntervalMs) || discoveryIntervalMs < 0) {
+      throw new HarnessError("invalid_option", "discoveryIntervalMs must be a finite number >= 0");
+    }
+    if (!Number.isInteger(maxBufferedEvents) || maxBufferedEvents < 1) {
+      throw new HarnessError("invalid_option", "maxBufferedEvents must be a positive integer");
+    }
+
+    type Waiter = {
+      resolve: (result: IteratorResult<ApiEvent>) => void;
+      reject: (error: Error) => void;
+    };
+    type Child = {
+      client: JcodeClient;
+      stream: AsyncIterableIterator<ApiEvent>;
+      pump?: Promise<void>;
+    };
+
+    const queue: ApiEvent[] = [];
+    const children = new Map<string, Child>();
+    const starting = new Set<string>();
+    const startTasks = new Set<Promise<void>>();
+    let waiter: Waiter | undefined;
+    let stopped = false;
+    let terminalError: Error | undefined;
+    let discoveryTimer: NodeJS.Timeout | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+
+    const settleWaiter = () => {
+      if (!waiter) return;
+      const pending = waiter;
+      waiter = undefined;
+      if (terminalError) pending.reject(terminalError);
+      else pending.resolve({ value: undefined as never, done: true });
+    };
+
+    const onParentClose = (error?: Error) => {
+      void finish(error);
+    };
+    const onAbort = () => {
+      void finish();
+    };
+
+    const finish = (error?: Error): Promise<void> => {
+      if (cleanupPromise) return cleanupPromise;
+      stopped = true;
+      terminalError = error;
+      queue.length = 0;
+      if (discoveryTimer) clearTimeout(discoveryTimer);
+      this.off("close", onParentClose);
+      options.signal?.removeEventListener("abort", onAbort);
+      settleWaiter();
+
+      const closing: Promise<unknown>[] = [];
+      for (const { client, stream, pump } of children.values()) {
+        closing.push(Promise.resolve(stream.return?.(undefined as never)));
+        closing.push(client.close());
+        if (pump) closing.push(pump);
+      }
+      children.clear();
+      closing.push(...startTasks);
+      cleanupPromise = Promise.allSettled(closing).then(() => undefined);
+      return cleanupPromise;
+    };
+
+    const enqueue = (event: ApiEvent) => {
+      if (stopped) return;
+      if (waiter) {
+        const pending = waiter;
+        waiter = undefined;
+        pending.resolve({ value: event, done: false });
+        return;
+      }
+      if (queue.length >= maxBufferedEvents) {
+        void finish(
+          new HarnessError(
+            "event_buffer_overflow",
+            `globalEvents consumer fell behind ${maxBufferedEvents} buffered events`,
+          ),
+        );
+        return;
+      }
+      queue.push(event);
+    };
+
+    const startChild = async (sessionId: string): Promise<void> => {
+      if (stopped || children.has(sessionId) || starting.has(sessionId)) return;
+      starting.add(sessionId);
+      let child: JcodeClient | undefined;
+      try {
+        child = await JcodeClient.connect({
+          socketPath: this.socketPath,
+          clientName: `${this.clientName}/global-events`,
+          requestTimeoutMs: this.requestTimeoutMs,
+        });
+        if (stopped) {
+          await child.close();
+          return;
+        }
+        const stream = child.events(sessionId);
+        const childState: Child = { client: child, stream };
+        children.set(sessionId, childState);
+        await child.attachSession(sessionId);
+        if (stopped) return;
+
+        const pump = (async () => {
+          try {
+            for await (const event of stream) enqueue(event);
+          } finally {
+            if (children.get(sessionId) === childState) children.delete(sessionId);
+            await childState.client.close();
+          }
+        })();
+        childState.pump = pump;
+        void pump;
+      } catch (error) {
+        if (child && children.get(sessionId)?.client === child) children.delete(sessionId);
+        await child?.close();
+        if (
+          !stopped &&
+          !(error instanceof HarnessError && error.code === "unknown_session")
+        ) {
+          void finish(error instanceof Error ? error : new Error(String(error)));
+        }
+      } finally {
+        starting.delete(sessionId);
+      }
+    };
+
+    const scan = async (): Promise<void> => {
+      if (stopped) return;
+      try {
+        const sessions = await this.listSessions({ includeArchived: true });
+        if (stopped) return;
+        const tasks = sessions.map((session) => {
+          const task = startChild(session.session_id);
+          startTasks.add(task);
+          void task.finally(() => startTasks.delete(task));
+          return task;
+        });
+        await Promise.allSettled(tasks);
+      } catch (error) {
+        if (!stopped) void finish(error instanceof Error ? error : new Error(String(error)));
+      }
+      if (!stopped && discoveryIntervalMs > 0) {
+        discoveryTimer = setTimeout(() => void scan(), discoveryIntervalMs);
+        discoveryTimer.unref?.();
+      }
+    };
+
+    this.once("close", onParentClose);
+    if (options.signal?.aborted) void finish();
+    else {
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      void scan();
+    }
+
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: () => {
+        if (queue.length > 0) {
+          return Promise.resolve({ value: queue.shift()!, done: false });
+        }
+        if (terminalError) return Promise.reject(terminalError);
+        if (stopped) {
+          return Promise.resolve({ value: undefined as never, done: true });
+        }
+        if (waiter) {
+          return Promise.reject(
+            new HarnessError("concurrent_next", "globalEvents does not support concurrent next() calls"),
+          );
+        }
+        return new Promise<IteratorResult<ApiEvent>>((resolve, reject) => {
+          waiter = { resolve, reject };
+        });
+      },
+      return: async () => {
+        await finish();
+        return { value: undefined as never, done: true };
+      },
+      throw: async (error?: unknown) => {
+        await finish();
+        throw error;
+      },
     };
   }
 
