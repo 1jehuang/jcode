@@ -36,6 +36,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--profile-scroll") => Some(profile_scroll()),
         Some("--bench-donut") => Some(bench_donut()),
         Some("--capture") => Some(run_capture(&args[1..])),
+        Some("--check-clipboard-image") => Some(check_clipboard_image()),
         Some("--check-primary-selection") => Some(check_primary_selection()),
         Some("--check-reconnect") => Some(check_reconnect()),
         Some("--e2e") => Some(run_e2e(
@@ -45,6 +46,30 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+/// `--check-clipboard-image`: prove Ctrl+V's image path against the *real*
+/// compositor.
+///
+/// The unit tests keep the system clipboard sandboxed so they cannot read or
+/// clobber a developer's clipboard, which means nothing in the suite exercises
+/// Wayland image negotiation at all. That is exactly where pasting a screenshot
+/// breaks without a single test failing, so this reads whatever image is on the
+/// clipboard right now and reports its type, size, and payload cost.
+fn check_clipboard_image() -> Result<()> {
+    let mut clipboard = crate::clipboard::Clipboard::system();
+    let image = clipboard
+        .get_image()
+        .map_err(|error| anyhow::anyhow!("clipboard image unavailable: {error}"))?
+        .ok_or_else(|| anyhow::anyhow!("clipboard does not contain an image"))?;
+    println!(
+        "clipboard image ok: {} {}, {} bytes, {} base64 chars",
+        image.media_type,
+        image.label(),
+        image.bytes.len(),
+        crate::png::base64(&image.bytes).len()
+    );
+    Ok(())
 }
 
 /// `--check-primary-selection`: prove auto-copy against the *real* compositor.
@@ -290,7 +315,10 @@ fn run_e2e(message: &str) -> Result<()> {
                 model.status = format!("attached: {session_id}");
                 model.session_id = Some(session_id);
                 model.transcript.push(transcript::Message::user(message));
-                outgoing.send(harness::Command::Send(message.to_string()))?;
+                outgoing.send(harness::Command::Send {
+                    content: message.to_string(),
+                    images: vec![],
+                })?;
                 sent = true;
             }
             // The e2e probe drives one session, so another session's tail is

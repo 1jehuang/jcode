@@ -126,61 +126,9 @@ pub fn capture_scene_to_rgba(scene: &Scene, width: u32, height: u32) -> Result<V
     Ok(pixels)
 }
 
-/// Minimal PNG writer (RGBA8, no external deps).
+/// Write tight RGBA8 pixels out as a PNG. Encoding itself lives in `png`, so
+/// the clipboard path can produce the same bytes without a file.
 fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
-    fn crc32(data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = if crc & 1 != 0 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        out.extend_from_slice(kind);
-        out.extend_from_slice(data);
-        let mut crc_input = kind.to_vec();
-        crc_input.extend_from_slice(data);
-        out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
-    }
-    // Raw scanlines with filter byte 0, stored (uncompressed) zlib blocks.
-    let mut raw = Vec::with_capacity((height * (1 + width * 4)) as usize);
-    for row in 0..height {
-        raw.push(0);
-        let start = (row * width * 4) as usize;
-        raw.extend_from_slice(&rgba[start..start + (width * 4) as usize]);
-    }
-    let mut idat = vec![0x78, 0x01];
-    let mut adler_a: u32 = 1;
-    let mut adler_b: u32 = 0;
-    for &byte in &raw {
-        adler_a = (adler_a + u32::from(byte)) % 65521;
-        adler_b = (adler_b + adler_a) % 65521;
-    }
-    for (i, block) in raw.chunks(65535).enumerate() {
-        let last = (i + 1) * 65535 >= raw.len();
-        idat.push(u8::from(last));
-        idat.extend_from_slice(&(block.len() as u16).to_le_bytes());
-        idat.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
-        idat.extend_from_slice(block);
-    }
-    idat.extend_from_slice(&((adler_b << 16) | adler_a).to_be_bytes());
-
-    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
-    chunk(&mut png, b"IHDR", &ihdr);
-    chunk(&mut png, b"IDAT", &idat);
-    chunk(&mut png, b"IEND", &[]);
-    std::fs::write(path, png)?;
+    std::fs::write(path, crate::png::encode_rgba(width, height, rgba))?;
     Ok(())
 }

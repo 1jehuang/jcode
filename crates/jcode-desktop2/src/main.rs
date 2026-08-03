@@ -8,6 +8,7 @@ mod ack;
 mod activity;
 mod app_harness;
 mod app_overview;
+mod app_resume;
 mod app_selection;
 mod app_settings;
 mod boot;
@@ -34,8 +35,10 @@ mod png;
 mod profile;
 mod reasoning;
 mod render;
+mod resume;
 mod scene;
 mod scene_overview;
+mod scene_resume;
 mod scroll;
 mod scroll_bench;
 mod scroll_profile;
@@ -108,7 +111,25 @@ struct App {
     /// "zoom out to everything" on the Super key. The flag stays so the
     /// gesture can be benched again as a flip rather than a revert.
     super_overview: bool,
+    /// Finished session-store scans, from the picker's worker thread.
+    ///
+    /// Its own channel rather than the harness one: a scan is local disk work
+    /// with no daemon involved, and routing it through the connection would
+    /// mean a disconnected window could not list its own history.
+    resume_scans: Option<(Sender<Vec<resume::Record>>, Receiver<Vec<resume::Record>>)>,
     clipboard: clipboard::Clipboard,
+    /// Images pasted into the composer, waiting for the next submission.
+    ///
+    /// Held on `App` rather than in the editor because an attachment is not
+    /// text: it has no place in the buffer, it must survive editing the message
+    /// written around it, and it is cleared by sending rather than by deleting
+    /// a character.
+    pending_images: Vec<(String, String)>,
+    /// Attachments belonging to messages typed mid-turn and waiting in the
+    /// transcript's queue: one entry per queued card, in the same order, so a
+    /// message is sent with the images it was written with rather than with
+    /// whatever happens to be pending when its turn comes.
+    queued_images: std::collections::VecDeque<Vec<(String, String)>>,
     /// Pointer position in logical units, tracked for click and drag.
     pointer: (f64, f64),
     /// True while the primary button is held inside the composer.
@@ -159,7 +180,10 @@ impl Default for App {
             super_held_since: None,
             pending_super_release: None,
             super_overview: true,
+            resume_scans: Some(std::sync::mpsc::channel()),
             clipboard: clipboard::Clipboard::default(),
+            pending_images: Vec::new(),
+            queued_images: std::collections::VecDeque::new(),
             pointer: (0.0, 0.0),
             dragging: false,
             selecting: false,
@@ -283,6 +307,13 @@ pub struct Model {
     pub selection: Option<select::Selection>,
     /// Transient one-line notice (e.g. "nothing to undo").
     pub notice: Option<String>,
+    /// How many images are attached to the message being written.
+    ///
+    /// A count on the model rather than the payload: a frame is a pure function
+    /// of the model, so the composer can say "1 image attached" in a capture
+    /// and in a test without carrying megabytes of base64 through the layout.
+    /// The bytes live on `App`, beside the connection that sends them.
+    pub attachments: usize,
     /// The most recent failure, until the next turn starts.
     ///
     /// Separate from [`Self::status`] because the status line is suppressed for
@@ -313,6 +344,9 @@ pub struct Model {
     /// Fetched tails of the other sessions, so the field can show *which*
     /// conversation each card is rather than only its name.
     pub peeks: overview::Peeks,
+    /// The resume-from-disk picker: stored sessions grouped by project, drawn
+    /// as an overlay panel over the conversation rather than instead of it.
+    pub resume: resume::Picker,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
@@ -394,6 +428,7 @@ impl Default for Model {
             scroll: 0.0,
             selection: None,
             notice: None,
+            attachments: 0,
             failure: None,
             donut: settings.motion.then(|| donut::Donut::new(DONUT_GRID)),
             spin: donut::Spin::default(),
@@ -403,6 +438,7 @@ impl Default for Model {
             strip: strip::Strip::default(),
             overview: overview::Overview::default(),
             peeks: overview::Peeks::default(),
+            resume: resume::Picker::default(),
             working_dir: None,
             model: None,
             boot: boot::Boot::default(),
@@ -545,6 +581,15 @@ impl Model {
         if let Some(failure) = &self.failure {
             return Some(failure.clone());
         }
+        // Attachments outlive the paste notice: a notice fades, and an image
+        // silently attached to a message still being typed is the one thing
+        // that must not go invisible before it is sent.
+        if self.attachments > 0 {
+            return Some(match self.attachments {
+                1 => "1 image attached".to_string(),
+                count => format!("{count} images attached"),
+            });
+        }
         if self.scroll > 0.0 {
             return Some("scrolled back".to_string());
         }
@@ -564,14 +609,25 @@ impl Model {
 
 impl App {
     fn submit_input(&mut self) {
-        if self.model.editor.text().trim().is_empty() {
+        // An attachment is a message: sending a screenshot with no words is a
+        // normal thing to do, so the composer is only empty when there is
+        // nothing pending either.
+        if self.model.editor.text().trim().is_empty() && self.pending_images.is_empty() {
             return;
         }
         if self.model.session_id.is_none() {
             self.model.set_notice("not attached yet");
             return;
         }
-        let content = self.model.editor.take_for_submit();
+        let mut content = self.model.editor.take_for_submit();
+        let images = std::mem::take(&mut self.pending_images);
+        self.model.attachments = 0;
+        // The transcript card needs something to draw and the daemon needs
+        // non-empty content, so an image sent on its own says so rather than
+        // appearing as a blank card indistinguishable from a glitch.
+        if content.trim().is_empty() {
+            content = "[image]".to_string();
+        }
         // Move to the next hint, so the set is discovered across turns instead
         // of one line being the whole of the user's experience of it.
         self.model.hint = self.model.hint.wrapping_add(1);
@@ -592,6 +648,10 @@ impl App {
         // in off-screen.
         self.model.scroll = 0.0;
         if queued {
+            // The attachments wait with their card rather than with the app: the
+            // next thing typed gets a fresh set, and this message keeps the
+            // images it was written with.
+            self.queued_images.push_back(images);
             // The turn is still streaming its reply above the queued card, so
             // the reveal must keep running; resetting it here would replay
             // text the user has already read.
@@ -603,7 +663,7 @@ impl App {
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
         if let Some((_, outgoing)) = self.harness.as_ref() {
-            let _ = outgoing.send(harness::Command::Send(content));
+            let _ = outgoing.send(harness::Command::Send { content, images });
         }
     }
 
@@ -620,8 +680,11 @@ impl App {
         };
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
+        // Oldest first, matching the card being promoted: the queue and this
+        // deque are pushed in the same order, so the front is this message's.
+        let images = self.queued_images.pop_front().unwrap_or_default();
         if let Some((_, outgoing)) = self.harness.as_ref() {
-            let _ = outgoing.send(harness::Command::Send(content));
+            let _ = outgoing.send(harness::Command::Send { content, images });
         }
     }
 
@@ -715,6 +778,32 @@ impl App {
 
     fn on_pointer_pressed(&mut self) {
         let (x, y) = self.pointer;
+        // The picker is modal: a click on a row takes it, a click on a project
+        // heading opens or shuts it, and a click on the dimmed page around the
+        // card dismisses, like any overlay.
+        if self.model.resume.is_open() {
+            match self.resume_row_under(x, y) {
+                Some(row) => {
+                    self.model.resume.set_cursor(row);
+                    let action = match self.model.resume.selected().is_some() {
+                        true => keymap::Action::ResumeCommit,
+                        // A heading: toggle it rather than resuming something
+                        // the user did not point at.
+                        false => keymap::Action::ResumeExpand,
+                    };
+                    self.apply_resume(action, None);
+                }
+                None if !self
+                    .frame
+                    .resume_card()
+                    .contains(vello::kurbo::Point::new(x, y)) =>
+                {
+                    self.apply_resume(keymap::Action::ResumeCancel, None);
+                }
+                None => {}
+            }
+            return;
+        }
         // The field is modal: a click in it picks a session, and a click on
         // the paper between cards dismisses, like any overview.
         if self.model.overview.is_open() {
@@ -885,6 +974,21 @@ impl App {
     fn update_cursor_icon(&mut self) {
         let (x, y) = self.pointer;
         let panel_rows = crate::settings::ROWS.len();
+        // The picker's rows are the only clickable thing while it is up, so the
+        // pointer says so there and stays an arrow over the dimmed page.
+        if self.model.resume.is_open() {
+            let wanted = match self.resume_row_under(x, y) {
+                Some(_) => winit::window::CursorIcon::Pointer,
+                None => winit::window::CursorIcon::Default,
+            };
+            if self.cursor_icon != wanted {
+                self.cursor_icon = wanted;
+                if let Some(state) = self.state.as_ref() {
+                    state.set_cursor_icon(wanted);
+                }
+            }
+            return;
+        }
         let wanted = if self.frame.hits_gear(x, y)
             || (self.model.panel.is_open() && self.frame.panel_row_at(panel_rows, x, y).is_some())
         {
@@ -919,6 +1023,22 @@ impl App {
     }
 
     fn on_pointer_moved(&mut self) {
+        // The picker owns the pointer while it is up: hovering a row moves the
+        // highlight, so the mouse and the keyboard drive one selection and the
+        // preview follows the cursor. A hover off the list leaves the highlight
+        // where it was, so crossing a heading does not blank the preview.
+        if self.model.resume.is_open() {
+            let (x, y) = self.pointer;
+            if let Some(row) = self.resume_row_under(x, y)
+                && row != self.model.resume.cursor()
+            {
+                self.model.resume.set_cursor(row);
+                self.request_resume_peek();
+                self.request_redraw();
+            }
+            self.update_cursor_icon();
+            return;
+        }
         // Hovering the field moves the highlight, so the mouse and the arrows
         // drive one selection rather than two competing ones. A hover off the
         // cards leaves the highlight where it was: sliding across the gap
@@ -1266,6 +1386,21 @@ impl App {
             Action::OverviewCommit => self.close_overview(true),
             Action::OverviewCancel => self.close_overview(false),
 
+            // The stored-session picker. Only the toggle can arrive here: the
+            // rest of its bindings are dispatched by `resume_keydown` while the
+            // overlay owns the keyboard.
+            Action::ToggleResume => self.toggle_resume(),
+            Action::ResumeUp
+            | Action::ResumeDown
+            | Action::ResumeGroupUp
+            | Action::ResumeGroupDown
+            | Action::ResumeCollapse
+            | Action::ResumeExpand
+            | Action::ResumeCommit
+            | Action::ResumeCancel
+            | Action::ResumeType
+            | Action::ResumeBackspace => self.apply_resume(action, typed),
+
             // The gear's chord. Opening it moves no focus and takes no
             // keystrokes: the composer keeps the keyboard, so typing through
             // an accidentally-opened panel still lands in the message.
@@ -1289,7 +1424,8 @@ impl App {
             Action::CycleReasoningDisplay => {
                 let next = self.model.transcript.reasoning_mode().cycle();
                 self.set_reasoning_from_keyboard(next);
-                self.model.set_notice(format!("reasoning display: {}", next.label()));
+                self.model
+                    .set_notice(format!("reasoning display: {}", next.label()));
             }
 
             Action::InsertNewline => self.model.editor.insert_char('\n'),
@@ -1378,9 +1514,34 @@ impl App {
                     .to_string();
                 self.copy_to(clipboard::Target::Clipboard, &text);
             }
-            Action::Paste => match self.clipboard.get() {
-                Some(text) => self.model.editor.insert_str(&text),
-                None => self.model.set_notice("clipboard is empty"),
+            // An image on the clipboard outranks text, because a copied image
+            // usually also publishes a text flavour (a file URI, or the HTML it
+            // came from), and pasting that instead is exactly the bug that made
+            // image pasting look broken.
+            Action::Paste => match self.clipboard.get_image() {
+                Ok(Some(image)) => {
+                    let label = image.label();
+                    self.pending_images
+                        .push((image.media_type, crate::png::base64(&image.bytes)));
+                    self.model.attachments = self.pending_images.len();
+                    // Said out loud because an attachment is invisible in the
+                    // composer text: without this a paste looks like nothing
+                    // happened, and a second looks like it replaced the first.
+                    self.model.set_notice(match self.pending_images.len() {
+                        1 => format!("image attached ({label})"),
+                        count => format!("image attached ({label}), {count} total"),
+                    });
+                }
+                Ok(None) => match self.clipboard.get() {
+                    Some(text) => self.model.editor.insert_str(&text),
+                    None => self.model.set_notice("clipboard is empty"),
+                },
+                // The clipboard existed but refused: say so rather than paste
+                // nothing, which is indistinguishable from the key being
+                // ignored.
+                Err(error) => self
+                    .model
+                    .set_notice(format!("clipboard image unavailable: {error}")),
             },
 
             // Zoom: the whole UI, not just the transcript, so the composer,
@@ -1700,6 +1861,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_harness_updates();
+                // Finished session-store scans, folded in beside the daemon's
+                // stream so both asynchronous sources land at one point in the
+                // frame rather than racing each other into the model.
+                self.drain_resume_scans();
                 // Refresh the chrome row's RAM caption. Throttled inside the
                 // sampler, so per-frame redraws do not become per-frame /proc
                 // reads; between samples the previous readout stays shown.

@@ -99,6 +99,38 @@ pub fn dimensions(data: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// Standard base64, no line breaks: how the harness API carries image bytes.
+///
+/// Written out rather than depended on. It is twenty lines, it sits beside the
+/// encoder whose output it wraps, and a paste must not be able to stop working
+/// because a dependency line went missing.
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let packed =
+            (u32::from(triple[0]) << 16) | (u32::from(triple[1]) << 8) | u32::from(triple[2]);
+        for position in 0..4 {
+            // Positions past the end of a short final chunk are padding, not
+            // data: emitting the zero bytes instead would decode to a longer
+            // image than the one that was copied.
+            if position <= chunk.len() {
+                out.push(char::from(
+                    ALPHABET[(packed >> (18 - 6 * position)) as usize & 0x3F],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +159,36 @@ mod tests {
         jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03]);
         jpeg.extend_from_slice(&[0u8; 16]);
         assert_eq!(dimensions(&jpeg), Some((32, 16)));
+    }
+
+    /// The encoding has to be everyone else's base64, or the daemon receives
+    /// bytes that only fail much later, as a model confused by the image.
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"hello world"), "aGVsbG8gd29ybGQ=");
+        // Every byte value, so no sign or shift error hides in the top bits.
+        let all: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(base64(&all).len(), all.len().div_ceil(3) * 4);
+        assert!(
+            base64(&all).ends_with("/P3+/w=="),
+            "the top byte values encode wrong"
+        );
+    }
+
+    /// A real PNG through both halves of this module: encode, then base64, is
+    /// exactly the path a pasted screenshot takes.
+    #[test]
+    fn a_png_survives_encoding_and_base64_together() {
+        let png = encode_rgba(2, 2, &[7u8; 2 * 2 * 4]);
+        assert!(
+            base64(&png).starts_with("iVBORw0KGgo"),
+            "not a base64 PNG header"
+        );
+        assert_eq!(dimensions(&png), Some((2, 2)));
     }
 }
