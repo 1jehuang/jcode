@@ -38,29 +38,50 @@ impl App {
         self.request_redraw();
     }
 
-    /// Fetch the highlighted session's conversation tail, if we do not have
-    /// it yet, so hovering a blob shows *which* conversation it is.
+    /// Fetch the tail of every session in the field, so each card can show the
+    /// conversation it holds rather than only its name.
     ///
-    /// Only the highlighted one: prefetching the whole field would send a
-    /// burst of reads on every open for previews the user will mostly never
-    /// look at. Cached once fetched, so moving back and forth across the field
-    /// is instant after the first visit.
+    /// The whole field rather than only the highlight: the point of the
+    /// overview is comparing sessions, and a strip where you must visit each
+    /// card to learn what is in it is a list you have to read one item at a
+    /// time. Requests are deduplicated by [`overview::Peeks`], so opening the
+    /// field costs one read per session for the whole gesture rather than one
+    /// per frame, and the highlight is asked for first so the card the eye is
+    /// already on fills in before its neighbours.
     pub(crate) fn request_peek(&mut self) {
-        let Some(target) = self
-            .model
+        for target in self.peek_targets() {
+            if !self.model.peeks.should_request(&target) {
+                continue;
+            }
+            if let Some((_, outgoing)) = self.harness.as_ref() {
+                let _ = outgoing.send(harness::Command::Peek(target));
+            }
+        }
+    }
+
+    /// Which sessions a peek pass covers, highlight first.
+    ///
+    /// Split out so the *policy* (the whole field, not just the highlight) is
+    /// testable without a live connection: the send itself needs a socket, and
+    /// a test that had to stand one up would end up asserting on plumbing
+    /// rather than on which sessions get previewed.
+    pub(crate) fn peek_targets(&self) -> Vec<String> {
+        // The highlight first so the card the eye is already on fills in before
+        // its neighbours.
+        self.model
             .overview
             .focus()
             .or(self.model.session_id.as_deref())
             .map(str::to_string)
-        else {
-            return;
-        };
-        if !self.model.peeks.should_request(&target) {
-            return;
-        }
-        if let Some((_, outgoing)) = self.harness.as_ref() {
-            let _ = outgoing.send(harness::Command::Peek(target));
-        }
+            .into_iter()
+            .chain(
+                self.model
+                    .strip
+                    .entries()
+                    .into_iter()
+                    .map(|entry| entry.session_id),
+            )
+            .collect()
     }
 
     /// Close the field, attaching to the highlighted session when `commit`.
@@ -269,6 +290,9 @@ impl App {
         logical_key: &winit::keyboard::Key,
         typed: Option<&str>,
     ) -> bool {
+        if self.model.resume.is_open() {
+            return self.resume_keydown(logical_key, typed);
+        }
         if self.model.overview.is_open() {
             return self.overview_keydown(logical_key, typed);
         }
