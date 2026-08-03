@@ -8,6 +8,7 @@ import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath } from "./sockets.js";
 import {
   API_VERSION_MAJOR,
+  type AnyApiEvent,
   type ApiEvent,
   type ApiRequest,
   type HistoryMessage,
@@ -401,6 +402,13 @@ export class JcodeClient extends EventEmitter {
    * Buffers frames that arrive between `next()` calls, so a consumer that
    * awaits slow work in the loop body does not silently drop deltas.
    */
+  /**
+   * Typed as the known event union so `switch (event.ev)` narrows each case.
+   *
+   * Unknown kinds can still arrive at runtime (the harness may add events
+   * within protocol v1), so always keep a `default` branch. Use
+   * `isKnownEvent` if you need to prove the distinction.
+   */
   events(sessionId?: string): AsyncIterableIterator<ApiEvent> {
     const queue: ApiEvent[] = [];
     let resolveNext: ((result: IteratorResult<ApiEvent>) => void) | undefined;
@@ -474,56 +482,41 @@ export class JcodeClient extends EventEmitter {
     for await (const event of stream) {
       options.onEvent?.(event);
       switch (event.ev) {
+        // No casts here: the event union narrows on `ev`. That is the point
+        // of keeping the unknown-kind catch-all out of `ApiEvent`, and it is
+        // also what stops a renamed wire field from compiling.
         case "text_delta":
-          result.text += (event as { text: string }).text;
+          result.text += event.text;
           break;
         case "reasoning_delta":
-          result.reasoning += (event as { text: string }).text;
+          result.reasoning += event.text;
           break;
-        case "tool_done": {
-          const done = event as unknown as {
-            call_id: string;
-            name: string;
-            output: string;
-            error?: string;
-          };
+        case "tool_done":
           result.toolCalls.push({
-            callId: done.call_id,
-            name: done.name,
-            output: done.output,
-            error: done.error,
+            callId: event.call_id,
+            name: event.name,
+            output: event.output,
+            error: event.error,
           });
           break;
-        }
-        case "token_usage": {
-          const usage = event as unknown as {
-            input: number;
-            output: number;
-            cache_read_input?: number;
-          };
+        case "token_usage":
           result.usage = {
-            input: usage.input,
-            output: usage.output,
-            cacheReadInput: usage.cache_read_input,
+            input: event.input,
+            output: event.output,
+            cacheReadInput: event.cache_read_input,
           };
           break;
-        }
-        case "permission_request": {
+        case "permission_request":
           if (options.autoApprove) {
-            const request = event as unknown as { request_id: string };
-            await this.respondToPermission(sessionId, request.request_id, "allow");
+            await this.respondToPermission(sessionId, event.request_id, "allow");
           }
           break;
-        }
         case "turn_done":
           await stream.return?.(undefined as never);
           return result;
         case "error":
           await stream.return?.(undefined as never);
-          throw new HarnessError(
-            String((event as { code?: string }).code ?? "internal"),
-            String((event as { message?: string }).message ?? "harness error"),
-          );
+          throw new HarnessError(event.code ?? "internal", event.message ?? "harness error");
       }
     }
     return result;
