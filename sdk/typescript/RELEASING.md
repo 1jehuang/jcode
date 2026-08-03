@@ -1,27 +1,19 @@
-# Releasing `@jcode/sdk`
+# Releasing `@1jehuang/sdk`
 
 Everything except the two decisions only you can make is automated and checked
 in CI. This document exists so the release is a short command list rather than
 a research exercise.
 
-## One-time: claim a package name
+## Package ownership
 
-The package is currently named `@jcode/sdk`, a scoped name. On npm a scope maps
-to a user or an organisation that must exist before you can publish under it.
-As of this writing `@jcode` is **unclaimed**, `jcode-sdk` is **free**, and the
-unscoped `jcode` is **taken** by an unrelated 2024 project.
+The package is published as `@1jehuang/sdk`. The `1jehuang` user scope is owned
+by the maintainer account and does not require an npm organization. The shorter
+`@jcode` scope belongs to someone else and must not be used in package metadata
+or documentation.
 
-Pick one:
-
-| Option | What it needs |
-| --- | --- |
-| Keep `@jcode/sdk` | Create the free `jcode` org at <https://www.npmjs.com/org/create>. Free for public packages. |
-| Switch to `@1jehuang/sdk` | Nothing. Your user scope already exists. |
-| Switch to `jcode-sdk` | Nothing, while the name stays free. |
-
-To switch, change `name` in `sdk/typescript/package.json`, then update the
-install line in `sdk/typescript/README.md`, the repo `README.md`, and the
-website's `/sdk` page.
+If the package name changes in the future, update `name` in
+`sdk/typescript/package.json`, the install examples in this README and the SDK
+README, the repository references, and the website's `/sdk` page together.
 
 ## Publishing
 
@@ -42,9 +34,9 @@ confirm with `npm pack --dry-run`.
 ```bash
 cd "$(mktemp -d)"
 npm init -y >/dev/null
-npm install @jcode/sdk
+npm install @1jehuang/sdk
 node --input-type=module -e '
-  import { JcodeClient } from "@jcode/sdk";
+  import { JcodeClient } from "@1jehuang/sdk";
   const client = await JcodeClient.launch({ workingDir: process.cwd() });
   const session = await client.createSession();
   console.log((await client.run(session.session_id, "say hello")).text);
