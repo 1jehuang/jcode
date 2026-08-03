@@ -2692,6 +2692,7 @@ impl App {
         let provider_hint = provider_hint.map(str::to_string);
         let session_id = self.session.id.clone();
         let auto_selection_active = Arc::clone(&self.onboarding_auto_model_selection_active);
+        let auto_selection_baseline = Arc::clone(&self.onboarding_auto_model_selection_baseline);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let activation = crate::auth::lifecycle::activate_auth_change(
@@ -2700,25 +2701,21 @@ impl App {
                 provider.on_auth_changed();
                 if select_local_model && activation.provider_id.is_some() {
                     let model_before_catalog_wait = provider.model();
-                    // Hot initialization is synchronous, but provider catalogs can
-                    // arrive shortly afterward. Retry briefly so a first-run import
-                    // selects the strongest live route rather than validating the
-                    // stale pre-import model.
-                    for delay_ms in [0_u64, 150, 350, 750, 1_500] {
-                        if delay_ms > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                        }
+                    // Select from hot/local routes once. Live catalogs publish
+                    // ModelsUpdated and are handled by the UI without holding the
+                    // login flow in a polling loop.
+                    'select_local: {
                         let routes = provider.model_routes();
                         let selection = if prefer_strongest {
                             if !auto_selection_active.load(std::sync::atomic::Ordering::Acquire)
                                 || provider.model() != model_before_catalog_wait
                             {
-                                break;
+                                break 'select_local;
                             }
                             let Some(route) =
                                 crate::auth::lifecycle::globally_preferred_default_route(&routes)
                             else {
-                                continue;
+                                break 'select_local;
                             };
                             let exact_route = crate::provider::RouteSelection::from_model_route(&route);
                             let default_selection =
@@ -2751,20 +2748,24 @@ impl App {
                             })
                         };
                         let Some((model, model_request, provider_key, exact_route)) = selection else {
-                            break;
+                            break 'select_local;
                         };
                         if prefer_strongest
                             && (!auto_selection_active
                                 .load(std::sync::atomic::Ordering::Acquire)
                                 || provider.model() != model_before_catalog_wait)
                         {
-                            break;
+                            break 'select_local;
                         }
                         let applied = exact_route.as_ref().map_or_else(
                             || provider.set_model(&model_request),
                             |selection| provider.set_route_selection(selection),
                         );
                         if applied.is_ok() {
+                            *auto_selection_baseline
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(provider.model());
                             crate::bus::Bus::global().publish_models_updated();
                             crate::bus::Bus::global().publish(
                                 crate::bus::BusEvent::ProviderModelActivated {
@@ -2777,7 +2778,6 @@ impl App {
                                     open_picker: false,
                                 },
                             );
-                            break;
                         }
                     }
                 }
@@ -2820,6 +2820,41 @@ impl App {
             }
             self.finish_auth_catalog_refresh();
         }
+    }
+
+    /// Adopt a better route delivered by a background catalog refresh, but
+    /// never override a model the user selected after onboarding began.
+    pub(super) fn maybe_apply_event_driven_onboarding_model(&mut self) {
+        if !self
+            .onboarding_auto_model_selection_active
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let baseline = self
+            .onboarding_auto_model_selection_baseline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if baseline.as_deref() != Some(self.provider.model().as_str()) {
+            self.onboarding_auto_model_selection_active
+                .store(false, std::sync::atomic::Ordering::Release);
+            return;
+        }
+        let routes = self.provider.model_routes();
+        let Some(route) = crate::auth::lifecycle::globally_preferred_default_route(&routes) else {
+            return;
+        };
+        let selection = crate::provider::RouteSelection::from_model_route(&route);
+        let model_request = selection.routed_model_spec();
+        if self.provider.set_route_selection(&selection).is_err() {
+            return;
+        }
+        let model = self.finalize_model_switch(&model_request);
+        *self
+            .onboarding_auto_model_selection_baseline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(model);
     }
 
     fn login_provider_is_azure(provider: &str) -> bool {
@@ -3153,6 +3188,11 @@ impl App {
                 if prefer_strongest {
                     self.onboarding_auto_model_selection_active
                         .store(true, std::sync::atomic::Ordering::Release);
+                    *self
+                        .onboarding_auto_model_selection_baseline
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(self.provider.model());
                 }
                 // Direct OpenAI-compatible logins already launched the
                 // profile-specific catalog refresh and model activation before

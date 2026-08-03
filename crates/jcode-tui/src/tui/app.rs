@@ -79,8 +79,8 @@ mod model_context;
 mod navigation;
 mod observe;
 pub(crate) mod onboarding_flow;
-pub(crate) mod onboarding_graph;
 mod onboarding_flow_control;
+pub(crate) mod onboarding_graph;
 mod onboarding_repair;
 mod onboarding_sim;
 mod productivity;
@@ -1075,6 +1075,9 @@ pub struct App {
     /// Onboarding completion clears it so a late catalog result cannot override
     /// the model after the user has moved into a normal session.
     onboarding_auto_model_selection_active: Arc<AtomicBool>,
+    /// Model last chosen by onboarding automation. A later catalog event may
+    /// improve it only while the active model still matches this value.
+    onboarding_auto_model_selection_baseline: Arc<std::sync::Mutex<Option<String>>>,
     /// One-shot guard: have we evaluated whether to auto-start the onboarding
     /// flow on startup yet? The fresh-install path logs in at the CLI before the
     /// TUI launches, so no in-TUI login event fires; this lets us still begin the

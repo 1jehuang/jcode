@@ -203,6 +203,7 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::ModelsUpdated) => {
             app.invalidate_model_picker_cache();
+            app.maybe_apply_event_driven_onboarding_model();
             true
         }
         Ok(BusEvent::AuthCatalogRefreshReady) => {
