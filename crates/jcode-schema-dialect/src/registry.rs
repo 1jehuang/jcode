@@ -155,45 +155,54 @@ pub const OPENROUTER: DialectSpec = DialectSpec {
     },
 };
 
-/// The Antigravity Cloud Code backend translating Gemini schemas to Anthropic,
-/// which rejects combiners at *any* depth.
+/// Antigravity's Claude route: the Cloud Code backend translates the request
+/// to Anthropic *after* parsing it.
+///
+/// The keyword set is Gemini's, not Anthropic's, because every Antigravity
+/// request is a `generateContent` payload whatever model it names. A keyword
+/// outside the Gemini schema proto is rejected while parsing the payload
+/// ("Invalid JSON payload received. Unknown name ...", #754), so it never
+/// reaches the Anthropic translation that would have accepted it. On top of
+/// that, the translation rejects combiners at any depth.
 pub const ANTIGRAVITY_CLAUDE: DialectSpec = DialectSpec {
     id: "antigravity-claude",
-    supported_keywords: ANTHROPIC.supported_keywords,
+    supported_keywords: GEMINI.supported_keywords,
     supported_string_formats: &[],
     transforms: DialectTransforms {
         flatten_all_combiners: true,
+        prune_dangling_required: true,
+        const_as_enum: true,
+        one_of_as_any_of: true,
         ..DEFAULT_TRANSFORMS
     },
 };
 
-/// Antigravity's OpenAI-compatible bridge (gpt-oss and friends), which
-/// round-trips numeric bounds through a protobuf `int64` and then rejects the
-/// string it produced, so those bounds must not be sent at all.
+/// Antigravity's OpenAI-compatible bridge (gpt-oss and friends).
+///
+/// Gemini's payload subset again (see [`ANTIGRAVITY_CLAUDE`]), minus the
+/// numeric bounds this bridge corrupts: it round-trips them through a protobuf
+/// `int64`, which proto3 JSON re-encodes as a string, and then rejects the
+/// string it just produced ("'10' is not of type 'integer'"). The bounds are
+/// advisory, so dropping them costs nothing at call time.
 pub const ANTIGRAVITY_BRIDGE: DialectSpec = DialectSpec {
     id: "antigravity-bridge",
     supported_keywords: &[
         "description",
         "default",
-        "examples",
         "format",
         "anyOf",
-        "oneOf",
-        "allOf",
-        "$defs",
-        "definitions",
-        "$ref",
-        "const",
-        "additionalProperties",
-        "patternProperties",
+        "nullable",
         "minimum",
         "maximum",
         "pattern",
-        "nullable",
+        "example",
     ],
     supported_string_formats: &[],
     transforms: DialectTransforms {
         flatten_all_combiners: true,
+        prune_dangling_required: true,
+        const_as_enum: true,
+        one_of_as_any_of: true,
         ..DEFAULT_TRANSFORMS
     },
 };
