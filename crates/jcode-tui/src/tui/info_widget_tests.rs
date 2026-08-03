@@ -105,7 +105,7 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 content: "Validate confidence UI".to_string(),
                 status: "in_progress".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(80),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 blocked_by: Vec::new(),
@@ -117,8 +117,8 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
                 content: "Ship completed item".to_string(),
                 status: "completed".to_string(),
                 priority: "medium".to_string(),
-                confidence: Some(70),
-                completion_confidence: Some(95),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(95)),
                 confidence_history: Vec::new(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
@@ -128,17 +128,17 @@ fn todos_widgets_show_item_and_aggregate_confidence() {
     };
 
     let normal_text = lines_text(&render_todos_widget(&data, Rect::new(0, 0, 80, 8)));
-    assert!(normal_text.contains("86%"));
-    assert!(normal_text.contains("80%"));
-    assert!(normal_text.contains("95%"));
+    assert!(normal_text.contains("plausible"));
+    assert!(normal_text.contains("plausible"));
+    assert!(normal_text.contains("plausible"));
 
     let expanded_text = lines_text(&render_todos_expanded(&data, Rect::new(0, 0, 80, 8)));
-    assert!(expanded_text.contains("86%"));
-    assert!(expanded_text.contains("80%"));
-    assert!(expanded_text.contains("95%"));
+    assert!(expanded_text.contains("plausible"));
+    assert!(expanded_text.contains("plausible"));
+    assert!(expanded_text.contains("plausible"));
 
     let compact_text = lines_text(&render_todos_compact(&data, Rect::new(0, 0, 80, 2)));
-    assert!(compact_text.contains("86%"));
+    assert!(compact_text.contains("plausible"));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn todos_widgets_render_group_headers_when_groups_present() {
         content: format!("task {id}"),
         status: status.to_string(),
         priority: "medium".to_string(),
-        confidence: Some(80),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
@@ -171,7 +171,7 @@ fn todos_widgets_render_group_headers_when_groups_present() {
     assert!(expanded.contains("optimize rendering"), "{expanded}");
     assert!(expanded.contains("1/2"), "{expanded}");
     assert!(
-        expanded.contains("1/2 · confidence 80%"),
+        expanded.contains("1/2 · confidence plausible"),
         "group confidence missing: {expanded}"
     );
     assert!(expanded.contains("fix scrollback"), "{expanded}");
@@ -191,7 +191,7 @@ fn task_group_headers_render_their_own_weighted_confidence() {
         content: format!("task {id}"),
         status: "pending".to_string(),
         priority: priority.to_string(),
-        confidence: Some(confidence),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(confidence)),
         completion_confidence: None,
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
@@ -211,11 +211,11 @@ fn task_group_headers_render_their_own_weighted_confidence() {
         lines_text_concat(&render_todos_expanded(&data, Rect::new(0, 0, 90, 14))),
     ] {
         assert!(
-            text.contains("high confidence 0/2 · confidence 85%"),
+            text.contains("high confidence 0/2 · confidence plausible"),
             "weighted group confidence missing: {text}"
         );
         assert!(
-            text.contains("lower confidence 0/1 · confidence 60%"),
+            text.contains("lower confidence 0/1 · confidence plausible"),
             "group-scoped confidence missing: {text}"
         );
     }
@@ -229,7 +229,7 @@ fn todos_widgets_stay_flat_without_groups() {
         content: format!("task {id}"),
         status: status.to_string(),
         priority: "medium".to_string(),
-        confidence: Some(80),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
@@ -251,7 +251,7 @@ fn todos_widget_renders_exact_pips_for_small_lists() {
         content: format!("item {status}"),
         status: status.to_string(),
         priority: "medium".to_string(),
-        confidence: Some(80),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
         blocked_by: Vec::new(),
@@ -436,7 +436,7 @@ fn todo_item(id: &str, content: &str, status: &str, group: Option<&str>) -> crat
         group: group.map(|g| g.to_string()),
         blocked_by: Vec::new(),
         assigned_to: None,
-        confidence: Some(80),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
         completion_confidence: None,
         confidence_history: Vec::new(),
     }
@@ -466,7 +466,7 @@ fn flat_todo_list_shows_closed_feedback_loop_on_header_in_all_widget_sizes() {
         ],
         todo_goals: vec![crate::todo::TodoGoal {
             group: None,
-            closed_feedback_loop: Some(85),
+            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(85)),
             ..Default::default()
         }],
         ..Default::default()
@@ -476,7 +476,7 @@ fn flat_todo_list_shows_closed_feedback_loop_on_header_in_all_widget_sizes() {
         lines_text_concat(&render_todos_expanded(&data, Rect::new(0, 0, 70, 14))),
         lines_text_concat(&render_todos_compact(&data, Rect::new(0, 0, 70, 3))),
     ] {
-        assert!(text.contains("loop 85%"), "loop suffix missing: {text}");
+        assert!(text.contains("loop strong"), "loop suffix missing: {text}");
     }
 }
 
@@ -490,12 +490,12 @@ fn grouped_todos_show_closed_feedback_loop_on_their_group_headers() {
         todo_goals: vec![
             crate::todo::TodoGoal {
                 group: Some("optimize grep".to_string()),
-                closed_feedback_loop: Some(90),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(90)),
                 ..Default::default()
             },
             crate::todo::TodoGoal {
                 group: Some("onboarding design".to_string()),
-                closed_feedback_loop: Some(20),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(20)),
                 ..Default::default()
             },
         ],
@@ -505,8 +505,11 @@ fn grouped_todos_show_closed_feedback_loop_on_their_group_headers() {
         lines_text_concat(&render_todos_widget(&data, Rect::new(0, 0, 70, 10))),
         lines_text_concat(&render_todos_expanded(&data, Rect::new(0, 0, 70, 14))),
     ] {
-        assert!(text.contains("loop 90%"), "group loop missing: {text}");
-        assert!(text.contains("loop 20%"), "low group loop missing: {text}");
+        assert!(text.contains("loop strong"), "group loop missing: {text}");
+        assert!(
+            text.contains("loop weak"),
+            "low group loop missing: {text}"
+        );
     }
 }
 
@@ -536,7 +539,7 @@ fn loop_suffix_renders_safely_at_tiny_sizes() {
         )],
         todo_goals: vec![crate::todo::TodoGoal {
             group: Some("a very long group name that must truncate".to_string()),
-            closed_feedback_loop: Some(100),
+            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
             ..Default::default()
         }],
         ..Default::default()

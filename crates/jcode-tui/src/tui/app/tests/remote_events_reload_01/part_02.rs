@@ -142,9 +142,12 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(0),
-                completion_confidence: Some(100),
-                confidence_history: vec![0, 100],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::from_legacy_score(0),
+                    crate::todo::ConfidenceState::from_legacy_score(100),
+                ],
             }],
         )
         .expect("save todos");
@@ -189,8 +192,8 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(80),
-                completion_confidence: Some(80),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
                 confidence_history: Vec::new(),
             }],
         )
@@ -205,8 +208,7 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
         assert!(
-            app.queued_messages[0]
-                .starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
+            app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
         );
         assert!(app.queued_messages[0].contains("Needs validation"));
         assert!(
@@ -258,8 +260,7 @@ fn test_remote_poke_status_and_off_update_state() {
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/poke status should succeed remotely");
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Auto-poke: ON. 1 incomplete todo.")
+            msg.content.contains("Auto-poke: ON. 1 incomplete todo.")
                 && msg.content.contains("A follow-up poke is queued.")
                 && msg.content.contains("A turn is currently running.")
         }));

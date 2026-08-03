@@ -316,15 +316,15 @@ mod tests {
         // to "owned end to end" without updating this test, turning it red on
         // master. What must hold is that each gate names what is being checked.
         assert!(
-            ownership.contains("end to end"),
+            ownership.contains("delivery state"),
             "ownership notice should say what is being checked: {ownership}"
         );
         assert!(
             feedback.contains("verify"),
             "feedback-loop notice should say what is being checked: {feedback}"
         );
-        assert!(!ownership.contains(&crate::todo::QUALITY_GATE_THRESHOLD.to_string()));
-        assert!(!feedback.contains(&crate::todo::QUALITY_GATE_THRESHOLD.to_string()));
+        assert!(!ownership.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(!feedback.chars().any(|ch| ch.is_ascii_digit()));
         assert!(todo_gate_notice("bash", ownership, true).is_none());
     }
 }

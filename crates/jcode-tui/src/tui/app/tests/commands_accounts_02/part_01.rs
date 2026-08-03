@@ -687,7 +687,7 @@ fn test_improve_status_summarizes_current_todos() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(82),
+                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(82)),
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                 },
@@ -721,7 +721,7 @@ fn test_improve_status_summarizes_current_todos() {
                 .contains("1 incomplete · 1 completed · 0 cancelled")
         );
         assert!(msg.content.contains("Profile startup path"));
-        assert!(msg.content.contains("confidence 82%"));
+        assert!(msg.content.contains("confidence plausible"));
     });
 }
 

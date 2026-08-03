@@ -2049,7 +2049,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     ("confidence", todo.confidence)
                 };
                 let confidence = confidence
-                    .map(|score| format!("{}%", score))
+                    .map(|state| state.as_str().to_string())
                     .unwrap_or_else(|| "?".to_string());
                 todo_lines.push_str(&format!(
                     "- [{}|{}|{} {}] {}\n",
