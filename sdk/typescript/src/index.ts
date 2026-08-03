@@ -22,6 +22,7 @@ export {
   userAppConfigDir,
 } from "./launch.js";
 export type { LaunchOptions, LaunchedInstance } from "./launch.js";
+export { bundledJcodeBinary, platformBinaryPackage } from "./binary.js";
 export { JcodeClient, unixSocketTransport } from "./client.js";
 export type {
   ConnectOptions,

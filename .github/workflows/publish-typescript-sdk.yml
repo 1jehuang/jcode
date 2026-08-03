@@ -2,6 +2,10 @@ name: Publish TypeScript SDK
 
 on:
   workflow_dispatch:
+    inputs:
+      jcode_release_tag:
+        description: Released jcode tag whose binaries should be bundled
+        required: true
 
 permissions:
   contents: read
@@ -40,6 +44,33 @@ jobs:
 
       - name: Validate SDK
         run: npm run check
+
+      - name: Download released jcode runtimes
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p sdk-runtime-assets
+          gh release download "${{ inputs.jcode_release_tag }}" --dir sdk-runtime-assets \
+            --pattern 'jcode-linux-x86_64.tar.gz' \
+            --pattern 'jcode-linux-aarch64.tar.gz' \
+            --pattern 'jcode-macos-x86_64.tar.gz' \
+            --pattern 'jcode-macos-aarch64.tar.gz' \
+            --pattern 'jcode-windows-x86_64.tar.gz' \
+            --pattern 'jcode-windows-aarch64.tar.gz'
+
+      - name: Prepare platform packages
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/prepare_sdk_runtime_packages.sh sdk-runtime-assets
+
+      # These must exist before the main package is published. npm selects only
+      # the package matching the consumer's os/cpu from optionalDependencies.
+      - name: Publish platform runtime packages
+        working-directory: ${{ github.workspace }}
+        run: |
+          for package in sdk/npm/*; do
+            npm publish "$package" --access public --provenance
+          done
 
       - name: Publish with npm provenance
         run: npm publish --access public --provenance
