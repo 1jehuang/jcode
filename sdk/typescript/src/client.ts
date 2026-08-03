@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
+import { HarnessError } from "./errors.js";
 import {
   API_VERSION_MAJOR,
   type AnyApiEvent,
@@ -19,14 +20,7 @@ import {
   type SessionInfo,
 } from "./protocol.js";
 
-export class HarnessError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(`${code}: ${message}`);
-    this.code = code;
-    this.name = "HarnessError";
-  }
-}
+
 
 /** Minimal duplex transport so tests and future WebSockets can plug in. */
 export interface Transport {
@@ -665,3 +659,5 @@ export interface TurnResult {
   toolCalls: Array<{ callId: string; name: string; output: string; error?: string }>;
   usage?: { input: number; output: number; cacheReadInput?: number };
 }
+
+export { HarnessError };

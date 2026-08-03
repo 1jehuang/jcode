@@ -16,6 +16,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { HarnessError } from "./errors.js";
 
 /**
  * Files inherited from the user's jcode home when logins are inherited.
@@ -375,7 +376,28 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
     exited = { code, signal };
   });
 
+  // A spawn failure (jcode not installed, which is the most likely first-run
+  // problem) emits "error" on the child. Node treats an unlistened "error" as
+  // a fatal throw from deep inside child_process, so without this the caller
+  // cannot catch it at all: their process dies with a raw ENOENT stack instead
+  // of being told to install jcode.
+  let spawnError: NodeJS.ErrnoException | undefined;
+  child.once("error", (error: NodeJS.ErrnoException) => {
+    spawnError = error;
+    exited = { code: null, signal: null };
+  });
+
+
   const shutdown = async (): Promise<void> => {
+    // A spawn that never started has no daemon to stop and nothing to wait
+    // for. Running the full shutdown here would spend its whole budget trying
+    // to talk to a daemon that does not exist, and the instance home would be
+    // left behind by the very error path that is supposed to clean it up.
+    if (spawnError) {
+      if (ephemeral) removeInstanceHome(jcodeHome);
+      return;
+    }
+
     // Stop the daemon *before* the bridge, not after.
     //
     // The instance's daemon is a separate process that the bridge spawned, so
@@ -431,9 +453,21 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
 
   const deadline = Date.now() + (options.startupTimeoutMs ?? 30_000);
   while (Date.now() < deadline) {
+    if (spawnError) {
+      await shutdown();
+      const binaryName = options.binary ?? "jcode";
+      throw new HarnessError(
+        "jcode_not_found",
+        spawnError.code === "ENOENT"
+          ? `could not run \`${binaryName}\`: jcode is not installed, or not on PATH. ` +
+            "Install it from https://jcode.sh, or pass `binary` with its full path."
+          : `could not run \`${binaryName}\`: ${spawnError.message}`,
+      );
+    }
     if (exited) {
       await shutdown();
-      throw new Error(
+      throw new HarnessError(
+        "startup_failed",
         `jcode exited during startup (code ${exited.code}, signal ${exited.signal})` +
           (stderr ? `:\n${stderr.trim()}` : ""),
       );
@@ -445,7 +479,8 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
   }
 
   await shutdown();
-  throw new Error(
+  throw new HarnessError(
+    "startup_timeout",
     `jcode did not create its API socket at ${socketPath} within the startup timeout` +
       (stderr ? `:\n${stderr.trim()}` : ""),
   );

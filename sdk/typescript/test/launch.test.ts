@@ -84,3 +84,40 @@ test("the user's jcode home is resolved independently of an instance", () => {
   assert.ok(userJcodeHome().length > 0);
   assert.ok(path.isAbsolute(userJcodeHome()));
 });
+
+/**
+ * A missing jcode is the most likely first-run failure, so it must be an
+ * ordinary catchable error.
+ *
+ * Node treats an unlistened "error" event on a child process as a fatal throw
+ * from inside child_process, so without a listener this killed the caller's
+ * process with a raw `spawn ENOENT` stack that no `try`/`catch` could reach.
+ * The failing path also has to clean up after itself: the instance home is
+ * created before the spawn, so an error path that returns early leaks it.
+ */
+test("a missing jcode binary is catchable, and leaks nothing", async () => {
+  const { JcodeClient, HarnessError } = await import("../dist/index.js");
+  const root = os.tmpdir();
+  const before = fs
+    .readdirSync(root)
+    .filter((name) => name.startsWith("jcode-sdk-instance-")).length;
+
+  await assert.rejects(
+    () =>
+      JcodeClient.launch({
+        binary: "jcode-definitely-not-installed",
+        startupTimeoutMs: 5000,
+      }),
+    (error: InstanceType<typeof HarnessError>) => {
+      assert.equal(error.name, "HarnessError");
+      assert.equal(error.code, "jcode_not_found");
+      assert.match(error.message, /not installed, or not on PATH/);
+      return true;
+    },
+  );
+
+  const after = fs
+    .readdirSync(root)
+    .filter((name) => name.startsWith("jcode-sdk-instance-")).length;
+  assert.equal(after, before, "a failed launch must not leave an instance home behind");
+});
