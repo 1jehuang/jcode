@@ -73,6 +73,19 @@ await step("its sessions stay inside the instance", async () => {
 await step("close() stops the instance and removes its home", async () => {
   await client.close();
   assert.ok(!fs.existsSync(home), "an ephemeral instance home must be cleaned up");
+
+  // Gone once is not gone. Background work started before shutdown (the
+  // session-search indexer writes a multi-megabyte file) can finish seconds
+  // later and recreate the directory behind a delete that already succeeded.
+  // That is exactly how this leaked in the first place, so wait and re-check
+  // rather than trusting the instant after close().
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  assert.ok(
+    !fs.existsSync(home),
+    `the instance home came back after cleanup: ${
+      fs.existsSync(home) ? fs.readdirSync(home).join(", ") : ""
+    }`,
+  );
 });
 
 // A launched instance must never be visible to the user's own jcode. Check

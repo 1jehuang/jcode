@@ -105,6 +105,14 @@ export interface LaunchOptions {
   startupTimeoutMs?: number;
   /** Forward the instance's stderr to this process. Defaults to false. */
   inheritStderr?: boolean;
+  /**
+   * Milliseconds `close()` will spend removing an ephemeral instance home.
+   *
+   * Background work started before shutdown can keep writing for seconds after
+   * the daemon is asked to stop, recreating the directory behind a delete.
+   * Defaults to 30000; lower it if a caller would rather leak than wait.
+   */
+  cleanupTimeoutMs?: number;
 }
 
 /** A running private jcode instance. */
@@ -189,6 +197,81 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
     inherited.push(`external/${relative}`);
   }
   return inherited;
+}
+
+/**
+ * Ask an instance's daemon to exit.
+ *
+ * `jcode server stop` speaks to the daemon on the socket named by the
+ * environment, so pointing it at the instance's runtime directory stops that
+ * daemon and nothing else. Best-effort: if the daemon is already gone, or the
+ * binary cannot be found, there is nothing to clean up and the caller should
+ * still proceed to remove the directory.
+ */
+async function stopInstanceDaemon(
+  binary: string,
+  jcodeHome: string,
+  runtimeDir: string,
+): Promise<void> {
+  const output = await new Promise<string>((resolve) => {
+    const stopper = spawn(binary, ["server", "stop", "--force", "--json"], {
+      env: {
+        ...process.env,
+        JCODE_HOME: jcodeHome,
+        JCODE_RUNTIME_DIR: runtimeDir,
+        JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
+      },
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let stdout = "";
+    stopper.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      stopper.kill("SIGKILL");
+      resolve(stdout);
+    }, 10_000);
+    timer.unref?.();
+    stopper.once("exit", () => {
+      clearTimeout(timer);
+      resolve(stdout);
+    });
+    stopper.once("error", () => {
+      clearTimeout(timer);
+      resolve(stdout);
+    });
+  });
+
+  // `server stop` sends SIGTERM and returns; it reports `stopped: false` with
+  // the pid it signalled, because the daemon is still unwinding. Returning
+  // here would delete the home while that daemon is still writing to it, so
+  // wait for the process to actually be gone.
+  let pid: number | undefined;
+  try {
+    const parsed = JSON.parse(output) as { signaled_pid?: number };
+    pid = typeof parsed.signaled_pid === "number" ? parsed.signaled_pid : undefined;
+  } catch {
+    // No parseable reply (no daemon, or an older binary): nothing to wait for.
+  }
+  if (pid === undefined) return;
+
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      // Signal 0 tests for existence without touching the process.
+      process.kill(pid, 0);
+    } catch {
+      return; // Gone.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  // Still alive after a graceful window: insist, so the instance cannot
+  // outlive the client that created it.
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Raced us to exit.
+  }
 }
 
 /**
@@ -293,6 +376,17 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
   });
 
   const shutdown = async (): Promise<void> => {
+    // Stop the daemon *before* the bridge, not after.
+    //
+    // The instance's daemon is a separate process that the bridge spawned, so
+    // killing the bridge does not stop it: it keeps running, keeps writing
+    // sessions and caches into the instance home, and outlives close(). It is
+    // asked to stop over its own socket, and that socket goes away when the
+    // daemon starts shutting down, so doing this after the bridge dies races
+    // a window where `server stop` reports "no running server found" and the
+    // daemon is simply leaked.
+    await stopInstanceDaemon(options.binary ?? "jcode", jcodeHome, runtimeDir);
+
     if (exited === undefined) {
       child.kill("SIGTERM");
       // Give it a moment to unwind before insisting.
@@ -308,16 +402,29 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
         });
       });
     }
+
     if (ephemeral) {
-      // The daemon flushes sessions, logs, and caches as it exits, and it does
-      // so a moment after the bridge process is gone. Deleting immediately
-      // races that flush: the walk empties a directory, the daemon recreates
-      // it, and `rmdir` fails with ENOTEMPTY. Retry rather than leak, and
-      // leave the directory behind rather than fight it forever.
-      for (let attempt = 0; attempt < 10; attempt += 1) {
+      // Even after the daemon is asked to stop, work it already started can
+      // land after the first delete: the session-search indexer writes a
+      // multi-megabyte file, and that write finishes seconds later, recreating
+      // the directory behind a delete that had already succeeded. So deleting
+      // once and seeing an empty result proves nothing. Require the home to
+      // stay gone across a settle window, and keep trying for long enough to
+      // outlast a slow flush.
+      const deadline = Date.now() + (options.cleanupTimeoutMs ?? 30_000);
+      while (Date.now() < deadline) {
         removeInstanceHome(jcodeHome);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        if (fs.existsSync(jcodeHome)) continue;
+        await new Promise((resolve) => setTimeout(resolve, 750));
         if (!fs.existsSync(jcodeHome)) return;
-        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      // Out of time. A leaked temp directory is a much smaller problem than a
+      // close() that never returns, but it should not be silent.
+      if (fs.existsSync(jcodeHome)) {
+        process.emitWarning(
+          `jcode instance home was still being written to and could not be removed: ${jcodeHome}`,
+        );
       }
     }
   };
