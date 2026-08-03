@@ -50,6 +50,9 @@ JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-turn.mjs"
 echo "== exercising the control surface =="
 JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-control.mjs"
 
+echo "== exercising models, effort, compaction, rename, and undo =="
+JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-capabilities.mjs"
+
 echo "== bridge log =="
 cat "$log"
 echo "SDK e2e passed."
