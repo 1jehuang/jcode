@@ -407,3 +407,33 @@ fn unrelated_notifications_are_dropped() {
     }));
     assert!(frames.is_empty());
 }
+
+/// The daemon answers a `ping` that arrives as the first frame on a connection
+/// and then closes it, because it classifies ping as a one-shot lightweight
+/// control request. Forwarding an unattached ping therefore destroys the
+/// client's connection before it ever gets a session, which is the opposite of
+/// what a liveness probe should do.
+#[test]
+fn ping_before_attach_is_answered_locally() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req": "ping", "id": 4}));
+    match out.as_slice() {
+        [Outbound::Reply(frame)] => {
+            assert_eq!(frame.reply_to, Some(4));
+            assert_eq!(frame.event, ApiEvent::Pong);
+        }
+        other => panic!("ping must not reach the daemon before attach: {other:?}"),
+    }
+}
+
+/// Once attached the connection is a normal session connection, so ping is a
+/// genuine round trip and should measure the daemon, not the bridge.
+#[test]
+fn ping_after_attach_reaches_the_daemon() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req": "ping", "id": 5}));
+    match out.as_slice() {
+        [Outbound::Legacy(value)] => assert_eq!(value["type"], "ping"),
+        other => panic!("expected a forwarded ping: {other:?}"),
+    }
+}

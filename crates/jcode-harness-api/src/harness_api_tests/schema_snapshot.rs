@@ -109,3 +109,81 @@ fn client_handshake_over_in_memory_pipe() {
     let sent = String::from_utf8(out).unwrap();
     assert!(sent.contains(r#""req":"hello""#), "sent: {sent}");
 }
+
+/// The TypeScript SDK mirrors these enums by hand, so a variant added here
+/// without a matching entry in `sdk/typescript/src/protocol.ts` silently
+/// leaves every JS client unable to name the new frame. Checking from the
+/// Rust side means the guard runs in the normal `cargo test` suite, where
+/// the change is actually being made, rather than only in the SDK's own
+/// Node tests which a Rust-only contributor never runs.
+#[test]
+fn typescript_sdk_lists_every_variant() {
+    let Some(sdk) = sdk_protocol_source() else {
+        // Absent in vendored/packaged builds: nothing to check.
+        return;
+    };
+    for (file, enum_name) in [("requests.rs", "ApiRequest"), ("events.rs", "ApiEvent")] {
+        for variant in enum_variants(file, enum_name) {
+            assert!(
+                sdk.contains(&format!("\"{variant}\"")),
+                "{enum_name}::{variant} is missing from sdk/typescript/src/protocol.ts; \
+                 add it to the union and to KNOWN_*_KINDS"
+            );
+        }
+    }
+}
+
+fn sdk_protocol_source() -> Option<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../sdk/typescript/src/protocol.ts");
+    std::fs::read_to_string(path).ok()
+}
+
+/// Snake-cased variant names of `enum_name`, excluding the `Unknown` catch-all.
+fn enum_variants(file: &str, enum_name: &str) -> Vec<String> {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(file),
+    )
+    .expect("read API source");
+    let start = source
+        .find(&format!("pub enum {enum_name} {{"))
+        .expect("enum present");
+    let body = &source[start..];
+    let end = body.find("\n}").unwrap_or(body.len());
+    body[..end]
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("    ")?;
+            if rest.starts_with(' ') {
+                return None;
+            }
+            let name: String = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric())
+                .collect();
+            let mut chars = name.chars();
+            let first = chars.next()?;
+            if !first.is_ascii_uppercase() || name == "Unknown" {
+                return None;
+            }
+            Some(snake_case(&name))
+        })
+        .collect()
+}
+
+fn snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
