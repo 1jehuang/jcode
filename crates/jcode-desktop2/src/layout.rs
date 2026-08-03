@@ -113,7 +113,7 @@ pub const GEAR_RADIUS: f64 = 0.30;
 pub const GEAR_TEETH: usize = 6;
 /// The settings panel the gear opens: one row per setting, hanging under the
 /// gear and aligned to its trailing edge like any menu.
-pub const PANEL_WIDTH: f64 = 190.0;
+pub const PANEL_WIDTH: f64 = 230.0;
 pub const PANEL_ROW_HEIGHT: f64 = 26.0;
 pub const PANEL_PAD: f64 = 6.0;
 pub const PANEL_RADIUS: f64 = 6.0;

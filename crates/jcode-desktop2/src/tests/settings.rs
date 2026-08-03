@@ -128,6 +128,29 @@ fn every_row_reaches_the_running_window() {
     assert_eq!(app.model.donut.is_some(), app.model.settings.motion);
 }
 
+/// The `more` row is a door, not a dial: it must open the config file, say so,
+/// change no setting, and put the menu away.
+#[test]
+fn the_more_row_opens_the_config_file_and_shuts_the_menu() {
+    let mut app = app();
+    app.model.panel.open();
+    let before = app.model.settings;
+    let index = ROWS.iter().position(|row| *row == Row::More).expect("more row");
+    let band = app.frame.panel_row(ROWS.len(), index);
+    click(
+        &mut app,
+        band.x0 + band.width() / 2.0,
+        band.y0 + band.height() / 2.0,
+    );
+    assert_eq!(app.model.settings, before, "the more row changed a setting");
+    assert!(!app.model.panel.is_open(), "the more row left the menu up");
+    let notice = app.model.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("config.toml"),
+        "the more row said nothing about where it went: {notice:?}"
+    );
+}
+
 #[test]
 fn an_out_of_range_row_is_ignored() {
     let mut app = app();
@@ -239,6 +262,10 @@ fn a_row_says_what_it_is_and_what_it_says() {
     }
     assert_eq!(ROWS.len(), 4, "the panel grew: is every row worth a click?");
     assert!(ROWS.contains(&Row::Theme));
+    // The escape hatch has to stay: the panel is deliberately small, so
+    // without a route to the config file the settings with no row would be
+    // unreachable from the app.
+    assert!(ROWS.contains(&Row::More));
 }
 
 /// The gear has to be findable without being loud: present in the margin, but

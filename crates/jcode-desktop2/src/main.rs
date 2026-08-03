@@ -494,7 +494,7 @@ impl Model {
         self.scroll + self.stream.glide() - self.smooth.lag()
     }
 
-    fn set_notice(&mut self, notice: impl Into<String>) {
+    pub(crate) fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
     }
 
@@ -1276,7 +1276,7 @@ impl App {
             Action::CycleReasoningDisplay => {
                 let next = self.model.transcript.reasoning_mode().cycle();
                 self.set_reasoning_from_keyboard(next);
-                self.model.set_notice(format!("thinking: {}", next.label()));
+                self.model.set_notice(format!("reasoning display: {}", next.label()));
             }
 
             Action::InsertNewline => self.model.editor.insert_char('\n'),

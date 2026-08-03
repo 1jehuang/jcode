@@ -21,19 +21,23 @@ pub enum Row {
     Theme,
     Reasoning,
     Motion,
-    CopyOnSelect,
+    /// Not a setting of its own: opens `~/.jcode/config.toml`, where the rest
+    /// of jcode's configuration lives. The panel is for the handful of choices
+    /// worth a click; everything else belongs in the file, and this row is the
+    /// way there rather than a second copy of it.
+    More,
 }
 
 /// Every row, in the order the panel draws them.
-pub const ROWS: &[Row] = &[Row::Theme, Row::Reasoning, Row::Motion, Row::CopyOnSelect];
+pub const ROWS: &[Row] = &[Row::Theme, Row::Reasoning, Row::Motion, Row::More];
 
 impl Row {
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "theme",
-            Self::Reasoning => "thinking",
+            Self::Reasoning => "reasoning display",
             Self::Motion => "motion",
-            Self::CopyOnSelect => "copy on select",
+            Self::More => "more",
         }
     }
 }
@@ -52,6 +56,10 @@ pub struct Settings {
     /// overwriting the real clipboard on every drag is destructive enough that
     /// it has to be asked for. On, it is the terminal-style behaviour people
     /// come here expecting.
+    ///
+    /// Not in the panel: it is set once and never again, so it lives in the
+    /// settings file and `JCODE_DESKTOP2_COPY_ON_SELECT` rather than spending
+    /// a row on a click nobody repeats.
     pub copy_on_select: bool,
 }
 
@@ -81,6 +89,14 @@ fn parse_on_off(value: &str) -> Option<bool> {
     }
 }
 
+/// jcode's own configuration file, the one the `more` row opens. Not read
+/// here: the desktop only needs to know where it is so the user can get to
+/// the settings that have no row.
+pub fn config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".jcode").join("config.toml"))
+}
+
 impl Settings {
     /// The value shown beside a row's label.
     pub fn value(&self, row: Row) -> &'static str {
@@ -92,7 +108,7 @@ impl Settings {
             },
             Row::Reasoning => self.reasoning.label(),
             Row::Motion => on_off(self.motion),
-            Row::CopyOnSelect => on_off(self.copy_on_select),
+            Row::More => "config.toml",
         }
     }
 
@@ -106,7 +122,9 @@ impl Settings {
             Row::Theme => self.theme = self.next_theme(system_dark),
             Row::Reasoning => self.reasoning = self.reasoning.cycle(),
             Row::Motion => self.motion = !self.motion,
-            Row::CopyOnSelect => self.copy_on_select = !self.copy_on_select,
+            // Nothing to cycle: the app opens the file. Kept a no-op here so
+            // the pure state can never be surprised by a row that acts.
+            Row::More => {}
         }
     }
 
@@ -159,11 +177,11 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "theme={}\nthinking={}\nmotion={}\ncopy_on_select={}\n",
+            "theme={}\nreasoning_display={}\nmotion={}\ncopy_on_select={}\n",
             self.value(Row::Theme),
             self.value(Row::Reasoning),
             self.value(Row::Motion),
-            self.value(Row::CopyOnSelect),
+            on_off(self.copy_on_select),
         )
     }
 
@@ -183,7 +201,10 @@ impl Settings {
                     "system" => settings.theme = ThemeMode::System,
                     _ => {}
                 },
-                "thinking" => {
+                // `thinking` is the key this file used before the row was
+                // renamed; still read so an existing settings file keeps its
+                // choice.
+                "reasoning_display" | "thinking" => {
                     if let Some(mode) = ReasoningMode::parse(value) {
                         settings.reasoning = mode;
                     }
@@ -216,6 +237,12 @@ impl Settings {
     /// Load the saved settings over the environment's defaults. A missing file
     /// is normal; any other failure is reported rather than hidden.
     pub fn load() -> Self {
+        // Never under test: a test that reads the developer's own saved file
+        // passes or fails depending on whose machine it runs on, which is how
+        // `copy_on_select=on` in one home directory broke the selection tests.
+        if cfg!(test) {
+            return Self::default();
+        }
         let base = Self::from_env();
         let Some(path) = Self::path() else {
             return base;
@@ -336,16 +363,12 @@ mod tests {
     }
 
     /// Off by default: highlighting text must not destroy whatever the user
-    /// deliberately copied unless they asked for that.
+    /// deliberately copied unless they asked for that. Set from the file or
+    /// the environment, not from the panel.
     #[test]
     fn copy_on_select_is_off_until_asked_for() {
         assert!(!Settings::default().copy_on_select);
-        let mut settings = Settings::default();
-        settings.cycle(Row::CopyOnSelect, false);
-        assert!(settings.copy_on_select);
-        assert_eq!(settings.value(Row::CopyOnSelect), "on");
-        settings.cycle(Row::CopyOnSelect, false);
-        assert!(!settings.copy_on_select);
+        assert!(Settings::parse_over(Settings::default(), "copy_on_select=on\n").copy_on_select);
     }
 
     #[test]
