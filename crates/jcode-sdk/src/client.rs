@@ -1,0 +1,749 @@
+//! Connected harness client: handshake, reply correlation, event streaming.
+//!
+//! Mirrors the TypeScript SDK's `JcodeClient` capability for capability. The
+//! shapes differ where Rust and TS differ honestly (`Result` instead of
+//! throwing, channels instead of `EventEmitter`), but every method here has a
+//! counterpart there and vice versa; `parity.rs` enforces that.
+//!
+//! Blocking, thread-based, and `Clone`. A desktop app has a UI thread that
+//! must never block on a socket and a worker that reads it forever, so the
+//! client is a handle both can hold: one reader thread owns the stream and
+//! fans frames out to whoever asked for them.
+
+use crate::errors::{Error, ErrorKind, Result};
+use crate::launch::{LaunchOptions, ensure_runtime};
+use jcode_harness_api::{
+    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, PermissionDecision,
+    ServerFrame, SessionInfo, api_socket_path, read_frame, write_frame,
+};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// How a client reaches the harness.
+pub struct ConnectOptions {
+    /// Defaults to the resolved harness API socket path.
+    pub socket_path: Option<std::path::PathBuf>,
+    /// Client identity sent in the handshake, e.g. "my-app/1.0".
+    pub client_name: String,
+    /// How long a request waits for its reply. `None` disables the timeout.
+    pub request_timeout: Option<Duration>,
+    /// Start the daemon and bridge if they are not already listening.
+    ///
+    /// On by default: an app that only works once the user has launched two
+    /// daemons by hand is indistinguishable from a broken one.
+    pub ensure_runtime: bool,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            socket_path: None,
+            client_name: concat!("jcode-sdk-rs/", env!("CARGO_PKG_VERSION")).to_string(),
+            request_timeout: Some(Duration::from_secs(30)),
+            ensure_runtime: true,
+        }
+    }
+}
+
+/// A duplex byte transport. Lets tests and future WebSockets plug in.
+pub trait Transport: Send {
+    fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)>;
+}
+
+/// A Unix socket transport, the default.
+pub struct UnixTransport(std::os::unix::net::UnixStream);
+
+impl UnixTransport {
+    pub fn connect(path: &std::path::Path) -> Result<Self> {
+        // A bare `No such file or directory` names the syscall and hides the
+        // cause: the bridge is not running. Connecting is the first thing
+        // anyone does with this SDK, so say what to do about it.
+        let stream = std::os::unix::net::UnixStream::connect(path).map_err(|cause| {
+            Error::new(
+                ErrorKind::ConnectFailed,
+                match cause.kind() {
+                    std::io::ErrorKind::NotFound => format!(
+                        "no harness API socket at {}: the jcode harness is not running. \
+                         Start it with `jcode serve` and `jcode-harness-api-bridge`, or \
+                         connect with ensure_runtime enabled.",
+                        path.display()
+                    ),
+                    std::io::ErrorKind::ConnectionRefused => format!(
+                        "{} exists but refuses connections: a previous harness left a \
+                         stale socket behind. Remove it and start the harness again.",
+                        path.display()
+                    ),
+                    std::io::ErrorKind::PermissionDenied => format!(
+                        "permission denied on {}: the socket belongs to another user.",
+                        path.display()
+                    ),
+                    _ => format!("could not connect to {}: {cause}", path.display()),
+                },
+            )
+        })?;
+        Ok(Self(stream))
+    }
+}
+
+impl Transport for UnixTransport {
+    fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
+        let writer = self
+            .0
+            .try_clone()
+            .map_err(|e| Error::new(ErrorKind::Transport, e.to_string()))?;
+        Ok((Box::new(BufReader::new(self.0)), Box::new(writer)))
+    }
+}
+
+/// A subscription to the event stream.
+///
+/// Streaming events are fanned out to every live subscription, so an app can
+/// have one loop rendering the attached session while another waits for a
+/// single acknowledgement without either stealing frames from the other.
+pub struct EventStream {
+    rx: Receiver<ApiEvent>,
+    id: u64,
+    inner: Arc<Inner>,
+}
+
+impl EventStream {
+    /// Block for the next event. `None` once the connection closes.
+    pub fn next(&self) -> Option<ApiEvent> {
+        self.rx.recv().ok()
+    }
+
+    /// Block for the next event, up to `timeout`.
+    pub fn next_timeout(&self, timeout: Duration) -> Option<ApiEvent> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(event) => Some(event),
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => None,
+        }
+    }
+}
+
+impl Iterator for EventStream {
+    type Item = ApiEvent;
+    fn next(&mut self) -> Option<ApiEvent> {
+        EventStream::next(self)
+    }
+}
+
+impl Drop for EventStream {
+    fn drop(&mut self) {
+        if let Ok(mut subs) = self.inner.subscribers.lock() {
+            subs.retain(|(id, _, _)| *id != self.id);
+        }
+    }
+}
+
+struct Inner {
+    writer: Mutex<Box<dyn Write + Send>>,
+    /// Requests waiting for their `reply_to` frame.
+    pending: Mutex<HashMap<u64, Sender<ServerFrame>>>,
+    /// Live subscriptions: (id, session filter, sink).
+    subscribers: Mutex<Vec<(u64, Option<String>, Sender<ApiEvent>)>>,
+    next_id: AtomicU64,
+    next_sub: AtomicU64,
+    closed: AtomicBool,
+    request_timeout: Option<Duration>,
+    socket_path: std::path::PathBuf,
+}
+
+/// Connected harness client.
+///
+/// Replies are correlated by the `reply_to` id the server echoes; anything
+/// without one is a stream event and goes to every subscriber.
+#[derive(Clone)]
+pub struct JcodeClient {
+    inner: Arc<Inner>,
+    /// Server identity from the handshake, e.g. "jcode-harness-api-bridge/0.1.0".
+    pub server: String,
+    /// Capability strings advertised by the server.
+    pub capabilities: Vec<String>,
+}
+
+impl JcodeClient {
+    /// Connect to the jcode running on this machine.
+    ///
+    /// Use this to automate the user's own jcode: a desktop app, an editor
+    /// plugin, a status dashboard. It shares the user's live sessions.
+    pub fn connect(options: ConnectOptions) -> Result<Self> {
+        let path = options.socket_path.clone().unwrap_or_else(api_socket_path);
+        if options.ensure_runtime {
+            ensure_runtime(&LaunchOptions::default(), &|_| {})?;
+        }
+        Self::over(Box::new(UnixTransport::connect(&path)?), &options, path)
+    }
+
+    /// Connect over a caller-supplied transport. The seam tests use.
+    pub fn connect_with(transport: Box<dyn Transport>, options: ConnectOptions) -> Result<Self> {
+        let path = options.socket_path.clone().unwrap_or_else(api_socket_path);
+        Self::over(transport, &options, path)
+    }
+
+    fn over(
+        transport: Box<dyn Transport>,
+        options: &ConnectOptions,
+        socket_path: std::path::PathBuf,
+    ) -> Result<Self> {
+        let (reader, writer) = transport.split()?;
+        let inner = Arc::new(Inner {
+            writer: Mutex::new(writer),
+            pending: Mutex::new(HashMap::new()),
+            subscribers: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+            next_sub: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
+            request_timeout: options.request_timeout,
+            socket_path,
+        });
+        spawn_reader(Arc::clone(&inner), reader);
+
+        let mut client = Self {
+            inner,
+            server: String::new(),
+            capabilities: Vec::new(),
+        };
+        let frame = client.request(ApiRequest::Hello {
+            min_version: API_VERSION_MAJOR,
+            max_version: API_VERSION_MAJOR,
+            client: options.client_name.clone(),
+        })?;
+        match frame.event {
+            ApiEvent::HelloOk {
+                server,
+                capabilities,
+                ..
+            } => {
+                client.server = server;
+                client.capabilities = capabilities;
+                Ok(client)
+            }
+            ApiEvent::Error { code, message } => Err(Error::new(ErrorKind::Harness(code), message)),
+            other => Err(Error::new(
+                ErrorKind::HandshakeFailed,
+                format!("unexpected reply to hello: {other:?}"),
+            )),
+        }
+    }
+
+    /// The socket this client is talking to.
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.inner.socket_path
+    }
+
+    /// Whether the server advertises a capability.
+    ///
+    /// Capabilities are how a client learns what this particular server can do
+    /// before depending on it. `permissions`, for instance, is absent from the
+    /// current bridge: it never issues permission prompts, so a client that
+    /// waits for one waits forever. Check rather than assume.
+    pub fn supports(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+
+    /// Send a raw request and wait for its reply frame.
+    pub fn request(&self, request: ApiRequest) -> Result<ServerFrame> {
+        let (tx, rx) = channel();
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.inner.pending.lock().map_err(poisoned)?.insert(id, tx);
+        if let Err(error) = self.write(ClientFrame::new(id, request.clone())) {
+            self.inner.pending.lock().map_err(poisoned)?.remove(&id);
+            return Err(error);
+        }
+        let received = match self.inner.request_timeout {
+            Some(timeout) => rx.recv_timeout(timeout).map_err(|error| match error {
+                RecvTimeoutError::Timeout => Error::new(
+                    ErrorKind::Timeout,
+                    format!("no reply to {} within {timeout:?}", request_name(&request)),
+                ),
+                RecvTimeoutError::Disconnected => closed_error(),
+            }),
+            None => rx.recv().map_err(|_| closed_error()),
+        };
+        if received.is_err() {
+            self.inner.pending.lock().map_err(poisoned)?.remove(&id);
+        }
+        received
+    }
+
+    /// Write a request without expecting a request-level reply.
+    pub fn notify(&self, request: ApiRequest) -> Result<()> {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.write(ClientFrame::new(id, request))
+    }
+
+    fn write(&self, frame: ClientFrame) -> Result<()> {
+        if self.inner.closed.load(Ordering::Relaxed) {
+            return Err(closed_error());
+        }
+        let mut writer = self.inner.writer.lock().map_err(poisoned)?;
+        write_frame(&mut *writer, &frame).map_err(Error::from)
+    }
+
+    /// Send a request, failing when the server replies with an error frame.
+    fn request_ok(&self, request: ApiRequest) -> Result<ServerFrame> {
+        let frame = self.request(request)?;
+        match frame.event {
+            ApiEvent::Error { code, message } => Err(Error::new(ErrorKind::Harness(code), message)),
+            _ => Ok(frame),
+        }
+    }
+
+    /// Subscribe to stream events, optionally filtered to one session.
+    ///
+    /// Frames that arrive between reads are buffered, so a consumer that does
+    /// slow work in the loop body does not silently drop deltas.
+    pub fn events(&self, session_id: Option<&str>) -> EventStream {
+        let (tx, rx) = channel();
+        let id = self.inner.next_sub.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut subs) = self.inner.subscribers.lock() {
+            subs.push((id, session_id.map(str::to_string), tx));
+        }
+        EventStream {
+            rx,
+            id,
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    // --- Curated surface -----------------------------------------------------
+
+    pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        match self.request_ok(ApiRequest::ListSessions)?.event {
+            ApiEvent::Sessions { sessions } => Ok(sessions),
+            other => Err(unexpected("sessions", &other)),
+        }
+    }
+
+    pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
+        match self
+            .request_ok(ApiRequest::CreateSession { working_dir })?
+            .event
+        {
+            ApiEvent::Attached { session } => Ok(session),
+            other => Err(unexpected("attached", &other)),
+        }
+    }
+
+    pub fn attach_session(&self, session_id: &str) -> Result<SessionInfo> {
+        match self
+            .request_ok(ApiRequest::AttachSession {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Attached { session } => Ok(session),
+            other => Err(unexpected("attached", &other)),
+        }
+    }
+
+    pub fn detach_session(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::DetachSession {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Send a user message.
+    ///
+    /// The harness does not reply to `send_message` at the request level: it
+    /// acknowledges by emitting `message_accepted` once the agent has the
+    /// message. Waiting for a reply here would always time out, so the frame
+    /// is written and the acknowledgement event is awaited instead. Pass a
+    /// `None` timeout for pure fire-and-forget.
+    pub fn send_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
+        // Subscribe *before* writing: an ack that lands between the write and
+        // the subscribe would otherwise be missed and time out a healthy turn.
+        let stream = wait_for_accept.map(|_| self.events(Some(session_id)));
+        self.notify(ApiRequest::SendMessage {
+            session_id: session_id.to_string(),
+            content: content.to_string(),
+            images,
+        })?;
+        if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
+            let deadline = std::time::Instant::now() + timeout;
+            while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+                match stream.next_timeout(remaining) {
+                    // Returning on timeout rather than failing keeps a missing
+                    // ack from failing an otherwise healthy turn: the stream is
+                    // the source of truth.
+                    None => break,
+                    Some(ApiEvent::MessageAccepted { .. }) => break,
+                    Some(_) => continue,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn cancel(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::Cancel {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    pub fn soft_interrupt(&self, session_id: &str, content: &str, urgent: bool) -> Result<()> {
+        self.request_ok(ApiRequest::SoftInterrupt {
+            session_id: session_id.to_string(),
+            content: content.to_string(),
+            urgent,
+        })
+        .map(drop)
+    }
+
+    pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
+        match self
+            .request_ok(ApiRequest::GetHistory {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::History { messages, .. } => Ok(messages),
+            other => Err(unexpected("history", &other)),
+        }
+    }
+
+    pub fn peek_session(
+        &self,
+        session_id: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<HistoryMessage>> {
+        match self
+            .request_ok(ApiRequest::PeekSession {
+                session_id: session_id.to_string(),
+                limit,
+            })?
+            .event
+        {
+            ApiEvent::History { messages, .. } => Ok(messages),
+            other => Err(unexpected("history", &other)),
+        }
+    }
+
+    pub fn clear(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::Clear {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    pub fn rewind(&self, session_id: &str, message_index: usize) -> Result<()> {
+        self.request_ok(ApiRequest::Rewind {
+            session_id: session_id.to_string(),
+            message_index,
+        })
+        .map(drop)
+    }
+
+    pub fn respond_to_permission(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::PermissionResponse {
+            session_id: session_id.to_string(),
+            request_id: request_id.to_string(),
+            decision,
+        })
+        .map(drop)
+    }
+
+    /// Models this session can switch to, and which one is serving it.
+    pub fn list_models(&self, session_id: &str) -> Result<(Vec<String>, Option<String>)> {
+        match self
+            .request_ok(ApiRequest::ListModels {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Models {
+                models, current, ..
+            } => Ok((models, current)),
+            other => Err(unexpected("models", &other)),
+        }
+    }
+
+    /// Switch the session to a different model. `model` is an id from
+    /// `list_models`.
+    pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
+        self.request_ok(ApiRequest::SetModel {
+            session_id: session_id.to_string(),
+            model: model.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Set how much the model deliberates before answering. The accepted set
+    /// is per-provider, so this takes a string rather than a union that would
+    /// go stale.
+    pub fn set_reasoning_effort(&self, session_id: &str, effort: &str) -> Result<()> {
+        self.request_ok(ApiRequest::SetReasoningEffort {
+            session_id: session_id.to_string(),
+            effort: effort.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Schedule compaction of the transcript so far, freeing context. Not
+    /// synchronous: returning means the request was accepted.
+    pub fn compact(&self, session_id: &str) -> Result<String> {
+        match self
+            .request_ok(ApiRequest::Compact {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Compacted { message, .. } => Ok(message),
+            other => Err(unexpected("compacted", &other)),
+        }
+    }
+
+    /// Set a session's title. `None` restores the generated one.
+    pub fn rename_session(&self, session_id: &str, title: Option<String>) -> Result<()> {
+        self.request_ok(ApiRequest::RenameSession {
+            session_id: session_id.to_string(),
+            title,
+        })
+        .map(drop)
+    }
+
+    /// Restore the history the last `rewind` removed.
+    pub fn rewind_undo(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::RewindUndo {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Drop soft interrupts that are queued but not yet delivered.
+    pub fn cancel_soft_interrupts(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::CancelSoftInterrupts {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    pub fn ping(&self) -> Result<()> {
+        self.request_ok(ApiRequest::Ping).map(drop)
+    }
+
+    /// Send a message and collect the assistant reply until the turn ends.
+    ///
+    /// The convenience path for scripts: one call in, the text and tool calls
+    /// of one turn out. Streaming consumers should use `events()` instead.
+    pub fn run(&self, session_id: &str, content: &str, options: RunOptions) -> Result<TurnResult> {
+        let stream = self.events(Some(session_id));
+        self.send_message(
+            session_id,
+            content,
+            options.images.clone(),
+            Some(Duration::from_secs(10)),
+        )?;
+        let mut result = TurnResult::default();
+        while let Some(event) = stream.next() {
+            if let Some(on_event) = &options.on_event {
+                on_event(&event);
+            }
+            match event {
+                ApiEvent::TextDelta { text, .. } => result.text.push_str(&text),
+                ApiEvent::ReasoningDelta { text, .. } => result.reasoning.push_str(&text),
+                ApiEvent::ToolDone {
+                    call_id,
+                    name,
+                    output,
+                    error,
+                    ..
+                } => result.tool_calls.push(ToolCall {
+                    call_id,
+                    name,
+                    output,
+                    error,
+                }),
+                ApiEvent::TokenUsage {
+                    input,
+                    output,
+                    cache_read_input,
+                    ..
+                } => {
+                    result.usage = Some(Usage {
+                        input,
+                        output,
+                        cache_read_input,
+                    })
+                }
+                ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
+                    self.respond_to_permission(session_id, &request_id, PermissionDecision::Allow)?;
+                }
+                ApiEvent::TurnDone { .. } => return Ok(result),
+                ApiEvent::Error { code, message } => {
+                    return Err(Error::new(ErrorKind::Harness(code), message));
+                }
+                _ => {}
+            }
+        }
+        Err(closed_error())
+    }
+
+    /// Whether the connection has been closed or lost.
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Relaxed)
+    }
+}
+
+/// Options for a one-shot turn.
+#[derive(Default)]
+pub struct RunOptions {
+    pub images: Vec<(String, String)>,
+    /// Called for every event of the turn, for progress rendering.
+    #[allow(clippy::type_complexity)]
+    pub on_event: Option<Box<dyn Fn(&ApiEvent) + Send>>,
+    /// Auto-answer permission prompts. Only meaningful when the server
+    /// advertises the `permissions` capability.
+    pub auto_approve: bool,
+}
+
+/// What one turn produced.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct TurnResult {
+    pub text: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub output: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read_input: Option<u64>,
+}
+
+/// The reader thread: correlates replies, fans stream events out.
+fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
+    std::thread::spawn(move || {
+        loop {
+            let frame: ServerFrame = match read_frame(&mut reader) {
+                Ok(frame) => frame,
+                Err(_) => break,
+            };
+            // Unknown kinds are skipped silently, per the protocol's
+            // forward-compatibility rule.
+            if matches!(frame.event, ApiEvent::Unknown) {
+                continue;
+            }
+            if let Some(reply_to) = frame.reply_to {
+                let waiter = inner
+                    .pending
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.remove(&reply_to));
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(frame);
+                    continue;
+                }
+            }
+            // Not a reply anyone is waiting on: a stream event. Dead
+            // subscriptions are dropped here as well as in `EventStream::drop`,
+            // so a leaked stream cannot grow the fan-out list forever.
+            if let Ok(mut subs) = inner.subscribers.lock() {
+                let session = event_session(&frame.event);
+                subs.retain(|(_, filter, sink)| {
+                    match (filter, session) {
+                        // A filtered subscription only wants its own session's
+                        // events. Events that name *no* session still go to it:
+                        // `error` is the one that matters, since the harness
+                        // sends it instead of `turn_done`, and dropping it
+                        // leaves a turn waiting forever for an end that will
+                        // never come.
+                        (Some(want), Some(got)) if want != got => true,
+                        _ => sink.send(frame.event.clone()).is_ok(),
+                    }
+                });
+            }
+        }
+        inner.closed.store(true, Ordering::Relaxed);
+        // Fail everything in flight rather than leaving callers blocked on a
+        // reply that can never arrive.
+        if let Ok(mut pending) = inner.pending.lock() {
+            pending.clear();
+        }
+        if let Ok(mut subs) = inner.subscribers.lock() {
+            subs.clear();
+        }
+    });
+}
+
+/// The session an event belongs to, when it names one.
+fn event_session(event: &ApiEvent) -> Option<&str> {
+    use ApiEvent::*;
+    match event {
+        TextDelta { session_id, .. }
+        | ReasoningDelta { session_id, .. }
+        | ReasoningDone { session_id, .. }
+        | ToolStart { session_id, .. }
+        | ToolInputDelta { session_id, .. }
+        | ToolExec { session_id, .. }
+        | ToolDone { session_id, .. }
+        | TokenUsage { session_id, .. }
+        | TurnDone { session_id, .. }
+        | BackgroundProgress { session_id, .. }
+        | MessageAccepted { session_id, .. }
+        | PermissionRequest { session_id, .. }
+        | SessionStatus { session_id, .. }
+        | ModelInfo { session_id, .. }
+        | Models { session_id, .. }
+        | Compacted { session_id, .. }
+        | SessionRenamed { session_id, .. }
+        | History { session_id, .. } => Some(session_id.as_str()),
+        Attached { session } => Some(session.session_id.as_str()),
+        _ => None,
+    }
+}
+
+fn closed_error() -> Error {
+    Error::new(ErrorKind::Disconnected, "harness connection closed")
+}
+
+fn poisoned<T>(_: std::sync::PoisonError<T>) -> Error {
+    Error::new(ErrorKind::Transport, "harness client state was poisoned")
+}
+
+fn unexpected(want: &str, got: &ApiEvent) -> Error {
+    Error::new(
+        ErrorKind::UnexpectedReply,
+        format!("expected {want}, got {got:?}"),
+    )
+}
+
+/// The wire name of a request, for error text.
+fn request_name(request: &ApiRequest) -> String {
+    serde_json::to_value(request)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("req")
+                .and_then(|r| r.as_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| "request".to_string())
+}
