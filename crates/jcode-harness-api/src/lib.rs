@@ -29,6 +29,10 @@ pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 #[path = "harness_api_tests/schema_snapshot.rs"]
 mod schema_snapshot_tests;
 
+#[cfg(test)]
+#[path = "harness_api_tests/capability_coverage.rs"]
+mod capability_coverage_tests;
+
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
