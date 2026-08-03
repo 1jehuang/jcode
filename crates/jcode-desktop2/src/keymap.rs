@@ -118,6 +118,28 @@ pub enum Action {
     /// Close the field without switching.
     OverviewCancel,
 
+    /// Ctrl+R: open or shut the resume-from-disk picker. The TUI spends the
+    /// same chord on session recovery, and this is the desktop's answer to it:
+    /// every stored session, grouped by the project it ran in.
+    ToggleResume,
+    /// Picker navigation, while the resume overlay is up. A list rather than a
+    /// field, so these are line and group motion instead of spatial moves.
+    ResumeUp,
+    ResumeDown,
+    /// Collapse the project the highlight is in, or expand it (and step in).
+    ResumeCollapse,
+    ResumeExpand,
+    /// Jump to the previous or next project heading, for a long list.
+    ResumeGroupUp,
+    ResumeGroupDown,
+    /// Attach to the highlighted stored session and close the overlay.
+    ResumeCommit,
+    /// Close the overlay without switching.
+    ResumeCancel,
+    /// Narrow the list by the typed character, and undo that.
+    ResumeType,
+    ResumeBackspace,
+
     /// Ctrl+Shift+D: flip the window between light and dark without opening
     /// anything. The panel is where a setting is *found*; a palette is the one
     /// setting people change often enough to want it on a key.
@@ -388,6 +410,11 @@ pub const PORTED: &[Ported] = &[
         tui: "new session",
     },
     Ported {
+        chord: "ctrl+r",
+        action: Action::ToggleResume,
+        tui: "Ctrl+R resume a stored session",
+    },
+    Ported {
         chord: "ctrl+,",
         action: Action::ToggleSettings,
         tui: "settings panel",
@@ -579,7 +606,6 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
     ("ctrl+a as start-of-line", "web select-all wins; use Home"),
     ("ctrl+s", "no input stash yet"),
     ("ctrl+p", "no auto-poke yet"),
-    ("ctrl+r", "no session recovery yet"),
     ("ctrl+g", "no diagram overlay yet"),
     ("ctrl+j / ctrl+[ / ctrl+]", "no prompt-jump anchors yet"),
     ("super+5", "onboarding simulator is a TUI dev aid"),
@@ -617,6 +643,59 @@ pub fn resolve_overview(key: &Key) -> Option<Action> {
             'j' => Some(Action::OverviewDown),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// Resolve a key press while the resume picker is up.
+///
+/// Its own resolver for the same reason the overview has one: the overlay owns
+/// the keyboard while it is open, so the letters that would go into the
+/// composer narrow the list instead. Keeping the two tables apart is what
+/// makes it impossible for a search keystroke to leak into a message.
+///
+/// `None` means the key does nothing here and is swallowed rather than typed.
+pub fn resolve_resume(key: &Key, mods: ModifiersState) -> Option<Action> {
+    let ctrl = mods.control_key();
+    let sup = mods.super_key();
+    let alt = mods.alt_key();
+    let cmd = ctrl || sup;
+    match key {
+        Key::Named(named) => match named {
+            NamedKey::ArrowUp => Some(Action::ResumeUp),
+            NamedKey::ArrowDown => Some(Action::ResumeDown),
+            NamedKey::ArrowLeft => Some(Action::ResumeCollapse),
+            NamedKey::ArrowRight => Some(Action::ResumeExpand),
+            NamedKey::PageUp => Some(Action::ResumeGroupUp),
+            NamedKey::PageDown => Some(Action::ResumeGroupDown),
+            // Tab walks the list rather than the field: the overlay is a
+            // vertical list, so "next" means the row below.
+            NamedKey::Tab if mods.shift_key() => Some(Action::ResumeUp),
+            NamedKey::Tab => Some(Action::ResumeDown),
+            NamedKey::Enter => Some(Action::ResumeCommit),
+            NamedKey::Escape => Some(Action::ResumeCancel),
+            NamedKey::Backspace => Some(Action::ResumeBackspace),
+            NamedKey::Space if !cmd && !alt => Some(Action::ResumeType),
+            _ => None,
+        },
+        Key::Character(text) => {
+            let ch = text.chars().next()?.to_ascii_lowercase();
+            // The chord that opened the overlay also shuts it, and Ctrl+C /
+            // Ctrl+D keep meaning "get me out of here" rather than typing a
+            // letter into the search.
+            if cmd && !alt {
+                return match ch {
+                    'r' => Some(Action::ToggleResume),
+                    'c' | 'd' | 'g' => Some(Action::ResumeCancel),
+                    'n' => Some(Action::ResumeDown),
+                    'p' => Some(Action::ResumeUp),
+                    _ => None,
+                };
+            }
+            // Everything else is search text: a picker you cannot type into is
+            // a list you have to scroll through a thousand rows of.
+            (!alt).then_some(Action::ResumeType)
+        }
         _ => None,
     }
 }
@@ -811,6 +890,11 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     'u' => Some(Action::KillToStart),
                     'k' => Some(Action::KillToEnd),
                     'w' => Some(Action::DeleteWordBack),
+                    // Ctrl+R: the stored-session picker. The TUI's recovery
+                    // chord, on the desktop's overlay: it opens over the
+                    // conversation rather than replacing it, so the session
+                    // you are in stays legible while you pick another.
+                    'r' => Some(Action::ToggleResume),
                     'd' => Some(Action::InterruptOrQuit),
                     _ => None,
                 };
