@@ -1548,6 +1548,10 @@ impl App {
     pub(super) fn onboarding_finish(&mut self) {
         self.onboarding_auto_model_selection_active
             .store(false, std::sync::atomic::Ordering::Release);
+        *self
+            .onboarding_auto_model_selection_baseline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.set_onboarding_phase(OnboardingPhase::Done);
     }
 
