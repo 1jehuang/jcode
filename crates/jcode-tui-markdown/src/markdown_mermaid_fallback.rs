@@ -42,6 +42,9 @@ pub fn deferred_render_epoch() -> u64 {
     0
 }
 
+/// No-op: without the mermaid renderer there is no shared deferred epoch.
+pub fn notify_deferred_render_completed() {}
+
 pub fn render_mermaid_deferred_with_stream_scope(
     _content: &str,
     _terminal_width: Option<u16>,
