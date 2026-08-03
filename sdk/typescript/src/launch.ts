@@ -27,7 +27,15 @@ import { HarnessError } from "./errors.js";
  * `rejected_refresh_fingerprint` makes a fresh instance refuse to even attempt
  * a refresh with credentials that work.
  */
-const CREDENTIAL_FILES = ["auth.json", "antigravity_oauth.json", "config.toml"];
+const CREDENTIAL_FILES = [
+  "auth.json",
+  "openai-auth.json",
+  "antigravity_oauth.json",
+  "gemini_oauth.json",
+  "google_oauth.json",
+  "google_credentials.json",
+  "config.toml",
+];
 
 /**
  * Credentials that must be *shared* with the user's home, not copied.
@@ -39,18 +47,19 @@ const CREDENTIAL_FILES = ["auth.json", "antigravity_oauth.json", "config.toml"];
  * for days. Sharing the file keeps one rotation record for one set of
  * credentials, which is what the tokens themselves already assume.
  */
-const SHARED_FILES = new Set(["auth.json", "antigravity_oauth.json"]);
+const SHARED_FILES = new Set(CREDENTIAL_FILES.filter((name) => name !== "config.toml"));
 
 /**
  * Where jcode looks for *other* tools' credentials, relative to `$HOME`.
  *
  * jcode can log in by reusing an existing CLI's OAuth store, so a large share
  * of real users have no usable `~/.jcode/auth.json` at all: the working
- * credentials live in `~/.claude/` or `~/.config/github-copilot/`. Under
+ * credentials live in files under `~/.claude/` or
+ * `~/.config/github-copilot/`. Under
  * `JCODE_HOME` these lookups are sandboxed to `$JCODE_HOME/external/`, so an
  * instance that inherits only `auth.json` silently has no credentials and
- * fails on the first turn. Linking the directories makes inheritance mean what
- * it says.
+ * fails on the first turn. Linking the recognized credential files makes
+ * inheritance mean what it says without exposing either directory wholesale.
  */
 /**
  * jcode's own config directory, relative to the platform config root.
@@ -65,19 +74,79 @@ const SHARED_FILES = new Set(["auth.json", "antigravity_oauth.json"]);
  */
 const APP_CONFIG_DIRNAME = "jcode";
 
-const EXTERNAL_CREDENTIAL_DIRS = [
-  ".claude",
-  ".codex",
-  ".gemini",
-  ".cursor",
-  ".config/cursor",
-  ".config/github-copilot",
-  ".copilot",
-  ".hermes",
-  ".pi/agent",
-  ".openclaw",
-  ".local/share/opencode",
+const EXTERNAL_CREDENTIAL_FILES = [
+  ".claude/.credentials.json",
+  ".codex/auth.json",
+  ".gemini/oauth_creds.json",
+  ".cursor/auth.json",
+  ".config/cursor/auth.json",
+  "AppData/Roaming/Cursor/auth.json",
+  ".config/Cursor/User/globalStorage/state.vscdb",
+  ".config/cursor/User/globalStorage/state.vscdb",
+  "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+  "Library/Application Support/cursor/User/globalStorage/state.vscdb",
+  "AppData/Roaming/Cursor/User/globalStorage/state.vscdb",
+  "AppData/Roaming/cursor/User/globalStorage/state.vscdb",
+  ".config/github-copilot/hosts.json",
+  ".config/github-copilot/apps.json",
+  ".copilot/config.json",
+  ".hermes/auth.json",
+  ".pi/agent/auth.json",
+  ".openclaw/agent/auth.json",
+  ".openclaw/credentials/oauth.json",
+  ".local/share/opencode/auth.json",
 ];
+
+/** Ensure a directory below an instance root contains no symlink components. */
+function ensureInstanceDirectory(root: string, relative: string): string {
+  if (path.isAbsolute(relative) || relative.split(/[\\/]+/u).includes("..")) {
+    throw new HarnessError("invalid_instance_home", `unsafe instance path: ${relative}`);
+  }
+
+  let current = root;
+  for (const part of relative.split(/[\\/]+/u).filter(Boolean)) {
+    current = path.join(current, part);
+    try {
+      const stats = fs.lstatSync(current);
+      if (stats.isSymbolicLink()) {
+        // Migrate homes made by SDK versions that linked whole credential
+        // directories. unlinkSync removes the link itself, never its target.
+        fs.unlinkSync(current);
+        fs.mkdirSync(current, { mode: 0o700 });
+      } else if (!stats.isDirectory()) {
+        throw new HarnessError(
+          "invalid_instance_home",
+          `instance credential path is not a directory: ${current}`,
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      fs.mkdirSync(current, { mode: 0o700 });
+    }
+  }
+  return current;
+}
+
+/** Replace an instance-relative path with a link to one credential file. */
+function linkCredentialFile(source: string, root: string, relative: string): boolean {
+  let sourceStats;
+  try {
+    sourceStats = fs.statSync(source);
+  } catch {
+    return false;
+  }
+  if (!sourceStats.isFile()) return false;
+
+  const parent = ensureInstanceDirectory(root, path.dirname(relative));
+  const destination = path.join(parent, path.basename(relative));
+  try {
+    fs.unlinkSync(destination);
+  } catch {
+    // Absent, which is the common case.
+  }
+  fs.symlinkSync(source, destination);
+  return true;
+}
 
 export interface LaunchOptions {
   /**
@@ -90,7 +159,7 @@ export interface LaunchOptions {
   /** Working directory for sessions created in this instance. */
   workingDir?: string;
   /**
-   * Copy the user's provider logins into the instance. Defaults to `true`.
+   * Share the user's provider logins with the instance. Defaults to `true`.
    *
    * Without credentials a fresh instance cannot talk to any model, so the
    * default is the one that works. It does mean the embedding application
@@ -158,6 +227,23 @@ export function userAppConfigDir(): string {
  */
 export function inheritCredentials(fromHome: string, toHome: string): string[] {
   fs.mkdirSync(toHome, { recursive: true, mode: 0o700 });
+  const toStats = fs.lstatSync(toHome);
+  if (toStats.isSymbolicLink() || !toStats.isDirectory()) {
+    throw new HarnessError(
+      "invalid_instance_home",
+      `instance home must be a real directory, not a link or file: ${toHome}`,
+    );
+  }
+  if (
+    fs.existsSync(fromHome) &&
+    fs.realpathSync(fromHome) === fs.realpathSync(toHome)
+  ) {
+    throw new HarnessError(
+      "invalid_instance_home",
+      "instance home must be different from the user's jcode home",
+    );
+  }
+
   const inherited: string[] = [];
   for (const name of CREDENTIAL_FILES) {
     const source = path.join(fromHome, name);
@@ -167,12 +253,7 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
       // A reused `jcodeHome` already has these links, and symlinkSync throws
       // EEXIST rather than replacing. Relinking also repoints a stale link
       // from an older run, so replace rather than skip.
-      try {
-        fs.unlinkSync(destination);
-      } catch {
-        // Nothing there, which is the common case.
-      }
-      fs.symlinkSync(source, destination);
+      linkCredentialFile(source, toHome, name);
     } else {
       fs.copyFileSync(source, destination);
       fs.chmodSync(destination, 0o600);
@@ -180,30 +261,58 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
     inherited.push(name);
   }
 
-  // Other CLIs' credential stores, which jcode reads directly and which
-  // `JCODE_HOME` redirects to `$JCODE_HOME/external/`. Symlinked for the same
-  // rotation reason as `auth.json`, and because these are another tool's files
-  // to own.
-  // jcode's own config dir, which `JCODE_HOME` moves to $JCODE_HOME/config.
+  // jcode's provider env files live in its platform config directory, which
+  // `JCODE_HOME` moves to `$JCODE_HOME/config/jcode`. Link only the env files:
+  // caches and usage data are not credentials and must stay instance-private.
+  // Most importantly, never link the directory itself. A buggy recursive
+  // cleanup can descend through a directory link and delete the user's files;
+  // a file link can only ever be unlinked at the instance-side path.
   const userConfig = userAppConfigDir();
-  if (fs.existsSync(userConfig)) {
-    const instanceConfig = path.join(toHome, "config", APP_CONFIG_DIRNAME);
-    fs.mkdirSync(path.dirname(instanceConfig), { recursive: true, mode: 0o700 });
-    if (!fs.existsSync(instanceConfig)) {
-      fs.symlinkSync(userConfig, instanceConfig);
-      inherited.push(`config/${APP_CONFIG_DIRNAME}`);
+  try {
+    for (const entry of fs.readdirSync(userConfig, { withFileTypes: true })) {
+      if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.endsWith(".env")) continue;
+      const relative = `config/${APP_CONFIG_DIRNAME}/${entry.name}`;
+      if (linkCredentialFile(path.join(userConfig, entry.name), toHome, relative)) {
+        inherited.push(relative);
+      }
+    }
+  } catch {
+    // No app config directory is a normal fresh-install state.
+  }
+
+  // Other CLIs' credential stores, which jcode reads directly and which
+  // `JCODE_HOME` redirects to `$JCODE_HOME/external/`. Share only the exact
+  // credential files. Linking whole directories would also expose transcripts,
+  // configuration, and anything those tools add in the future.
+  for (const relative of EXTERNAL_CREDENTIAL_FILES) {
+    const source = path.join(os.homedir(), relative);
+    const instanceRelative = path.join("external", relative);
+    if (linkCredentialFile(source, toHome, instanceRelative)) {
+      inherited.push(`external/${relative}`);
     }
   }
 
-  const externalRoot = path.join(toHome, "external");
-  for (const relative of EXTERNAL_CREDENTIAL_DIRS) {
-    const source = path.join(os.homedir(), relative);
-    if (!fs.existsSync(source)) continue;
-    const destination = path.join(externalRoot, relative);
-    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
-    if (fs.existsSync(destination)) continue;
-    fs.symlinkSync(source, destination);
-    inherited.push(`external/${relative}`);
+  // OpenClaw's current store is per-agent. Enumerate one level of agent IDs,
+  // then link only the two credential filenames its loader recognizes.
+  const openclawAgents = path.join(os.homedir(), ".openclaw", "agents");
+  try {
+    for (const agent of fs.readdirSync(openclawAgents, { withFileTypes: true })) {
+      if (!agent.isDirectory()) continue;
+      for (const name of ["auth-profiles.json", "auth.json"]) {
+        const relative = path.join(".openclaw", "agents", agent.name, "agent", name);
+        if (
+          linkCredentialFile(
+            path.join(os.homedir(), relative),
+            toHome,
+            path.join("external", relative),
+          )
+        ) {
+          inherited.push(`external/${relative}`);
+        }
+      }
+    }
+  } catch {
+    // OpenClaw is optional.
   }
   return inherited;
 }
@@ -308,10 +417,9 @@ function processExists(pid: number): boolean {
 /**
  * Delete an ephemeral instance home, refusing to follow symlinks out of it.
  *
- * The home contains symlinks that point at the user's real credential stores
- * (`~/.claude`, `~/.jcode/auth.json`). A recursive delete that followed them
- * would destroy the user's logins while "cleaning up a temp directory", which
- * is about the worst thing this SDK could do. So links are unlinked and never
+ * The home contains symlinks that point at the user's real credential files.
+ * Production inheritance never links directories, but cleanup still treats an
+ * injected or legacy directory link as hostile: links are unlinked and never
  * descended into, and anything unexpected is left in place rather than
  * force-removed.
  */
@@ -320,6 +428,19 @@ export function removeInstanceHomeForTest(home: string): void {
 }
 
 function removeInstanceHome(home: string): void {
+  // Only homes created by this module are eligible for recursive cleanup.
+  // Persistent caller-supplied homes are never passed here, but keep the guard
+  // local to the destructive primitive so a future call site cannot turn a
+  // lifecycle bug into deletion of an arbitrary directory.
+  const resolvedHome = path.resolve(home);
+  const tempRoot = path.resolve(os.tmpdir());
+  if (
+    path.dirname(resolvedHome) !== tempRoot ||
+    !path.basename(resolvedHome).startsWith("jcode-sdk-instance-")
+  ) {
+    return;
+  }
+
   const walk = (target: string): void => {
     let stats;
     try {

@@ -59,6 +59,12 @@ await step("inherited credentials are owner-only", () => {
 
 await step("the instance can reach a model", async () => {
   const session = await client.createSession(process.cwd());
+  // CI and developer machines often retain a stale default provider alongside
+  // another valid login. Let the validation choose a known-good route so this
+  // tests inherited credentials rather than unrelated historical selection.
+  if (process.env.JCODE_SDK_TEST_MODEL) {
+    await client.setModel(session.session_id, process.env.JCODE_SDK_TEST_MODEL);
+  }
   const turn = await client.run(session.session_id, "Reply with exactly: ISOLATED", {
     autoApprove: true,
   });

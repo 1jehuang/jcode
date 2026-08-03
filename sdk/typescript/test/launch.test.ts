@@ -8,20 +8,17 @@ import { inheritCredentials, userJcodeHome } from "../dist/index.js";
 /**
  * Cleanup must never follow a symlink out of the instance home.
  *
- * A launched instance links the user's real credential stores into its home so
- * token rotation stays coherent. That makes the obvious cleanup,
- * `rm -rf $home`, catastrophic: following those links deletes the user's
- * logins while "removing a temp directory". This is the single most damaging
- * thing the SDK could do, so it gets a test that actually builds the shape and
- * checks the target survives.
+ * Current inheritance links files only, but cleanup must also be safe against a
+ * legacy, corrupted, or attacker-injected directory link. Following that link
+ * would delete the user's logins while "removing a temp directory", so this
+ * test actually builds the hostile shape and checks the target survives.
  */
 test("removing an instance home never follows links to real credentials", async () => {
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-cleanup-test-"));
-  const precious = path.join(sandbox, "real-home");
+  const instance = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-instance-"));
+  const precious = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-precious-test-"));
   fs.mkdirSync(precious, { recursive: true });
   fs.writeFileSync(path.join(precious, "auth.json"), '{"token":"keep me"}');
 
-  const instance = path.join(sandbox, "instance");
   fs.mkdirSync(path.join(instance, "external"), { recursive: true });
   fs.symlinkSync(precious, path.join(instance, "external", "linked-home"));
   fs.symlinkSync(path.join(precious, "auth.json"), path.join(instance, "auth.json"));
@@ -42,7 +39,18 @@ test("removing an instance home never follows links to real credentials", async 
     "the user's credentials must be untouched, not merely present",
   );
 
-  fs.rmSync(sandbox, { recursive: true, force: true });
+  fs.rmSync(precious, { recursive: true, force: true });
+});
+
+test("cleanup refuses arbitrary directories even when asked directly", async () => {
+  const arbitrary = fs.mkdtempSync(path.join(os.tmpdir(), "not-a-jcode-instance-"));
+  fs.writeFileSync(path.join(arbitrary, "keep"), "safe");
+
+  const { removeInstanceHomeForTest } = await import("../dist/launch.js");
+  removeInstanceHomeForTest(arbitrary);
+
+  assert.equal(fs.readFileSync(path.join(arbitrary, "keep"), "utf8"), "safe");
+  fs.rmSync(arbitrary, { recursive: true, force: true });
 });
 
 /** Inheriting must share rotating credentials, not copy them. */
@@ -78,6 +86,67 @@ test("rotating credentials are shared so token refresh stays coherent", () => {
   assert.equal(fs.readFileSync(path.join(to, "auth.json"), "utf8"), '{"refresh":"v2"}');
 
   fs.rmSync(sandbox, { recursive: true, force: true });
+});
+
+test("credential inheritance refuses to use the user's home as the instance home", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-same-home-test-"));
+  const auth = path.join(home, "auth.json");
+  fs.writeFileSync(auth, '{"token":"must survive"}');
+
+  assert.throws(
+    () => inheritCredentials(home, home),
+    (error: { code?: string }) => error.code === "invalid_instance_home",
+  );
+  assert.equal(fs.readFileSync(auth, "utf8"), '{"token":"must survive"}');
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("login inheritance creates file links, never credential directory links", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-inherit-shape-test-"));
+  const oldHome = process.env.HOME;
+  const oldXdg = process.env.XDG_CONFIG_HOME;
+  const home = path.join(sandbox, "home");
+  const config = path.join(sandbox, "config");
+  const from = path.join(home, ".jcode");
+  const to = path.join(sandbox, "instance");
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(config, "jcode"), { recursive: true });
+  fs.mkdirSync(from, { recursive: true });
+  fs.writeFileSync(path.join(home, ".claude", ".credentials.json"), "{}");
+  fs.writeFileSync(path.join(config, "jcode", "n.env"), "TOKEN=test");
+  fs.writeFileSync(path.join(config, "jcode", "usage.json"), "{}");
+  const legacyTarget = path.join(sandbox, "legacy-linked-config");
+  fs.mkdirSync(legacyTarget);
+  fs.writeFileSync(path.join(legacyTarget, "precious"), "untouched");
+  fs.mkdirSync(to);
+  fs.symlinkSync(legacyTarget, path.join(to, "config"));
+
+  try {
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = config;
+    const inherited = inheritCredentials(from, to);
+
+    assert.ok(inherited.includes("config/jcode/n.env"));
+    assert.ok(inherited.includes("external/.claude/.credentials.json"));
+    assert.ok(fs.lstatSync(path.join(to, "config", "jcode", "n.env")).isSymbolicLink());
+    assert.ok(
+      fs.lstatSync(path.join(to, "external", ".claude", ".credentials.json")).isSymbolicLink(),
+    );
+    assert.ok(!fs.lstatSync(path.join(to, "config", "jcode")).isSymbolicLink());
+    assert.ok(!fs.lstatSync(path.join(to, "external", ".claude")).isSymbolicLink());
+    assert.ok(!fs.existsSync(path.join(to, "config", "jcode", "usage.json")));
+    assert.equal(
+      fs.readFileSync(path.join(legacyTarget, "precious"), "utf8"),
+      "untouched",
+      "migrating an old directory link must not modify its target",
+    );
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = oldXdg;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("the user's jcode home is resolved independently of an instance", () => {
