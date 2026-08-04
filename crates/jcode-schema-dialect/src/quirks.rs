@@ -44,17 +44,17 @@ fn store_path() -> Option<PathBuf> {
     Some(home.join("schema-quirks.json"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_override() -> Option<PathBuf> {
     TEST_PATH.with(|path| path.borrow().clone())
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn test_override() -> Option<PathBuf> {
     None
 }
@@ -63,7 +63,12 @@ fn test_override() -> Option<PathBuf> {
 /// store is otherwise process-global, so redirecting per thread is what keeps
 /// them from racing each other (and avoids mutating process env, which is
 /// `unsafe` in edition 2024).
-#[cfg(test)]
+///
+/// Gated behind `test-support` as well as `cfg(test)` so integration tests,
+/// which compile against the crate as an external dependency, can isolate
+/// themselves too. Without that an integration test would read and write the
+/// developer's real `~/.jcode/schema-quirks.json`.
+#[cfg(any(test, feature = "test-support"))]
 pub fn use_test_path(path: PathBuf) {
     TEST_PATH.with(|slot| *slot.borrow_mut() = Some(path));
     reset_cache_for_tests();

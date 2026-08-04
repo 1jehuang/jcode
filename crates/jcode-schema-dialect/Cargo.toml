@@ -13,5 +13,12 @@ dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[features]
+# Exposes the per-thread quirk-store redirect so integration tests (which see
+# the crate as an external dependency) can isolate themselves from the real
+# ~/.jcode store.
+test-support = []
+
 [dev-dependencies]
 tempfile = "3"
+jcode-schema-dialect = { path = ".", features = ["test-support"] }
