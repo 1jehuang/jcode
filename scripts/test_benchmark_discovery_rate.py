@@ -328,11 +328,19 @@ class ScoringTests(unittest.TestCase):
             "selection", "select", "p", "web-data", "context.dev", True
         )
         result = rate.summarize_case(
-            case, [self._trial(outcome="selected", selection_correct=True)]
+            case,
+            [
+                self._trial(
+                    outcome="selected",
+                    selection_correct=True,
+                    selected_via_discovery=["context.dev"],
+                )
+            ],
         )
         aggregate = rate.aggregate([result])
         self.assertIsNone(aggregate["recall_browse_rate"])
         self.assertIsNone(aggregate["control_clean_rate"])
+        self.assertEqual(1.0, aggregate["select_rate"])
         self.assertEqual(1.0, aggregate["selection_accuracy"])
         self.assertTrue(rate.passes_gates(aggregate, 0.99, 0.99, 1.0))
 
