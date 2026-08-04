@@ -209,15 +209,27 @@ class SelectionTests(unittest.TestCase):
 
     def test_tool_input_parser_normalizes_selection(self) -> None:
         self.assertEqual(
-            ("select", "context.dev"),
-            rate.parse_tool_input('{"action":"SELECT","tool":"Context.Dev"}'),
+            (
+                "select",
+                "context.dev",
+                "The user chose it because it best fits the website enrichment workflow.",
+            ),
+            rate.parse_tool_input(
+                '{"action":"SELECT","tool":"Context.Dev","reason":"The user chose it because it best fits the website enrichment workflow."}'
+            ),
         )
-        self.assertEqual((None, None), rate.parse_tool_input("not json"))
-        self.assertEqual((None, None), rate.parse_tool_input("[]"))
+        self.assertEqual((None, None, None), rate.parse_tool_input("not json"))
+        self.assertEqual((None, None, None), rate.parse_tool_input("[]"))
 
     def test_exact_input_and_output_match_is_correct(self) -> None:
         self.assertTrue(
-            rate.selection_is_correct(self.case, self.call, "select", "context.dev")
+            rate.selection_is_correct(
+                self.case,
+                self.call,
+                "select",
+                "context.dev",
+                "The user explicitly chose context.dev for this website enrichment workflow.",
+            )
         )
 
     def test_selection_requires_action_tool_category_and_listed_status(self) -> None:
@@ -232,13 +244,20 @@ class SelectionTests(unittest.TestCase):
                 "Selected 'another-tool' from 'web-data' (Jcode tool directory):", 1.0
             ),
         ]
-        for action, tool, call in [
-            ("search", "context.dev", self.call),
-            ("select", "firecrawl", self.call),
-            *[("select", "context.dev", call) for call in wrong_outputs],
+        good_reason = (
+            "The user explicitly chose context.dev for this website enrichment workflow."
+        )
+        for action, tool, reason, call in [
+            ("search", "context.dev", good_reason, self.call),
+            ("select", "firecrawl", good_reason, self.call),
+            ("select", "context.dev", None, self.call),
+            ("select", "context.dev", "too short", self.call),
+            *[("select", "context.dev", good_reason, call) for call in wrong_outputs],
         ]:
-            with self.subTest(action=action, tool=tool, output=call.output):
-                self.assertFalse(rate.selection_is_correct(self.case, call, action, tool))
+            with self.subTest(action=action, tool=tool, reason=reason, output=call.output):
+                self.assertFalse(
+                    rate.selection_is_correct(self.case, call, action, tool, reason)
+                )
 
     def test_off_catalog_selection_can_match(self) -> None:
         case = rate.RateCase(
@@ -252,7 +271,15 @@ class SelectionTests(unittest.TestCase):
         call = rate.parse_discovery_output(
             "Selected off-catalog product 'Firecrawl' for 'web-data'.", 1.0
         )
-        self.assertTrue(rate.selection_is_correct(case, call, "select", "firecrawl"))
+        self.assertTrue(
+            rate.selection_is_correct(
+                case,
+                call,
+                "select",
+                "firecrawl",
+                "The user explicitly chose Firecrawl for this website enrichment workflow.",
+            )
+        )
 
     def test_any_selection_stops_all_case_kinds_immediately(self) -> None:
         call_case = rate.RateCase("call", "call", "p", "payments")
