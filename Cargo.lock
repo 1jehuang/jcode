@@ -4025,6 +4025,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-gemini",
  "jcode-provider-openai",
+ "jcode-provider-openrouter",
  "jcode-schema-dialect",
  "reqwest 0.12.28",
  "serde",
@@ -4092,6 +4093,7 @@ dependencies = [
  "jcode-core",
  "jcode-logging",
  "jcode-message-types",
+ "jcode-schema-dialect",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4133,6 +4135,7 @@ name = "jcode-schema-dialect"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "jcode-schema-dialect",
  "serde",
  "serde_json",
  "tempfile",

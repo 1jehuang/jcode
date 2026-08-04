@@ -174,3 +174,54 @@ fn openrouter_sends_a_schema_its_strictest_upstream_accepts() {
         }));
     assert_eq!(bare["properties"], serde_json::json!({}));
 }
+
+/// Which provider request builders reach the dialect engine.
+///
+/// A dialect in the registry that no provider executes is a sweep passing over
+/// dead code, which is how OpenAI, OpenRouter and Anthropic ended up with
+/// registry entries while still shipping their own older sanitizers. Pinning the
+/// set turns the remaining migration into bounded, visible work: a provider
+/// moving onto the engine fails this until the list is updated, and a provider
+/// silently reverting off it fails too.
+#[test]
+fn provider_request_builders_that_reach_the_dialect_engine_are_pinned() {
+    // (source file, reaches the engine)
+    const BUILDERS: &[(&str, bool)] = &[
+        ("../jcode-provider-gemini/src/lib.rs", true),
+        ("../jcode-provider-antigravity/src/lib.rs", true),
+        ("../jcode-provider-openrouter/src/request.rs", true),
+        // Still on their own sanitizers. Both work today, and both have their
+        // behavior pinned by `every_provider_sends_clean_schemas`, so this is
+        // duplication to remove rather than a live defect. OpenAI additionally
+        // owns strict-eligibility logic (#711, #713) that has no dialect
+        // equivalent yet.
+        ("../jcode-provider-openai/src/request.rs", false),
+        ("../jcode-provider-anthropic/src/lib.rs", false),
+    ];
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut mismatches = Vec::new();
+
+    for (relative, should_use_engine) in BUILDERS {
+        let path = manifest.join(relative);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+        // Ignore doc comments, so a file that only *mentions* the engine in
+        // prose is not counted as using it.
+        let uses_engine = source.lines().any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && trimmed.contains("jcode_schema_dialect::")
+        });
+        if uses_engine != *should_use_engine {
+            mismatches.push(format!(
+                "{relative}: pinned as engine={should_use_engine}, found engine={uses_engine}"
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "provider/engine wiring changed without updating this list:\n{}",
+        mismatches.join("\n")
+    );
+}
