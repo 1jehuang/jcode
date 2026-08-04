@@ -94,8 +94,14 @@ class CaseFileTests(unittest.TestCase):
         cases = rate.load_cases(rate.DEFAULT_CASES, self.categories)
         calls = [case for case in cases if case.expect == "call"]
         controls = [case for case in cases if case.expect == "no-call"]
+        selections = [case for case in cases if case.expect == "select"]
         self.assertGreaterEqual(len(calls), 15)
         self.assertGreaterEqual(len(controls), 8, "controls guard against over-triggering")
+        self.assertEqual(
+            {(case.expected_tool, case.expected_listed) for case in selections},
+            {("context.dev", True), ("firecrawl", False)},
+        )
+        self.assertTrue(all(case.expected_category == "web-data" for case in selections))
         # Every category with a positive case should be represented at most once
         # per distinct scenario, and all declared categories must be real.
         for case in calls:
@@ -140,6 +146,148 @@ class CaseFileTests(unittest.TestCase):
         )
         with self.assertRaises(rate.BenchmarkError):
             rate.load_cases(path, self.categories)
+
+    def test_selection_case_requires_complete_expected_receipt(self) -> None:
+        base = {
+            "id": "x",
+            "expect": "select",
+            "prompt": "I chose ExampleCo. Set it up.",
+            "expected_category": "web-data",
+            "expected_tool": "exampleco",
+            "expected_listed": False,
+        }
+        for missing in ("expected_category", "expected_tool", "expected_listed"):
+            malformed = dict(base)
+            malformed.pop(missing)
+            with self.subTest(missing=missing), self.assertRaises(rate.BenchmarkError):
+                rate.load_cases(self._write([malformed]), self.categories)
+
+    def test_selection_case_requires_boolean_listed_status(self) -> None:
+        path = self._write(
+            [
+                {
+                    "id": "x",
+                    "expect": "select",
+                    "prompt": "I chose ExampleCo. Set it up.",
+                    "expected_category": "web-data",
+                    "expected_tool": "exampleco",
+                    "expected_listed": "false",
+                }
+            ]
+        )
+        with self.assertRaisesRegex(rate.BenchmarkError, "boolean expected_listed"):
+            rate.load_cases(path, self.categories)
+
+    def test_call_cases_cannot_declare_selection_fields(self) -> None:
+        path = self._write(
+            [
+                {
+                    "id": "x",
+                    "expect": "call",
+                    "prompt": "Give this application an external capability.",
+                    "expected_tool": "exampleco",
+                }
+            ]
+        )
+        with self.assertRaisesRegex(rate.BenchmarkError, "only select cases"):
+            rate.load_cases(path, self.categories)
+
+
+class SelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.case = rate.RateCase(
+            id="select-context",
+            expect="select",
+            prompt="I chose context.dev. Set it up.",
+            expected_category="web-data",
+            expected_tool="context.dev",
+            expected_listed=True,
+        )
+        self.call = rate.parse_discovery_output(
+            "Selected 'context.dev' from 'web-data' (Jcode tool directory):", 1.0
+        )
+
+    def test_tool_input_parser_normalizes_selection(self) -> None:
+        self.assertEqual(
+            (
+                "select",
+                "context.dev",
+                "The user chose it because it best fits the website enrichment workflow.",
+            ),
+            rate.parse_tool_input(
+                '{"action":"SELECT","tool":"Context.Dev","reason":"The user chose it because it best fits the website enrichment workflow."}'
+            ),
+        )
+        self.assertEqual((None, None, None), rate.parse_tool_input("not json"))
+        self.assertEqual((None, None, None), rate.parse_tool_input("[]"))
+
+    def test_exact_input_and_output_match_is_correct(self) -> None:
+        self.assertTrue(
+            rate.selection_is_correct(
+                self.case,
+                self.call,
+                "select",
+                "context.dev",
+                "The user explicitly chose context.dev for this website enrichment workflow.",
+            )
+        )
+
+    def test_selection_requires_action_tool_category_and_listed_status(self) -> None:
+        wrong_outputs = [
+            rate.parse_discovery_output(
+                "Selected 'context.dev' from 'web-search' (Jcode tool directory):", 1.0
+            ),
+            rate.parse_discovery_output(
+                "Selected off-catalog product 'context.dev' for 'web-data'.", 1.0
+            ),
+            rate.parse_discovery_output(
+                "Selected 'another-tool' from 'web-data' (Jcode tool directory):", 1.0
+            ),
+        ]
+        good_reason = (
+            "The user explicitly chose context.dev for this website enrichment workflow."
+        )
+        for action, tool, reason, call in [
+            ("search", "context.dev", good_reason, self.call),
+            ("select", "firecrawl", good_reason, self.call),
+            ("select", "context.dev", None, self.call),
+            ("select", "context.dev", "too short", self.call),
+            *[("select", "context.dev", good_reason, call) for call in wrong_outputs],
+        ]:
+            with self.subTest(action=action, tool=tool, reason=reason, output=call.output):
+                self.assertFalse(
+                    rate.selection_is_correct(self.case, call, action, tool, reason)
+                )
+
+    def test_off_catalog_selection_can_match(self) -> None:
+        case = rate.RateCase(
+            id="select-firecrawl",
+            expect="select",
+            prompt="I chose Firecrawl. Set it up.",
+            expected_category="web-data",
+            expected_tool="firecrawl",
+            expected_listed=False,
+        )
+        call = rate.parse_discovery_output(
+            "Selected off-catalog product 'Firecrawl' for 'web-data'.", 1.0
+        )
+        self.assertTrue(
+            rate.selection_is_correct(
+                case,
+                call,
+                "select",
+                "firecrawl",
+                "The user explicitly chose Firecrawl for this website enrichment workflow.",
+            )
+        )
+
+    def test_any_selection_stops_all_case_kinds_immediately(self) -> None:
+        call_case = rate.RateCase("call", "call", "p", "payments")
+        control = rate.RateCase("control", "no-call", "p")
+        self.assertTrue(rate.discovery_call_stops_trial(self.case, True))
+        self.assertTrue(rate.discovery_call_stops_trial(call_case, True))
+        self.assertTrue(rate.discovery_call_stops_trial(control, False))
+        self.assertFalse(rate.discovery_call_stops_trial(call_case, False))
 
 
 class ScoringTests(unittest.TestCase):
@@ -188,6 +336,54 @@ class ScoringTests(unittest.TestCase):
         summary = rate.aggregate([scored, unscored])
         self.assertEqual(1.0, summary["recall_browse_rate"])
         self.assertEqual(1, summary["invalid_trial_count"])
+
+    def test_selection_accuracy_counts_missing_and_incorrect_selections(self) -> None:
+        case = rate.RateCase(
+            "selection", "select", "p", "web-data", "context.dev", True
+        )
+        trials = [
+            self._trial(outcome="selected", selection_correct=True),
+            self._trial(trial=2, outcome="incorrect-selection", selection_correct=False),
+            self._trial(trial=3, outcome="no-selection", browsed=False),
+        ]
+        summary = rate.summarize_case(case, trials)
+        self.assertAlmostEqual(1 / 3, summary["selection_accuracy"])
+        self.assertFalse(summary["passed"])
+
+    def test_selection_only_aggregate_passes_and_fails_its_own_gate(self) -> None:
+        case = rate.RateCase(
+            "selection", "select", "p", "web-data", "context.dev", True
+        )
+        result = rate.summarize_case(
+            case,
+            [
+                self._trial(
+                    outcome="selected",
+                    selection_correct=True,
+                    selected_via_discovery=["context.dev"],
+                )
+            ],
+        )
+        aggregate = rate.aggregate([result])
+        self.assertIsNone(aggregate["recall_browse_rate"])
+        self.assertIsNone(aggregate["control_clean_rate"])
+        self.assertEqual(1.0, aggregate["select_rate"])
+        self.assertEqual(1.0, aggregate["selection_accuracy"])
+        self.assertTrue(rate.passes_gates(aggregate, 0.99, 0.99, 1.0))
+
+        aggregate["selection_accuracy"] = 0.5
+        self.assertFalse(rate.passes_gates(aggregate, 0.0, 0.0, 0.75))
+
+    def test_no_scored_trials_never_pass_any_filtered_gate(self) -> None:
+        summary = rate.aggregate(
+            [
+                rate.summarize_case(
+                    self._case(),
+                    [self._trial(outcome="invalid", browsed=False, invalid_reason="quota")],
+                )
+            ]
+        )
+        self.assertFalse(rate.passes_gates(summary, 0.0, 0.0, 0.0))
 
 
 if __name__ == "__main__":

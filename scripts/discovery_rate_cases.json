@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "Call-rate suite for discover_tools. Unlike scripts/discovery_benchmark_cases.json this suite is not catalog-locked: it measures how often the agent reaches for Discovery at all across a broad spread of tasks, including tasks where reaching for it is wrong. `expect` is `call` or `no-call`. `expected_category` is optional and only scores category routing when a call happens. Prompts must never name a catalog tool, a category slug, or discover_tools.",
+  "comment": "Call-rate suite for integration_tools. Unlike scripts/discovery_benchmark_cases.json this suite is not catalog-locked: it measures how often the agent reaches for Discovery at all across a broad spread of tasks, including tasks where reaching for it is wrong. `expect` is `call`, `no-call`, or `select`. Selection cases name an already-chosen product and require `expected_category`, `expected_tool`, and `expected_listed`. Other prompts must not name a product, category slug, or integration_tools.",
   "cases": [
     {
       "id": "payments-agent-purchase",
@@ -139,6 +139,24 @@
       "expect": "call",
       "tags": ["capability-gap", "open-category"],
       "prompt": "I have a folder of recorded customer calls and want accurate transcripts with speaker labels, produced automatically for new recordings too."
+    },
+    {
+      "id": "select-context-dev",
+      "expect": "select",
+      "expected_category": "web-data",
+      "expected_tool": "context.dev",
+      "expected_listed": true,
+      "tags": ["selection", "catalog-selection"],
+      "prompt": "I've compared the options and chosen context.dev for the company website enrichment pipeline. Set up that product in this project."
+    },
+    {
+      "id": "select-firecrawl",
+      "expect": "select",
+      "expected_category": "web-data",
+      "expected_tool": "firecrawl",
+      "expected_listed": false,
+      "tags": ["selection", "off-catalog-selection"],
+      "prompt": "I've compared the options and chosen Firecrawl to crawl customer websites into structured records. Set up that product in this project."
     },
     {
       "id": "control-local-refactor",

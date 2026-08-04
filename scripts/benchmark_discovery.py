@@ -43,6 +43,9 @@ DISCOVERY_TOOL_NAMES = ("integration_tools", "discover_tools")
 LISTING_RE = re.compile(r"(?:Discoverable tools|Available integrations) in '([^']+)'")
 EMPTY_RE = re.compile(r"No (?:discoverable tools|integrations) in category '([^']+)'")
 SELECTION_RE = re.compile(r"(?:Selected|Set up) '([^']+)' from '([^']+)'")
+OFF_CATALOG_SELECTION_RE = re.compile(
+    r"Selected off-catalog product '([^']+)' for '([^']+)'"
+)
 TOOL_RE = re.compile(r"^- ([^:\n]+):", re.MULTILINE)
 RUNTIME_ERROR_RE = re.compile(
     r"\b(error|failed|failure|timed out|timeout|did not start|exited before startup)\b",
@@ -66,6 +69,7 @@ class DiscoveryCall:
     tools: list[str]
     outcome: str
     output: str
+    listed: bool | None = None
 
 
 @dataclass
@@ -243,6 +247,7 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
     listing = LISTING_RE.search(output)
     empty = EMPTY_RE.search(output)
     selection = SELECTION_RE.search(output)
+    off_catalog_selection = OFF_CATALOG_SELECTION_RE.search(output)
     category = (
         listing.group(1)
         if listing
@@ -250,6 +255,8 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         if empty
         else selection.group(2)
         if selection
+        else off_catalog_selection.group(2)
+        if off_catalog_selection
         else None
     )
     tools = (
@@ -257,13 +264,15 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         if listing
         else [selection.group(1).strip().lower()]
         if selection
+        else [off_catalog_selection.group(1).strip().lower()]
+        if off_catalog_selection
         else []
     )
     if listing:
         outcome = "listing"
     elif empty:
         outcome = "empty"
-    elif selection:
+    elif selection or off_catalog_selection:
         outcome = "selection"
     elif output.startswith("Error:"):
         outcome = "error"
@@ -275,6 +284,7 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         tools=tools,
         outcome=outcome,
         output=output[:4000],
+        listed=True if selection else False if off_catalog_selection else None,
     )
 
 

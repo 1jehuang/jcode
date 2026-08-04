@@ -177,9 +177,20 @@ pub fn selfdev_build_command_for_target(
     };
     let specs = match target {
         SelfDevBuildTarget::Tui => vec![("jcode", "jcode")],
-        SelfDevBuildTarget::Desktop2 => vec![("jcode-desktop2", "jcode-desktop2")],
+        // desktop2 launches the harness API bridge as a sibling executable.
+        // Building only the app leaves a fresh target directory unable to
+        // start its runtime because the bridge is neither beside it nor on
+        // PATH.
+        SelfDevBuildTarget::Desktop2 => vec![
+            ("jcode-desktop2", "jcode-desktop2"),
+            ("jcode-harness-api-server", "jcode-harness-api-bridge"),
+        ],
         SelfDevBuildTarget::All | SelfDevBuildTarget::Auto => {
-            vec![("jcode", "jcode"), ("jcode-desktop2", "jcode-desktop2")]
+            vec![
+                ("jcode", "jcode"),
+                ("jcode-desktop2", "jcode-desktop2"),
+                ("jcode-harness-api-server", "jcode-harness-api-bridge"),
+            ]
         }
     };
     let wrapper = repo_dir.join("scripts").join("dev_cargo.sh");
@@ -637,10 +648,17 @@ mod tests {
         let repo = repo_fixture(false);
         let cases = [
             (SelfDevBuildTarget::Tui, vec!["-p jcode "]),
-            (SelfDevBuildTarget::Desktop2, vec!["-p jcode-desktop2 "]),
+            (
+                SelfDevBuildTarget::Desktop2,
+                vec!["-p jcode-desktop2 ", "--bin jcode-harness-api-bridge"],
+            ),
             (
                 SelfDevBuildTarget::All,
-                vec!["-p jcode ", "-p jcode-desktop2 "],
+                vec![
+                    "-p jcode ",
+                    "-p jcode-desktop2 ",
+                    "--bin jcode-harness-api-bridge",
+                ],
             ),
         ];
         for (target, expected) in cases {

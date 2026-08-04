@@ -1525,14 +1525,14 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
         &jcode_schema_dialect::registry::GEMINI,
     );
     assert!(
-        unnormalized.iter().any(|e| e.message.contains("propertyNames")),
+        unnormalized
+            .iter()
+            .any(|e| e.message.contains("propertyNames")),
         "the checker must flag the raw schema, got {unnormalized:?}"
     );
 
-    let normalized = jcode_schema_dialect::dialect::apply(
-        &hostile,
-        &jcode_schema_dialect::registry::GEMINI,
-    );
+    let normalized =
+        jcode_schema_dialect::dialect::apply(&hostile, &jcode_schema_dialect::registry::GEMINI);
     assert!(
         jcode_schema_dialect::must_not_contain_unsupported_constructs(
             &normalized,

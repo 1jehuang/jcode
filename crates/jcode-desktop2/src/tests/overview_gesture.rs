@@ -52,21 +52,96 @@ fn app() -> App {
             weight: 1_200.0,
         },
     ];
-    let mut app = App::default();
+    let mut app = App {
+        // The held-Super field is benched by default; these tests exercise
+        // the machinery behind the flag so it stays healthy while benched.
+        super_overview: true,
+        ..App::default()
+    };
     app.model.session_id = Some("session_mushroom_2_b".into());
     app.model.strip = Strip::build(entries, Some("session_mushroom_2_b"));
     app
 }
 
-/// The gesture ships on: a default app must open the field when Super goes
-/// down, because the whole point is that it costs zero configuration.
+/// The gesture is benched: a default app leaves Super as a plain chord
+/// modifier, because the workspace now moves like niri directly and a
+/// zoomed-out field would be a second spatial model fighting the first.
 #[test]
-fn the_super_overview_is_enabled_by_default() {
+fn the_super_overview_is_benched_by_default() {
     let mut app = App::default();
     app.on_super_changed(true, Instant::now());
     assert!(
-        app.model.overview.is_visible(),
-        "the default app did not open the field on Super"
+        !app.model.overview.is_visible(),
+        "the benched field opened on a bare Super press"
+    );
+}
+
+/// Super+hjkl on a default app is direct niri motion: the session switches
+/// at once and the camera slides, with no overview in between.
+#[test]
+fn super_hjkl_is_direct_motion_by_default() {
+    let mut app = App::default();
+    app.model.session_id = Some("session_clover_1_a".into());
+    app.model.strip = Strip::build(
+        vec![
+            Entry {
+                session_id: "session_clover_1_a".into(),
+                title: None,
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+                weight: 1.0,
+            },
+            Entry {
+                session_id: "session_mushroom_2_b".into(),
+                title: None,
+                working_dir: Some("/home/j/jcode".into()),
+                busy: false,
+                weight: 1.0,
+            },
+            Entry {
+                session_id: "session_harbor_4_d".into(),
+                title: None,
+                working_dir: Some("/home/j/site".into()),
+                busy: false,
+                weight: 1.0,
+            },
+        ],
+        Some("session_clover_1_a"),
+    );
+    app.modifiers = winit::keyboard::ModifiersState::SUPER;
+    app.on_super_changed(true, Instant::now());
+    assert!(!app.model.overview.is_visible());
+
+    app.key_pressed(&Key::Character(SmolStr::new("l")), Some("l"));
+    assert_eq!(
+        app.model.session_id.as_deref(),
+        Some("session_mushroom_2_b"),
+        "super+l did not switch session directly"
+    );
+    assert!(
+        app.model.workspace.is_animating(),
+        "the direct switch did not slide the camera"
+    );
+
+    app.key_pressed(&Key::Character(SmolStr::new("j")), Some("j"));
+    assert_eq!(
+        app.model.session_id.as_deref(),
+        Some("session_harbor_4_d"),
+        "super+j did not switch to the next workspace"
+    );
+    assert_eq!(
+        app.model.workspace.row_change(),
+        Some(crate::workspace::Direction::Down),
+        "the workspace switch was not a vertical row slide"
+    );
+    let (prev_row, _) = app.model.workspace.prev_row();
+    assert_eq!(
+        prev_row,
+        [
+            "session_clover_1_a".to_string(),
+            "session_mushroom_2_b".to_string()
+        ],
+        "the departing row was not captured for the slide"
     );
 }
 
@@ -520,7 +595,10 @@ fn dead_axes_move_but_live_edges_clamp() {
     };
     // Up and down could never move in a single-row field, so they cycle.
     for dir in [crate::overview::Dir::Up, crate::overview::Dir::Down] {
-        let mut app = App::default();
+        let mut app = App {
+            super_overview: true,
+            ..App::default()
+        };
         app.model.session_id = Some("session_0".into());
         app.model.strip = Strip::build(entries(), Some("session_0"));
         let opened = hold_super(&mut app);
@@ -534,7 +612,10 @@ fn dead_axes_move_but_live_edges_clamp() {
     }
     // Left at the start of the row is an edge of a live axis: it clamps
     // instead of wrapping to the far end.
-    let mut app = App::default();
+    let mut app = App {
+        super_overview: true,
+        ..App::default()
+    };
     app.model.session_id = Some("session_0".into());
     app.model.strip = Strip::build(entries(), Some("session_0"));
     let opened = hold_super(&mut app);

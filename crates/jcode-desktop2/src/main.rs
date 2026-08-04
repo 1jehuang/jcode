@@ -118,10 +118,12 @@ struct App {
     /// cancel it, so a synthetic lift is invisible and a real one still
     /// resolves a frame or two later.
     pending_super_release: Option<(std::time::Instant, bool)>,
-    /// Whether holding Super opens the card-strip overview. On by default:
-    /// the compositor muscle memory this app lives inside (niri, GNOME) puts
-    /// "zoom out to everything" on the Super key. The flag stays so the
-    /// gesture can be benched again as a flip rather than a revert.
+    /// Whether holding Super opens the card-strip overview. Benched: the
+    /// workspace now moves like niri itself, so Super+hjkl slides the camera
+    /// between live pages directly and a zoomed-out field of thumbnails is a
+    /// second spatial model fighting the first. The machinery stays behind
+    /// this flag (and the sessions icon) so it can return as a flip rather
+    /// than a revert if the direct motion proves insufficient.
     super_overview: bool,
     /// Finished session-store scans, from the picker's worker thread.
     ///
@@ -194,7 +196,7 @@ impl Default for App {
             modifiers: winit::keyboard::ModifiersState::empty(),
             super_held_since: None,
             pending_super_release: None,
-            super_overview: true,
+            super_overview: false,
             resume_scans: Some(std::sync::mpsc::channel()),
             clipboard: clipboard::Clipboard::default(),
             pending_images: Vec::new(),
@@ -1526,14 +1528,23 @@ impl App {
                     self.request_peek();
                 }
             }
+            // Vertical motion is a workspace switch: the whole row slides
+            // off and the next one in, so the departing row is captured
+            // before the strip moves or it could not be drawn leaving.
             Action::SessionUp => {
+                let (prev_row, prev_focused) = self.focused_row_snapshot();
                 if self.model.strip.focus_up() {
+                    self.begin_row_transition(workspace::Direction::Up, prev_row, prev_focused);
                     self.attach_focused_session();
+                    self.request_peek();
                 }
             }
             Action::SessionDown => {
+                let (prev_row, prev_focused) = self.focused_row_snapshot();
                 if self.model.strip.focus_down() {
+                    self.begin_row_transition(workspace::Direction::Down, prev_row, prev_focused);
                     self.attach_focused_session();
+                    self.request_peek();
                 }
             }
 
