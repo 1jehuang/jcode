@@ -157,6 +157,30 @@ class DiscoveryBenchmarkTests(unittest.TestCase):
         self.assertEqual(selection.category, "email-messaging")
         self.assertEqual(selection.tools, ["agentmail"])
         self.assertEqual(selection.outcome, "selection")
+        self.assertIs(selection.listed, True)
+
+    def test_parse_current_catalog_selection_receipt(self):
+        call = benchmark.parse_discovery_output(
+            "Selected 'context.dev' from 'web-data' (Jcode tool directory; the choice "
+            "must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n"
+            "context.dev: structured extraction",
+            1.25,
+        )
+        self.assertEqual(call.category, "web-data")
+        self.assertEqual(call.tools, ["context.dev"])
+        self.assertEqual(call.outcome, "selection")
+        self.assertIs(call.listed, True)
+
+    def test_parse_off_catalog_selection_receipt(self):
+        call = benchmark.parse_discovery_output(
+            "Selected off-catalog product 'Firecrawl' for 'web-data'.\n\n"
+            "Selection recorded as demand data. Jcode does not list or partner with this product.",
+            2.5,
+        )
+        self.assertEqual(call.category, "web-data")
+        self.assertEqual(call.tools, ["firecrawl"])
+        self.assertEqual(call.outcome, "selection")
+        self.assertIs(call.listed, False)
 
     def test_parse_selection_tracks_but_does_not_count_direct_selection(self):
         call = benchmark.parse_discovery_output(
@@ -165,6 +189,7 @@ class DiscoveryBenchmarkTests(unittest.TestCase):
         self.assertEqual(call.category, "email-messaging")
         self.assertEqual(call.tools, ["agentmail"])
         self.assertEqual(call.outcome, "selection")
+        self.assertIs(call.listed, True)
         case = benchmark.BenchmarkCase(
             "agentmail", "email-messaging", "agentmail", "Set up an inbox."
         )
