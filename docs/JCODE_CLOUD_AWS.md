@@ -1,6 +1,7 @@
 # Jcode Cloud on AWS
 
-Status: product and infrastructure direction, August 2026
+Status: product and infrastructure direction, August 2026. The managed customer
+control plane described here is not deployed yet.
 
 ## Product decision
 
@@ -11,7 +12,8 @@ Cloud access is bundled into paid Jcode subscriptions rather than sold as a seco
 ### User journey
 
 1. Run `/remote` on desktop or select **Jcode Cloud** in a client.
-2. Browser opens `https://jcode.sh/account?activate=cloud`.
+2. Browser opens `https://jcode.sh/account`. During early access, the account
+   page handles sign-in and plan management but does not yet provision a host.
 3. Sign in with the existing Jcode device/account identity. If needed, subscribe or upgrade.
 4. Pick the nearest supported region. Defaults are automatic and reversible.
 5. Jcode provisions an isolated host, imports only credentials or repository access the user explicitly approves, and displays progress.

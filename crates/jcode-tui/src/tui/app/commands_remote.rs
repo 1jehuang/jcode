@@ -7,9 +7,9 @@ use crate::gateway::control::{
 const REMOTE_HELP: &str = "\
 **`/remote`** - use jcode from any device
 
-`/remote` opens Jcode Cloud activation. Cloud is managed, wakes on demand, and
-is included with eligible Jcode subscriptions. Your projects and credentials
-stay isolated in your cloud host.
+`/remote` opens your Jcode account, the entry point for Jcode Cloud access.
+Cloud is being bundled with eligible Jcode subscriptions. The managed host
+control plane is currently in early access.
 
 - `/remote` or `/remote cloud` - activate or manage Jcode Cloud
 - `/remote status` - local gateway state, dial address, paired devices
@@ -20,7 +20,7 @@ stay isolated in your cloud host.
 For self-hosting, run `/remote on`, restart the server, then `/remote pair`.
 ";
 
-const CLOUD_ACTIVATION_URL: &str = "https://jcode.sh/account?activate=cloud";
+const CLOUD_ACCOUNT_URL: &str = "https://jcode.sh/account";
 
 pub(super) fn handle_remote_command(app: &mut App, trimmed: &str) -> bool {
     let Some(parsed) = parse_remote_command(trimmed) else {
@@ -53,25 +53,26 @@ fn activate_cloud(app: &mut App) {
             None => "Signed in to your Jcode account.".to_string(),
         }
     } else {
-        "Not signed in yet. The activation page will guide you through sign-in or subscription setup."
+        "Not signed in yet. The account page will guide you through passwordless sign-in and subscription setup."
             .to_string()
     };
 
-    let opened = super::helpers::open_path_or_url_detached(CLOUD_ACTIVATION_URL).is_ok();
+    let opened = super::helpers::open_path_or_url_detached(CLOUD_ACCOUNT_URL).is_ok();
     let open_line = if opened {
-        "Opened the secure activation page in your browser."
+        "Opened your secure Jcode account page in the browser."
     } else {
-        "Open the secure activation page:"
+        "Open your secure Jcode account page:"
     };
     app.push_display_message(DisplayMessage::system(format!(
-        "**Jcode Cloud**\n\n{account_line}\n\n{open_line}\n\n{CLOUD_ACTIVATION_URL}\n\n\
-         Cloud hosts wake on demand and stop when idle. To use your own machine instead, run \
+        "**Jcode Cloud early access**\n\n{account_line}\n\n{open_line}\n\n{CLOUD_ACCOUNT_URL}\n\n\
+         The managed-host control plane is not generally available yet. Reference hosts wake on \
+         demand and stop when idle. To use your own machine now, run \
          `/remote on`, restart the server, then `/remote pair`."
     )));
     app.set_status_notice(if opened {
-        "Jcode Cloud activation opened"
+        "Jcode Cloud account opened"
     } else {
-        "Jcode Cloud activation link ready"
+        "Jcode Cloud account link ready"
     });
 }
 
