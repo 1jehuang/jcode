@@ -255,6 +255,17 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
                 return false;
             }
         }
+        // A declared property that says nothing about its type is legal JSON
+        // Schema (an empty schema accepts anything) and Anthropic takes it, but
+        // OpenAI's strict validator rejects the whole catalog over it (#713:
+        // cua-driver's `set_config.value`, whose type genuinely depends on
+        // `key`). Strict eligibility must fail closed here: the schema is still
+        // sent, just without `strict: true`, so the tool stays usable.
+        if let Some(Value::Object(properties)) = map.get("properties")
+            && properties.values().any(|property| !declares_a_type(property))
+        {
+            return false;
+        }
 
         map.values().all(schema_supports_strict)
     }
@@ -264,6 +275,22 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
         Value::Array(items) => items.iter().all(schema_supports_strict),
         _ => true,
     }
+}
+
+/// Whether a subschema says anything about what it accepts.
+///
+/// `true` for a boolean schema: `true`/`false` are complete JSON Schemas whose
+/// meaning is unambiguous, unlike an object that simply omits `type`.
+fn declares_a_type(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return schema.is_boolean();
+    };
+    const TYPE_BEARING_KEYWORDS: &[&str] = &[
+        "type", "enum", "const", "anyOf", "oneOf", "allOf", "$ref", "properties", "items",
+    ];
+    TYPE_BEARING_KEYWORDS
+        .iter()
+        .any(|keyword| map.contains_key(*keyword))
 }
 
 fn schema_is_object_typed(map: &serde_json::Map<String, Value>) -> bool {
@@ -690,4 +717,55 @@ mod tests {
         );
         assert_eq!(normalized["properties"]["not"]["type"], json!("string"));
     }
+
+    /// Issue #713: `cua-driver`'s `set_config.value` declares a description and
+    /// no type, because its type genuinely depends on the sibling `key`. That
+    /// is legal JSON Schema and Anthropic accepts it, but OpenAI's strict
+    /// validator rejects the entire tool catalog over it, so every
+    /// OpenAI-route agent died on its first turn.
+    ///
+    /// The fix is to fail strict eligibility closed rather than to rewrite the
+    /// schema: the tool is still advertised with its real shape, just without
+    /// `strict: true`.
+    #[test]
+    fn issue_713_a_property_without_a_type_disqualifies_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "value": { "description": "JSON type depends on the key." }
+            }
+        });
+        assert!(
+            !schema_supports_strict(&openai_compatible_schema(&schema)),
+            "a typeless property must not be sent as a strict schema"
+        );
+    }
+
+    /// The counterpart: failing closed must not become failing always, or every
+    /// well-formed tool silently loses strict mode and the structured-output
+    /// guarantees that come with it.
+    #[test]
+    fn a_fully_typed_schema_still_qualifies_for_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "where" },
+                "count": { "type": "integer" },
+                "mode": { "enum": ["fast", "slow"] },
+                "nested": {
+                    "type": "object",
+                    "properties": { "inner": { "type": "boolean" } }
+                },
+                "either": { "anyOf": [{ "type": "string" }, { "type": "integer" }] },
+                "anything": true
+            },
+            "required": ["path"]
+        });
+        assert!(
+            schema_supports_strict(&openai_compatible_schema(&schema)),
+            "every property declares its shape, so strict must stay available"
+        );
+    }
+
 }

@@ -38,6 +38,7 @@ pub mod rejection;
 
 pub use conformance::{
     ConformanceError, must_not_contain_unsupported_constructs, must_preserve_meaning,
+    untyped_properties,
 };
 pub use dialect::{DialectSpec, DialectTransforms, LearnedQuirks};
 pub use keyword::{KeywordRole, keyword_role};
