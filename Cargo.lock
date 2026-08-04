@@ -3936,6 +3936,7 @@ dependencies = [
  "httpdate",
  "jcode-logging",
  "jcode-message-types",
+ "jcode-schema-dialect",
  "rand 0.9.3",
  "reqwest 0.12.28",
  "serde",

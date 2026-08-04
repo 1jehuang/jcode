@@ -55,6 +55,13 @@ pub const OPENAI: DialectSpec = DialectSpec {
     ],
     transforms: DialectTransforms {
         one_of_as_any_of: true,
+        // OpenAI accepts `allOf` but does not intersect its branches the way
+        // the spec requires, so a schema whose properties live only in `allOf`
+        // branches ends up advertising none of them. The sanitizer this
+        // replaces merged them into the parent object, so the dialect must too
+        // or migrating onto it would silently empty those tools (caught by
+        // diffing the two before switching).
+        merge_all_of_branches: true,
         ..DEFAULT_TRANSFORMS
     },
 };
@@ -220,6 +227,7 @@ const DEFAULT_TRANSFORMS: DialectTransforms = DialectTransforms {
     prune_dangling_required: false,
     const_as_enum: false,
     one_of_as_any_of: false,
+    merge_all_of_branches: false,
 };
 
 /// Every registered dialect, for conformance sweeps.

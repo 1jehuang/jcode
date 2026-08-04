@@ -162,33 +162,19 @@ fn flatten_all_of_schema(mut map: serde_json::Map<String, Value>) -> Value {
     Value::Object(merged)
 }
 
+/// Normalize a tool-parameter schema for the OpenAI function-parameters subset.
+///
+/// One construct OpenAI rejects fails the entire tool catalog rather than the
+/// one tool, which is why this class of bug (#446, #495, #543, #687, #711, #713,
+/// #754) has recurred: each fix appended a keyword to a deny-list, so the next
+/// unlisted keyword from the next MCP server was the next outage.
+///
+/// The subset is now an allow-list in `jcode-schema-dialect`, shared with every
+/// other provider, so a construct nobody has seen yet is dropped rather than
+/// forwarded. Strict-mode eligibility and normalization stay here: they are
+/// OpenAI-specific and have no dialect equivalent.
 pub fn openai_compatible_schema(schema: &Value) -> Value {
-    match schema {
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (key, value) in map {
-                if is_openai_unsupported_keyword(key) {
-                    continue;
-                }
-                // Unsupported `format` values are rejected by the non-strict
-                // validator too (#543 was reported on a plain tool call), so
-                // this cannot live only in `strict_normalize_schema`. It did,
-                // which meant the #713 fix (typeless property forces strict
-                // off) silently reopened #543 for exactly those catalogs.
-                if key == "format" && !is_supported_string_format(value) {
-                    continue;
-                }
-                let normalized_key = if key == "oneOf" { "anyOf" } else { key };
-                out.insert(
-                    normalized_key.to_string(),
-                    openai_compatible_keyword(key, value),
-                );
-            }
-            flatten_all_of_schema(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(openai_compatible_schema).collect()),
-        _ => schema.clone(),
-    }
+    jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENAI)
 }
 
 /// JSON Schema keywords that are valid JSON Schema 2020-12 but rejected by the
