@@ -775,3 +775,28 @@ fn anthropic_usage_response_deserializes_structured_fable_limit() {
         Some("Fable")
     );
 }
+
+#[test]
+fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
+    let usage = UsageData {
+        model_scoped: vec![ModelScopedUsageWindow {
+            model_name: "Fable".to_string(),
+            utilization: 1.0,
+            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
+        }],
+        ..Default::default()
+    };
+
+    assert!(usage.model_scoped_exhausted("claude-fable-5"));
+    assert!(!usage.model_scoped_exhausted("claude-opus-5"));
+
+    let below_limit = UsageData {
+        model_scoped: vec![ModelScopedUsageWindow {
+            model_name: "Claude Fable 5".to_string(),
+            utilization: 0.98,
+            resets_at: None,
+        }],
+        ..Default::default()
+    };
+    assert!(!below_limit.model_scoped_exhausted("claude-fable-5"));
+}
