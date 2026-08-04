@@ -189,7 +189,7 @@ fn recovery_triggers_on_the_error_string_the_runtime_really_builds() {
     let rejection = jcode_schema_dialect::classify(&with_context)
         .expect("the runtime's own error string must be recognized as a schema rejection");
     assert_eq!(
-        rejection.keyword.as_deref(),
+        rejection.keyword(),
         Some("propertyNames"),
         "recovery must extract the construct from the wrapped, escaped error"
     );

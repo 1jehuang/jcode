@@ -14,8 +14,14 @@ use serde_json::Value;
 /// What a provider objected to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchemaRejection {
-    /// The offending JSON Schema keyword, when the provider names one.
-    pub keyword: Option<String>,
+    /// Every offending JSON Schema keyword the provider named.
+    ///
+    /// Plural because a real Gemini 400 reports a `fieldViolations` array and
+    /// names each bad keyword separately. Learning only the first would cost
+    /// one failed turn per bad keyword, so a schema with three of them would
+    /// look like the recovery layer was broken. Observed live: a single
+    /// response naming both `dependentRequired` and `unevaluatedItems`.
+    pub keywords: Vec<String>,
     /// The offending `format` value, when the provider names one.
     pub format: Option<String>,
     /// The tool whose schema was rejected, when the provider names one.
@@ -23,11 +29,16 @@ pub struct SchemaRejection {
 }
 
 impl SchemaRejection {
+    /// The first named keyword, for callers that only need one.
+    pub fn keyword(&self) -> Option<&str> {
+        self.keywords.first().map(String::as_str)
+    }
+
     /// Whether this rejection identifies something actionable to strip. A
     /// rejection we cannot attribute is not worth retrying: the retry would
     /// send a byte-identical request.
     pub fn is_actionable(&self) -> bool {
-        self.keyword.is_some() || self.format.is_some()
+        !self.keywords.is_empty() || self.format.is_some()
     }
 }
 
@@ -42,20 +53,21 @@ pub fn classify(message: &str) -> Option<SchemaRejection> {
     //   Invalid JSON payload received. Unknown name "propertyNames" at
     //   'request.tools[0].function_declarations[32].parameters.properties[0].value':
     //   Cannot find field.
-    if message.contains("Cannot find field")
-        && let Some(name) = extract_quoted_after(message, "Unknown name")
-    {
-        return Some(SchemaRejection {
-            keyword: Some(name),
-            format: None,
-            tool,
-        });
+    if message.contains("Cannot find field") {
+        let names = extract_all_quoted_after(message, "Unknown name");
+        if !names.is_empty() {
+            return Some(SchemaRejection {
+                keywords: names,
+                format: None,
+                tool,
+            });
+        }
     }
 
     // OpenAI (#543): 'uri' is not a valid format.
     if let Some(format) = extract_quoted_before(message, "is not a valid format") {
         return Some(SchemaRejection {
-            keyword: None,
+            keywords: Vec::new(),
             format: Some(format),
             tool,
         });
@@ -64,7 +76,7 @@ pub fn classify(message: &str) -> Option<SchemaRejection> {
     // OpenAI (#687): 'uniqueItems' is not permitted.
     if let Some(keyword) = extract_quoted_before(message, "is not permitted") {
         return Some(SchemaRejection {
-            keyword: Some(keyword),
+            keywords: vec![keyword],
             format: None,
             tool,
         });
@@ -75,7 +87,7 @@ pub fn classify(message: &str) -> Option<SchemaRejection> {
     // caller can act on by re-normalizing with pruning enabled.
     if message.contains("are not defined in the schema properties") {
         return Some(SchemaRejection {
-            keyword: Some("required".to_string()),
+            keywords: vec!["required".to_string()],
             format: None,
             tool,
         });
@@ -86,7 +98,7 @@ pub fn classify(message: &str) -> Option<SchemaRejection> {
         || (message.contains("input_schema") && message.contains("JSON Schema draft 2020-12"))
     {
         return Some(SchemaRejection {
-            keyword: Some("anyOf".to_string()),
+            keywords: vec!["anyOf".to_string()],
             format: None,
             tool,
         });
@@ -131,6 +143,26 @@ fn extract_quoted_after(message: &str, marker: &str) -> Option<String> {
     clean_token(&after[..end])
 }
 
+/// Every distinct quoted token following any occurrence of `marker`.
+///
+/// A Gemini 400 repeats "Unknown name X" once per `fieldViolations` entry, and
+/// the top-level `message` duplicates the first one, so this both collects all
+/// of them and deduplicates.
+fn extract_all_quoted_after(message: &str, marker: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = message[cursor..].find(marker) {
+        let start = cursor + offset;
+        if let Some(token) = extract_quoted_after(&message[start..], marker)
+            && !found.contains(&token)
+        {
+            found.push(token);
+        }
+        cursor = start + marker.len();
+    }
+    found
+}
+
 /// The last single- or double-quoted token appearing before `marker`.
 fn extract_quoted_before(message: &str, marker: &str) -> Option<String> {
     let end = message.find(marker)?;
@@ -162,7 +194,7 @@ mod tests {
     fn parses_the_real_gemini_unknown_name_400() {
         let message = r#"Antigravity generateContent failed (HTTP 400 Bad Request): "Invalid JSON payload received. Unknown name \"propertyNames\" at 'request.tools[0].function_declarations[32].parameters.properties[0].value': Cannot find field.""#;
         let rejection = classify(message).expect("recognized");
-        assert_eq!(rejection.keyword.as_deref(), Some("propertyNames"));
+        assert_eq!(rejection.keyword(), Some("propertyNames"));
         assert!(rejection.is_actionable());
     }
 
@@ -181,14 +213,14 @@ mod tests {
     fn parses_the_real_openai_unpermitted_keyword_400() {
         let message = "invalid_request_error (invalid_function_parameters): Invalid schema for function 'mcp__tubealfred__youtube_channels_batch': In context=('properties', 'ids'), 'uniqueItems' is not permitted.";
         let rejection = classify(message).expect("recognized");
-        assert_eq!(rejection.keyword.as_deref(), Some("uniqueItems"));
+        assert_eq!(rejection.keyword(), Some("uniqueItems"));
     }
 
     #[test]
     fn parses_the_real_gemini_dangling_required_400() {
         let message = "GenerateContentRequest.tools[0].function_declarations[3].parameters: required fields ['label'] are not defined in the schema properties";
         assert_eq!(
-            classify(message).unwrap().keyword.as_deref(),
+            classify(message).unwrap().keyword(),
             Some("required")
         );
     }
@@ -196,7 +228,7 @@ mod tests {
     #[test]
     fn parses_the_real_anthropic_top_level_combiner_400() {
         let message = "input_schema does not support oneOf, allOf, or anyOf at the top level";
-        assert_eq!(classify(message).unwrap().keyword.as_deref(), Some("anyOf"));
+        assert_eq!(classify(message).unwrap().keyword(), Some("anyOf"));
     }
 
     #[test]
@@ -215,4 +247,48 @@ mod tests {
         assert!(schema_contains_keyword(&schema, "propertyNames"));
         assert!(!schema_contains_keyword(&schema, "uniqueItems"));
     }
+
+    /// Captured live from the Antigravity `generateContent` endpoint, not
+    /// transcribed from an issue: a single 400 whose `fieldViolations` array
+    /// names two different bad keywords, with the first also duplicated into
+    /// the top-level `message`.
+    ///
+    /// Learning only the first would spend one failed turn per bad keyword,
+    /// which is what this response actually did before the fix.
+    const LIVE_MULTI_VIOLATION_400: &str = r#"Antigravity generateContent failed (HTTP 400 Bad Request): {
+  "error": {
+    "code": 400,
+    "message": "Invalid JSON payload received. Unknown name \"dependentRequired\" at 'request.tools[0].function_declarations[14].parameters.properties[3].value': Cannot find field.",
+    "status": "INVALID_ARGUMENT",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.BadRequest",
+        "fieldViolations": [
+          {
+            "field": "request.tools[0].function_declarations[14].parameters.properties[3].value",
+            "description": "Invalid JSON payload received. Unknown name \"dependentRequired\" at 'request.tools[0].function_declarations[14].parameters.properties[3].value': Cannot find field."
+          },
+          {
+            "field": "request.tools[0].function_declarations[14].parameters.properties[3].value",
+            "description": "Invalid JSON payload received. Unknown name \"unevaluatedItems\" at 'request.tools[0].function_declarations[14].parameters.properties[3].value': Cannot find field."
+          }
+        ]
+      }
+    ]
+  }
+}"#;
+
+    #[test]
+    fn every_keyword_in_a_multi_violation_400_is_learned_at_once() {
+        let rejection = classify(LIVE_MULTI_VIOLATION_400).expect("recognized");
+        assert_eq!(
+            rejection.keywords,
+            vec![
+                "dependentRequired".to_string(),
+                "unevaluatedItems".to_string()
+            ],
+            "both violations must be learned from one response, deduplicated"
+        );
+    }
+
 }

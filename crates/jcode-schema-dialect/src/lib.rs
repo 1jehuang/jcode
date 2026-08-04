@@ -97,7 +97,12 @@ pub fn recover_from_error(message: &str, spec: &DialectSpec) -> RecoveryAction {
     let mut learned_something = false;
     let mut described = Vec::new();
 
-    if let Some(keyword) = rejection.keyword.as_deref() {
+    // Learn every keyword the response named, not just the first. A Gemini 400
+    // reports one `fieldViolations` entry per bad keyword, so learning them one
+    // per turn would burn a failed request for each (observed live: a single
+    // response naming both `dependentRequired` and `unevaluatedItems`).
+    for keyword in &rejection.keywords {
+        let keyword = keyword.as_str();
         // A load-bearing keyword cannot be dropped without destroying the
         // tool's meaning, so this is a real bug rather than a quirk to absorb.
         if !keyword::is_droppable(keyword) {
@@ -145,7 +150,8 @@ pub fn recover_from_error(message: &str, spec: &DialectSpec) -> RecoveryAction {
                  construct is not what actually failed",
                 spec.id,
                 rejection
-                    .keyword
+                    .keyword()
+                    .map(ToString::to_string)
                     .or(rejection.format)
                     .unwrap_or_else(|| "a schema construct".into())
             )
