@@ -1,6 +1,6 @@
 use super::{
-    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, LatexRenderingMode, ProviderConfig,
-    SessionPickerResumeAction, SwarmSpawnMode, ToolConfig, config_env_fingerprint,
+    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands, LatexRenderingMode,
+    ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig, config_env_fingerprint,
     populate_context_limits_from_config_ref,
 };
 use std::ffi::OsString;
@@ -241,10 +241,27 @@ fn hooks_config_defaults_and_parses_from_toml() {
         "[hooks]\nturn_start = \"notify-start\"\nturn_end = \"notify-turn\"\npre_tool = \"~/bin/policy\"\npre_tool_timeout_ms = 1500\n",
     )
     .expect("hooks config should parse");
-    assert_eq!(cfg.hooks.turn_start.as_deref(), Some("notify-start"));
-    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("notify-turn"));
-    assert_eq!(cfg.hooks.pre_tool.as_deref(), Some("~/bin/policy"));
+    assert_eq!(
+        cfg.hooks.turn_start.as_ref().and_then(HookCommands::first),
+        Some("notify-start")
+    );
+    assert_eq!(
+        cfg.hooks.turn_end.as_ref().and_then(HookCommands::first),
+        Some("notify-turn")
+    );
+    assert_eq!(
+        cfg.hooks.pre_tool.as_ref().and_then(HookCommands::first),
+        Some("~/bin/policy")
+    );
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 1500);
+
+    let cfg: Config =
+        toml::from_str("[hooks]\nsession_start = [\"notify-user\", \"notify-herdr\"]\n")
+            .expect("hook arrays should parse");
+    assert_eq!(
+        cfg.hooks.session_start.unwrap().iter().collect::<Vec<_>>(),
+        vec!["notify-user", "notify-herdr"]
+    );
 }
 
 #[test]
@@ -257,15 +274,26 @@ fn test_env_override_lifecycle_hooks() {
     crate::env::set_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", "250");
     let mut cfg = Config::default();
     cfg.apply_env_overrides();
-    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("my-notifier --fast"));
+    assert_eq!(
+        cfg.hooks.turn_end.as_ref().and_then(HookCommands::first),
+        Some("my-notifier --fast")
+    );
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 250);
 
     // Empty env value disables a config-file hook.
     crate::env::set_var("JCODE_HOOK_TURN_END", " ");
     let mut cfg = Config::default();
-    cfg.hooks.turn_end = Some("from-config".to_string());
+    cfg.hooks.turn_end = Some(HookCommands::one("from-config"));
     cfg.apply_env_overrides();
     assert_eq!(cfg.hooks.turn_end, None);
+
+    crate::env::set_var("JCODE_HOOK_TURN_END", "[\"first\", \"second\"]");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(
+        cfg.hooks.turn_end.unwrap().iter().collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
 
     restore_env_var("JCODE_HOOK_TURN_END", prev_turn_end);
     restore_env_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", prev_timeout);
