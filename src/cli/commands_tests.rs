@@ -259,8 +259,9 @@ fn test_todo(
         content: format!("todo {id}"),
         status: status.to_string(),
         priority: priority.to_string(),
-        confidence,
-        completion_confidence,
+        confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
+        completion_confidence: completion_confidence
+            .map(crate::todo::ConfidenceState::from_legacy_score),
         ..Default::default()
     }
 }
@@ -293,7 +294,10 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
 #[test]
 fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
     let mut todo = test_todo("a", "completed", "high", Some(0), Some(100));
-    todo.confidence_history = vec![0, 100];
+    todo.confidence_history = vec![
+        crate::todo::ConfidenceState::from_legacy_score(0),
+        crate::todo::ConfidenceState::from_legacy_score(100),
+    ];
 
     let todos = [todo];
     match build_run_auto_poke_follow_up_from_todos(&todos, false, None) {
@@ -320,7 +324,9 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
     let todos = vec![
         {
             let mut todo = test_todo("a", "completed", "high", Some(100), Some(100));
-            todo.confidence_history = vec![70, 80, 90, 100];
+            todo.confidence_history = [70, 80, 90, 100]
+                .map(crate::todo::ConfidenceState::from_legacy_score)
+                .to_vec();
             todo
         },
         test_todo("b", "completed", "low", Some(98), Some(98)),
@@ -405,7 +411,11 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
         &[crate::todo::GateObservation {
             kind: crate::todo::GateObservationKind::IntentUnderstanding,
             group: None,
-            score: Some(70),
+            state: Some(
+                crate::todo::IntentUnderstanding::from_legacy_score(70)
+                    .as_str()
+                    .to_string(),
+            ),
         }],
     )
     .expect("append");
@@ -466,7 +476,11 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
         &[crate::todo::GateObservation {
             kind: crate::todo::GateObservationKind::IntentUnderstanding,
             group: None,
-            score: Some(70),
+            state: Some(
+                crate::todo::IntentUnderstanding::from_legacy_score(70)
+                    .as_str()
+                    .to_string(),
+            ),
         }],
     )
     .expect("append");
