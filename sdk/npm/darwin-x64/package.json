@@ -1,0 +1,27 @@
+{
+  "name": "@1jehuang/jcode-darwin-x64",
+  "version": "1.1.0",
+  "description": "Jcode runtime binary for darwin x64",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1jehuang/jcode.git",
+    "directory": "sdk/npm/darwin-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

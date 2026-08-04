@@ -312,7 +312,7 @@ impl McpClient {
         }
 
         // Send initialized notification
-        let notif = JsonRpcRequest::new(0, "notifications/initialized", None);
+        let notif = JsonRpcNotification::new("notifications/initialized", None);
         let msg = serde_json::to_string(&notif)? + "\n";
         self.handle.writer_tx.send(msg).await?;
 

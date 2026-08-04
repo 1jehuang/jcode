@@ -504,6 +504,50 @@ impl GeminiProvider {
             .context("Failed to parse Gemini operation response")
     }
 
+    /// Recover from a tool-schema rejection by learning what
+    /// `generateContent` refused and re-sending the turn without it.
+    ///
+    /// jcode advertises every tool on every request, so one construct the
+    /// endpoint dislikes 400s the whole session rather than one tool. The
+    /// historical fix was to append the keyword to a deny-list and ship a
+    /// release (#754, #655); this recovers in the same turn instead, and
+    /// `jcode-schema-dialect` remembers it so later requests never send it.
+    ///
+    /// Returns `None` when the error is not a recoverable schema rejection,
+    /// so the caller falls through to its normal error handling. The quirk
+    /// store reports a construct as newly-learned only once, which is what
+    /// bounds this to a single retry per distinct construct.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors generate_content so the retry re-sends an identical turn"
+    )]
+    async fn retry_after_schema_rejection(
+        &self,
+        error: &str,
+        state: &GeminiRuntimeState,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Option<Result<CodeAssistGenerateResponse>> {
+        let dialect = &jcode_schema_dialect::registry::GEMINI;
+        match jcode_schema_dialect::recover_from_error(error, dialect) {
+            jcode_schema_dialect::RecoveryAction::NotSchemaRelated => None,
+            jcode_schema_dialect::RecoveryAction::Unrecoverable { hint } => {
+                jcode_base::logging::warn(&format!("Gemini tool-schema rejection: {hint}"));
+                None
+            }
+            jcode_schema_dialect::RecoveryAction::RetryWithoutConstruct { description } => {
+                jcode_base::logging::warn(&format!("Gemini {description}"));
+                Some(
+                    self.generate_content(state, model, messages, tools, system, resume_session_id)
+                        .await,
+                )
+            }
+        }
+    }
+
     async fn generate_content(
         &self,
         state: &GeminiRuntimeState,
@@ -727,8 +771,33 @@ impl Provider for GeminiProvider {
                     }
                 }
                 Err(err) => {
-                    let _ = tx.send(Err(err)).await;
-                    return;
+                    // A tool schema `generateContent` rejects 400s every turn,
+                    // so the provider is unusable until jcode ships a new
+                    // keyword. Learn the rejected construct from the error,
+                    // persist it, and retry this turn without it. See
+                    // `jcode-schema-dialect`.
+                    match provider
+                        .retry_after_schema_rejection(
+                            &err.to_string(),
+                            &state,
+                            &model,
+                            &messages,
+                            &tools,
+                            &system,
+                            resume_session_id.as_deref(),
+                        )
+                        .await
+                    {
+                        Some(Ok(response)) => response,
+                        Some(Err(retry_err)) => {
+                            let _ = tx.send(Err(retry_err)).await;
+                            return;
+                        }
+                        None => {
+                            let _ = tx.send(Err(err)).await;
+                            return;
+                        }
+                    }
                 }
             };
 

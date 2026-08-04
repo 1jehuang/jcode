@@ -353,6 +353,15 @@ async fn fetch_usage_for_account(
     fetch_anthropic_usage_data(access_token, cache_key).await
 }
 
+/// Fetch the current Anthropic OAuth usage for an already-resolved access
+/// token. This is used on the request path when model-scoped quota affects
+/// routing. Unlike [`get`], it waits for the first fetch instead of returning
+/// an empty snapshot while a background refresh starts.
+pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageData> {
+    let cache_key = anthropic_usage_cache_key(access_token, None);
+    fetch_anthropic_usage_data(access_token.to_string(), cache_key).await
+}
+
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)
 pub fn get_sync() -> UsageData {
     // Try to get cached data

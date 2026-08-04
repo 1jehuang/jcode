@@ -26,7 +26,30 @@ echo "packed $tarball"
 echo "== installing into a fresh consumer =="
 cd "$work"
 npm init -y --silent >/dev/null
-npm install "$tarball" --no-audit --no-fund --silent
+runtime_tarball=""
+if command -v jcode >/dev/null 2>&1 && [ "$(uname -s)" = Linux ]; then
+  case "$(uname -m)" in
+    x86_64) runtime_package=linux-x64 ;;
+    aarch64) runtime_package=linux-arm64 ;;
+    *) runtime_package="" ;;
+  esac
+  if [ -n "$runtime_package" ]; then
+    runtime_stage="$work/runtime-stage"
+    mkdir -p "$runtime_stage/bin"
+    cp "$repo_root/sdk/npm/$runtime_package/package.json" "$runtime_stage/"
+    cp "$repo_root/sdk/npm/$runtime_package/README.md" "$runtime_stage/"
+    cp "$(command -v jcode)" "$runtime_stage/bin/jcode"
+    chmod +x "$runtime_stage/bin/jcode"
+    runtime_tarball="$(cd "$runtime_stage" && npm pack --silent)"
+    runtime_tarball="$runtime_stage/$runtime_tarball"
+  fi
+fi
+
+if [ -n "$runtime_tarball" ]; then
+  npm install "$runtime_tarball" "$tarball" --no-audit --no-fund --silent
+else
+  npm install "$tarball" --no-audit --no-fund --silent
+fi
 
 echo "== ESM import =="
 node --input-type=module -e '
@@ -36,6 +59,18 @@ if (typeof HarnessError !== "function") throw new Error("HarnessError missing");
 if (API_VERSION_MAJOR !== 1) throw new Error("unexpected protocol version");
 console.log("esm ok");
 '
+
+if [ -n "$runtime_tarball" ]; then
+  echo "== bundled runtime resolution =="
+  node --input-type=module -e '
+  import { bundledJcodeBinary } from "@1jehuang/jcode-sdk";
+  const binary = bundledJcodeBinary();
+  if (!binary || !binary.includes("@1jehuang/jcode-linux-")) {
+    throw new Error(`platform runtime was not resolved: ${binary}`);
+  }
+  console.log(`runtime ok: ${binary}`);
+  '
+fi
 
 echo "== CJS require =="
 node --input-type=commonjs -e '
@@ -123,7 +158,7 @@ if command -v jcode >/dev/null 2>&1; then
 import { JcodeClient } from "@1jehuang/jcode-sdk";
 import fs from "node:fs";
 
-// No `binary` option: resolve `jcode` from PATH, exactly like a consumer.
+// No `binary` option: use the platform npm package, exactly like a consumer.
 const client = await JcodeClient.launch({ workingDir: process.cwd() });
 const home = client.instanceHome;
 

@@ -24,6 +24,25 @@ impl JsonRpcRequest {
     }
 }
 
+/// JSON-RPC notification (a request without an `id`).
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: &'static str,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
+impl JsonRpcNotification {
+    pub fn new(method: impl Into<String>, params: Option<Value>) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            method: method.into(),
+            params,
+        }
+    }
+}
+
 /// JSON-RPC response
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcResponse {

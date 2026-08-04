@@ -5,6 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { inheritCredentials, userJcodeHome } from "../dist/index.js";
 
+test("platform runtime packages map to npm platform conventions", async () => {
+  const { platformBinaryPackage } = await import("../dist/index.js");
+  assert.equal(platformBinaryPackage("linux", "x64"), "@1jehuang/jcode-linux-x64");
+  assert.equal(platformBinaryPackage("darwin", "arm64"), "@1jehuang/jcode-darwin-arm64");
+  assert.equal(platformBinaryPackage("win32", "x64"), "@1jehuang/jcode-win32-x64");
+  assert.equal(platformBinaryPackage("freebsd", "x64"), undefined);
+});
+
 /**
  * Cleanup must never follow a symlink out of the instance home.
  *

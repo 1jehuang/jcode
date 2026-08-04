@@ -61,6 +61,7 @@ jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-ambient-types = { path = "../jcode-ambient-types" }
 jcode-notify-email = { path = "../jcode-notify-email" }
 jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 # NOTE: jcode-app-core does NOT depend on any jcode-tui-* crate. They were
 # unused dead dependency edges here (the TUI declares them itself). Removing
 # them stops a jcode-tui-* edit from cascading a recompile through app-core.
