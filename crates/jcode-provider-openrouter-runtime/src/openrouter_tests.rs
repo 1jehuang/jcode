@@ -806,7 +806,7 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
 }
 
 #[test]
-fn comtegra_profile_uses_endpoint_default_max_tokens() {
+fn profiles_use_endpoint_default_max_tokens() {
     let _lock = ENV_LOCK.lock();
     let _override = EnvVarGuard::remove("JCODE_OPENROUTER_MAX_TOKENS");
 
@@ -816,6 +816,10 @@ fn comtegra_profile_uses_endpoint_default_max_tokens() {
     );
     assert_eq!(
         OpenRouterProvider::configured_max_tokens(Some("deepseek")),
+        None
+    );
+    assert_eq!(
+        OpenRouterProvider::configured_max_tokens(Some("celeris")),
         None
     );
 }

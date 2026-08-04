@@ -1082,7 +1082,7 @@ impl OpenRouterProvider {
         }
     }
 
-    fn configured_max_tokens(profile_id: Option<&str>) -> Option<u32> {
+    fn configured_max_tokens(_profile_id: Option<&str>) -> Option<u32> {
         if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MAX_TOKENS") {
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
@@ -1096,14 +1096,6 @@ impl OpenRouterProvider {
                     raw
                 )),
             }
-        }
-
-        // Celeris rejects `max_tokens` values that are not a positive multiple
-        // of 256, and requires prompt + max_tokens <= 8,192. Its own default
-        // (2,048) leaves only ~6K of prompt room, so ask for a smaller
-        // completion budget to keep more of the context window usable.
-        if profile_id.is_some_and(|id| id.eq_ignore_ascii_case("celeris")) {
-            return Some(1_024);
         }
 
         None
