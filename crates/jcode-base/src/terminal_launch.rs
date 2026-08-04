@@ -1,8 +1,8 @@
 use anyhow::Result;
 pub use jcode_terminal_launch::{
-    SpawnAttempt, TerminalCommand, build_hook_spawn_command, detected_resume_terminal, expand_home,
-    parse_hook_command, resume_terminal_candidates, sh_escape, shell_command,
-    snapshot_client_terminal_env, spawn_command_in_new_terminal_with,
+    SpawnAttempt, TerminalCommand, apply_client_terminal_env, build_hook_spawn_command,
+    detected_resume_terminal, expand_home, parse_hook_command, resume_terminal_candidates,
+    sh_escape, shell_command, snapshot_client_terminal_env, spawn_command_in_new_terminal_with,
 };
 use std::path::Path;
 
