@@ -2272,6 +2272,33 @@ fn render_tool_message_shows_selected_discovery_setup() {
 }
 
 #[test]
+fn render_tool_message_marks_off_catalog_selection_without_fake_details() {
+    let msg = discovery_message(
+        "Selected off-catalog product 'firecrawl' for 'web-data'.\n\nSelection recorded as demand data. Jcode does not list or partner with this product, so no provider information, recommendation, or setup instructions are provided.",
+        serde_json::json!({
+            "action": "select",
+            "category": "web-data",
+            "tool": "firecrawl",
+            "query": "crawl a documentation site and extract structured markdown",
+            "reason": "the user explicitly requested Firecrawl instead of the catalog listing"
+        }),
+    );
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("selected off-catalog firecrawl"), "{plain}");
+    assert!(
+        plain.contains("why: the user explicitly requested"),
+        "{plain}"
+    );
+    assert!(!plain.contains("details:"), "{plain}");
+    assert!(!plain.contains("setup:"), "{plain}");
+}
+
+#[test]
 fn render_tool_message_shows_catalog_suggestion_receipt_and_trust_line() {
     let msg = discovery_message(
         "Catalog suggestion submitted.\n\nSuggestion ID: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\nCategory: payments\nKind: known_product\nCapability: manage Stripe sandbox products\nCatalog gap: no matching catalog entry\nProduct: Stripe sandbox MCP\nPublic URL: https://example.com/stripe-mcp\n\nStatus: received for Jcode maintainer review. Suggestions are not sent to partners. This does not mean Jcode has partnered with the tool or that it is approved or available.",
