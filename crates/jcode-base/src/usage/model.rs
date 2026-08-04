@@ -69,6 +69,22 @@ pub struct UsageData {
 }
 
 impl UsageData {
+    /// Whether Anthropic reports an exhausted model-scoped weekly window for
+    /// `model`. The API currently uses display names such as `Fable`, while
+    /// callers use catalog ids such as `claude-fable-5`, so compare normalized
+    /// model families rather than requiring the strings to be identical.
+    pub fn model_scoped_exhausted(&self, model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        self.model_scoped.iter().any(|window| {
+            let scope = window.model_name.to_ascii_lowercase();
+            window.utilization >= 0.99
+                && ((model.contains("fable") && scope.contains("fable"))
+                    || (model.contains("opus") && scope.contains("opus"))
+                    || (model.contains("sonnet") && scope.contains("sonnet"))
+                    || (model.contains("haiku") && scope.contains("haiku")))
+        })
+    }
+
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
         if usage_reset_passed([
