@@ -191,12 +191,11 @@ fn provider_request_builders_that_reach_the_dialect_engine_are_pinned() {
         ("../jcode-provider-antigravity/src/lib.rs", true),
         ("../jcode-provider-openrouter/src/request.rs", true),
         ("../jcode-provider-anthropic/src/lib.rs", true),
-        // The last holdout, deliberately. OpenAI's path is not just a
-        // sanitizer: it also decides strict eligibility (#711, #713) and runs a
-        // separate strict normalization, neither of which has a dialect
-        // equivalent. Its wire output is pinned by the test above, so this is
-        // duplication to remove once the engine can express strict mode, not a
-        // live defect.
+        // OpenAI's keyword subset now comes from the engine too. Strict
+        // eligibility and strict normalization stay in jcode-provider-core
+        // because they are OpenAI-specific and have no dialect equivalent, so
+        // the engine call lives there rather than in this request builder.
+        ("../jcode-provider-core/src/openai_schema.rs", true),
         ("../jcode-provider-openai/src/request.rs", false),
     ];
 
@@ -286,4 +285,77 @@ fn anthropic_sends_a_schema_without_a_top_level_combiner() {
     .expect("serialize");
     assert_eq!(bare_wire[0]["input_schema"]["type"], "object");
     assert_eq!(bare_wire[0]["input_schema"]["properties"], serde_json::json!({}));
+}
+
+/// The property the whole system exists for: a keyword nobody has ever seen
+/// cannot reach any provider.
+///
+/// Every issue in this class began this way. Some MCP server emitted a construct
+/// that was not on the relevant deny-list, it was forwarded verbatim, and the
+/// provider 400d the entire tool catalog. A deny-list can only ever contain what
+/// has already broken for somebody, so this test is the difference between the
+/// fix and the system: it uses an invented keyword that appears in no list, no
+/// issue, and no provider documentation.
+#[test]
+fn a_keyword_no_deny_list_has_ever_heard_of_reaches_no_provider() {
+    let novel = vec![ToolDefinition {
+        name: "mcp__future__probe".to_string(),
+        description: "probe".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "string",
+                    "description": "keep me",
+                    "someKeywordFromADraftThatDoesNotExistYet": { "nested": true }
+                }
+            },
+            "required": ["x"]
+        }),
+    }];
+    const NOVEL: &str = "someKeywordFromADraftThatDoesNotExistYet";
+
+    let gemini = serde_json::to_value(
+        jcode_provider_gemini::build_tools(&novel).expect("gemini tools"),
+    )
+    .expect("serialize");
+    assert!(!contains_key(&gemini, NOVEL), "gemini forwarded it: {gemini}");
+
+    let openai = serde_json::to_value(jcode_provider_openai::request::build_tools(&novel))
+        .expect("serialize");
+    assert!(!contains_key(&openai, NOVEL), "openai forwarded it: {openai}");
+
+    let anthropic =
+        serde_json::to_value(jcode_provider_anthropic::format_tools(&novel, false, false))
+            .expect("serialize");
+    assert!(
+        !contains_key(&anthropic, NOVEL),
+        "anthropic forwarded it: {anthropic}"
+    );
+
+    let openrouter = jcode_provider_openrouter::request::sanitize_tool_parameters_schema(
+        &novel[0].input_schema,
+    );
+    assert!(
+        !contains_key(&openrouter, NOVEL),
+        "openrouter forwarded it: {openrouter}"
+    );
+
+    for model in ["gemini-3-flash", "claude-sonnet-4-5", "gpt-oss-120b"] {
+        let antigravity = jcode_provider_antigravity::antigravity_compatible_schema(
+            &novel[0].input_schema,
+            model,
+        );
+        assert!(
+            !contains_key(&antigravity, NOVEL),
+            "antigravity/{model} forwarded it: {antigravity}"
+        );
+    }
+
+    // Dropping the unknown keyword must not cost the tool its meaning.
+    assert_eq!(
+        gemini[0]["functionDeclarations"][0]["parameters"]["properties"]["x"]["description"],
+        "keep me"
+    );
+    assert_eq!(openai[0]["parameters"]["properties"]["x"]["type"], "string");
 }

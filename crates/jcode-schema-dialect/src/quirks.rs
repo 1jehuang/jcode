@@ -33,6 +33,20 @@ fn store_path() -> Option<PathBuf> {
     if let Some(override_path) = test_override() {
         return Some(override_path);
     }
+    // A test that forgot to isolate itself must not read or write the real
+    // store. This is not hypothetical: an earlier version of the test hook used
+    // a process-global env var, and because tests run in parallel one of them
+    // observed it unset and persisted a learned `minItems` rejection into the
+    // developer's real `~/.jcode/schema-quirks.json`, silently stripping that
+    // keyword from every OpenAI request on that machine afterwards. Failing
+    // closed here makes the whole class impossible rather than relying on every
+    // future test remembering to isolate.
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        None
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
     if let Ok(explicit) = std::env::var("JCODE_SCHEMA_QUIRKS_PATH") {
         return Some(PathBuf::from(explicit));
     }
@@ -42,6 +56,7 @@ fn store_path() -> Option<PathBuf> {
         dirs::home_dir()?.join(".jcode")
     };
     Some(home.join("schema-quirks.json"))
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
