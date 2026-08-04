@@ -493,19 +493,22 @@ impl AcpRuntime {
     async fn attach_existing_session(
         &self,
         target_session_id: String,
-        _cwd: PathBuf,
+        cwd: PathBuf,
         replay_history: bool,
     ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
         let session = DaemonSession::new(String::new(), reader, writer, 2);
         let resume_id = 1;
         session
-            .send(&Request::ResumeSession {
+            .send(&Request::Subscribe {
                 id: resume_id,
-                session_id: target_session_id.clone(),
+                working_dir: Some(cwd.display().to_string()),
+                selfdev: None,
+                target_session_id: Some(target_session_id.clone()),
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
                 allow_session_takeover: false,
+                terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })
             .await?;
 
