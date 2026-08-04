@@ -119,7 +119,10 @@ fn openai_sends_a_clean_schema_and_does_not_overclaim_strict() {
     let built = jcode_provider_openai::request::build_tools(&hostile_tool());
     let wire = serde_json::to_value(&built).expect("serialize");
 
-    assert!(!contains_key(&wire, "propertyNames"), "openai kept propertyNames: {wire}");
+    assert!(
+        !contains_key(&wire, "propertyNames"),
+        "openai kept propertyNames: {wire}"
+    );
     let parameters = &wire[0]["parameters"];
     assert!(
         parameters["properties"]["ids"].get("uniqueItems").is_none(),
@@ -279,12 +282,14 @@ fn anthropic_sends_a_schema_without_a_top_level_combiner() {
         description: "probe".to_string(),
         input_schema: serde_json::json!({}),
     }];
-    let bare_wire = serde_json::to_value(jcode_provider_anthropic::format_tools(
-        &bare, false, false,
-    ))
-    .expect("serialize");
+    let bare_wire =
+        serde_json::to_value(jcode_provider_anthropic::format_tools(&bare, false, false))
+            .expect("serialize");
     assert_eq!(bare_wire[0]["input_schema"]["type"], "object");
-    assert_eq!(bare_wire[0]["input_schema"]["properties"], serde_json::json!({}));
+    assert_eq!(
+        bare_wire[0]["input_schema"]["properties"],
+        serde_json::json!({})
+    );
 }
 
 /// The property the whole system exists for: a keyword nobody has ever seen
@@ -315,15 +320,20 @@ fn a_keyword_no_deny_list_has_ever_heard_of_reaches_no_provider() {
     }];
     const NOVEL: &str = "someKeywordFromADraftThatDoesNotExistYet";
 
-    let gemini = serde_json::to_value(
-        jcode_provider_gemini::build_tools(&novel).expect("gemini tools"),
-    )
-    .expect("serialize");
-    assert!(!contains_key(&gemini, NOVEL), "gemini forwarded it: {gemini}");
+    let gemini =
+        serde_json::to_value(jcode_provider_gemini::build_tools(&novel).expect("gemini tools"))
+            .expect("serialize");
+    assert!(
+        !contains_key(&gemini, NOVEL),
+        "gemini forwarded it: {gemini}"
+    );
 
     let openai = serde_json::to_value(jcode_provider_openai::request::build_tools(&novel))
         .expect("serialize");
-    assert!(!contains_key(&openai, NOVEL), "openai forwarded it: {openai}");
+    assert!(
+        !contains_key(&openai, NOVEL),
+        "openai forwarded it: {openai}"
+    );
 
     let anthropic =
         serde_json::to_value(jcode_provider_anthropic::format_tools(&novel, false, false))
@@ -333,9 +343,8 @@ fn a_keyword_no_deny_list_has_ever_heard_of_reaches_no_provider() {
         "anthropic forwarded it: {anthropic}"
     );
 
-    let openrouter = jcode_provider_openrouter::request::sanitize_tool_parameters_schema(
-        &novel[0].input_schema,
-    );
+    let openrouter =
+        jcode_provider_openrouter::request::sanitize_tool_parameters_schema(&novel[0].input_schema);
     assert!(
         !contains_key(&openrouter, NOVEL),
         "openrouter forwarded it: {openrouter}"

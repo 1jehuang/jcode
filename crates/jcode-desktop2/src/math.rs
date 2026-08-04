@@ -85,6 +85,22 @@ impl MathSystem {
         }
     }
 
+    /// Typeset math that participates in a prose line. Unlike display math it
+    /// keeps operator limits beside operators and stays at the body font size.
+    pub fn typeset_inline(&self, source: &str, font_size: f64) -> Formula {
+        let boxed = MathLayoutEngine::stix().layout_inline(source, font_size);
+        let width = boxed.width;
+        let height = boxed.ascent + boxed.descent;
+        Formula {
+            lines: vec![PlacedLine {
+                baseline: boxed.ascent,
+                boxed,
+            }],
+            width,
+            height,
+        }
+    }
+
     /// Draw a typeset formula with its top-left corner at `origin`, in logical
     /// units.
     ///

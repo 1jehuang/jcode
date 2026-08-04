@@ -1,10 +1,28 @@
-//! App-side clock and coordinate bridge for the horizontal workspace.
+//! App-side clock and coordinate bridge for the niri-style workspace.
 
 use crate::{App, workspace};
 
 impl App {
+    /// Start a horizontal camera slide toward the session the strip just
+    /// focused.
     pub(crate) fn begin_workspace_transition(&mut self, direction: workspace::Direction) {
         self.model.workspace.begin(direction);
+        self.workspace_frame = Some(std::time::Instant::now());
+        self.request_redraw();
+    }
+
+    /// Start a vertical row slide. `prev_row` and `prev_focused` describe the
+    /// group being left, captured *before* the strip moved, so the departing
+    /// workspace exits exactly as it stood.
+    pub(crate) fn begin_row_transition(
+        &mut self,
+        direction: workspace::Direction,
+        prev_row: Vec<String>,
+        prev_focused: usize,
+    ) {
+        self.model
+            .workspace
+            .begin_row_change(direction, prev_row, prev_focused);
         self.workspace_frame = Some(std::time::Instant::now());
         self.request_redraw();
     }
@@ -27,20 +45,29 @@ impl App {
         }
     }
 
-    /// Size used to lay out the focused model. The GPU surface stays full-window;
-    /// only the child scene uses this narrower native-scale page.
+    /// Size used to lay out the focused model. The GPU surface stays
+    /// full-window; only the child scene uses this narrower native-scale page.
     pub(crate) fn workspace_render_size(&self, viewport: (u32, u32)) -> (u32, u32) {
         if !self.workspace_active() {
             return viewport;
         }
+        let row_len = self
+            .model
+            .strip
+            .focused_group()
+            .map(|group| group.entries.len())
+            .unwrap_or(1);
+        let scale = self.effective_scale();
+        let inset = (workspace::VERTICAL_INSET * scale * 2.0).round() as u32;
         (
-            workspace::column_width(viewport.0, self.model.strip.len()),
-            viewport.1,
+            workspace::column_width(viewport.0, row_len),
+            viewport.1.saturating_sub(inset).max(1),
         )
     }
 
-    /// Convert the window-space pointer to focused-column coordinates. Inactive
-    /// columns therefore never reach any of the existing hit-testing paths.
+    /// Convert the window-space pointer to focused-column coordinates.
+    /// Inactive columns therefore never reach any of the existing hit-testing
+    /// paths.
     pub(crate) fn focused_pointer(&self) -> (f64, f64) {
         let Some(state) = self.state.as_ref() else {
             // Unit tests construct the app without a surface and set pointer
@@ -52,33 +79,55 @@ impl App {
         }
         let size = state.size();
         let scale = self.effective_scale();
-        let entries = self.model.strip.entries();
-        let focused_index = entries
-            .iter()
-            .position(|entry| Some(entry.session_id.as_str()) == self.model.session_id.as_deref())
-            .or_else(|| {
-                let focused = self.model.strip.focused_session()?;
-                entries.iter().position(|entry| entry.session_id == focused)
-            })
-            .unwrap_or(0);
-        let width = workspace::column_width(size.0, entries.len());
-        let origin = self
-            .model
-            .workspace
-            .layout(
-                entries.len(),
-                focused_index,
-                f64::from(size.0),
-                f64::from(width),
-                workspace::GAP * scale,
+        let origin = workspace::placement(
+            &self.model.strip,
+            &self.model.workspace,
+            self.model.session_id.as_deref(),
+            (f64::from(size.0), f64::from(size.1)),
+            workspace::GAP * scale,
+        )
+        .into_iter()
+        .find(|column| column.focused)
+        .map_or((0.0, 0.0), |column| {
+            (
+                column.x / scale,
+                (column.y + workspace::VERTICAL_INSET * scale) / scale,
             )
-            .into_iter()
-            .find(|column| column.focused)
-            .map_or(0.0, |column| column.x / scale);
-        (self.pointer.0 - origin, self.pointer.1)
+        });
+        (self.pointer.0 - origin.0, self.pointer.1 - origin.1)
     }
 
-    fn workspace_active(&self) -> bool {
-        self.model.strip.len() > 1 && !self.model.overview.is_visible()
+    /// The focused group's session ids and focused position, for capturing a
+    /// row about to be left by a vertical slide.
+    pub(crate) fn focused_row_snapshot(&self) -> (Vec<String>, usize) {
+        let ids = self
+            .model
+            .strip
+            .focused_group()
+            .map(|group| {
+                group
+                    .entries
+                    .iter()
+                    .map(|entry| entry.session_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (ids, self.model.strip.index())
+    }
+
+    /// Whether the workspace chrome (gutters, page rings, camera) is in play:
+    /// the focused row has neighbors, or a slide is still running.
+    pub(crate) fn workspace_active(&self) -> bool {
+        if self.model.overview.is_visible() {
+            return false;
+        }
+        if self.model.workspace.is_animating() {
+            return true;
+        }
+        self.model
+            .strip
+            .focused_group()
+            .map(|group| group.entries.len() > 1)
+            .unwrap_or(false)
     }
 }

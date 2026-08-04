@@ -3,8 +3,8 @@ use crate::auth::{AuthState, AuthStatus, ProviderAuth};
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::ModelRoute;
 use crate::provider::{EventStream, Provider};
-use crate::tool::Registry;
 use crate::todo::ConfidenceState;
+use crate::tool::Registry;
 use async_trait::async_trait;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -281,8 +281,20 @@ fn test_todo(
 #[test]
 fn run_auto_poke_followup_targets_below_threshold_todos() {
     let todos = vec![
-        test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible)),
-        test_todo("b", "completed", "low", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible)),
+        test_todo(
+            "a",
+            "completed",
+            "high",
+            Some(ConfidenceState::Plausible),
+            Some(ConfidenceState::Plausible),
+        ),
+        test_todo(
+            "b",
+            "completed",
+            "low",
+            Some(ConfidenceState::Plausible),
+            Some(ConfidenceState::Plausible),
+        ),
     ];
 
     let followup = build_run_auto_poke_follow_up_from_todos(&todos, false, None);
@@ -305,7 +317,13 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
 
 #[test]
 fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
-    let mut todo = test_todo("a", "completed", "high", Some(ConfidenceState::Speculative), Some(ConfidenceState::Verified));
+    let mut todo = test_todo(
+        "a",
+        "completed",
+        "high",
+        Some(ConfidenceState::Speculative),
+        Some(ConfidenceState::Verified),
+    );
     todo.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
 
     let todos = [todo];
@@ -332,7 +350,13 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
     // summary anyway; now we spend no tokens and end the run.
     let todos = vec![
         {
-            let mut todo = test_todo("a", "completed", "high", Some(ConfidenceState::Verified), Some(ConfidenceState::Verified));
+            let mut todo = test_todo(
+                "a",
+                "completed",
+                "high",
+                Some(ConfidenceState::Verified),
+                Some(ConfidenceState::Verified),
+            );
             todo.confidence_history = vec![
                 ConfidenceState::Plausible,
                 ConfidenceState::Plausible,
@@ -341,7 +365,13 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
             ];
             todo
         },
-        test_todo("b", "completed", "low", Some(ConfidenceState::Validated), Some(ConfidenceState::Validated)),
+        test_todo(
+            "b",
+            "completed",
+            "low",
+            Some(ConfidenceState::Validated),
+            Some(ConfidenceState::Validated),
+        ),
     ];
     assert!(build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none());
 }
@@ -349,8 +379,20 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
 #[test]
 fn run_auto_poke_followup_prioritizes_incomplete_todos() {
     let todos = vec![
-        test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible)),
-        test_todo("b", "in_progress", "medium", Some(ConfidenceState::Plausible), None),
+        test_todo(
+            "a",
+            "completed",
+            "high",
+            Some(ConfidenceState::Plausible),
+            Some(ConfidenceState::Plausible),
+        ),
+        test_todo(
+            "b",
+            "in_progress",
+            "medium",
+            Some(ConfidenceState::Plausible),
+            None,
+        ),
     ];
 
     let followup = build_run_auto_poke_follow_up_from_todos(&todos, false, None);
@@ -371,7 +413,13 @@ fn run_auto_poke_followup_prioritizes_incomplete_todos() {
 /// the deferred quality review must reach that path too, not only the TUI.
 #[test]
 fn run_auto_poke_delivers_the_deferred_gate_digest_before_confidence() {
-    let todos = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible))];
+    let todos = vec![test_todo(
+        "a",
+        "completed",
+        "high",
+        Some(ConfidenceState::Plausible),
+        Some(ConfidenceState::Plausible),
+    )];
     // Without a digest, the confidence gate is what fires.
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(&todos, false, None),
@@ -395,7 +443,13 @@ fn run_auto_poke_delivers_the_deferred_gate_digest_before_confidence() {
 /// turn to actually end rather than interrupting mid-flight.
 #[test]
 fn run_auto_poke_prefers_incomplete_todos_over_the_gate_digest() {
-    let todos = vec![test_todo("a", "in_progress", "high", Some(ConfidenceState::Plausible), None)];
+    let todos = vec![test_todo(
+        "a",
+        "in_progress",
+        "high",
+        Some(ConfidenceState::Plausible),
+        None,
+    )];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(
             &todos,
@@ -428,7 +482,13 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     )
     .expect("append");
 
-    let open = vec![test_todo("a", "in_progress", "high", Some(ConfidenceState::Plausible), None)];
+    let open = vec![test_todo(
+        "a",
+        "in_progress",
+        "high",
+        Some(ConfidenceState::Plausible),
+        None,
+    )];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(
             &open,
@@ -445,7 +505,13 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     );
 
     // Once the work closes, the reminder is still there to deliver.
-    let done = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Verified))];
+    let done = vec![test_todo(
+        "a",
+        "completed",
+        "high",
+        Some(ConfidenceState::Plausible),
+        Some(ConfidenceState::Verified),
+    )];
     match build_run_auto_poke_follow_up_from_todos(
         &done,
         false,
@@ -511,7 +577,13 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
 
 #[test]
 fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
-    let needs_validation = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible))];
+    let needs_validation = vec![test_todo(
+        "a",
+        "completed",
+        "high",
+        Some(ConfidenceState::Plausible),
+        Some(ConfidenceState::Plausible),
+    )];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(&needs_validation, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
@@ -521,7 +593,13 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
     ));
 
-    let validated = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Verified))];
+    let validated = vec![test_todo(
+        "a",
+        "completed",
+        "high",
+        Some(ConfidenceState::Plausible),
+        Some(ConfidenceState::Verified),
+    )];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(&validated, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary {

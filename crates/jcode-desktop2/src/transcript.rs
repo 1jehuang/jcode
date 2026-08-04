@@ -857,6 +857,9 @@ pub struct LaidBlock {
     /// Native OpenType-MATH layout for a display equation. When present the
     /// scene draws this instead of the terminal-oriented Unicode fallback.
     pub math: Option<crate::math::Formula>,
+    /// Native formulas embedded in this block's Parley inline boxes. The box id
+    /// is the index into this vector, so layout and drawing share exact geometry.
+    pub inline_math: Vec<crate::math::Formula>,
     /// The block's flattened plain text, the same string the layout was built
     /// from. Kept so a pointer selection can slice it for the clipboard
     /// without re-parsing the markdown or reading back from the GPU.
@@ -1152,6 +1155,11 @@ pub fn lay_out_message_reusing(
             source = latex.to_owned();
             crate::math::shared().typeset(latex, f64::from(base.font_size))
         });
+        let inline_math: Vec<_> = spans
+            .iter()
+            .filter_map(|span| span.latex.as_deref())
+            .map(|latex| crate::math::shared().typeset_inline(latex, f64::from(base.font_size)))
+            .collect();
         // An edit card's code block is a diff, so each of its lines takes the
         // ink of the side it is on. Applied here, over the flattened block,
         // because "which side" is a property of the whole line and markdown has
@@ -1237,6 +1245,7 @@ pub fn lay_out_message_reusing(
             style,
             Palette { theme, tint },
             scale,
+            &inline_math,
         );
         fresh += 1;
         let mut height = if let Some(formula) = math.as_ref() {
@@ -1265,11 +1274,18 @@ pub fn lay_out_message_reusing(
         };
         blocks.push(LaidBlock {
             glyphs: math.as_ref().map_or_else(
-                || crate::text::glyph_count(&layout),
+                || {
+                    crate::text::glyph_count(&layout)
+                        + inline_math
+                            .iter()
+                            .map(crate::math::Formula::glyphs)
+                            .sum::<usize>()
+                },
                 |formula| formula.glyphs(),
             ),
             layout,
             math,
+            inline_math,
             source,
             top,
             height,
@@ -1342,6 +1358,7 @@ fn diff_spans(source: &str, language: Option<&str>, theme: &Theme) -> Vec<SpanSt
         underline: false,
         strikethrough: false,
         color: Some(color),
+        latex: None,
     };
     for line in source.split_inclusive('\n') {
         let start = at;
@@ -1471,6 +1488,7 @@ fn count_spans(source: &str, theme: &Theme, mut spans: Vec<SpanStyle>) -> Vec<Sp
             underline: false,
             strikethrough: false,
             color: Some(ink),
+            latex: None,
         });
         tail = at;
     }
@@ -1500,6 +1518,7 @@ fn code_spans(source: &str, language: &str, theme: &Theme) -> Vec<SpanStyle> {
                 underline: false,
                 strikethrough: false,
                 color: Some(color),
+                latex: None,
             });
         }
     }
@@ -2132,6 +2151,9 @@ pub struct SpanStyle {
     /// tint. Only diff lines use it: an added line is green and a removed one
     /// red regardless of the role the markdown gave the text.
     pub color: Option<Color>,
+    /// Original TeX for native inline layout. The flattened source contains one
+    /// object-replacement character at this range rather than Unicode math.
+    pub latex: Option<String>,
 }
 
 /// Flatten styled lines into one string plus byte-ranged styling. Parley wants
@@ -2146,7 +2168,11 @@ pub fn flatten(lines: &[StyledLine]) -> (String, Vec<SpanStyle>) {
         }
         for span in &line.spans {
             let start = source.len();
-            source.push_str(&span.text);
+            if span.latex.is_some() {
+                source.push('\u{fffc}');
+            } else {
+                source.push_str(&span.text);
+            }
             spans.push(SpanStyle {
                 range: start..source.len(),
                 role: span.role,
@@ -2156,6 +2182,7 @@ pub fn flatten(lines: &[StyledLine]) -> (String, Vec<SpanStyle>) {
                 underline: span.attrs.underline || role_is_underlined(span.role),
                 strikethrough: span.attrs.strikethrough,
                 color: None,
+                latex: span.latex.clone(),
             });
         }
     }
@@ -2194,8 +2221,10 @@ pub fn layout_rich(
     style: ParagraphStyle,
     palette: Palette<'_>,
     scale: f64,
+    inline_math: &[crate::math::Formula],
 ) -> Layout<Brush> {
     text.layout_rich(source, width as f32, style, scale, &mut |builder| {
+        let mut math_id = 0usize;
         for span in spans {
             if span.range.is_empty() {
                 continue;
@@ -2222,6 +2251,20 @@ pub fn layout_rich(
             }
             if span.strikethrough {
                 builder.push(StyleProperty::Strikethrough(true), span.range.clone());
+            }
+            if span.latex.is_some() {
+                let id = math_id;
+                math_id += 1;
+                if let Some(formula) = inline_math.get(id) {
+                    builder.push(StyleProperty::FontSize(0.0), span.range.clone());
+                    builder.push_inline_box(parley::InlineBox {
+                        id: id as u64,
+                        kind: parley::InlineBoxKind::InFlow,
+                        index: span.range.start,
+                        width: (formula.width * scale) as f32,
+                        height: (formula.height * scale) as f32,
+                    });
+                }
             }
         }
     })
@@ -3101,6 +3144,15 @@ mod tests {
             "inline latex was not rendered to math: {text:?}"
         );
         assert!(!text.contains("x^2"), "raw latex source survived: {text:?}");
+
+        let laid = laid("the value $x^2$ grows");
+        assert_eq!(laid.blocks[0].inline_math.len(), 1);
+        assert!(
+            laid.blocks[0].source.contains('\u{fffc}'),
+            "native inline math did not replace the Unicode fallback: {:?}",
+            laid.blocks[0].source
+        );
+        assert!(!laid.blocks[0].source.contains('²'));
     }
 
     #[test]

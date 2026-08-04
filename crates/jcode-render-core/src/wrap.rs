@@ -152,12 +152,14 @@ fn push_token(cur: &mut Vec<StyledSpan>, src: &StyledSpan, text: &str) {
         && last.role == src.role
         && last.fill == src.fill
         && last.attrs == src.attrs
+        && last.latex == src.latex
     {
         last.text.push_str(text);
         return;
     }
     cur.push(StyledSpan {
         text: text.to_string(),
+        latex: src.latex.clone(),
         role: src.role,
         fill: src.fill,
         attrs: src.attrs,

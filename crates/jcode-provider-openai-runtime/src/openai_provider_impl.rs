@@ -608,6 +608,27 @@ impl Provider for OpenAIProvider {
                                     ("elapsed_ms", elapsed_ms.to_string()),
                                 ],
                             );
+                            // A tool schema OpenAI rejects fails every turn, not
+                            // just this one, and one bad construct invalidates
+                            // the whole catalog (#446, #543, #687, #711, #713).
+                            // Learn what it refused so the user's next request
+                            // omits it, instead of every request failing until
+                            // a release adds the keyword to a list. Learning,
+                            // not retrying: this loop owns its own retry and
+                            // backoff, and a second retry inside it would double
+                            // attempts against a possibly rate-limited endpoint.
+                            let error = match jcode_schema_dialect::learn_from_error(
+                                &error.to_string(),
+                                &jcode_schema_dialect::registry::OPENAI,
+                            ) {
+                                Some(explanation) => {
+                                    jcode_base::logging::warn(&format!(
+                                        "OpenAI tool-schema rejection: {explanation}"
+                                    ));
+                                    error.context(explanation)
+                                }
+                                None => error,
+                            };
                             let _ = tx.send(Err(error)).await;
                             return;
                         }

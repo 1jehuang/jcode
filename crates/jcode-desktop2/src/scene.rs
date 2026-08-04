@@ -1388,6 +1388,30 @@ fn draw_transcript(
                     scale,
                     revealed,
                 );
+                // Parley owns wrapping and baseline geometry for inline math.
+                // Its inline boxes reserve the exact formula dimensions; draw
+                // the corresponding native OpenType-MATH formula into each box.
+                for line in block.layout.lines() {
+                    for item in line.items() {
+                        let parley::PositionedLayoutItem::InlineBox(boxed) = item else {
+                            continue;
+                        };
+                        let Some(formula) = block.inline_math.get(boxed.id as usize) else {
+                            continue;
+                        };
+                        crate::math::shared().draw(
+                            scene,
+                            formula,
+                            (
+                                text_left + inset_x + f64::from(boxed.x) / scale,
+                                block_top + inset_y + f64::from(boxed.y) / scale,
+                            ),
+                            theme.text,
+                            scale,
+                            f64::INFINITY,
+                        );
+                    }
+                }
             }
             drawn_glyphs += block.glyphs;
         }
