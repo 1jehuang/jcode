@@ -170,6 +170,14 @@ pub fn openai_compatible_schema(schema: &Value) -> Value {
                 if is_openai_unsupported_keyword(key) {
                     continue;
                 }
+                // Unsupported `format` values are rejected by the non-strict
+                // validator too (#543 was reported on a plain tool call), so
+                // this cannot live only in `strict_normalize_schema`. It did,
+                // which meant the #713 fix (typeless property forces strict
+                // off) silently reopened #543 for exactly those catalogs.
+                if key == "format" && !is_supported_string_format(value) {
+                    continue;
+                }
                 let normalized_key = if key == "oneOf" { "anyOf" } else { key };
                 out.insert(
                     normalized_key.to_string(),
