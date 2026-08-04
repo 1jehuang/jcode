@@ -10,7 +10,8 @@ use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
-const RENDERER_VERSION: u8 = 4;
+// Bump whenever rendering output changes so stale images are not reused.
+const RENDERER_VERSION: u8 = 6;
 const MAX_SOURCE_BYTES: usize = 32 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const FOREGROUND: (u8, u8, u8) = super::MATH_FOREGROUND;
@@ -545,7 +546,7 @@ fn render_artifact_in(
         .map_err(|e| format!("write LaTeX source: {e}"))?;
 
     let dpi_arg = dpi.to_string();
-    let foreground_arg = format!("rgb {} {} {}", FOREGROUND.0, FOREGROUND.1, FOREGROUND.2);
+    let foreground_arg = dvipng_rgb_arg(FOREGROUND);
     let dvi_result = run_command(
         &toolchain.latex,
         [
@@ -593,6 +594,17 @@ fn render_artifact_in(
         let _ = fs::remove_file(&temporary_cache_path);
     }
     load_artifact(&cache_path)
+}
+
+fn dvipng_rgb_arg((red, green, blue): (u8, u8, u8)) -> String {
+    // dvipng uses the dvips color syntax, whose RGB components are in 0..=1.
+    // Passing byte values such as `255 255 255` wraps to almost-black output.
+    format!(
+        "rgb {:.6} {:.6} {:.6}",
+        f32::from(red) / 255.0,
+        f32::from(green) / 255.0,
+        f32::from(blue) / 255.0
+    )
 }
 
 fn render_with_pdf_toolchain(
@@ -815,6 +827,18 @@ mod tests {
         assert_ne!(cache_key("x", false, 240), cache_key("x", true, 240));
         assert_ne!(cache_key("x", false, 240), cache_key("y", false, 240));
         assert_ne!(cache_key("x", false, 240), cache_key("x", false, 312));
+    }
+
+    #[test]
+    fn dvipng_foreground_uses_normalized_rgb_components() {
+        assert_eq!(
+            dvipng_rgb_arg((255, 255, 255)),
+            "rgb 1.000000 1.000000 1.000000"
+        );
+        assert_eq!(
+            dvipng_rgb_arg((0, 128, 255)),
+            "rgb 0.000000 0.501961 1.000000"
+        );
     }
 
     #[cfg(feature = "mermaid-renderer")]

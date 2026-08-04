@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.67.0"
+version = "0.67.1"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -49,6 +49,7 @@ members = [
     "crates/jcode-provider-metadata",
     "crates/jcode-provider-env",
     "crates/jcode-provider-core",
+    "crates/jcode-schema-dialect",
     "crates/jcode-provider-bedrock",
     "crates/jcode-provider-anthropic",
     "crates/jcode-provider-antigravity",

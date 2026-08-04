@@ -866,7 +866,7 @@ mod tests {
                 priority: "high".to_string(),
                 id: "menubar-label".to_string(),
                 group: Some("Meaningful menu labels".to_string()),
-                confidence: Some(95),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 blocked_by: Vec::new(),

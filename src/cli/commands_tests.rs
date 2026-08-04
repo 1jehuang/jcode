@@ -4,6 +4,7 @@ use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::ModelRoute;
 use crate::provider::{EventStream, Provider};
 use crate::tool::Registry;
+use crate::todo::ConfidenceState;
 use async_trait::async_trait;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -126,6 +127,12 @@ fn test_parse_tailscale_dns_name_invalid_json() {
 #[test]
 fn configured_auth_test_targets_only_include_configured_supported_providers() {
     let _guard = crate::storage::lock_test_env();
+    // OpenRouter has no OAuth state to set: its availability is read straight
+    // from `OPENROUTER_API_KEY` (or `openrouter.env`). Setting it here is what
+    // makes the expectation below independent of whoever runs the test having
+    // a key exported.
+    let saved_openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
+    crate::env::set_var("OPENROUTER_API_KEY", "test-key");
 
     let status = AuthStatus {
         anthropic: ProviderAuth {
@@ -139,10 +146,16 @@ fn configured_auth_test_targets_only_include_configured_supported_providers() {
         google: AuthState::Expired,
         copilot: AuthState::Available,
         cursor: AuthState::NotConfigured,
+        openrouter: AuthState::Available,
         ..AuthStatus::default()
     };
 
     let targets = configured_auth_test_targets(&status);
+
+    match saved_openrouter_key {
+        Some(key) => crate::env::set_var("OPENROUTER_API_KEY", key),
+        None => crate::env::remove_var("OPENROUTER_API_KEY"),
+    }
 
     assert!(targets.contains(&ResolvedAuthTestTarget::Detailed(AuthTestTarget::Claude)));
     assert!(targets.contains(&ResolvedAuthTestTarget::Detailed(AuthTestTarget::Copilot)));
@@ -251,8 +264,8 @@ fn test_todo(
     id: &str,
     status: &str,
     priority: &str,
-    confidence: Option<u8>,
-    completion_confidence: Option<u8>,
+    confidence: Option<ConfidenceState>,
+    completion_confidence: Option<ConfidenceState>,
 ) -> crate::todo::TodoItem {
     crate::todo::TodoItem {
         id: id.to_string(),
@@ -268,8 +281,8 @@ fn test_todo(
 #[test]
 fn run_auto_poke_followup_targets_below_threshold_todos() {
     let todos = vec![
-        test_todo("a", "completed", "high", Some(90), Some(90)),
-        test_todo("b", "completed", "low", Some(80), Some(80)),
+        test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible)),
+        test_todo("b", "completed", "low", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible)),
     ];
 
     let followup = build_run_auto_poke_follow_up_from_todos(&todos, false, None);
@@ -292,8 +305,8 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
 
 #[test]
 fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
-    let mut todo = test_todo("a", "completed", "high", Some(0), Some(100));
-    todo.confidence_history = vec![0, 100];
+    let mut todo = test_todo("a", "completed", "high", Some(ConfidenceState::Speculative), Some(ConfidenceState::Verified));
+    todo.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
 
     let todos = [todo];
     match build_run_auto_poke_follow_up_from_todos(&todos, false, None) {
@@ -319,11 +332,16 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
     // summary anyway; now we spend no tokens and end the run.
     let todos = vec![
         {
-            let mut todo = test_todo("a", "completed", "high", Some(100), Some(100));
-            todo.confidence_history = vec![70, 80, 90, 100];
+            let mut todo = test_todo("a", "completed", "high", Some(ConfidenceState::Verified), Some(ConfidenceState::Verified));
+            todo.confidence_history = vec![
+                ConfidenceState::Plausible,
+                ConfidenceState::Plausible,
+                ConfidenceState::Validated,
+                ConfidenceState::Verified,
+            ];
             todo
         },
-        test_todo("b", "completed", "low", Some(98), Some(98)),
+        test_todo("b", "completed", "low", Some(ConfidenceState::Validated), Some(ConfidenceState::Validated)),
     ];
     assert!(build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none());
 }
@@ -331,8 +349,8 @@ fn run_auto_poke_followup_silent_when_confident_and_earned() {
 #[test]
 fn run_auto_poke_followup_prioritizes_incomplete_todos() {
     let todos = vec![
-        test_todo("a", "completed", "high", Some(95), Some(95)),
-        test_todo("b", "in_progress", "medium", Some(80), None),
+        test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible)),
+        test_todo("b", "in_progress", "medium", Some(ConfidenceState::Plausible), None),
     ];
 
     let followup = build_run_auto_poke_follow_up_from_todos(&todos, false, None);
@@ -353,7 +371,7 @@ fn run_auto_poke_followup_prioritizes_incomplete_todos() {
 /// the deferred quality review must reach that path too, not only the TUI.
 #[test]
 fn run_auto_poke_delivers_the_deferred_gate_digest_before_confidence() {
-    let todos = vec![test_todo("a", "completed", "high", Some(80), Some(80))];
+    let todos = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible))];
     // Without a digest, the confidence gate is what fires.
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(&todos, false, None),
@@ -377,7 +395,7 @@ fn run_auto_poke_delivers_the_deferred_gate_digest_before_confidence() {
 /// turn to actually end rather than interrupting mid-flight.
 #[test]
 fn run_auto_poke_prefers_incomplete_todos_over_the_gate_digest() {
-    let todos = vec![test_todo("a", "in_progress", "high", Some(80), None)];
+    let todos = vec![test_todo("a", "in_progress", "high", Some(ConfidenceState::Plausible), None)];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(
             &todos,
@@ -405,12 +423,12 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
         &[crate::todo::GateObservation {
             kind: crate::todo::GateObservationKind::IntentUnderstanding,
             group: None,
-            score: Some(70),
+            state: Some("partial".to_string()),
         }],
     )
     .expect("append");
 
-    let open = vec![test_todo("a", "in_progress", "high", Some(80), None)];
+    let open = vec![test_todo("a", "in_progress", "high", Some(ConfidenceState::Plausible), None)];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(
             &open,
@@ -427,7 +445,7 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     );
 
     // Once the work closes, the reminder is still there to deliver.
-    let done = vec![test_todo("a", "completed", "high", Some(80), Some(100))];
+    let done = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Verified))];
     match build_run_auto_poke_follow_up_from_todos(
         &done,
         false,
@@ -466,7 +484,7 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
         &[crate::todo::GateObservation {
             kind: crate::todo::GateObservationKind::IntentUnderstanding,
             group: None,
-            score: Some(70),
+            state: Some("partial".to_string()),
         }],
     )
     .expect("append");
@@ -493,7 +511,7 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
 
 #[test]
 fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
-    let needs_validation = vec![test_todo("a", "completed", "high", Some(80), Some(80))];
+    let needs_validation = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Plausible))];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(&needs_validation, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
@@ -503,7 +521,7 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(RunAutoPokeFollowUp::ConfidenceSummary { .. })
     ));
 
-    let validated = vec![test_todo("a", "completed", "high", Some(80), Some(100))];
+    let validated = vec![test_todo("a", "completed", "high", Some(ConfidenceState::Plausible), Some(ConfidenceState::Verified))];
     assert!(matches!(
         build_run_auto_poke_follow_up_from_todos(&validated, false, None),
         Some(RunAutoPokeFollowUp::ConfidenceSummary {

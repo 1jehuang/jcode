@@ -679,7 +679,7 @@ impl Tool for TodoTool {
                         "understands_user_intent": {
                             "type": "string",
                             "enum": ["uncertain", "partial", "clear", "complete"],
-                            "description": "How well you understand what the user actually wants. Report uncertain or partial when guessing at intent."
+                            "description": "How well you understand what the user wants. Report uncertain or partial when guessing."
                         }
                     }
                 },
@@ -716,16 +716,16 @@ impl Tool for TodoTool {
                             "autonomy": {
                                 "type": "string",
                                 "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"],
-                                "description": "How far beyond the literal request the work extended. Assess honestly from completed work and consequential adjacent follow-through."
+                                "description": "How far beyond the literal request the work went. Assess from what was completed."
                             },
                             "iteration_maturity": {
                                 "type": "string",
                                 "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"],
-                                "description": "How far the feedback loop has actually been exercised and the evidence-based reason, if any, that further iteration should stop. Assess the current state honestly rather than predicting a future result."
+                                "description": "How far the feedback loop was actually exercised, and any evidence-based reason to stop iterating."
                             },
                             "stopping_evidence": {
                                 "type": "string",
-                                "description": "Concrete evidence supporting the reported iteration maturity when a stopping claim is made. Name relevant attempts, observations, remaining hypotheses, or an actual constraint or budget."
+                                "description": "Evidence for the reported iteration_maturity: attempts, observations, or a real budget limit."
                             }
                         }
                     }
@@ -918,8 +918,8 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("alignment score should describe representation coverage");
-        assert!(alignment_description.contains("what the user actually wants"));
-        assert!(alignment_description.contains("when guessing at intent"));
+        assert!(alignment_description.contains("what the user wants"));
+        assert!(alignment_description.contains("when guessing"));
         // The detailed calibration rubric moved out of the always-on schema
         // into deferred turn-finish continuation messages, which are paid only
         // when the completed turn needs another quality pass.

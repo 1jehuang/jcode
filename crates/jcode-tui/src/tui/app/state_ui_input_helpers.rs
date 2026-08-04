@@ -76,6 +76,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/fast-release",
         "Publish Linux immediately from the warm selfdev cache; CI adds other platforms",
     ),
+    RegisteredCommand::public(
+        "/fast-macos-release",
+        "Publish a prepared macOS arm64 build immediately; CI adds other platforms",
+    ),
     RegisteredCommand::public("/remote", "Reach this session from another machine"),
     RegisteredCommand::public(
         "/remote-release",

@@ -1831,6 +1831,27 @@ fn anthropic_quality_rank_orders_opus_before_haiku_and_retired_last() {
 }
 
 #[test]
+fn fable_quota_fallback_selects_the_best_available_opus() {
+    let fallback = AnthropicProvider::best_available_opus_model("claude-fable-5")
+        .expect("the curated Anthropic catalog should contain an Opus fallback");
+    assert!(
+        fallback.contains("claude-opus"),
+        "unexpected fallback: {fallback}"
+    );
+
+    let candidates = jcode_base::provider::cached_anthropic_model_ids()
+        .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids);
+    let best_rank = candidates
+        .iter()
+        .filter(|model| model.to_ascii_lowercase().contains("claude-opus"))
+        .filter(|model| !anthropic_model_is_retired(model))
+        .map(|model| anthropic_model_quality_rank(model))
+        .min()
+        .expect("available Opus model");
+    assert_eq!(anthropic_model_quality_rank(&fallback), best_rank);
+}
+
+#[test]
 fn ping_keepalive_emits_streaming_phase_event() {
     // Issue #451: during silent reasoning phases, `ping` events can be the
     // only upstream traffic. They must surface as a StreamEvent so the client

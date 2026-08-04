@@ -5,12 +5,16 @@ set -euo pipefail
 # - --prepare-fast: refresh target/selfdev before the release metadata commit.
 # - --fast-local: package that prepared binary, publish Linux immediately, then
 #   let CI replace it with portable/signoff assets and add every other platform.
+# - --prepare-fast-macos/--fast-macos-local: do the same for macOS arm64 using
+#   the local osxcross cache.
 # - --remote: push the tag immediately and let CI gate publication.
 # - default: build Linux + macOS locally and stage them on the CI-owned draft.
 #
 # Usage:
 #   scripts/quick-release.sh --prepare-fast v0.5.5 # warm selfdev before bump
 #   scripts/quick-release.sh --fast-local v0.5.5  # package it, public now
+#   scripts/quick-release.sh --prepare-fast-macos v0.5.5
+#   scripts/quick-release.sh --fast-macos-local v0.5.5
 #   scripts/quick-release.sh --remote v0.5.5      # tag now, CI-gated publication
 #   scripts/quick-release.sh v0.5.5               # local Linux + macOS draft
 #   scripts/quick-release.sh --dry-run v0.5.5     # standard local build only
@@ -28,6 +32,14 @@ while [[ "${1:-}" == --* ]]; do
             [[ "$MODE" == "standard" ]] || { echo "Error: release modes cannot be combined." >&2; exit 1; }
             MODE="prepare-fast"
             ;;
+        --fast-macos|--fast-macos-local)
+            [[ "$MODE" == "standard" ]] || { echo "Error: release modes cannot be combined." >&2; exit 1; }
+            MODE="fast-macos-local"
+            ;;
+        --prepare-fast-macos)
+            [[ "$MODE" == "standard" ]] || { echo "Error: release modes cannot be combined." >&2; exit 1; }
+            MODE="prepare-fast-macos"
+            ;;
         --remote|--ci-only)
             [[ "$MODE" == "standard" ]] || { echo "Error: release modes cannot be combined." >&2; exit 1; }
             MODE="remote"
@@ -38,7 +50,7 @@ while [[ "${1:-}" == --* ]]; do
             ;;
         *)
             echo "Error: Unknown option: $1" >&2
-            echo "Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --remote | --dry-run] <version> [title]" >&2
+            echo "Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --prepare-fast-macos | --fast-macos-local | --remote | --dry-run] <version> [title]" >&2
             exit 1
             ;;
     esac
@@ -50,7 +62,7 @@ if $DRY_RUN && [[ "$MODE" == "remote" ]]; then
     exit 1
 fi
 
-VERSION="${1:?Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --remote | --dry-run] <version> [title]}"
+VERSION="${1:?Usage: scripts/quick-release.sh [--prepare-fast | --fast-local | --prepare-fast-macos | --fast-macos-local | --remote | --dry-run] <version> [title]}"
 TITLE="${2:-$VERSION}"
 VERSION_NUM="${VERSION#v}"
 
@@ -71,6 +83,13 @@ case "$MODE" in
         required_commands+=(file strip tar gzip sha256sum)
         $DRY_RUN || required_commands+=(gh)
         ;;
+    prepare-fast-macos)
+        required_commands+=(cargo file sha256sum)
+        ;;
+    fast-macos-local)
+        required_commands+=(file tar gzip sha256sum)
+        $DRY_RUN || required_commands+=(gh)
+        ;;
     standard)
         required_commands+=(cargo docker file)
         $DRY_RUN || required_commands+=(gh)
@@ -80,7 +99,7 @@ for cmd in "${required_commands[@]}"; do
     command -v "$cmd" &>/dev/null || { echo "Error: $cmd not found."; exit 1; }
 done
 
-if [[ "$MODE" == "standard" ]]; then
+if [[ "$MODE" == "standard" || "$MODE" == "prepare-fast-macos" ]]; then
     [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
     export PATH="$HOME/.osxcross/bin:$PATH"
     if ! command -v aarch64-apple-darwin23.5-clang &>/dev/null; then
@@ -92,7 +111,7 @@ fi
 working_tree_changes="$(git status --porcelain)"
 if [[ -n "$working_tree_changes" ]]; then
     case "$MODE" in
-        fast-local|prepare-fast)
+        fast-local|prepare-fast|fast-macos-local|prepare-fast-macos)
             echo "Error: --$MODE requires a clean working tree so the binary matches committed source." >&2
             printf '%s\n' "$working_tree_changes" >&2
             exit 1
@@ -111,6 +130,13 @@ fi
 if [[ "$MODE" == "fast-local" || "$MODE" == "prepare-fast" ]]; then
     if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
         echo "Error: --fast-local currently publishes the Linux x86_64 asset and must run on Linux x86_64." >&2
+        exit 1
+    fi
+fi
+
+if [[ "$MODE" == "fast-macos-local" || "$MODE" == "prepare-fast-macos" ]]; then
+    if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
+        echo "Error: fast macOS release currently uses osxcross and must run on Linux x86_64." >&2
         exit 1
     fi
 fi
@@ -195,6 +221,27 @@ if [[ "$MODE" == "prepare-fast" ]]; then
     echo "=== Fast release prepared in $(elapsed)s ==="
     echo "  ✅ Warm selfdev binary recorded for $VERSION at $(git rev-parse --short HEAD)"
     echo "  Next: commit only Cargo.toml, Cargo.lock, and changelog release metadata, then run --fast-local."
+    exit 0
+fi
+
+if [[ "$MODE" == "prepare-fast-macos" ]]; then
+    echo "▸ Refreshing the macOS arm64 build before the version bump..."
+    JCODE_RELEASE_BUILD=1 JCODE_BUILD_SEMVER="$VERSION_NUM" \
+        CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
+        cargo build --release --target aarch64-apple-darwin --bin jcode
+    source_bin="target/aarch64-apple-darwin/release/jcode"
+    [[ -x "$source_bin" ]] || { echo "Error: macOS binary not found: $source_bin" >&2; exit 1; }
+    file "$source_bin" | grep -q 'Mach-O 64-bit' || { echo "Error: bad macOS binary" >&2; exit 1; }
+    prepared_marker="target/aarch64-apple-darwin/release/fast-macos-release-prepared"
+    {
+        printf 'version=%s\n' "$VERSION_NUM"
+        printf 'commit=%s\n' "$(git rev-parse HEAD)"
+        printf 'binary_sha256=%s\n' "$(sha256sum "$source_bin" | cut -d' ' -f1)"
+    } > "$prepared_marker"
+    echo ""
+    echo "=== Fast macOS release prepared in $(elapsed)s ==="
+    echo "  ✅ macOS arm64 binary recorded for $VERSION at $(git rev-parse --short HEAD)"
+    echo "  Next: commit only Cargo.toml, Cargo.lock, and changelog release metadata, then run --fast-macos-local."
     exit 0
 fi
 
@@ -293,6 +340,50 @@ WRAPPER
     echo "  ⏳ CI: replacing Linux with the portable build and adding macOS, Windows, FreeBSD, signatures, and final checksums"
     echo ""
     echo "The immediate Linux asset targets this build host's runtime baseline until CI replaces it."
+    exit 0
+fi
+
+if [[ "$MODE" == "fast-macos-local" ]]; then
+    echo "▸ Validating the prepared macOS arm64 build..."
+    source_bin="target/aarch64-apple-darwin/release/jcode"
+    prepared_marker="target/aarch64-apple-darwin/release/fast-macos-release-prepared"
+    [[ -x "$source_bin" ]] || { echo "Error: macOS binary not found: $source_bin" >&2; exit 1; }
+    [[ -f "$prepared_marker" ]] || {
+        echo "Error: fast macOS release was not prepared. Run scripts/quick-release.sh --prepare-fast-macos $VERSION before the release metadata commit." >&2
+        exit 1
+    }
+    prepared_version="$(sed -n 's/^version=//p' "$prepared_marker")"
+    prepared_commit="$(sed -n 's/^commit=//p' "$prepared_marker")"
+    prepared_sha256="$(sed -n 's/^binary_sha256=//p' "$prepared_marker")"
+    [[ "$prepared_version" == "$VERSION_NUM" ]] || { echo "Error: prepared version $prepared_version does not match $VERSION_NUM." >&2; exit 1; }
+    [[ "$prepared_commit" == "$(git rev-parse HEAD^)" ]] || { echo "Error: prepared macOS binary commit is not the parent of the release commit." >&2; exit 1; }
+    [[ "$prepared_sha256" == "$(sha256sum "$source_bin" | cut -d' ' -f1)" ]] || { echo "Error: prepared macOS binary changed after preparation." >&2; exit 1; }
+    unexpected_release_files="$(git diff-tree --no-commit-id --name-only -r HEAD | grep -Ev '^(Cargo\.toml|Cargo\.lock|changelog/)' || true)"
+    [[ -z "$unexpected_release_files" ]] || {
+        echo "Error: the release metadata commit contains code or unsupported files:" >&2
+        printf '%s\n' "$unexpected_release_files" >&2
+        exit 1
+    }
+    cp "$source_bin" "$DIST/jcode-macos-aarch64"
+    chmod +x "$DIST/jcode-macos-aarch64"
+    file "$DIST/jcode-macos-aarch64" | grep -q 'Mach-O 64-bit' || { echo "Error: bad macOS binary" >&2; exit 1; }
+    (cd "$DIST" && tar czf jcode-macos-aarch64.tar.gz jcode-macos-aarch64)
+    (cd "$DIST" && sha256sum jcode-macos-aarch64.tar.gz > SHA256SUMS)
+
+    if $DRY_RUN; then
+        echo "Fast macOS dry run complete in $(elapsed)s. Artifacts in: $DIST"
+        trap - EXIT
+        exit 0
+    fi
+    tag_and_push
+    echo "▸ Publishing immediate macOS arm64 release..."
+    ensure_release_draft
+    gh release upload "$VERSION" "$DIST/jcode-macos-aarch64.tar.gz" "$DIST/SHA256SUMS" --clobber
+    gh release edit "$VERSION" --draft=false --latest
+    echo ""
+    echo "=== Fast macOS release published in $(elapsed)s ==="
+    echo "  ✅ macOS arm64: public now from the prepared osxcross build"
+    echo "  ⏳ CI: replacing it with the signoff build and adding Linux, macOS Intel, Windows, FreeBSD, signatures, and final checksums"
     exit 0
 fi
 

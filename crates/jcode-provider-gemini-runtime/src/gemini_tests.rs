@@ -499,8 +499,12 @@ fn build_tools_rewrites_const_for_gemini_schema_compatibility() {
     let parameters = &built[0].function_declarations[0].parameters;
 
     assert!(!schema_contains_key(parameters, "const"));
+    // Gemini's schema proto models `anyOf` and has no `oneOf` field, so a
+    // passed-through `oneOf` is an "Unknown name" HTTP 400. The two mean the
+    // same thing for tool parameters, so the dialect renames rather than drops.
+    assert!(!schema_contains_key(parameters, "oneOf"));
     assert_eq!(
-        parameters["properties"]["tool_calls"]["items"]["oneOf"][0]["properties"]["tool"]["enum"],
+        parameters["properties"]["tool_calls"]["items"]["anyOf"][0]["properties"]["tool"]["enum"],
         json!(["read"])
     );
 }

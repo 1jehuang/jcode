@@ -1426,7 +1426,17 @@ fn todo_spans(
         }
         // A finished task recedes: the strikethrough says "done" and the
         // faint ink stops five done lines from shouting over the two left.
+        // The `• ` marker keeps its width but loses its ink: the scene draws
+        // a state dot in that column, and the glyph showed through the ring.
+        // Kept in the source (rather than stripped) so the text keeps its
+        // column and a copied task still reads as a list item.
         BlockKind::ListItem { .. } => {
+            if let Some(first) = spans.first_mut()
+                && first.range.start == 0
+                && first.role == StyleRole::Dim
+            {
+                first.color = Some(Color::TRANSPARENT);
+            }
             for span in &mut spans {
                 if span.strikethrough {
                     span.color = Some(theme.faint);

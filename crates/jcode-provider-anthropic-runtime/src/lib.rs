@@ -386,6 +386,48 @@ impl AnthropicProvider {
         usage.five_hour >= 0.99 && usage.seven_day >= 0.99
     }
 
+    fn best_available_opus_model(exclude: &str) -> Option<String> {
+        let mut models = jcode_base::provider::cached_anthropic_model_ids()
+            .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids);
+        models.retain(|model| {
+            let key = strip_1m_suffix(model).to_ascii_lowercase();
+            key.contains("claude-opus")
+                && strip_1m_suffix(model) != strip_1m_suffix(exclude)
+                && !anthropic_model_is_retired(model)
+        });
+        models.sort_by_key(|model| anthropic_model_quality_rank(model));
+        models.into_iter().next()
+    }
+
+    async fn model_after_oauth_quota_check(
+        &self,
+        token: &str,
+        is_oauth: bool,
+        selected_model: String,
+    ) -> String {
+        if !is_oauth || !selected_model.to_ascii_lowercase().contains("fable") {
+            return selected_model;
+        }
+        let Ok(usage) = jcode_base::usage::fetch_usage_for_access_token(token).await else {
+            return selected_model;
+        };
+        if !usage.model_scoped_exhausted(&selected_model) {
+            return selected_model;
+        }
+        let Some(fallback) = Self::best_available_opus_model(&selected_model) else {
+            return selected_model;
+        };
+        jcode_base::logging::warn(&format!(
+            "Anthropic OAuth model-scoped weekly quota for '{}' is exhausted; routing to '{}'",
+            selected_model, fallback
+        ));
+        *self
+            .model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
+        fallback
+    }
+
     /// Resolve a usable access token (OAuth or API key) and whether it is OAuth.
     ///
     /// Exposed for the provider-doctor's native Claude driver so it can validate
@@ -1020,11 +1062,14 @@ impl Provider for AnthropicProvider {
             )
             .await?;
         }
-        let model = self
+        let selected_model = self
             .model
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let model = self
+            .model_after_oauth_quota_check(&token, is_oauth, selected_model)
+            .await;
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
@@ -1381,11 +1426,14 @@ impl Provider for AnthropicProvider {
             )
             .await?;
         }
-        let model = self
+        let selected_model = self
             .model
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let model = self
+            .model_after_oauth_quota_check(&token, is_oauth, selected_model)
+            .await;
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request

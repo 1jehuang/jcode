@@ -10,15 +10,9 @@ fn exact_multiline_latex_response() -> &'static str {
 }
 
 #[test]
-fn latex_foreground_is_saturated_blue_and_styles_inline_math() {
-    assert_eq!(MATH_FOREGROUND, (100, 160, 255));
-    assert!(MATH_FOREGROUND.2 > MATH_FOREGROUND.1);
-    assert!(MATH_FOREGROUND.1 > MATH_FOREGROUND.0);
-    // Inline math blends with prose: near body-text brightness with a light
-    // blue tint, not the saturated display-math blue.
-    assert_eq!(MATH_INLINE_FOREGROUND, (185, 200, 225));
-    assert!(MATH_INLINE_FOREGROUND.2 > MATH_INLINE_FOREGROUND.1);
-    assert!(MATH_INLINE_FOREGROUND.1 > MATH_INLINE_FOREGROUND.0);
+fn latex_foreground_is_white_and_styles_inline_math() {
+    assert_eq!(MATH_FOREGROUND, (255, 255, 255));
+    assert_eq!(MATH_INLINE_FOREGROUND, (255, 255, 255));
 
     let lines = with_streaming_render_context(|| render_markdown("Inline $x^2$ math."));
     let math_spans: Vec<_> = lines
