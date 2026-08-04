@@ -251,6 +251,44 @@ fn model_picker_is_favorite(
         .contains(&model_picker_usage_key(model_name, route, effort))
 }
 
+/// Return the filtered position of the favorite after the current model in a
+/// stable identity order. The runtime picker itself is sorted with the current
+/// model first, so using its row order after reopening the picker can only
+/// alternate between the current model and the highest-ranked other favorite.
+fn next_model_favorite_after_current(picker: &InlineInteractiveState) -> Option<usize> {
+    let mut favorites: Vec<(String, usize, bool)> = picker
+        .filtered
+        .iter()
+        .enumerate()
+        .filter_map(|(filtered_pos, &entry_idx)| {
+            let entry = picker.entries.get(entry_idx)?;
+            if !entry.is_favorite || !matches!(entry.action, PickerAction::Model) {
+                return None;
+            }
+            let route = entry.active_option()?;
+            Some((
+                model_picker_usage_key(
+                    &model_entry_base_name(entry),
+                    route,
+                    entry.effort.as_deref(),
+                ),
+                filtered_pos,
+                entry.is_current,
+            ))
+        })
+        .collect();
+    favorites.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    let next = favorites
+        .iter()
+        .position(|(_, _, is_current)| *is_current)
+        .map(|current| (current + 1) % favorites.len())
+        .unwrap_or(0);
+    favorites
+        .get(next)
+        .map(|(_, filtered_pos, _)| *filtered_pos)
+}
+
 fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
     picker.kind == PickerKind::Model
         && picker
@@ -2993,6 +3031,28 @@ impl App {
         }
     }
 
+    fn cycle_model_favorite_after_current(&mut self) {
+        let selected_name = (|| {
+            let picker = self.inline_interactive_state.as_mut()?;
+            if !picker_is_runtime_model_picker(picker) || picker.filtered.is_empty() {
+                return None;
+            }
+            let next = next_model_favorite_after_current(picker)?;
+            let entry_idx = picker.filtered[next];
+            picker.selected = next;
+            picker.column = 0;
+            picker
+                .entries
+                .get(entry_idx)
+                .map(|entry| entry.name.clone())
+        })();
+        if let Some(entry_name) = selected_name {
+            self.set_status_notice(format!("Favorite → {}", entry_name));
+        } else {
+            self.set_status_notice("No favorited models yet. Use Ctrl+N to favorite one.");
+        }
+    }
+
     pub(super) fn cycle_model_favorite_hotkey(&mut self) {
         if self
             .inline_interactive_state
@@ -3014,7 +3074,7 @@ impl App {
             self.set_status_notice("Model favorites unavailable until model routes finish loading");
             return;
         }
-        self.cycle_selected_model_favorite();
+        self.cycle_model_favorite_after_current();
         let _ = self.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE);
     }
 
@@ -3624,9 +3684,9 @@ mod tests {
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
         model_picker_effort_matches_default, model_picker_route_is_current,
         model_picker_route_is_default, model_picker_route_is_recommended,
-        picker_is_runtime_model_picker, remote_model_catalog_cache_is_fresh,
-        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
-        route_supports_reasoning_effort,
+        next_model_favorite_after_current, picker_is_runtime_model_picker,
+        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
+        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -3699,6 +3759,70 @@ mod tests {
 
         assert!(picker_is_runtime_model_picker(&runtime));
         assert!(!picker_is_runtime_model_picker(&agent));
+    }
+
+    #[test]
+    fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
+        let favorite_specs = [
+            ("claude-opus-5", "high", 2550),
+            ("claude-opus-4-8", "high", 950),
+            ("claude-opus-4-8", "medium", 0),
+            ("claude-opus-4-8", "low", 0),
+        ];
+        let mut current_name = "claude-opus-5 (high)".to_string();
+        let mut visited = Vec::new();
+
+        for _ in 0..favorite_specs.len() {
+            // Rebuild and re-sort the picker exactly as each hotkey press does:
+            // the newly current model moves to row zero, while the other
+            // favorites retain their usage-based ranking.
+            let mut entries: Vec<_> = favorite_specs
+                .iter()
+                .map(|(model, effort, usage_score)| {
+                    let effort_label = if *effort == "medium" { "med" } else { effort };
+                    let mut entry = picker_entry(
+                        &format!("{model} ({effort_label})"),
+                        "Anthropic",
+                        *usage_score,
+                    );
+                    entry.effort = Some((*effort).to_string());
+                    entry.is_favorite = true;
+                    entry.is_current = entry.name == current_name;
+                    entry
+                })
+                .collect();
+            entries.sort_by_key(|entry| {
+                (
+                    !entry.is_current,
+                    std::cmp::Reverse(entry.usage_score),
+                    entry.name.clone(),
+                )
+            });
+            let picker = InlineInteractiveState {
+                kind: PickerKind::Model,
+                filtered: (0..entries.len()).collect(),
+                entries,
+                selected: 0,
+                column: 0,
+                filter: String::new(),
+                preview: false,
+            };
+
+            let next = next_model_favorite_after_current(&picker)
+                .expect("a favorited model should be selectable");
+            current_name = picker.entries[picker.filtered[next]].name.clone();
+            visited.push(current_name.clone());
+        }
+
+        assert_eq!(
+            visited,
+            [
+                "claude-opus-4-8 (high)",
+                "claude-opus-4-8 (low)",
+                "claude-opus-4-8 (med)",
+                "claude-opus-5 (high)",
+            ]
+        );
     }
 
     #[test]
