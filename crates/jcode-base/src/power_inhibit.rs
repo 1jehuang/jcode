@@ -18,7 +18,7 @@
 //! clears that thread's execution-state request if the process exits or crashes.
 
 use std::io;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -52,12 +52,20 @@ enum InhibitHandle {
     Windows(WindowsPowerGuard),
 }
 
+struct InhibitHandleStatus {
+    running: bool,
+    exit_status: Option<ExitStatus>,
+}
+
 impl InhibitHandle {
-    fn is_running(&mut self) -> bool {
+    fn status(&mut self) -> InhibitHandleStatus {
         match self {
-            Self::Child(child) => child_is_running(child),
+            Self::Child(child) => child_status(child),
             #[cfg(windows)]
-            Self::Windows(guard) => guard.is_running(),
+            Self::Windows(guard) => InhibitHandleStatus {
+                running: guard.is_running(),
+                exit_status: None,
+            },
         }
     }
 }
@@ -106,7 +114,22 @@ impl PowerInhibitor {
 
     fn acquire(&mut self) {
         let now = Instant::now();
-        let healthy = self.handle.as_mut().is_some_and(InhibitHandle::is_running);
+        let handle_status = self.handle.as_mut().map(InhibitHandle::status);
+        if self.platform == Some(InhibitPlatform::LinuxSystemd)
+            && handle_status
+                .as_ref()
+                .and_then(|status| status.exit_status.as_ref())
+                .is_some_and(|status| !status.success())
+        {
+            crate::logging::warn(
+                "power_inhibit: systemd inhibitor exited unsuccessfully; disabling for this process",
+            );
+            self.release();
+            self.available = false;
+            return;
+        }
+
+        let healthy = handle_status.is_some_and(|status| status.running);
         let fresh = self.platform.is_some_and(|platform| {
             !platform.requires_refresh()
                 || self
@@ -184,8 +207,21 @@ impl Drop for PowerInhibitor {
     }
 }
 
-fn child_is_running(child: &mut Child) -> bool {
-    matches!(child.try_wait(), Ok(None))
+fn child_status(child: &mut Child) -> InhibitHandleStatus {
+    match child.try_wait() {
+        Ok(None) => InhibitHandleStatus {
+            running: true,
+            exit_status: None,
+        },
+        Ok(Some(exit_status)) => InhibitHandleStatus {
+            running: false,
+            exit_status: Some(exit_status),
+        },
+        Err(_) => InhibitHandleStatus {
+            running: false,
+            exit_status: None,
+        },
+    }
 }
 
 /// Whether a helper acquired at `acquired_at` should be refreshed by `now`.
@@ -379,6 +415,9 @@ fn build_linux_systemd_inhibit_command(ttl: Duration) -> Command {
         .arg("--who=jcode")
         .arg("--why=Jcode is streaming or processing active work")
         .arg("--mode=block")
+        // Power inhibition is best-effort and must never trigger an interactive
+        // Polkit authentication prompt from the background daemon.
+        .arg("--no-ask-password")
         .arg("sleep")
         .arg(ttl.as_secs().to_string())
         .stdin(Stdio::null())
@@ -447,10 +486,33 @@ mod tests {
         assert!(args.contains(&"--what=sleep:handle-lid-switch".to_string()));
         assert!(args.contains(&"--who=jcode".to_string()));
         assert!(args.contains(&"--mode=block".to_string()));
+        assert!(args.contains(&"--no-ask-password".to_string()));
         assert!(args.contains(&"sleep".to_string()));
         // Bounded TTL (not "infinity") so orphaned locks self-heal.
         assert!(args.contains(&INHIBIT_TTL.as_secs().to_string()));
         assert!(!args.contains(&"infinity".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_linux_inhibitor_disables_retries_for_process_lifetime() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn failed inhibitor helper");
+        assert!(!child.wait().expect("wait for failed helper").success());
+
+        let mut inhibitor = super::PowerInhibitor {
+            handle: Some(super::InhibitHandle::Child(child)),
+            acquired_at: Some(Instant::now()),
+            platform: Some(InhibitPlatform::LinuxSystemd),
+            available: true,
+        };
+
+        inhibitor.set_active(true);
+
+        assert!(!inhibitor.is_available());
+        assert!(inhibitor.handle.is_none());
     }
 
     #[test]
