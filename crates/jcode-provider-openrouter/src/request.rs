@@ -21,7 +21,6 @@ pub fn sanitize_tool_parameters_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENROUTER)
 }
 
-
 /// Build OpenAI-compatible chat `messages` for OpenRouter/direct compatible providers.
 ///
 /// This stays in the OpenRouter leaf crate so provider-specific message normalization,

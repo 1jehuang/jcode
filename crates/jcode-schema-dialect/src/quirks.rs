@@ -47,15 +47,15 @@ fn store_path() -> Option<PathBuf> {
     }
     #[cfg(not(any(test, feature = "test-support")))]
     {
-    if let Ok(explicit) = std::env::var("JCODE_SCHEMA_QUIRKS_PATH") {
-        return Some(PathBuf::from(explicit));
-    }
-    let home = if let Ok(jcode_home) = std::env::var("JCODE_HOME") {
-        PathBuf::from(jcode_home)
-    } else {
-        dirs::home_dir()?.join(".jcode")
-    };
-    Some(home.join("schema-quirks.json"))
+        if let Ok(explicit) = std::env::var("JCODE_SCHEMA_QUIRKS_PATH") {
+            return Some(PathBuf::from(explicit));
+        }
+        let home = if let Ok(jcode_home) = std::env::var("JCODE_HOME") {
+            PathBuf::from(jcode_home)
+        } else {
+            dirs::home_dir()?.join(".jcode")
+        };
+        Some(home.join("schema-quirks.json"))
     }
 }
 

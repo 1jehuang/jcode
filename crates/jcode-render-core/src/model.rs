@@ -67,6 +67,10 @@ impl TextAttrs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyledSpan {
     pub text: String,
+    /// Original TeX for an inline-math span. Text front-ends render `text` as a
+    /// readable fallback; graphical front-ends use this source for native math.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latex: Option<String>,
     pub role: StyleRole,
     pub fill: FillRole,
     pub attrs: TextAttrs,
@@ -76,6 +80,7 @@ impl StyledSpan {
     pub fn new(text: impl Into<String>, role: StyleRole) -> Self {
         Self {
             text: text.into(),
+            latex: None,
             role,
             fill: FillRole::None,
             attrs: TextAttrs::none(),

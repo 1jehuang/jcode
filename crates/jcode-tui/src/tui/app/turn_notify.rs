@@ -7,8 +7,8 @@
 //! default it fires only while the terminal window is unfocused.
 
 use super::App;
-use base64::Engine as _;
 use crate::todo::TodoItem;
+use base64::Engine as _;
 #[cfg(target_os = "macos")]
 use std::io::Write;
 
@@ -139,9 +139,7 @@ fn notification_text(notification: &TurnNotification) -> String {
 }
 
 fn osc_safe(text: &str) -> String {
-    text.chars()
-        .filter(|ch| !ch.is_control())
-        .collect()
+    text.chars().filter(|ch| !ch.is_control()).collect()
 }
 
 fn kitty_notification_id(session_id: &str) -> String {
@@ -150,7 +148,10 @@ fn kitty_notification_id(session_id: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '.'))
         .take(128)
         .collect();
-    format!("jcode-turn-{}", if safe.is_empty() { "unknown" } else { &safe })
+    format!(
+        "jcode-turn-{}",
+        if safe.is_empty() { "unknown" } else { &safe }
+    )
 }
 
 fn kitty_notification_sequence(notification: &TurnNotification, session_id: &str) -> String {

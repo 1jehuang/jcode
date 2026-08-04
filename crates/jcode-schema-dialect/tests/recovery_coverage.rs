@@ -16,8 +16,12 @@ use jcode_schema_dialect::{RecoveryAction, quirks, registry};
 /// message: adding a dialect without recovery should require deliberately
 /// editing this list, which is the moment to ask whether that route can 400 on
 /// a schema.
-const DIALECTS_WITH_RUNTIME_RECOVERY: &[&str] =
-    &["gemini", "antigravity-claude", "antigravity-bridge"];
+const DIALECTS_WITH_RUNTIME_RECOVERY: &[&str] = &[
+    "gemini",
+    "antigravity-claude",
+    "antigravity-bridge",
+    "openai",
+];
 
 /// Dialects deliberately without runtime recovery, and why.
 ///
@@ -27,7 +31,7 @@ const DIALECTS_WITH_RUNTIME_RECOVERY: &[&str] =
 /// rather than by retrying. Wiring recovery there is still worthwhile, but it
 /// is a separate change with its own live verification, so it is recorded as a
 /// known gap instead of being silently absent.
-const DIALECTS_WITHOUT_RUNTIME_RECOVERY: &[&str] = &["openai", "openrouter", "anthropic"];
+const DIALECTS_WITHOUT_RUNTIME_RECOVERY: &[&str] = &["openrouter", "anthropic"];
 
 #[test]
 fn every_dialect_is_accounted_for_as_having_recovery_or_not() {
@@ -159,12 +163,19 @@ fn no_dialect_treats_an_operational_failure_as_a_schema_rejection() {
 const RUNTIME_RECOVERY_EXPECTATIONS: &[(&str, bool)] = &[
     ("../jcode-provider-gemini-runtime/src/lib.rs", true),
     ("../jcode-provider-antigravity-runtime/src/lib.rs", true),
-    // OpenAI-family routes report the offending construct in a validation
-    // error, and every historical failure there (#446, #543, #687, #711, #713)
-    // was fixed by not claiming `strict` rather than by retrying. Wiring
-    // recovery is still worthwhile, but it is a separate change needing its own
-    // live verification, so the gap is recorded rather than left implicit.
-    ("../jcode-provider-openai-runtime/src/lib.rs", false),
+    // Learns without retrying: this path owns its own retry and backoff, so a
+    // second retry inside it would double attempts against a possibly
+    // rate-limited endpoint. Learning still turns "every request fails until a
+    // release" into "one request fails".
+    (
+        "../jcode-provider-openai-runtime/src/openai_provider_impl.rs",
+        true,
+    ),
+    // Still unhandled. Both forward to upstreams whose rejection texts jcode has
+    // never captured, so there is nothing to write a classifier against yet;
+    // inventing patterns would produce a check that cannot fail. Prevention
+    // covers them (their wire output is pinned by
+    // `every_provider_sends_clean_schemas`), so this is a real but bounded gap.
     ("../jcode-provider-openrouter-runtime/src/lib.rs", false),
     ("../jcode-provider-anthropic-runtime/src/lib.rs", false),
 ];
@@ -191,7 +202,13 @@ fn each_runtime_recovery_wiring_matches_what_is_claimed() {
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
-                !trimmed.starts_with("//") && trimmed.contains("recover_from_error(")
+                // Either mechanism counts: `recover_from_error` retries the
+                // turn, `learn_from_error` only records for the next one. Both
+                // end the "fails until a release" behavior, which is what this
+                // check is about.
+                !trimmed.starts_with("//")
+                    && (trimmed.contains("recover_from_error(")
+                        || trimmed.contains("learn_from_error("))
             })
             .count();
 

@@ -58,9 +58,7 @@ fn playwright_tool_definitions() -> Vec<ToolDefinition> {
 /// validator does when it reports "Unknown name X at ...".
 fn contains_key(value: &serde_json::Value, key: &str) -> bool {
     match value {
-        serde_json::Value::Object(map) => map
-            .iter()
-            .any(|(k, v)| k == key || contains_key(v, key)),
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| k == key || contains_key(v, key)),
         serde_json::Value::Array(items) => items.iter().any(|i| contains_key(i, key)),
         _ => false,
     }

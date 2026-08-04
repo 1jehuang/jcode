@@ -165,6 +165,94 @@ pub fn recover_from_error(message: &str, spec: &DialectSpec) -> RecoveryAction {
     }
 }
 
+/// Learn from a rejection without retrying, returning a message to show the
+/// user in place of the raw provider error.
+///
+/// Some request paths cannot safely re-send a turn: OpenAI's streaming loop
+/// owns its own retry and backoff machinery, and threading a second retry
+/// through it risks doubling attempts against a rate-limited endpoint. But the
+/// expensive half of recovery is *learning*, not retrying. Recording the
+/// construct here means the user's next request already omits it, so a schema
+/// rejection costs one failed turn instead of every turn until a release.
+///
+/// Returns `None` when the error is not about tool schemas, so callers can use
+/// this as a pass-through predicate.
+pub fn learn_from_error(message: &str, spec: &DialectSpec) -> Option<String> {
+    match recover_from_error(message, spec) {
+        RecoveryAction::NotSchemaRelated => None,
+        RecoveryAction::RetryWithoutConstruct { description } => Some(format!(
+            "{description}. This request failed, but the next one will not send it.",
+        )),
+        RecoveryAction::Unrecoverable { hint } => Some(hint),
+    }
+}
+
+#[cfg(test)]
+mod learn_tests {
+    use super::*;
+
+    fn isolated(name: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        quirks::use_test_path(dir.path().join(format!("{name}.json")));
+        dir
+    }
+
+    /// The two OpenAI rejections that name a construct must be learned, so the
+    /// user's next request omits it even though this path cannot retry.
+    #[test]
+    fn openai_rejections_that_name_a_construct_are_learned() {
+        let _dir = isolated("learn-openai");
+
+        let format_rejection = "invalid_request_error (invalid_function_parameters): Invalid schema for function 'mcp__firecrawl__firecrawl_map': In context=('properties', 'url'), 'uri' is not a valid format.";
+        let message = learn_from_error(format_rejection, &registry::OPENAI).expect("recognized");
+        assert!(message.contains("uri"), "{message}");
+        assert!(
+            quirks::learned_for("openai")
+                .rejected_formats
+                .iter()
+                .any(|f| f == "uri"),
+            "the format must be remembered for the next request"
+        );
+
+        let keyword_rejection = "invalid_request_error (invalid_function_parameters): Invalid schema for function 'mcp__x__y': In context=('properties', 'ids'), 'uniqueItems' is not permitted.";
+        let message = learn_from_error(keyword_rejection, &registry::OPENAI).expect("recognized");
+        assert!(message.contains("uniqueItems"), "{message}");
+    }
+
+    /// #713's "must have a 'type' key" names nothing strippable, so it must be
+    /// labelled as a schema problem rather than either retried or passed
+    /// through as an opaque 400.
+    #[test]
+    fn a_structural_openai_rejection_is_labelled_not_retried() {
+        let _dir = isolated("learn-structural");
+        let structural = "invalid_request_error (invalid_function_parameters): Invalid schema for function 'mcp__cua__set_config': In context=('properties','value'), schema must have a 'type' key.";
+        let message = learn_from_error(structural, &registry::OPENAI).expect("recognized");
+        assert!(
+            message.contains("schema"),
+            "the user needs to know this is a tool-schema problem: {message}"
+        );
+        assert!(
+            quirks::learned_for("openai").is_empty(),
+            "nothing is strippable here, so nothing must be recorded"
+        );
+    }
+
+    #[test]
+    fn operational_failures_pass_straight_through() {
+        let _dir = isolated("learn-operational");
+        for message in [
+            "HTTP 429 Too Many Requests",
+            "connection reset by peer",
+            "HTTP 500 internal error",
+        ] {
+            assert!(
+                learn_from_error(message, &registry::OPENAI).is_none(),
+                "misread an operational failure as a schema problem: {message}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,7 +446,6 @@ mod tests {
             recover_from_error(message, &registry::OPENAI),
             RecoveryAction::Unrecoverable { .. }
         ));
-
     }
 
     #[test]
@@ -390,7 +477,6 @@ mod tests {
             "minItems"
         ));
         let _ = schema;
-
     }
 
     #[test]

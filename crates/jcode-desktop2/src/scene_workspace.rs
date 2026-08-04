@@ -4,15 +4,26 @@
 //! remains the only interactive page. Other columns use the same builder with a
 //! read-only model made from their cached `Peek` transcript. All pages are then
 //! appended into one Vello scene at the camera positions supplied by
-//! [`crate::workspace`].
+//! [`crate::workspace`], each clipped to a rounded window with its own border
+//! ring, so where one session ends and the next begins is legible at a glance.
 
 use crate::{Model, paint, scene, strip, workspace};
 use vello::Scene;
-use vello::kurbo::{Affine, Rect};
+use vello::kurbo::{Affine, Rect, RoundedRect, Stroke};
 
-/// Build the actual window scene. The overview deliberately keeps the legacy
-/// full-window path: it is already a view of every session, and nesting that
-/// spatial navigator inside one workspace column would make both modes worse.
+/// Corner radius of a session page, in logical units. Soft enough to read as
+/// a window, square enough that the transcript inside does not lose its
+/// margins to the curve.
+const PAGE_CORNER: f64 = 10.0;
+/// Ring weight around an unfocused page, and around the focused one. The
+/// focused ring is the compositor's focus border: it is the whole signal for
+/// "this is the page your keys go to", so it is unmistakably heavier.
+const PAGE_RING: f64 = 1.0;
+const PAGE_RING_FOCUS: f64 = 2.0;
+
+/// Build the actual window scene. The overview keeps the legacy full-window
+/// path: it is already a view of every session, and nesting that spatial
+/// navigator inside one workspace column would make both modes worse.
 pub fn build_workspace_scene(
     output: &mut Scene,
     painter: &mut paint::Painter,
@@ -20,28 +31,25 @@ pub fn build_workspace_scene(
     size: (u32, u32),
     scale: f64,
 ) {
-    let entries = model.strip.entries();
-    if entries.len() <= 1 || model.overview.is_visible() {
+    if model.overview.is_visible() {
         scene::build_scene(output, painter, model, size, scale);
         return;
     }
-
-    let column_width = workspace::column_width(size.0, entries.len());
-    let focused_index = entries
-        .iter()
-        .position(|entry| Some(entry.session_id.as_str()) == model.session_id.as_deref())
-        .or_else(|| {
-            let focused = model.strip.focused_session()?;
-            entries.iter().position(|entry| entry.session_id == focused)
-        })
-        .unwrap_or(0);
-    let columns = model.workspace.layout(
-        entries.len(),
-        focused_index,
-        f64::from(size.0),
-        f64::from(column_width),
+    let entries = model.strip.entries();
+    let columns = workspace::placement(
+        &model.strip,
+        &model.workspace,
+        model.session_id.as_deref(),
+        (f64::from(size.0), f64::from(size.1)),
         workspace::GAP * scale,
     );
+    // A lone page at rest is the legacy full-window layout: chrome around a
+    // window with no neighbors would be a picture frame on a wall with one
+    // painting.
+    if columns.len() <= 1 && !model.workspace.is_animating() {
+        scene::build_scene(output, painter, model, size, scale);
+        return;
+    }
 
     // The gutters belong to the workspace, not to any session. A quiet wash
     // makes the page boundaries legible without adding permanent chrome.
@@ -53,29 +61,70 @@ pub fn build_workspace_scene(
         &Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)),
     );
 
-    // Neighbors first, then the live page. They normally do not overlap, but
-    // this ordering keeps subpixel edge antialiasing from washing over focus.
-    for column in columns
-        .iter()
-        .copied()
-        .filter(|column| !column.focused && column.is_visible(f64::from(size.0)))
-    {
-        let mut child = Scene::new();
-        let retained = retained_session_model(model, &entries[column.index]);
-        scene::build_scene(
-            &mut child,
-            painter,
-            &retained,
-            (column_width, size.1),
-            scale,
-        );
-        output.append(&child, Some(Affine::translate((column.x, 0.0))));
-    }
+    let inset = workspace::VERTICAL_INSET * scale;
+    let page_height = (f64::from(size.1) - inset * 2.0).max(1.0) as u32;
+    let viewport = (f64::from(size.0), f64::from(size.1));
 
-    if let Some(column) = columns.iter().find(|column| column.focused) {
+    // Neighbors first, then the live page, so the focused ring is never
+    // washed over by a neighbor's edge antialiasing.
+    let mut ordered: Vec<&workspace::Column> = columns
+        .iter()
+        .filter(|column| column.is_visible(viewport))
+        .collect();
+    ordered.sort_by_key(|column| column.focused);
+    for column in ordered {
+        let width = column.width.round().max(1.0) as u32;
         let mut child = Scene::new();
-        scene::build_scene(&mut child, painter, model, (column_width, size.1), scale);
-        output.append(&child, Some(Affine::translate((column.x, 0.0))));
+        // The focused column is the live page: placement anchors focus to the
+        // attached session, falling back to the strip's focus during the
+        // frames before an attach resolves, exactly when the live model's
+        // "attaching" status is the honest thing to show.
+        if column.focused {
+            scene::build_scene(&mut child, painter, model, (width, page_height), scale);
+        } else {
+            let Some(entry) = entries.get(column.index) else {
+                continue;
+            };
+            let retained = retained_session_model(model, entry);
+            scene::build_scene(&mut child, painter, &retained, (width, page_height), scale);
+        }
+
+        let page = RoundedRect::new(
+            column.x,
+            inset + column.y,
+            column.x + column.width,
+            inset + column.y + f64::from(page_height),
+            PAGE_CORNER * scale,
+        );
+        // The page is clipped to its rounded window so nothing it draws (a
+        // wide code block, a selection band) can bleed into the gutter or
+        // onto a neighbor: the boundary is a wall, not a suggestion.
+        output.push_layer(
+            vello::peniko::Fill::NonZero,
+            vello::peniko::Mix::Normal,
+            1.0,
+            Affine::IDENTITY,
+            &page,
+        );
+        output.append(
+            &child,
+            Some(Affine::translate((column.x, inset + column.y))),
+        );
+        output.pop_layer();
+
+        // The ring sits outside the clip so it stays crisp at every corner.
+        let (color, weight) = if column.focused {
+            (model.theme.field_border_focus, PAGE_RING_FOCUS)
+        } else {
+            (model.theme.rule, PAGE_RING)
+        };
+        output.stroke(
+            &Stroke::new(weight * scale),
+            Affine::IDENTITY,
+            color,
+            None,
+            &page,
+        );
     }
 }
 
@@ -210,7 +259,10 @@ mod tests {
         let entry = strip::Entry::new("neighbor", Some("/work/neighbor"));
         source.session_id = Some("live".into());
         source.strip = strip::Strip::build(
-            vec![strip::Entry::new("live", Some("/work/live")), entry.clone()],
+            vec![
+                strip::Entry::new("live", Some("/work/neighbor")),
+                entry.clone(),
+            ],
             Some("live"),
         );
         source
@@ -229,78 +281,29 @@ mod tests {
         build_workspace_scene(&mut output, &mut painter, &source, (1000, 720), 1.0);
     }
 
+    /// A vertical row slide draws both rows without panicking, including the
+    /// departing sessions that only exist as peeks.
     #[test]
-    #[ignore = "requires a GPU-backed capture"]
-    fn centered_retained_column_matches_the_full_session_scene_within_raster_tolerance() {
-        const VIEW_WIDTH: u32 = 1000;
-        const COLUMN_WIDTH: u32 = 760;
-        const HEIGHT: u32 = 720;
-        const COLUMN_X: u32 = (VIEW_WIDTH - COLUMN_WIDTH) / 2;
-
+    fn a_row_slide_builds_with_both_rows() {
         let mut source = Model::default();
-        let entry = strip::Entry::new("neighbor", Some("/work/neighbor"));
-        source.theme = crate::theme::Theme::print_light();
-        source.session_id = Some("live".into());
+        source.session_id = Some("b1".into());
         source.strip = strip::Strip::build(
-            vec![strip::Entry::new("live", Some("/work/live")), entry.clone()],
-            Some("live"),
+            vec![
+                strip::Entry::new("a1", Some("/w/jcode")),
+                strip::Entry::new("a2", Some("/w/jcode")),
+                strip::Entry::new("b1", Some("/w/site")),
+            ],
+            Some("b1"),
         );
-        source.peeks.insert(
-            "neighbor",
-            transcript([
-                Message::user("question with **formatting**"),
-                Message::assistant("answer with `code` and\n\nmultiple paragraphs"),
-            ]),
+        source.peeks.insert("a1", transcript([Message::user("q")]));
+        source.workspace.begin_row_change(
+            workspace::Direction::Down,
+            vec!["a1".into(), "a2".into()],
+            0,
         );
-        // At phase zero the page being left is centered. With two columns and
-        // rightward motion, that is the retained neighbor at x = 120.
-        source.workspace.begin(workspace::Direction::Right);
 
-        let mut workspace_scene = Scene::new();
-        build_workspace_scene(
-            &mut workspace_scene,
-            &mut paint::Painter::default(),
-            &source,
-            (VIEW_WIDTH, HEIGHT),
-            1.0,
-        );
-        let workspace_pixels =
-            crate::capture::capture_scene_to_rgba(&workspace_scene, VIEW_WIDTH, HEIGHT)
-                .expect("capture workspace scene");
-
-        let retained = retained_session_model(&source, &entry);
-        let mut retained_scene = Scene::new();
-        scene::build_scene(
-            &mut retained_scene,
-            &mut paint::Painter::default(),
-            &retained,
-            (COLUMN_WIDTH, HEIGHT),
-            1.0,
-        );
-        let retained_pixels =
-            crate::capture::capture_scene_to_rgba(&retained_scene, COLUMN_WIDTH, HEIGHT)
-                .expect("capture retained scene");
-
-        let mut max_channel_delta = 0;
-        for y in 0..HEIGHT as usize {
-            let workspace_start = (y * VIEW_WIDTH as usize + COLUMN_X as usize) * 4;
-            let workspace_end = workspace_start + COLUMN_WIDTH as usize * 4;
-            let retained_start = y * COLUMN_WIDTH as usize * 4;
-            let retained_end = retained_start + COLUMN_WIDTH as usize * 4;
-            for (&workspace, &retained) in workspace_pixels[workspace_start..workspace_end]
-                .iter()
-                .zip(&retained_pixels[retained_start..retained_end])
-            {
-                max_channel_delta = max_channel_delta.max(workspace.abs_diff(retained));
-            }
-        }
-        // Vello may round edge coverage a few byte values differently when the
-        // same vector scene is rasterized at a translated target origin. The
-        // observed delta stays below one sixteenth of a channel and is confined
-        // to antialiased edges; a structural or color mismatch is much larger.
-        assert!(
-            max_channel_delta <= 16,
-            "retained scene diverged by {max_channel_delta}/255",
-        );
+        let mut painter = paint::Painter::default();
+        let mut output = Scene::new();
+        build_workspace_scene(&mut output, &mut painter, &source, (1000, 720), 1.0);
     }
 }

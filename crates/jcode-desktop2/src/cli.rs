@@ -152,11 +152,11 @@ fn run_profile_states(args: &[String]) -> Result<()> {
 ///
 ///   jcode-desktop2 --script 'type:alpha beta' ctrl+a shift+right shift+right
 ///
-/// The gesture verbs drive the same handlers the window does, so the held-Super
-/// overview is checkable without a compositor:
+/// The gesture verbs drive the same handlers the window does. Super+hjkl is
+/// direct niri-style motion by default; the held-Super overview stays behind
+/// its bench flag:
 ///
-///   jcode-desktop2 --script 'sessions:a=jcode,b=jcode,c=site' super-down \
-///       'settle' super+h super-up
+///   jcode-desktop2 --script 'sessions:a=jcode,b=jcode,c=site' super+l super+j
 fn run_script(steps: &[String]) -> Result<()> {
     let mut app = App::default();
     app.model.session_id = Some("session_script".into());
