@@ -146,6 +146,23 @@ pub fn snapshot_client_terminal_env() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Replace inherited terminal identity with an authoritative client snapshot.
+///
+/// Removing every known key first is important for a shared server: an empty
+/// client snapshot must not leak the pane that happened to start the server.
+/// Aliases let integrations explicitly distinguish client values from other
+/// process environment while native names preserve existing hook behavior.
+pub fn apply_client_terminal_env(cmd: &mut Command, env: &[(String, String)]) {
+    for key in CLIENT_TERMINAL_ENV_VARS {
+        cmd.env_remove(key);
+        cmd.env_remove(format!("JCODE_CLIENT_{key}"));
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+        cmd.env(format!("JCODE_CLIENT_{key}"), value);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnAttempt {
     pub terminal: String,
@@ -823,6 +840,32 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn client_terminal_env_replaces_inherited_identity_and_exports_aliases() {
+        let mut command = Command::new("hook");
+        command.env("HERDR_PANE_ID", "stale-pane");
+        command.env("TMUX_PANE", "stale-tmux");
+        apply_client_terminal_env(
+            &mut command,
+            &[("HERDR_PANE_ID".to_string(), "client-pane".to_string())],
+        );
+        let env = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(env["HERDR_PANE_ID"].as_deref(), Some("client-pane"));
+        assert_eq!(
+            env["JCODE_CLIENT_HERDR_PANE_ID"].as_deref(),
+            Some("client-pane")
+        );
+        assert_eq!(env["TMUX_PANE"], None);
+    }
 
     #[test]
     fn spawn_metadata_env_reexports_client_terminal_env_with_native_and_client_keys() {

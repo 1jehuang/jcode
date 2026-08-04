@@ -431,13 +431,23 @@ impl Config {
         }
 
         // Lifecycle hooks. Empty env values disable config-file hooks.
-        fn hook_env_override(slot: &mut Option<String>, key: &str) {
+        fn hook_env_override(slot: &mut Option<HookCommands>, key: &str) {
             if let Ok(v) = std::env::var(key) {
                 let trimmed = v.trim();
                 *slot = if trimmed.is_empty() {
                     None
+                } else if trimmed.starts_with('[') {
+                    #[derive(serde::Deserialize)]
+                    struct HookOverride {
+                        commands: HookCommands,
+                    }
+
+                    toml::from_str::<HookOverride>(&format!("commands = {trimmed}"))
+                        .map(|parsed| parsed.commands)
+                        .ok()
+                        .or_else(|| Some(HookCommands::one(trimmed)))
                 } else {
-                    Some(trimmed.to_string())
+                    Some(HookCommands::one(trimmed))
                 };
             }
         }
