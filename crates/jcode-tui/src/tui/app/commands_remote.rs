@@ -5,18 +5,22 @@ use crate::gateway::control::{
 };
 
 const REMOTE_HELP: &str = "\
-**`/remote`** - reach this session from another machine
+**`/remote`** - use jcode from any device
 
-The gateway lets another computer or phone drive this jcode server over the
-network, using the same protocol the local UI speaks.
+`/remote` opens Jcode Cloud activation. Cloud is managed, wakes on demand, and
+is included with eligible Jcode subscriptions. Your projects and credentials
+stay isolated in your cloud host.
 
-- `/remote` or `/remote status` - gateway state, dial address, paired devices
+- `/remote` or `/remote cloud` - activate or manage Jcode Cloud
+- `/remote status` - local gateway state, dial address, paired devices
 - `/remote on` / `/remote off` - enable or disable the gateway
 - `/remote pair` - show a pairing code and QR for a new device
 - `/remote revoke <device>` - remove a paired device
 
-Setup is: `/remote on`, restart the server, then `/remote pair`.
+For self-hosting, run `/remote on`, restart the server, then `/remote pair`.
 ";
+
+const CLOUD_ACTIVATION_URL: &str = "https://jcode.sh/account?activate=cloud";
 
 pub(super) fn handle_remote_command(app: &mut App, trimmed: &str) -> bool {
     let Some(parsed) = parse_remote_command(trimmed) else {
@@ -29,6 +33,7 @@ pub(super) fn handle_remote_command(app: &mut App, trimmed: &str) -> bool {
             app.push_display_message(DisplayMessage::system(REMOTE_HELP.to_string()));
             app.set_status_notice("Remote help");
         }
+        Ok(RemoteCommand::Cloud) => activate_cloud(app),
         Ok(RemoteCommand::Status) => show_status(app),
         Ok(RemoteCommand::On) => toggle(app, true),
         Ok(RemoteCommand::Off) => toggle(app, false),
@@ -37,6 +42,37 @@ pub(super) fn handle_remote_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     true
+}
+
+fn activate_cloud(app: &mut App) {
+    let signed_in = crate::subscription_catalog::has_credentials();
+    let tier = crate::subscription_catalog::cached_tier();
+    let account_line = if signed_in {
+        match tier {
+            Some(tier) => format!("Signed in on the **{}** plan.", tier.display_name()),
+            None => "Signed in to your Jcode account.".to_string(),
+        }
+    } else {
+        "Not signed in yet. The activation page will guide you through sign-in or subscription setup."
+            .to_string()
+    };
+
+    let opened = super::helpers::open_path_or_url_detached(CLOUD_ACTIVATION_URL).is_ok();
+    let open_line = if opened {
+        "Opened the secure activation page in your browser."
+    } else {
+        "Open the secure activation page:"
+    };
+    app.push_display_message(DisplayMessage::system(format!(
+        "**Jcode Cloud**\n\n{account_line}\n\n{open_line}\n\n{CLOUD_ACTIVATION_URL}\n\n\
+         Cloud hosts wake on demand and stop when idle. To use your own machine instead, run \
+         `/remote on`, restart the server, then `/remote pair`."
+    )));
+    app.set_status_notice(if opened {
+        "Jcode Cloud activation opened"
+    } else {
+        "Jcode Cloud activation link ready"
+    });
 }
 
 fn show_status(app: &mut App) {
@@ -163,7 +199,7 @@ mod tests {
         assert_eq!(parse_remote_command("/remote-release"), None);
         assert_eq!(
             parse_remote_command("/remote"),
-            Some(Ok(RemoteCommand::Status))
+            Some(Ok(RemoteCommand::Cloud))
         );
     }
 
@@ -171,7 +207,7 @@ mod tests {
     /// subcommands the parser actually accepts.
     #[test]
     fn help_documents_every_supported_subcommand() {
-        for sub in ["status", "on", "off", "pair", "revoke"] {
+        for sub in ["cloud", "status", "on", "off", "pair", "revoke"] {
             assert!(
                 REMOTE_HELP.contains(sub),
                 "help should document /remote {sub}"
