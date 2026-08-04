@@ -49,6 +49,7 @@ fn parses_inline_math_into_unicode_math_span() {
         .find(|span| span.role == StyleRole::Math)
         .expect("math span");
     assert_eq!(math.text, "e^(iπ) + 1 = 0");
+    assert_eq!(math.latex.as_deref(), Some(r"e^{i\pi} + 1 = 0"));
 }
 
 #[test]

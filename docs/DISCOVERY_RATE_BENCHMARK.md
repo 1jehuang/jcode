@@ -1,9 +1,9 @@
 # Discovery call-rate benchmark
 
 `scripts/benchmark_discovery_rate.py` measures the policy we actually want to
-hold: **the agent calls `discover_tools` whenever it reaches for an external
+hold: **the agent calls `integration_tools` whenever it reaches for an external
 product, service, API, or data source, and it commits to a specific vendor
-through `action=select` rather than around Discovery.**
+through `action=select` rather than around the integration directory.**
 
 This is a different question from `docs/DISCOVERY_BENCHMARK.md`. That benchmark
 is catalog-locked: it verifies that each live listing is reachable from a natural
@@ -16,6 +16,7 @@ broad suite, including tasks where triggering would be wrong.
 python scripts/benchmark_discovery_rate.py --provider jcode --model claude-haiku-4-5-20251001
 python scripts/benchmark_discovery_rate.py --trials 3                 # tighter confidence
 python scripts/benchmark_discovery_rate.py --tag control              # precision only
+python scripts/benchmark_discovery_rate.py --tag selection            # selection accuracy only
 python scripts/benchmark_discovery_rate.py --case storage-user-uploads
 python scripts/benchmark_discovery_rate.py --list                     # inspect the suite
 ```
@@ -31,19 +32,24 @@ named baselines.
 
 ## The suite
 
-`scripts/discovery_rate_cases.json` holds two kinds of case.
+`scripts/discovery_rate_cases.json` holds three kinds of case.
 
-- `expect: "call"` — a task that genuinely needs an external capability. There is
+- `expect: "call"` - a task that genuinely needs an external capability. There is
   at least one per Discovery category, plus two open-category tasks (SMS, speech
   to text) where no category is asserted. These measure **recall**.
-- `expect: "no-call"` — a nearby task that is purely local: refactoring, tests,
+- `expect: "no-call"` - a nearby task that is purely local: refactoring, tests,
   writing copy, a Dockerfile, local SQLite. Any Discovery call here is a false
   positive. These measure **precision**, so recall cannot be bought by calling
   Discovery on everything.
+- `expect: "select"` - a task where the user has already chosen a named product.
+  These cases require `expected_category`, `expected_tool`, and boolean
+  `expected_listed`. The checked-in suite covers context.dev as a listed product
+  and Firecrawl as an off-catalog product. These measure **selection accuracy**.
 
-Loading the suite enforces that prompts never name `discover_tools`, never say
+Loading the suite enforces that prompts never name `integration_tools`, never say
 "discovery", and never contain a category slug. A prompt that leaks the
-mechanism measures nothing.
+mechanism measures nothing. Selection prompts name the product because the
+behavior under test begins after the user has made that choice.
 
 ## Metrics
 
@@ -58,12 +64,30 @@ Per case and in aggregate:
   A high bypass rate is the specific failure this benchmark exists to catch.
 - **select rate** — trials that reached `action=select`, the second half of the
   intended policy.
+- **selection accuracy** - on `expect: "select"` cases, the fraction of scored
+  trials whose actual `integration_tools` input used `action: "select"` and the
+  expected `tool`, included a substantive `reason` explaining the choice, and
+  whose output receipt reported the expected tool, category, and catalog status.
+  Catalog receipts such as `Selected 'context.dev' from
+  'web-data' ...` count as `listed: true`; `Selected off-catalog product
+  'Firecrawl' for 'web-data'.` counts as `listed: false`. Output text alone does
+  not prove that the agent supplied the required tool input.
 - **category accuracy** — when a browse happened, whether it used the expected
   category.
 - **control clean rate** — controls that finished with no Discovery call.
 
-The run passes when aggregate browse recall clears `--min-recall` (default 0.8)
-and control clean rate clears `--min-precision` (default 0.9).
+The run passes when each represented family clears its gate: aggregate browse
+recall clears `--min-recall` (default 0.8), control clean rate clears
+`--min-precision` (default 0.9), and exact selection accuracy clears
+`--min-selection-accuracy` (default 1.0). A filtered run applies only the gates
+for case families it contains, so `--tag selection` can pass or fail without call
+or control cases. A run with no scored trials never passes.
+
+Every trial stops on its first selection, whether correct or incorrect. This
+makes the receipt decisive and prevents setup instructions from leading into an
+install, signup, spending, or another consequential action. Existing `call`
+cases still require a browse response, and `no-call` controls still fail on their
+first integration-directory call.
 
 ## Bypass detection
 

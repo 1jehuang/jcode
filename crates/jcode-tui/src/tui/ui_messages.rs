@@ -3566,7 +3566,7 @@ fn render_discovery_card(
                 MAX_DISCOVERY_DETAIL_LINES,
             );
         }
-        "select" => {
+        "select" | "setup" => {
             let name = tool
                 .input
                 .get("tool")
@@ -3575,7 +3575,14 @@ fn render_discovery_card(
             push_compact_discovery_header(
                 &mut content,
                 vec![
-                    Span::styled("selected ", muted_style),
+                    Span::styled(
+                        if tool_output.starts_with("Selected off-catalog product") {
+                            "selected off-catalog "
+                        } else {
+                            "selected "
+                        },
+                        muted_style,
+                    ),
                     Span::styled(name.to_string(), name_style),
                 ],
                 block_width,

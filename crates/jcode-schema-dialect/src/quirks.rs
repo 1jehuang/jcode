@@ -33,28 +33,43 @@ fn store_path() -> Option<PathBuf> {
     if let Some(override_path) = test_override() {
         return Some(override_path);
     }
-    if let Ok(explicit) = std::env::var("JCODE_SCHEMA_QUIRKS_PATH") {
-        return Some(PathBuf::from(explicit));
+    // A test that forgot to isolate itself must not read or write the real
+    // store. This is not hypothetical: an earlier version of the test hook used
+    // a process-global env var, and because tests run in parallel one of them
+    // observed it unset and persisted a learned `minItems` rejection into the
+    // developer's real `~/.jcode/schema-quirks.json`, silently stripping that
+    // keyword from every OpenAI request on that machine afterwards. Failing
+    // closed here makes the whole class impossible rather than relying on every
+    // future test remembering to isolate.
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        None
     }
-    let home = if let Ok(jcode_home) = std::env::var("JCODE_HOME") {
-        PathBuf::from(jcode_home)
-    } else {
-        dirs::home_dir()?.join(".jcode")
-    };
-    Some(home.join("schema-quirks.json"))
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        if let Ok(explicit) = std::env::var("JCODE_SCHEMA_QUIRKS_PATH") {
+            return Some(PathBuf::from(explicit));
+        }
+        let home = if let Ok(jcode_home) = std::env::var("JCODE_HOME") {
+            PathBuf::from(jcode_home)
+        } else {
+            dirs::home_dir()?.join(".jcode")
+        };
+        Some(home.join("schema-quirks.json"))
+    }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_override() -> Option<PathBuf> {
     TEST_PATH.with(|path| path.borrow().clone())
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn test_override() -> Option<PathBuf> {
     None
 }
@@ -63,7 +78,12 @@ fn test_override() -> Option<PathBuf> {
 /// store is otherwise process-global, so redirecting per thread is what keeps
 /// them from racing each other (and avoids mutating process env, which is
 /// `unsafe` in edition 2024).
-#[cfg(test)]
+///
+/// Gated behind `test-support` as well as `cfg(test)` so integration tests,
+/// which compile against the crate as an external dependency, can isolate
+/// themselves too. Without that an integration test would read and write the
+/// developer's real `~/.jcode/schema-quirks.json`.
+#[cfg(any(test, feature = "test-support"))]
 pub fn use_test_path(path: PathBuf) {
     TEST_PATH.with(|slot| *slot.borrow_mut() = Some(path));
     reset_cache_for_tests();

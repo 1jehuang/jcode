@@ -53,6 +53,15 @@ pub struct DialectTransforms {
     pub const_as_enum: bool,
     /// Rewrite `oneOf` as `anyOf` for dialects that model only `anyOf`.
     pub one_of_as_any_of: bool,
+    /// Merge each `allOf` branch's `properties` into the enclosing object and
+    /// drop the `allOf`.
+    ///
+    /// Distinct from [`Self::flatten_top_level_combiners`], which widens
+    /// `anyOf`/`oneOf` alternatives at the root only. `allOf` branches all
+    /// apply simultaneously, so merging them is lossless, and it applies at any
+    /// depth. Needed by validators that accept `allOf` syntactically without
+    /// intersecting it.
+    pub merge_all_of_branches: bool,
 }
 
 /// A provider's accepted JSON Schema subset plus the rewrites needed to reach
@@ -235,6 +244,9 @@ fn walk(schema: &Value, spec: &DialectSpec, quirks: &LearnedQuirks) -> Value {
 
             if spec.transforms.prune_dangling_required {
                 prune_dangling_required(&mut out);
+            }
+            if spec.transforms.merge_all_of_branches {
+                merge_all_of_branches(&mut out);
             }
             if spec.transforms.require_properties_on_objects && is_object_typed(&out) {
                 out.entry("properties".to_string())
@@ -429,4 +441,83 @@ fn flatten_all_combiners(schema: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().map(flatten_all_combiners).collect()),
         _ => schema.clone(),
     }
+}
+
+/// Merge each `allOf` branch into the enclosing object and drop the `allOf`.
+///
+/// Lossless in principle: `allOf` branches all apply at once, so their
+/// properties and requirements are simply the object's. Needed by validators
+/// that accept `allOf` syntactically without intersecting it, which otherwise
+/// see a tool with no properties at all.
+///
+/// Only object-shaped branches are merged. A branch expressing something else
+/// (a bare `{"minLength": 1}` on a string, say) has nothing to contribute to a
+/// property map, and dropping it only widens what the model may send while the
+/// tool still validates the real call.
+fn merge_all_of_branches(out: &mut Map<String, Value>) {
+    let Some(Value::Array(branches)) = out.remove("allOf") else {
+        return;
+    };
+
+    let mut properties = out
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut required: Vec<String> = out
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for branch in &branches {
+        let Some(branch) = branch.as_object() else {
+            continue;
+        };
+        // Adopt the branch's `type` when the enclosing object declares none.
+        // A schema whose only `type` lives in its `allOf` branches becomes
+        // typeless once the `allOf` is gone, and a typeless tool schema is
+        // rejected outright.
+        if !out.contains_key("type")
+            && let Some(branch_type) = branch.get("type")
+        {
+            out.insert("type".to_string(), branch_type.clone());
+        }
+        if let Some(branch_properties) = branch.get("properties").and_then(Value::as_object) {
+            for (name, property) in branch_properties {
+                // The enclosing object's own declaration wins: it is the more
+                // specific one, and a branch usually only narrows.
+                properties
+                    .entry(name.clone())
+                    .or_insert_with(|| property.clone());
+            }
+        }
+        if let Some(branch_required) = branch.get("required").and_then(Value::as_array) {
+            for name in branch_required.iter().filter_map(Value::as_str) {
+                if !required.iter().any(|existing| existing == name) {
+                    required.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    if !properties.is_empty() {
+        out.insert("properties".to_string(), Value::Object(properties));
+    }
+    if required.is_empty() {
+        out.remove("required");
+    } else {
+        out.insert(
+            "required".to_string(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
+    // A branch may have required a name no branch declared.
+    prune_dangling_required(out);
 }

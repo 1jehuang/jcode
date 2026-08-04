@@ -93,6 +93,20 @@ pub fn classify(message: &str) -> Option<SchemaRejection> {
         });
     }
 
+    // OpenAI (#713): "schema must have a 'type' key". Structural: nothing can be
+    // stripped to fix it, so it is reported as a recognized-but-unactionable
+    // schema error. That labels the failure for the user instead of surfacing a
+    // raw 400, and keeps the caller from retrying a byte-identical request.
+    // Prevention already handles this by declining strict mode, so a rejection
+    // reaching here means a schema jcode did not expect.
+    if message.contains("must have a 'type' key") || message.contains("is not of type") {
+        return Some(SchemaRejection {
+            keywords: Vec::new(),
+            format: None,
+            tool,
+        });
+    }
+
     // Anthropic / OpenRouter (#495) and the Antigravity Claude bridge.
     if message.contains("does not support oneOf, allOf, or anyOf")
         || (message.contains("input_schema") && message.contains("JSON Schema draft 2020-12"))
@@ -219,10 +233,7 @@ mod tests {
     #[test]
     fn parses_the_real_gemini_dangling_required_400() {
         let message = "GenerateContentRequest.tools[0].function_declarations[3].parameters: required fields ['label'] are not defined in the schema properties";
-        assert_eq!(
-            classify(message).unwrap().keyword(),
-            Some("required")
-        );
+        assert_eq!(classify(message).unwrap().keyword(), Some("required"));
     }
 
     #[test]
@@ -290,5 +301,4 @@ mod tests {
             "both violations must be learned from one response, deduplicated"
         );
     }
-
 }

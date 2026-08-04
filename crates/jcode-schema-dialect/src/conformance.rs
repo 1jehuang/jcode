@@ -37,9 +37,19 @@ pub fn untyped_properties(schema: &Value) -> Vec<ConformanceError> {
         let Some(map) = schema.as_object() else {
             return schema.is_boolean();
         };
-        ["type", "enum", "const", "anyOf", "oneOf", "allOf", "$ref", "properties", "items"]
-            .iter()
-            .any(|keyword| map.contains_key(*keyword))
+        [
+            "type",
+            "enum",
+            "const",
+            "anyOf",
+            "oneOf",
+            "allOf",
+            "$ref",
+            "properties",
+            "items",
+        ]
+        .iter()
+        .any(|keyword| map.contains_key(*keyword))
     }
 
     fn walk(schema: &Value, path: &str, errors: &mut Vec<ConformanceError>) {

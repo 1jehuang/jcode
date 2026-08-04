@@ -13,6 +13,7 @@ async-trait = "0.1"
 futures = "0.3"
 httpdate = "1"
 jcode-logging = { path = "../jcode-logging" }
+jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 jcode-message-types = { path = "../jcode-message-types" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
