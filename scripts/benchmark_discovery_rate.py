@@ -287,17 +287,18 @@ def detect_bypasses(tool: str, text: str, elapsed: float) -> list[Bypass]:
     return found
 
 
-def parse_tool_input(text: str) -> tuple[str | None, str | None]:
-    """Return normalized action and tool from one integration_tools input."""
+def parse_tool_input(text: str) -> tuple[str | None, str | None, str | None]:
+    """Return normalized action, tool, and stated reason from one tool input."""
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        return None, None
+        return None, None, None
     if not isinstance(value, dict):
-        return None, None
+        return None, None, None
     action = str(value.get("action") or "").strip().lower() or None
     tool = str(value.get("tool") or "").strip().lower() or None
-    return action, tool
+    reason = str(value.get("reason") or "").strip() or None
+    return action, tool, reason
 
 
 def selection_is_correct(
@@ -305,12 +306,15 @@ def selection_is_correct(
     call: DiscoveryCall,
     action: str | None,
     tool: str | None,
+    reason: str | None,
 ) -> bool:
-    """Require the select input and its rendered receipt to agree with the case."""
+    """Require the select input, stated reason, and receipt to agree with the case."""
     return (
         case.expect == "select"
         and action == "select"
         and tool == case.expected_tool
+        and reason is not None
+        and len(reason) >= 40
         and call.outcome == "selection"
         and call.tools == [case.expected_tool]
         and call.category == case.expected_category
@@ -418,9 +422,10 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
                 call = parse_discovery_output(output, elapsed)
                 record = asdict(call)
                 record["input"] = tool_input[:2000]
-                input_action, input_tool = parse_tool_input(tool_input)
+                input_action, input_tool, input_reason = parse_tool_input(tool_input)
                 record["input_action"] = input_action
                 record["input_tool"] = input_tool
+                record["input_reason"] = input_reason
                 result.discovery_calls.append(record)
                 if result.first_call_seconds is None:
                     result.first_call_seconds = round(elapsed, 3)
@@ -433,7 +438,7 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
                     result.selected_via_discovery.append(input_tool)
                 if case.expect == "select" and is_selection:
                     result.selection_correct = selection_is_correct(
-                        case, call, input_action, input_tool
+                        case, call, input_action, input_tool, input_reason
                     )
                 if discovery_call_stops_trial(case, is_selection):
                     # A control is decided by its first call. A product choice

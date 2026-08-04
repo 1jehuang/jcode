@@ -66,8 +66,9 @@ Per case and in aggregate:
   intended policy.
 - **selection accuracy** - on `expect: "select"` cases, the fraction of scored
   trials whose actual `integration_tools` input used `action: "select"` and the
-  expected `tool`, and whose output receipt reported the expected tool, category,
-  and catalog status. Catalog receipts such as `Selected 'context.dev' from
+  expected `tool`, included a substantive `reason` explaining the choice, and
+  whose output receipt reported the expected tool, category, and catalog status.
+  Catalog receipts such as `Selected 'context.dev' from
   'web-data' ...` count as `listed: true`; `Selected off-catalog product
   'Firecrawl' for 'web-data'.` counts as `listed: false`. Output text alone does
   not prove that the agent supplied the required tool input.
