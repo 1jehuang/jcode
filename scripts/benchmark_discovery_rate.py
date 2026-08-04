@@ -556,6 +556,7 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     category_scores = [
         result["category_accuracy"] for result in call_cases if result["category_accuracy"] is not None
     ]
+    action_cases = call_cases + select_cases
     return {
         "call_case_count": len(call_cases),
         "control_case_count": len(control_cases),
@@ -565,7 +566,7 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
         "recall_browse_rate": mean([result["browse_rate"] for result in call_cases]),
         "recall_any_call_rate": mean([result["call_rate"] for result in call_cases]),
         "bypass_rate": mean([result["bypass_rate"] for result in call_cases]),
-        "select_rate": mean([result["select_rate"] for result in call_cases]),
+        "select_rate": mean([result["select_rate"] for result in action_cases]),
         "selection_accuracy": mean(
             [result["selection_accuracy"] for result in select_cases]
         ),
