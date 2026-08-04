@@ -190,13 +190,14 @@ fn provider_request_builders_that_reach_the_dialect_engine_are_pinned() {
         ("../jcode-provider-gemini/src/lib.rs", true),
         ("../jcode-provider-antigravity/src/lib.rs", true),
         ("../jcode-provider-openrouter/src/request.rs", true),
-        // Still on their own sanitizers. Both work today, and both have their
-        // behavior pinned by `every_provider_sends_clean_schemas`, so this is
-        // duplication to remove rather than a live defect. OpenAI additionally
-        // owns strict-eligibility logic (#711, #713) that has no dialect
-        // equivalent yet.
+        ("../jcode-provider-anthropic/src/lib.rs", true),
+        // The last holdout, deliberately. OpenAI's path is not just a
+        // sanitizer: it also decides strict eligibility (#711, #713) and runs a
+        // separate strict normalization, neither of which has a dialect
+        // equivalent. Its wire output is pinned by the test above, so this is
+        // duplication to remove once the engine can express strict mode, not a
+        // live defect.
         ("../jcode-provider-openai/src/request.rs", false),
-        ("../jcode-provider-anthropic/src/lib.rs", false),
     ];
 
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -224,4 +225,65 @@ fn provider_request_builders_that_reach_the_dialect_engine_are_pinned() {
         "provider/engine wiring changed without updating this list:\n{}",
         mismatches.join("\n")
     );
+}
+
+/// Anthropic rejects a top-level combiner and requires an object schema with a
+/// `properties` map (#495's sibling constraint). Now that it runs the shared
+/// engine, its wire output needs the same behavioral pin as the others.
+#[test]
+fn anthropic_sends_a_schema_without_a_top_level_combiner() {
+    let combiner_tool = vec![ToolDefinition {
+        name: "multi_action".to_string(),
+        description: "probe".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "action": { "type": "string", "description": "what" } },
+            "anyOf": [
+                { "properties": { "label": { "type": "string" } }, "required": ["label"] },
+                { "properties": { "target": { "type": "string" } } }
+            ]
+        }),
+    }];
+
+    let built = jcode_provider_anthropic::format_tools(&combiner_tool, false, false);
+    let wire = serde_json::to_value(&built).expect("serialize");
+    let schema = &wire[0]["input_schema"];
+
+    for combiner in ["anyOf", "oneOf", "allOf"] {
+        assert!(
+            schema.get(combiner).is_none(),
+            "anthropic kept a top-level {combiner}: {schema}"
+        );
+    }
+    // Every branch's fields are advertised, so the model can still call any
+    // action; runtime deserialization enforces which combination is valid.
+    for name in ["action", "label", "target"] {
+        assert!(
+            schema["properties"].get(name).is_some(),
+            "anthropic lost property `{name}`: {schema}"
+        );
+    }
+    assert_eq!(schema["properties"]["action"]["description"], "what");
+    // A branch-only requirement must not survive as a demand the merged object
+    // cannot express.
+    assert!(
+        schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .is_none_or(|r| r.iter().all(|n| n.as_str() != Some("label"))),
+        "anthropic promoted an anyOf branch's requirement: {schema}"
+    );
+
+    // And a no-argument tool still gets the object shape Anthropic requires.
+    let bare = vec![ToolDefinition {
+        name: "noargs".to_string(),
+        description: "probe".to_string(),
+        input_schema: serde_json::json!({}),
+    }];
+    let bare_wire = serde_json::to_value(jcode_provider_anthropic::format_tools(
+        &bare, false, false,
+    ))
+    .expect("serialize");
+    assert_eq!(bare_wire[0]["input_schema"]["type"], "object");
+    assert_eq!(bare_wire[0]["input_schema"]["properties"], serde_json::json!({}));
 }

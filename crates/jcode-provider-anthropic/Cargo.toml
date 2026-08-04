@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 jcode-logging = { path = "../jcode-logging" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }

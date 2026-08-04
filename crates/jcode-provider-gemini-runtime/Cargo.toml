@@ -30,6 +30,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 jcode-provider-antigravity = { path = "../jcode-provider-antigravity" }
+jcode-provider-anthropic = { path = "../jcode-provider-anthropic" }
 jcode-provider-openai = { path = "../jcode-provider-openai" }
 jcode-provider-openrouter = { path = "../jcode-provider-openrouter" }
 serde = { version = "1", features = ["derive"] }

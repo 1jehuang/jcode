@@ -137,6 +137,12 @@ pub const ANTHROPIC: DialectSpec = DialectSpec {
     supported_string_formats: &[],
     transforms: DialectTransforms {
         flatten_top_level_combiners: true,
+        // Anthropic's `input_schema` must be an object schema with a
+        // `properties` map: the API rejects a bare `{"type":"object"}` and a
+        // non-object schema outright. The provider's own sanitizer guaranteed
+        // both, so the dialect has to as well or migrating onto it would be a
+        // regression (caught by diffing the two before switching).
+        require_properties_on_objects: true,
         ..DEFAULT_TRANSFORMS
     },
 };
