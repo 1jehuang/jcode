@@ -399,6 +399,16 @@ impl AnthropicProvider {
         models.into_iter().next()
     }
 
+    fn fallback_for_model_scoped_usage(
+        selected_model: &str,
+        usage: &jcode_base::usage::UsageData,
+    ) -> Option<String> {
+        (selected_model.to_ascii_lowercase().contains("fable")
+            && usage.model_scoped_exhausted(selected_model))
+        .then(|| Self::best_available_opus_model(selected_model))
+        .flatten()
+    }
+
     async fn model_after_oauth_quota_check(
         &self,
         token: &str,
@@ -411,10 +421,7 @@ impl AnthropicProvider {
         let Ok(usage) = jcode_base::usage::fetch_usage_for_access_token(token).await else {
             return selected_model;
         };
-        if !usage.model_scoped_exhausted(&selected_model) {
-            return selected_model;
-        }
-        let Some(fallback) = Self::best_available_opus_model(&selected_model) else {
+        let Some(fallback) = Self::fallback_for_model_scoped_usage(&selected_model, &usage) else {
             return selected_model;
         };
         jcode_base::logging::warn(&format!(
@@ -1669,6 +1676,38 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Anthropic OAuth can reject Fable with a model-scoped weekly
+                // quota error before the usage cache observes the exhausted
+                // window. This is terminal for Fable, not a transient 429.
+                if is_oauth
+                    && !saw_output
+                    && is_fable_scoped_limit_error(&model_name, &error_str)
+                    && let Some(fallback) =
+                        AnthropicProvider::best_available_opus_model(&model_name)
+                {
+                    jcode_base::logging::warn(&format!(
+                        "Anthropic Fable weekly quota is exhausted ({}); retrying with '{}'",
+                        e, fallback
+                    ));
+                    let _ = tx
+                        .send(Ok(StreamEvent::StatusDetail {
+                            detail: format!(
+                                "⚠ '{}' weekly limit reached; switching to '{}'",
+                                strip_1m_suffix(&model_name),
+                                strip_1m_suffix(&fallback)
+                            ),
+                        }))
+                        .await;
+                    request.model = strip_1m_suffix(&fallback).to_string();
+                    *model_state
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
+                    tried_models.push(fallback.clone());
+                    model_name = fallback;
+                    last_error = Some(e);
+                    continue;
+                }
+
                 // Reasoning request rejected (e.g. a model listed with effort or
                 // thinking capabilities that the live API does not actually
                 // accept: "adaptive thinking is not supported on this model" or
@@ -1981,6 +2020,24 @@ fn is_retryable_error(error_str: &str) -> bool {
         // API-level server errors (SSE error events)
         || error_str.contains("api_error")
         || error_str.contains("internal server error")
+}
+
+fn is_fable_scoped_limit_error(model: &str, error: &str) -> bool {
+    let model = strip_1m_suffix(model).to_ascii_lowercase();
+    if !model.contains("fable") {
+        return false;
+    }
+    let error = error.to_ascii_lowercase();
+    let is_limit = error.contains("rate_limit")
+        || error.contains("rate limit")
+        || error.contains("usage_limit")
+        || error.contains("usage limit");
+    let is_scoped = error.contains("fable")
+        || error.contains("weekly")
+        || error.contains("week limit")
+        || error.contains("7-day")
+        || error.contains("7 day");
+    is_limit && is_scoped
 }
 
 /// Detect an Anthropic "model not found" rejection.
