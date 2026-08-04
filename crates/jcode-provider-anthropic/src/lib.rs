@@ -318,72 +318,19 @@ const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "write",
 ];
 
-/// Anthropic accepts JSON Schema combinators inside object properties, but
-/// rejects `oneOf`, `anyOf`, and `allOf` at the input schema's top level. Keep
-/// the common object shape and widen top-level variants into one object whose
-/// properties cover every branch. Runtime tool deserialization remains the
-/// authority for action-specific constraints.
+/// Normalize a tool schema for Anthropic's `input_schema`.
+///
+/// Anthropic accepts JSON Schema combinators inside object properties but
+/// rejects `oneOf`/`anyOf`/`allOf` at the top level, and requires an object
+/// schema with a `properties` map. The subset and the rewrites live in
+/// `jcode-schema-dialect` so every provider shares one implementation and one
+/// set of regression tests.
+///
+/// Widening a top-level combiner loses the per-branch constraint, which is
+/// intended: runtime tool deserialization remains the authority on which
+/// combination is actually valid.
 fn anthropic_input_schema(schema: &Value) -> Value {
-    let Value::Object(source) = schema else {
-        return json!({"type": "object", "properties": {}});
-    };
-
-    let mut output = source.clone();
-    let mut merged_properties = output
-        .get("properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut all_of_required = Vec::new();
-
-    for keyword in ["oneOf", "anyOf", "allOf"] {
-        let Some(branches) = output
-            .remove(keyword)
-            .and_then(|value| value.as_array().cloned())
-        else {
-            continue;
-        };
-        for branch in branches {
-            let Some(branch) = branch.as_object() else {
-                continue;
-            };
-            if let Some(properties) = branch.get("properties").and_then(Value::as_object) {
-                for (name, property) in properties {
-                    merged_properties
-                        .entry(name.clone())
-                        .or_insert_with(|| property.clone());
-                }
-            }
-            if keyword == "allOf"
-                && let Some(required) = branch.get("required").and_then(Value::as_array)
-            {
-                for name in required.iter().filter_map(Value::as_str) {
-                    if !all_of_required.iter().any(|existing| existing == name) {
-                        all_of_required.push(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    output.insert("type".to_string(), Value::String("object".to_string()));
-    output.insert("properties".to_string(), Value::Object(merged_properties));
-    if !all_of_required.is_empty() {
-        let required = output
-            .entry("required".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Value::Array(required) = required {
-            for name in all_of_required {
-                if !required
-                    .iter()
-                    .any(|existing| existing.as_str() == Some(&name))
-                {
-                    required.push(Value::String(name));
-                }
-            }
-        }
-    }
-    Value::Object(output)
+    jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::ANTHROPIC)
 }
 
 pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool) -> Vec<ApiTool> {
