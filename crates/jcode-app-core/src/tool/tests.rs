@@ -1542,3 +1542,45 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
         "and must pass once normalized"
     );
 }
+
+/// Failing strict eligibility closed for #711/#713 must not quietly cost jcode's
+/// own tools their strict mode, since that would drop the structured-output
+/// guarantees on every OpenAI-route tool call with nothing to notice.
+///
+/// The four tools listed below were already non-strict before that change, for
+/// reasons unrelated to it (`batch` declares `additionalProperties: true` so its
+/// sub-call payloads stay open-world; the others carry open maps or untyped
+/// action payloads). Pinning the exact set is what makes this a regression
+/// detector: a fifth name appearing means a stricter rule went too far, and a
+/// name disappearing means a tool became strict-eligible and the list is stale.
+#[tokio::test]
+async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
+    /// Built-ins that legitimately cannot be strict. Verified against master
+    /// before the #711/#713 eligibility changes, so this is pre-existing.
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "initiative", "swarm"];
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let defs = registry.definitions(None).await;
+    assert!(!defs.is_empty(), "the sweep must not pass vacuously");
+
+    let mut ineligible: Vec<String> = Vec::new();
+    for def in &defs {
+        let compatible =
+            jcode_provider_core::openai_schema::openai_compatible_schema(&def.input_schema);
+        if !jcode_provider_core::openai_schema::schema_supports_strict(&compatible) {
+            ineligible.push(def.name.clone());
+        }
+    }
+    ineligible.sort();
+
+    let expected: Vec<String> = KNOWN_OPEN_WORLD_TOOLS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        ineligible, expected,
+        "the set of strict-ineligible built-in tools changed; a new name means an \
+         eligibility rule is too aggressive, a missing name means this list is stale"
+    );
+}

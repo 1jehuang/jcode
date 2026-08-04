@@ -267,6 +267,42 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
             return false;
         }
 
+        // The same rule inside a combiner. A branch that only adds a
+        // constraint (`{"required": ["memory_id"]}`) or only an enum, with no
+        // type of its own, cannot satisfy OpenAI's strict object requirements
+        // and fails the whole catalog (#711, observed on a real MCP catalog).
+        //
+        // Branches are held to a stricter bar than properties: a bare `enum`
+        // is enough to describe a property, but a combiner branch must name a
+        // `type` (OpenAI reports "schema must have a 'type' key"), which is the
+        // same rule the registry-wide sweep already enforces on jcode's own
+        // tools.
+        for combiner in ["anyOf", "oneOf", "allOf"] {
+            if let Some(Value::Array(branches)) = map.get(combiner)
+                && branches.iter().any(|branch| !branch_names_a_type(branch))
+            {
+                return false;
+            }
+        }
+
+        // An array whose `items` are unconstrained: strict mode requires the
+        // element shape to be known (#711).
+        let is_array_typed = match map.get("type") {
+            Some(Value::String(t)) => t == "array",
+            Some(Value::Array(types)) => types.iter().any(|v| v.as_str() == Some("array")),
+            _ => false,
+        };
+        if is_array_typed && !map.get("items").is_some_and(declares_a_type) {
+            return false;
+        }
+
+        // A `$ref` that survived normalization points at a definition the
+        // request does not carry (`$defs` is stripped for some paths), so the
+        // strict validator cannot resolve it (#711).
+        if map.contains_key("$ref") {
+            return false;
+        }
+
         map.values().all(schema_supports_strict)
     }
 
@@ -291,6 +327,23 @@ fn declares_a_type(schema: &Value) -> bool {
     TYPE_BEARING_KEYWORDS
         .iter()
         .any(|keyword| map.contains_key(*keyword))
+}
+
+/// Whether a combiner branch names a concrete `type`.
+///
+/// Stricter than [`declares_a_type`]: OpenAI accepts a property described only
+/// by an `enum`, but rejects a *branch* that does not name a `type`, which is
+/// what #711's `mcp__cirqul__create_object` hit with an enum-only `anyOf`
+/// branch. A nested combiner is accepted here and validated on recursion.
+fn branch_names_a_type(branch: &Value) -> bool {
+    let Some(map) = branch.as_object() else {
+        return branch.is_boolean();
+    };
+    map.contains_key("type")
+        || map.contains_key("$ref")
+        || ["anyOf", "oneOf", "allOf"]
+            .iter()
+            .any(|combiner| map.contains_key(*combiner))
 }
 
 fn schema_is_object_typed(map: &serde_json::Map<String, Value>) -> bool {
@@ -765,6 +818,85 @@ mod tests {
         assert!(
             schema_supports_strict(&openai_compatible_schema(&schema)),
             "every property declares its shape, so strict must stay available"
+        );
+    }
+
+
+    /// Issue #711, reproduced independently against master before fixing: four
+    /// constructs from a real MCP catalog that jcode marked `strict: true` and
+    /// OpenAI then rejected, failing the entire tool catalog.
+    ///
+    /// Each is legal JSON Schema that Anthropic accepts, so the fix is to fail
+    /// strict eligibility closed rather than to rewrite the schema.
+    #[test]
+    fn issue_711_constructs_openai_rejects_do_not_claim_strict() {
+        let cases: &[(&str, serde_json::Value)] = &[
+            (
+                // mcp__cirqul__correct_memory: a branch that only adds a
+                // constraint cannot satisfy strict object requirements.
+                "constraint-only anyOf branch",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "memory_id": { "type": "string" } },
+                    "anyOf": [ { "required": ["memory_id"] } ]
+                }),
+            ),
+            (
+                // mcp__cirqul__create_object: OpenAI wants a `type` key on a
+                // branch even when an enum already pins the values.
+                "enum-only anyOf branch without a type",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "anyOf": [ { "enum": ["a", "b"] }, { "type": "string" } ] }
+                    }
+                }),
+            ),
+            (
+                "array with unconstrained items",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "tags": { "type": "array" } }
+                }),
+            ),
+            (
+                // `$defs` is stripped on some paths, so a surviving `$ref`
+                // cannot be resolved by the validator.
+                "unresolvable $ref",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "node": { "$ref": "#/$defs/missing" } }
+                }),
+            ),
+        ];
+
+        for (label, schema) in cases {
+            assert!(
+                !schema_supports_strict(&openai_compatible_schema(schema)),
+                "{label} must not be sent as a strict schema"
+            );
+        }
+    }
+
+    /// Failing closed must not become failing always: every construct below is
+    /// well formed, and losing strict mode for them would quietly drop the
+    /// structured-output guarantees on every OpenAI-route tool call.
+    #[test]
+    fn well_formed_schemas_keep_strict_mode() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "where" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "mode": { "enum": ["fast", "slow"] },
+                "either": { "anyOf": [ { "type": "string" }, { "type": "integer" } ] },
+                "nested": { "type": "object", "properties": { "x": { "type": "boolean" } } }
+            },
+            "required": ["path"]
+        });
+        assert!(
+            schema_supports_strict(&openai_compatible_schema(&schema)),
+            "a well-formed schema must keep strict mode"
         );
     }
 
