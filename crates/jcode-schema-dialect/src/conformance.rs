@@ -23,6 +23,64 @@ pub struct ConformanceError {
     pub message: String,
 }
 
+/// Report properties that declare nothing about what they accept.
+///
+/// Legal JSON Schema (an empty schema accepts any instance) and fine for
+/// Anthropic, but OpenAI's strict validator rejects the whole tool catalog over
+/// it (#713). Unlike the keyword checks this is not per-dialect: no dialect
+/// *rejects* a typeless property, the OpenAI path just must not claim `strict`
+/// for it. Reporting it separately keeps jcode's own tools from acquiring one
+/// silently, since that would cost every OpenAI-route agent its strict
+/// structured-output guarantees.
+pub fn untyped_properties(schema: &Value) -> Vec<ConformanceError> {
+    fn declares_a_type(schema: &Value) -> bool {
+        let Some(map) = schema.as_object() else {
+            return schema.is_boolean();
+        };
+        ["type", "enum", "const", "anyOf", "oneOf", "allOf", "$ref", "properties", "items"]
+            .iter()
+            .any(|keyword| map.contains_key(*keyword))
+    }
+
+    fn walk(schema: &Value, path: &str, errors: &mut Vec<ConformanceError>) {
+        let Some(map) = schema.as_object() else {
+            if let Some(items) = schema.as_array() {
+                for (idx, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}[{idx}]"), errors);
+                }
+            }
+            return;
+        };
+        if let Some(Value::Object(properties)) = map.get("properties") {
+            for (name, property) in properties {
+                let child = format!("{path}.properties.{name}");
+                if !declares_a_type(property) {
+                    errors.push(ConformanceError {
+                        path: child.clone(),
+                        message: "property declares no type, enum, or combiner, so the OpenAI \
+                                  strict validator would reject the whole catalog"
+                            .to_string(),
+                    });
+                }
+                walk(property, &child, errors);
+            }
+        }
+        for (key, value) in map {
+            if key == "properties" {
+                continue;
+            }
+            match keyword_role(key) {
+                KeywordRole::Data => {}
+                _ => walk(value, &format!("{path}.{key}"), errors),
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    walk(schema, "$", &mut errors);
+    errors
+}
+
 impl std::fmt::Display for ConformanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.path, self.message)

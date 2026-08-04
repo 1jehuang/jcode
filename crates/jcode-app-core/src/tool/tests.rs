@@ -1466,6 +1466,15 @@ async fn tool_schemas_are_sendable_to_every_provider_dialect() {
     assert!(!defs.is_empty(), "the sweep must not pass vacuously");
 
     let mut failures = Vec::new();
+    // Not per-dialect: no provider *rejects* a property that declares no type,
+    // but OpenAI refuses `strict` for the whole catalog over one (#713), so a
+    // built-in tool acquiring one would silently cost every OpenAI-route agent
+    // its structured-output guarantees.
+    for def in &defs {
+        for error in jcode_schema_dialect::untyped_properties(&def.input_schema) {
+            failures.push(format!("tool `{}` {error}", def.name));
+        }
+    }
     for spec in jcode_schema_dialect::registry::ALL {
         for def in &defs {
             let normalized = jcode_schema_dialect::dialect::apply(&def.input_schema, spec);
