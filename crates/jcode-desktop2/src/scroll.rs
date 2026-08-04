@@ -303,7 +303,11 @@ impl Smooth {
     fn edge_brake(&self) -> Option<f64> {
         let room = self.room.filter(|room| *room > 0.0)?;
         let speed = self.velocity.abs();
-        (speed > MIN_VELOCITY).then(|| speed * speed / (2.0 * room))
+        // The continuous solution lands exactly only with continuous integration.
+        // We integrate once per frame and spend the post-brake velocity, so a
+        // small safety margin is needed to avoid reaching the last frame with a
+        // visibly non-zero step that the edge clamp then cuts off.
+        (speed > MIN_VELOCITY).then(|| 1.2 * speed * speed / (2.0 * room))
     }
 
     /// Kill the fling: the view has hit the top or the tail, and coasting into
