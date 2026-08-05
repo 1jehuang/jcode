@@ -40,6 +40,17 @@ const OFF_CATALOG_FAILURE_REASON: &str = "off_catalog_select";
 /// True when a select response carries no usable tool entry (`{}`,
 /// `{"tool": null}`, or an empty object), which endpoints use instead of 404.
 fn listing_has_no_tool_entry(listing: &Value) -> bool {
+    // A successful off-catalog selection deliberately has no `tool` object.
+    // It is still a valid receipt and must reach `render_selection` rather than
+    // being mistaken for an empty catalog response.
+    if listing.get("listed").and_then(Value::as_bool) == Some(false)
+        && listing
+            .get("selected_tool")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.trim().is_empty())
+    {
+        return false;
+    }
     match listing.get("tool") {
         None | Some(Value::Null) => true,
         Some(Value::Object(entry)) => entry.is_empty(),
@@ -401,9 +412,9 @@ impl Tool for DiscoverToolsTool {
     fn description(&self) -> &str {
         "Call this before using any product, service, dev tool, API, or data source you \
          don't already have a tool for. Tools in this catalog are vetted integrations \
-         partnered with this harness to ensure quality and seamless one-call setup. \
-         After deciding, call it again with action `select` and the product actually \
-         chosen, including an off-catalog product. Off-catalog selections are recorded \
+         partnered with this harness. If a built-in tool provides the capability, use that tool directly. \
+         After deciding, call again with action `select` and the chosen product, including an \
+         off-catalog product. Off-catalog selections are recorded \
          but return no provider information or setup instructions."
     }
 
@@ -1032,12 +1043,24 @@ async fn submit_suggestion(
             response_bytes: Some(body.len() as u64),
         });
     }
-    let listing = serde_json::from_slice(&body).map_err(|err| DiscoveryFetchError {
+    let mut listing: Value = serde_json::from_slice(&body).map_err(|err| DiscoveryFetchError {
         message: format!("catalog suggestion returned invalid JSON: {err}"),
         failure_reason: "invalid_json",
         http_status: Some(status.as_u16()),
         response_bytes: Some(body.len() as u64),
     })?;
+    // Older catalog deployments returned a successful receipt without a
+    // `status` field. HTTP success (or the explicitly accepted 409 duplicate)
+    // already establishes the outcome, so normalize that compatible response
+    // instead of surfacing a false tool error to the user.
+    if let Some(object) = listing.as_object_mut()
+        && !object.contains_key("status")
+    {
+        object.insert(
+            "status".to_string(),
+            Value::String(if duplicate { "duplicate" } else { "received" }.to_string()),
+        );
+    }
     Ok(DiscoveryFetchResult {
         listing,
         http_status: status.as_u16(),
@@ -1637,6 +1660,10 @@ mod tests {
         assert!(listing_has_no_tool_entry(&json!({"tool": null})));
         assert!(listing_has_no_tool_entry(&json!({"tool": {}})));
         assert!(!listing_has_no_tool_entry(&json!({"tool": {"name": "x"}})));
+        assert!(!listing_has_no_tool_entry(&json!({
+            "selected_tool": "duckduckgo",
+            "listed": false
+        })));
     }
 
     #[test]
@@ -1657,6 +1684,7 @@ mod tests {
         let description = tool.description();
         assert!(description.starts_with("Call this before using any product"));
         assert!(description.contains("don't already have a tool for"));
+        assert!(description.contains("use that tool directly"));
         assert!(description.contains("vetted integrations"));
         assert!(description.contains("partnered with this harness"));
         assert!(description.contains("including an off-catalog product"));
@@ -2045,7 +2073,6 @@ mod tests {
     async fn submit_suggestion_posts_structured_maintainer_only_payload() {
         let body = json!({
             "suggestion_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-            "status": "received",
             "message": "received"
         })
         .to_string();
@@ -2073,6 +2100,7 @@ mod tests {
         };
         let result = submit_suggestion(&request, &suggestion).await.unwrap();
         assert_eq!(result.http_status, 202);
+        // Successful receipts from older deployments omitted `status`.
         assert_eq!(result.listing["status"], "received");
 
         let request = server.await.unwrap();
