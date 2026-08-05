@@ -16,6 +16,46 @@ use jcode_notify_email::{
 };
 pub use jcode_notify_email::{extract_permission_id, parse_permission_reply};
 
+/// Stable schema version for files handed to the bundled macOS notification
+/// broker. The broker ignores payloads with a newer schema instead of guessing
+/// at their meaning.
+pub const MACOS_NOTIFICATION_SCHEMA_VERSION: u32 = 1;
+
+/// The terminal route attached to a macOS turn notification.
+///
+/// `tty` is the strongest identifier available across Terminal.app and iTerm2:
+/// both expose it in their AppleScript dictionaries, so a notification click
+/// can select the exact originating tab/session. Ghostty currently exposes no
+/// supported per-surface activation API, so its route intentionally degrades to
+/// activating the application.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacosTerminalKind {
+    AppleTerminal,
+    Iterm2,
+    Ghostty,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MacosNotificationOrigin {
+    pub terminal: MacosTerminalKind,
+    pub bundle_id: Option<String>,
+    pub tty: Option<String>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MacosNotificationEnvelope {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub body: String,
+    pub sound: Option<String>,
+    pub origin: MacosNotificationOrigin,
+}
+
 /// Notification priority levels (maps to ntfy priority header).
 #[derive(Debug, Clone, Copy)]
 pub enum Priority {
@@ -274,6 +314,343 @@ async fn send_ntfy(
 // ---------------------------------------------------------------------------
 // Desktop (cross-platform, fire-and-forget)
 // ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFICATION_BROKER_APP_NAME: &str = "Jcode Notifications.app";
+#[cfg(target_os = "macos")]
+const MACOS_NOTIFICATION_BROKER_EXECUTABLE: &str = "jcode-notification-broker";
+
+impl MacosNotificationOrigin {
+    /// Capture the terminal route for the local client which owns this process.
+    pub fn detect() -> Self {
+        let tty = controlling_tty();
+        Self::from_values(
+            &std::env::var("TERM_PROGRAM").unwrap_or_default(),
+            &std::env::var("TERM").unwrap_or_default(),
+            tty.as_deref(),
+            std::env::var("TERM_SESSION_ID").ok().as_deref(),
+            std::env::var("ITERM_SESSION_ID").ok().as_deref(),
+            std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+                || std::env::var("GHOSTTY_BIN_DIR").is_ok(),
+        )
+    }
+
+    fn from_values(
+        term_program: &str,
+        term: &str,
+        tty: Option<&str>,
+        term_session_id: Option<&str>,
+        iterm_session_id: Option<&str>,
+        has_ghostty_env: bool,
+    ) -> Self {
+        let term_program_lower = term_program.to_ascii_lowercase();
+        let term_lower = term.to_ascii_lowercase();
+        let (terminal, bundle_id, session_id) =
+            if term_program_lower == "iterm.app" || iterm_session_id.is_some() {
+                (
+                    MacosTerminalKind::Iterm2,
+                    Some("com.googlecode.iterm2".to_string()),
+                    iterm_session_id,
+                )
+            } else if term_program_lower == "apple_terminal" {
+                (
+                    MacosTerminalKind::AppleTerminal,
+                    Some("com.apple.Terminal".to_string()),
+                    term_session_id,
+                )
+            } else if has_ghostty_env
+                || term_program_lower == "ghostty"
+                || term_lower.contains("ghostty")
+            {
+                (
+                    MacosTerminalKind::Ghostty,
+                    Some("com.mitchellh.ghostty".to_string()),
+                    term_session_id,
+                )
+            } else {
+                (MacosTerminalKind::Unknown, None, term_session_id)
+            };
+
+        Self {
+            terminal,
+            bundle_id,
+            tty: tty.filter(|value| valid_tty(value)).map(str::to_string),
+            session_id: session_id
+                .filter(|value| valid_route_identifier(value))
+                .map(str::to_string),
+        }
+    }
+}
+
+fn valid_tty(value: &str) -> bool {
+    value.starts_with("/dev/tty")
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-'))
+}
+
+fn valid_route_identifier(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+#[cfg(unix)]
+fn controlling_tty() -> Option<String> {
+    use std::os::fd::AsRawFd;
+
+    let fd = std::io::stdin().as_raw_fd();
+    let mut buffer = vec![0_i8; 1024];
+    // SAFETY: `buffer` is valid and writable for its full length and `fd` is a
+    // live descriptor. `ttyname_r` writes a NUL-terminated string on success.
+    let result = unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr(), buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: successful `ttyname_r` guarantees a NUL terminator in `buffer`.
+    let value = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    value.to_str().ok().map(str::to_string)
+}
+
+#[cfg(not(unix))]
+fn controlling_tty() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_notification_broker_app_path() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_BROKER_APP") {
+        return Some(path.into());
+    }
+    dirs::home_dir().map(|home| {
+        home.join("Applications")
+            .join(MACOS_NOTIFICATION_BROKER_APP_NAME)
+    })
+}
+
+/// The durable inbox consumed by the bundled macOS broker.
+pub fn macos_notification_inbox_dir() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_INBOX") {
+        return Some(path.into());
+    }
+    dirs::home_dir().map(|home| {
+        home.join(".jcode")
+            .join("notifications")
+            .join("macos")
+            .join("inbox")
+    })
+}
+
+/// Queue a turn notification for the bundled LSUIElement broker and wake it.
+/// Returns false when the helper is unavailable so the caller can use its
+/// terminal-native or `osascript` fallback.
+pub fn send_macos_turn_notification(
+    title: &str,
+    subtitle: Option<&str>,
+    body: &str,
+    sound: Option<&str>,
+) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, subtitle, body, sound);
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(app_path) = macos_notification_broker_app_path() else {
+            return false;
+        };
+        let executable = app_path
+            .join("Contents")
+            .join("MacOS")
+            .join(MACOS_NOTIFICATION_BROKER_EXECUTABLE);
+        if !app_path.is_dir() || !executable.is_file() {
+            return false;
+        }
+
+        let id = next_macos_notification_id();
+        let envelope = MacosNotificationEnvelope {
+            schema_version: MACOS_NOTIFICATION_SCHEMA_VERSION,
+            notification_id: id.clone(),
+            title: title.to_string(),
+            subtitle: subtitle
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string),
+            body: body.to_string(),
+            sound: sound
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string),
+            origin: MacosNotificationOrigin::detect(),
+        };
+        let queued_path = match enqueue_macos_notification(&envelope) {
+            Ok(path) => path,
+            Err(error) => {
+                logging::warn(&format!("failed to queue macOS notification: {error}"));
+                return false;
+            }
+        };
+
+        match std::process::Command::new("/usr/bin/open")
+            .arg("-gj")
+            .arg(&app_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                reap_notification_child(child);
+                true
+            }
+            Err(error) => {
+                // The caller will send a fallback, so remove this payload rather
+                // than deliver a duplicate after a later successful launch.
+                let _ = std::fs::remove_file(queued_path);
+                logging::warn(&format!(
+                    "failed to launch macOS notification broker: {error}"
+                ));
+                false
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn next_macos_notification_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "jcode-turn-{timestamp}-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn enqueue_macos_notification(
+    envelope: &MacosNotificationEnvelope,
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::io::Write as _;
+
+    let inbox = macos_notification_inbox_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine notification inbox"))?;
+    std::fs::create_dir_all(&inbox)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let final_path = inbox.join(format!("{}.json", envelope.notification_id));
+    let temporary_path = inbox.join(format!(".{}.tmp", envelope.notification_id));
+    let bytes = serde_json::to_vec(envelope)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary_path, &final_path)?;
+    Ok(final_path)
+}
+
+fn reap_notification_child(mut child: std::process::Child) {
+    let _ = std::thread::Builder::new()
+        .name("jcode-notification-child".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+}
+
+/// Build the process invocation used when a broker notification is clicked.
+/// Kept pure so routing and escaping are fully testable on non-macOS builders.
+pub fn macos_notification_activation_command(
+    origin: &MacosNotificationOrigin,
+) -> Option<(String, Vec<String>)> {
+    fn applescript_string(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    match origin.terminal {
+        MacosTerminalKind::AppleTerminal => {
+            let tty = origin.tty.as_deref().filter(|value| valid_tty(value));
+            let script = if let Some(tty) = tty {
+                format!(
+                    "tell application \"Terminal\"\nrepeat with w in windows\nrepeat with t in tabs of w\nif tty of t is \"{}\" then\nset selected tab of w to t\nset frontmost of w to true\nactivate\nreturn\nend if\nend repeat\nend repeat\nactivate\nend tell",
+                    applescript_string(tty)
+                )
+            } else {
+                "tell application \"Terminal\" to activate".to_string()
+            };
+            Some((
+                "/usr/bin/osascript".to_string(),
+                vec!["-e".to_string(), script],
+            ))
+        }
+        MacosTerminalKind::Iterm2 => {
+            let tty = origin.tty.as_deref().filter(|value| valid_tty(value));
+            let script = if let Some(tty) = tty {
+                format!(
+                    "tell application \"iTerm2\"\nrepeat with w in windows\nrepeat with t in tabs of w\nrepeat with s in sessions of t\nif tty of s is \"{}\" then\nselect s\nselect t\nactivate\nreturn\nend if\nend repeat\nend repeat\nend repeat\nactivate\nend tell",
+                    applescript_string(tty)
+                )
+            } else {
+                "tell application \"iTerm2\" to activate".to_string()
+            };
+            Some((
+                "/usr/bin/osascript".to_string(),
+                vec!["-e".to_string(), script],
+            ))
+        }
+        MacosTerminalKind::Ghostty => Some((
+            "/usr/bin/open".to_string(),
+            vec![
+                "-b".to_string(),
+                origin
+                    .bundle_id
+                    .as_deref()
+                    .filter(|value| *value == "com.mitchellh.ghostty")
+                    .unwrap_or("com.mitchellh.ghostty")
+                    .to_string(),
+            ],
+        )),
+        MacosTerminalKind::Unknown => origin.bundle_id.as_deref().and_then(|bundle_id| {
+            let safe = bundle_id.len() <= 255
+                && bundle_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+            safe.then(|| {
+                (
+                    "/usr/bin/open".to_string(),
+                    vec!["-b".to_string(), bundle_id.to_string()],
+                )
+            })
+        }),
+    }
+}
+
+/// Activate the recorded terminal route without blocking the notification
+/// delegate's main run loop.
+pub fn activate_macos_notification_origin(origin: &MacosNotificationOrigin) {
+    let Some((program, args)) = macos_notification_activation_command(origin) else {
+        return;
+    };
+    if let Ok(child) = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        reap_notification_child(child);
+    }
+}
 
 /// Send a local desktop notification without blocking.
 ///
@@ -649,5 +1026,127 @@ mod tests {
         // Just verify it doesn't panic
         let cfg = SafetyConfig::default();
         let _dispatcher = NotificationDispatcher::from_config(cfg);
+    }
+
+    #[test]
+    fn macos_origin_detects_terminal_identifiers() {
+        let terminal = MacosNotificationOrigin::from_values(
+            "Apple_Terminal",
+            "xterm-256color",
+            Some("/dev/ttys007"),
+            Some("4F3C"),
+            None,
+            false,
+        );
+        assert_eq!(terminal.terminal, MacosTerminalKind::AppleTerminal);
+        assert_eq!(terminal.bundle_id.as_deref(), Some("com.apple.Terminal"));
+        assert_eq!(terminal.tty.as_deref(), Some("/dev/ttys007"));
+        assert_eq!(terminal.session_id.as_deref(), Some("4F3C"));
+
+        let iterm = MacosNotificationOrigin::from_values(
+            "iTerm.app",
+            "xterm-256color",
+            Some("/dev/ttys011"),
+            None,
+            Some("w0t1p0:ABC"),
+            false,
+        );
+        assert_eq!(iterm.terminal, MacosTerminalKind::Iterm2);
+        assert_eq!(iterm.session_id.as_deref(), Some("w0t1p0:ABC"));
+
+        let ghostty = MacosNotificationOrigin::from_values(
+            "",
+            "xterm-ghostty",
+            Some("/dev/ttys019"),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(ghostty.terminal, MacosTerminalKind::Ghostty);
+        assert_eq!(ghostty.bundle_id.as_deref(), Some("com.mitchellh.ghostty"));
+    }
+
+    #[test]
+    fn macos_origin_rejects_untrusted_route_values() {
+        let origin = MacosNotificationOrigin::from_values(
+            "Apple_Terminal",
+            "",
+            Some("/dev/ttys001\"\nrun script"),
+            Some("bad\nidentifier"),
+            None,
+            false,
+        );
+        assert_eq!(origin.tty, None);
+        assert_eq!(origin.session_id, None);
+
+        let (_, args) = macos_notification_activation_command(&origin).expect("Terminal route");
+        assert_eq!(
+            args,
+            vec!["-e", "tell application \"Terminal\" to activate"]
+        );
+    }
+
+    #[test]
+    fn macos_activation_targets_terminal_and_iterm_ttys() {
+        let terminal = MacosNotificationOrigin {
+            terminal: MacosTerminalKind::AppleTerminal,
+            bundle_id: Some("com.apple.Terminal".to_string()),
+            tty: Some("/dev/ttys003".to_string()),
+            session_id: Some("session-a".to_string()),
+        };
+        let (program, args) =
+            macos_notification_activation_command(&terminal).expect("Terminal command");
+        assert_eq!(program, "/usr/bin/osascript");
+        assert!(args[1].contains("if tty of t is \"/dev/ttys003\""));
+        assert!(args[1].contains("set selected tab of w to t"));
+
+        let iterm = MacosNotificationOrigin {
+            terminal: MacosTerminalKind::Iterm2,
+            bundle_id: Some("com.googlecode.iterm2".to_string()),
+            tty: Some("/dev/ttys004".to_string()),
+            session_id: Some("w0t0p0:guid".to_string()),
+        };
+        let (_, args) = macos_notification_activation_command(&iterm).expect("iTerm command");
+        assert!(args[1].contains("if tty of s is \"/dev/ttys004\""));
+        assert!(args[1].contains("select s"));
+    }
+
+    #[test]
+    fn macos_ghostty_activation_is_application_scoped() {
+        let origin = MacosNotificationOrigin {
+            terminal: MacosTerminalKind::Ghostty,
+            bundle_id: Some("evil.bundle".to_string()),
+            tty: Some("/dev/ttys005".to_string()),
+            session_id: None,
+        };
+        assert_eq!(
+            macos_notification_activation_command(&origin),
+            Some((
+                "/usr/bin/open".to_string(),
+                vec!["-b".to_string(), "com.mitchellh.ghostty".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn macos_envelope_roundtrip_preserves_origin_metadata() {
+        let envelope = MacosNotificationEnvelope {
+            schema_version: MACOS_NOTIFICATION_SCHEMA_VERSION,
+            notification_id: "jcode-turn-test".to_string(),
+            title: "jcode · done".to_string(),
+            subtitle: Some("2/2 todos".to_string()),
+            body: "Finished broker".to_string(),
+            sound: Some("Glass".to_string()),
+            origin: MacosNotificationOrigin {
+                terminal: MacosTerminalKind::Iterm2,
+                bundle_id: Some("com.googlecode.iterm2".to_string()),
+                tty: Some("/dev/ttys009".to_string()),
+                session_id: Some("w1t2p0:route".to_string()),
+            },
+        };
+        let encoded = serde_json::to_vec(&envelope).expect("encode envelope");
+        let decoded: MacosNotificationEnvelope =
+            serde_json::from_slice(&encoded).expect("decode envelope");
+        assert_eq!(decoded, envelope);
     }
 }

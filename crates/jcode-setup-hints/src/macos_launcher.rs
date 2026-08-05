@@ -11,11 +11,19 @@ const MACOS_APP_ICON_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/app-icons/Jcode.icns"
 ));
+const MACOS_NOTIFICATION_APP_NAME: &str = "Jcode Notifications.app";
+const MACOS_NOTIFICATION_EXECUTABLE: &str = "jcode-notification-broker";
+const MACOS_NOTIFICATION_VERSION_MARKER: &str = "jcode-broker-version";
 
 pub(super) fn should_refresh_macos_app_launcher(state: &SetupHintsState) -> bool {
-    match (macos_app_launcher_dir(), legacy_macos_app_launcher_dir()) {
-        (Ok(app_dir), Ok(legacy_app_dir)) => {
+    match (
+        macos_app_launcher_dir(),
+        legacy_macos_app_launcher_dir(),
+        macos_notification_broker_dir(),
+    ) {
+        (Ok(app_dir), Ok(legacy_app_dir), Ok(broker_dir)) => {
             should_refresh_macos_app_launcher_paths(state, &app_dir, &legacy_app_dir)
+                || !macos_notification_broker_is_valid(&broker_dir)
         }
         _ => !state.desktop_shortcut_created,
     }
@@ -86,6 +94,8 @@ pub(super) fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)>
     );
     std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
 
+    install_macos_notification_broker(&exe)?;
+
     if !macos_app_launcher_is_valid(&app_dir) {
         anyhow::bail!(
             "launcher bundle is incomplete after setup: {}",
@@ -106,6 +116,143 @@ fn macos_app_launcher_dir() -> Result<PathBuf> {
 fn legacy_macos_app_launcher_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join("Applications").join("jcode.app"))
+}
+
+fn macos_notification_broker_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    Ok(home.join("Applications").join(MACOS_NOTIFICATION_APP_NAME))
+}
+
+fn macos_notification_broker_executable_path(app_dir: &Path) -> PathBuf {
+    app_dir
+        .join("Contents")
+        .join("MacOS")
+        .join(MACOS_NOTIFICATION_EXECUTABLE)
+}
+
+fn macos_notification_broker_marker_path(app_dir: &Path) -> PathBuf {
+    app_dir
+        .join("Contents")
+        .join("Resources")
+        .join(MACOS_NOTIFICATION_VERSION_MARKER)
+}
+
+fn macos_notification_broker_icon_path(app_dir: &Path) -> PathBuf {
+    app_dir
+        .join("Contents")
+        .join("Resources")
+        .join(MACOS_APP_ICON_FILE_NAME)
+}
+
+fn macos_notification_broker_is_valid(app_dir: &Path) -> bool {
+    app_dir.is_dir()
+        && app_dir.join("Contents").join("Info.plist").is_file()
+        && macos_notification_broker_executable_path(app_dir).is_file()
+        && macos_notification_broker_icon_path(app_dir).is_file()
+        && std::fs::read_to_string(macos_notification_broker_marker_path(app_dir))
+            .is_ok_and(|version| version.trim() == jcode_build_meta::version())
+}
+
+/// Install a faceless Notification Center owner using the already-built jcode
+/// executable as a multicall binary. Hard-linking keeps the generated helper
+/// tiny and architecture-correct for both Intel and Apple Silicon artifacts;
+/// copying is the reliable fallback when ~/Applications is on another volume.
+fn install_macos_notification_broker(jcode_executable: &Path) -> Result<PathBuf> {
+    let app_dir = macos_notification_broker_dir()?;
+    let parent = app_dir
+        .parent()
+        .context("notification broker bundle has no parent")?;
+    std::fs::create_dir_all(parent)?;
+
+    let staging = parent.join(format!(
+        ".Jcode Notifications.app.installing-{}",
+        std::process::id()
+    ));
+    remove_path_if_exists(&staging)?;
+    let contents = staging.join("Contents");
+    let macos = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    std::fs::create_dir_all(&macos)?;
+    std::fs::create_dir_all(&resources)?;
+
+    let broker_executable = macos.join(MACOS_NOTIFICATION_EXECUTABLE);
+    if std::fs::hard_link(jcode_executable, &broker_executable).is_err() {
+        std::fs::copy(jcode_executable, &broker_executable).with_context(|| {
+            format!(
+                "failed to install notification broker executable from {}",
+                jcode_executable.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&broker_executable, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::write(
+        resources.join(MACOS_APP_ICON_FILE_NAME),
+        MACOS_APP_ICON_BYTES,
+    )?;
+    std::fs::write(
+        resources.join(MACOS_NOTIFICATION_VERSION_MARKER),
+        format!("{}\n", jcode_build_meta::version()),
+    )?;
+    std::fs::write(contents.join("Info.plist"), macos_notification_info_plist())?;
+
+    if !macos_notification_broker_is_valid(&staging) {
+        remove_path_if_exists(&staging)?;
+        anyhow::bail!(
+            "notification broker bundle is incomplete after setup: {}",
+            staging.display()
+        );
+    }
+
+    remove_path_if_exists(&app_dir)?;
+    std::fs::rename(&staging, &app_dir).with_context(|| {
+        format!(
+            "failed to publish notification broker bundle at {}",
+            app_dir.display()
+        )
+    })?;
+    register_macos_app_launcher(&app_dir);
+    Ok(app_dir)
+}
+
+fn macos_notification_info_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Jcode Notifications</string>
+    <key>CFBundleDisplayName</key>
+    <string>Jcode Notifications</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jcode.notifications</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleExecutable</key>
+    <string>{executable}</string>
+    <key>CFBundleIconFile</key>
+    <string>{icon}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"#,
+        version = jcode_build_meta::version(),
+        executable = MACOS_NOTIFICATION_EXECUTABLE,
+        icon = MACOS_APP_ICON_FILE_NAME,
+    )
 }
 
 fn macos_app_launcher_info_plist_path(app_dir: &Path) -> PathBuf {
