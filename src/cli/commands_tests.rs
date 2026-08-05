@@ -272,8 +272,9 @@ fn test_todo(
         content: format!("todo {id}"),
         status: status.to_string(),
         priority: priority.to_string(),
-        confidence,
-        completion_confidence,
+        confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
+        completion_confidence: completion_confidence
+            .map(crate::todo::ConfidenceState::from_legacy_score),
         ..Default::default()
     }
 }
