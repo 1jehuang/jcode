@@ -453,3 +453,121 @@ fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
     }
     result.expect("issue #653 merge assertions");
 }
+
+#[test]
+fn claude_is_live_while_codex_is_a_one_time_snapshot() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let external = home.path().join("external");
+    let codex_dir = external.join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("create external config dirs");
+    let claude_path = external.join(".claude.json");
+    let codex_path = codex_dir.join("config.toml");
+
+    std::fs::write(
+        &claude_path,
+        r#"{"mcpServers":{"alpha":{"command":"claude-alpha","args":["--first"],"env":{"TOKEN":"claude-inline-secret"}},"beta":{"command":"claude-beta"}}}"#,
+    )
+    .expect("write Claude config");
+    std::fs::write(
+        &codex_path,
+        r#"[mcp_servers.codex_only]
+command = "codex-bin"
+args = ["--snapshot"]
+env = { TOKEN = "codex-inline-secret" }
+"#,
+    )
+    .expect("write Codex config");
+
+    let result = std::panic::catch_unwind(|| {
+        let first = McpConfig::load_for_dir(None);
+        assert!(first.servers.contains_key("alpha"));
+        assert!(first.servers.contains_key("beta"));
+        assert!(first.servers.contains_key("codex_only"));
+
+        let snapshot_path = home.path().join("mcp.json");
+        let snapshot = std::fs::read_to_string(&snapshot_path).expect("Codex snapshot");
+        assert!(snapshot.contains("codex_only"));
+        assert!(snapshot.contains("codex-inline-secret"));
+        assert!(!snapshot.contains("alpha"));
+        assert!(!snapshot.contains("beta"));
+        assert!(!snapshot.contains("claude-inline-secret"));
+
+        std::fs::write(
+            &claude_path,
+            r#"{"mcpServers":{"alpha":{"command":"claude-alpha","args":["--edited"]}}}"#,
+        )
+        .expect("edit Claude config");
+        std::fs::remove_file(&codex_path).expect("remove Codex source");
+
+        let second = McpConfig::load_for_dir(None);
+        assert_eq!(
+            second.servers.get("alpha").expect("live alpha").args,
+            vec!["--edited"]
+        );
+        assert!(!second.servers.contains_key("beta"));
+        assert!(
+            second.servers.contains_key("codex_only"),
+            "the one-time Codex snapshot remains authoritative after import"
+        );
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("live Claude and snapshot Codex assertions");
+}
+
+#[test]
+fn claude_only_config_never_creates_a_jcode_snapshot() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let external = home.path().join("external");
+    std::fs::create_dir_all(&external).expect("create external config dir");
+    std::fs::write(
+        external.join(".claude.json"),
+        r#"{"mcpServers":{"private":{"command":"claude-bin","env":{"TOKEN":"must-not-be-copied"}}}}"#,
+    )
+    .expect("write Claude config");
+
+    let result = std::panic::catch_unwind(|| {
+        let config = McpConfig::load_for_dir(None);
+        assert!(config.servers.contains_key("private"));
+        assert!(
+            !home.path().join("mcp.json").exists(),
+            "a live Claude source must not be persisted into jcode config"
+        );
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("Claude no-snapshot assertions");
+}
+
+#[test]
+fn mcp_source_logs_explain_provenance_without_config_values() {
+    let live = McpConfig::live_claude_log_message(2, "~/.claude.json");
+    assert!(live.contains("Loaded 2 server(s) live from Claude Code (~/.claude.json)"));
+    assert!(live.contains("source values were not copied"));
+
+    let imported =
+        McpConfig::codex_import_log_message(1, 2, std::path::Path::new("/sandbox/.jcode/mcp.json"));
+    assert!(imported.contains("One-time imported 1 server(s) from Codex CLI"));
+    assert!(imported.contains("/sandbox/.jcode/mcp.json"));
+    assert!(imported.contains("2 configured environment value(s)"));
+    assert!(imported.contains("may contain secrets"));
+    assert!(imported.contains("Claude Code MCP configuration remains live and was not copied"));
+    assert!(!imported.contains("TOKEN"));
+    assert!(!imported.contains("inline-secret"));
+}
