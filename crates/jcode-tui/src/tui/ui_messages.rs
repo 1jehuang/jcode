@@ -1106,9 +1106,13 @@ pub(crate) fn render_todos_message(
     .max(1);
     let base_indent = if centered { "" } else { "  " };
     let inner_width = card_width.saturating_sub(base_indent.width()).max(1);
+    // Long assessment prose is useful in a wide transcript, but wrapping it
+    // with a hanging label quickly overwhelms the actual task list in a narrow
+    // terminal. Keep those details to one ellipsized line at small widths.
+    let compact_details = inner_width < 72;
 
     let mut lines = Vec::new();
-    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width);
+    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(
@@ -1149,7 +1153,7 @@ pub(crate) fn render_todos_message(
                     base_indent,
                     inner_width,
                 ));
-                push_todo_goal_details(&mut lines, goal, base_indent, inner_width);
+                push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
                 for todo in items {
                     lines.push(render_todo_card_item_line(todo, base_indent, inner_width));
                 }
@@ -1162,7 +1166,7 @@ pub(crate) fn render_todos_message(
                 inner_width,
             ));
             if goal.is_some() {
-                push_todo_goal_details(&mut lines, goal, base_indent, inner_width);
+                push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
             for todo in &todos {
                 lines.push(render_todo_card_item_line(todo, base_indent, inner_width));
@@ -1354,6 +1358,7 @@ fn push_todo_plan_details(
     plan: &crate::todo::TodoPlan,
     base_indent: &str,
     inner_width: usize,
+    compact_details: bool,
 ) {
     if let Some(state) = plan.understands_user_intent {
         lines.push(todo_card_line(
@@ -1377,8 +1382,39 @@ fn push_todo_plan_details(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        push_todo_wrapped_detail(lines, "User intention", intention, base_indent, inner_width);
+        push_todo_detail(
+            lines,
+            "User intention",
+            intention,
+            base_indent,
+            inner_width,
+            compact_details,
+        );
     }
+}
+
+fn push_todo_detail(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    base_indent: &str,
+    inner_width: usize,
+    compact: bool,
+) {
+    if !compact {
+        push_todo_wrapped_detail(lines, label, value, base_indent, inner_width);
+        return;
+    }
+
+    let prefix = format!("  {} · ", label);
+    lines.push(todo_card_line(
+        vec![
+            Span::styled(prefix, Style::default().fg(todo_label_color())),
+            Span::styled(value.to_string(), Style::default().fg(todo_meta_color())),
+        ],
+        base_indent,
+        inner_width,
+    ));
 }
 
 /// Wrap one labeled detail line to the card width.
@@ -1416,6 +1452,7 @@ fn push_todo_goal_details(
     goal: Option<&crate::todo::TodoGoal>,
     base_indent: &str,
     inner_width: usize,
+    compact_details: bool,
 ) {
     let Some(goal) = goal else {
         return;
@@ -1454,7 +1491,14 @@ fn push_todo_goal_details(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        push_todo_wrapped_detail(lines, "Feedback", value, base_indent, inner_width);
+        push_todo_detail(
+            lines,
+            "Feedback",
+            value,
+            base_indent,
+            inner_width,
+            compact_details,
+        );
     }
 }
 

@@ -600,6 +600,79 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
 }
 
 #[test]
+fn render_todos_message_compacts_long_details_at_narrow_widths() {
+    let long_text = "This deliberately long assessment detail should not consume several rows in a narrow terminal window";
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Keep the task visible".to_string(),
+        status: "in_progress".to_string(),
+        priority: "high".to_string(),
+        group: Some("responsive card".to_string()),
+        confidence: None,
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let plan = crate::todo::TodoPlan {
+        user_intention: Some(long_text.to_string()),
+        ..Default::default()
+    };
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("responsive card".to_string()),
+        feedback_loop: Some(long_text.to_string()),
+        ..Default::default()
+    }];
+    let msg = DisplayMessage::todos(
+        serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }).to_string(),
+    );
+
+    let narrow = render_todos_message(&msg, 60, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        narrow
+            .iter()
+            .filter(|line| line.contains("User intention"))
+            .count(),
+        1,
+        "{}",
+        narrow.join("\n")
+    );
+    assert_eq!(
+        narrow
+            .iter()
+            .filter(|line| line.contains("Feedback"))
+            .count(),
+        1,
+        "{}",
+        narrow.join("\n")
+    );
+    assert!(
+        narrow.iter().any(|line| line.contains('…')),
+        "{}",
+        narrow.join("\n")
+    );
+    assert!(
+        narrow
+            .iter()
+            .any(|line| line.contains("Keep the task visible")),
+        "{}",
+        narrow.join("\n")
+    );
+
+    let wide = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>();
+    assert!(
+        wide.len() > narrow.len(),
+        "wide={wide:?}\nnarrow={narrow:?}"
+    );
+}
+
+#[test]
 fn render_todos_message_uses_readable_semantic_colors() {
     let todos = vec![crate::todo::TodoItem {
         id: "1".to_string(),
