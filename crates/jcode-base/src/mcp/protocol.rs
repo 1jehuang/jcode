@@ -275,13 +275,13 @@ impl McpConfig {
         Ok(())
     }
 
-    /// Import MCP servers from Claude Code and Codex CLI on first run.
-    /// Only runs if ~/.jcode/mcp.json doesn't exist yet.
-    #[expect(
-        clippy::collapsible_if,
-        reason = "Import logic keeps source-specific MCP config handling explicit"
-    )]
-    fn import_from_external() {
+    /// Import MCP servers from Codex CLI on first run.
+    ///
+    /// Claude Code configuration is intentionally not imported here. It is a
+    /// live source read by `load_for_dir`, so persisting it would make deleted
+    /// servers survive in jcode's snapshot and would duplicate inline secrets.
+    /// This only runs while ~/.jcode/mcp.json does not exist.
+    fn import_from_codex_once() {
         let jcode_mcp = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("mcp.json"),
             Err(_) => return,
@@ -291,69 +291,62 @@ impl McpConfig {
             return; // Not first run
         }
 
-        let mut imported = Self::default();
-        let mut sources = Vec::new();
-
-        // Import from Claude Code. The canonical user config is `~/.claude.json`
-        // (top-level `mcpServers` + per-project entries); fall back to the older
-        // `~/.claude/mcp.json` layout for users who still have it.
-        if let Ok(claude_json) = crate::storage::user_home_path(".claude.json") {
-            if claude_json.exists() {
-                let config = Self::load_claude_json(&claude_json, None);
-                let count = config.servers.len();
-                if count > 0 {
-                    sources.push(format!("{} from Claude Code", count));
-                    imported.servers.extend(config.servers);
-                }
-            }
+        let Ok(codex_config) = crate::storage::user_home_path(".codex/config.toml") else {
+            return;
+        };
+        if !codex_config.exists() {
+            return;
         }
-        if let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json") {
-            if claude_mcp.exists() {
-                if let Ok(config) = Self::load_from_file(&claude_mcp) {
-                    let count = config.servers.len();
-                    if count > 0 {
-                        sources.push(format!("{} from Claude Code (legacy)", count));
-                        Self::merge_servers_preferring_runnable(
-                            &mut imported.servers,
-                            config.servers,
-                        );
-                    }
-                }
-            }
+        let Ok(imported) = Self::load_from_codex_toml(&codex_config) else {
+            return;
+        };
+        if imported.servers.is_empty() {
+            return;
         }
 
-        // Import from Codex CLI (~/.codex/config.toml)
-        if let Ok(codex_config) = crate::storage::user_home_path(".codex/config.toml") {
-            if codex_config.exists() {
-                if let Ok(config) = Self::load_from_codex_toml(&codex_config) {
-                    let count = config.servers.len();
-                    if count > 0 {
-                        sources.push(format!("{} from Codex CLI", count));
-                        // Codex overrides Claude for same-named servers, except
-                        // that a transport jcode cannot run must not displace a
-                        // working stdio definition (issue #653).
-                        Self::merge_servers_preferring_runnable(
-                            &mut imported.servers,
-                            config.servers,
-                        );
-                    }
-                }
-            }
+        let server_count = imported.servers.len();
+        let environment_value_count = imported
+            .servers
+            .values()
+            .map(|server| server.env.len())
+            .sum();
+        if let Err(e) = imported.save_to_file(&jcode_mcp) {
+            crate::logging::error(&format!("Failed to save imported MCP config: {}", e));
+            return;
         }
+        crate::logging::info(&Self::codex_import_log_message(
+            server_count,
+            environment_value_count,
+            &jcode_mcp,
+        ));
+    }
 
-        if !imported.servers.is_empty() {
-            if let Err(e) = imported.save_to_file(&jcode_mcp) {
-                crate::logging::error(&format!("Failed to save imported MCP config: {}", e));
-                return;
-            }
-            let names: Vec<&str> = imported.servers.keys().map(|s| s.as_str()).collect();
-            crate::logging::info(&format!(
-                "MCP: Imported {} servers ({}) from {}",
-                imported.servers.len(),
-                names.join(", "),
-                sources.join(" + "),
-            ));
-        }
+    fn codex_import_log_message(
+        server_count: usize,
+        environment_value_count: usize,
+        destination: &std::path::Path,
+    ) -> String {
+        let environment_note = if environment_value_count == 0 {
+            "no configured environment values were copied".to_string()
+        } else {
+            format!(
+                "copied {} configured environment value(s), which may contain secrets",
+                environment_value_count
+            )
+        };
+        format!(
+            "MCP: One-time imported {} server(s) from Codex CLI (~/.codex/config.toml) into {}; {}. Claude Code MCP configuration remains live and was not copied",
+            server_count,
+            destination.display(),
+            environment_note,
+        )
+    }
+
+    fn live_claude_log_message(server_count: usize, source: &str) -> String {
+        format!(
+            "MCP: Loaded {} server(s) live from Claude Code ({}); source values were not copied into jcode config",
+            server_count, source
+        )
     }
 
     /// Parse MCP servers from Codex CLI's config.toml ([mcp_servers.*] sections)
@@ -493,8 +486,8 @@ impl McpConfig {
         reason = "Import logic keeps source-specific MCP config merge order explicit"
     )]
     pub fn load_for_dir(project_dir: Option<&std::path::Path>) -> Self {
-        // First-run import from Claude Code / Codex CLI
-        Self::import_from_external();
+        // Codex CLI is a one-time migration. Claude Code remains a live source.
+        Self::import_from_codex_once();
 
         let mut merged = Self::default();
 
@@ -514,6 +507,29 @@ impl McpConfig {
             if claude_json.exists() {
                 let cwd = project_dir.map(std::path::Path::to_path_buf);
                 let config = Self::load_claude_json(&claude_json, cwd.as_deref());
+                if !config.servers.is_empty() {
+                    crate::logging::info(&Self::live_claude_log_message(
+                        config.servers.len(),
+                        "~/.claude.json",
+                    ));
+                }
+                Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
+            }
+        }
+
+        // Older Claude Code global config is also a live source. Reading it on
+        // every load preserves compatibility without copying any inline env
+        // values into ~/.jcode/mcp.json.
+        if let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json") {
+            if claude_mcp.exists()
+                && let Ok(config) = Self::load_from_file(&claude_mcp)
+            {
+                if !config.servers.is_empty() {
+                    crate::logging::info(&Self::live_claude_log_message(
+                        config.servers.len(),
+                        "~/.claude/mcp.json (legacy)",
+                    ));
+                }
                 Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
             }
         }
