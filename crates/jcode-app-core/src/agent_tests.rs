@@ -1617,3 +1617,97 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
         "the recovered turn must deliver the model's real completion, got {text:?}"
     );
 }
+
+#[derive(Clone, Default)]
+struct FableGuardrailProvider {
+    calls: Arc<std::sync::Mutex<usize>>,
+    reconsideration_seen: Arc<std::sync::Mutex<bool>>,
+}
+
+#[async_trait]
+impl Provider for FableGuardrailProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if call == 2 {
+            *self.reconsideration_seen.lock().unwrap() = messages.iter().any(|message| {
+                message_text(message).contains("genuinely requires a safety refusal")
+            });
+        }
+
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            if call == 1 {
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("refusal".to_string()),
+                    }))
+                    .await;
+            } else {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta(
+                        "Reconsidered and completed safely".to_string(),
+                    )))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("end_turn".to_string()),
+                    }))
+                    .await;
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn model(&self) -> String {
+        "claude-fable-5".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let fable = FableGuardrailProvider::default();
+    let calls = fable.calls.clone();
+    let reconsideration_seen = fable.reconsideration_seen.clone();
+    let provider: Arc<dyn Provider> = Arc::new(fable);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("do this ordinary coding task", Vec::new(), None, tx)
+        .await
+        .expect("turn should recover from the guardrail");
+
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TextDelta { text: delta } = event {
+            text.push_str(&delta);
+        }
+    }
+
+    assert_eq!(*calls.lock().unwrap(), 2);
+    assert!(*reconsideration_seen.lock().unwrap());
+    assert!(
+        text.contains("Reconsidered and completed safely"),
+        "{text:?}"
+    );
+}
