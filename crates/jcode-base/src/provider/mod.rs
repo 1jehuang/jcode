@@ -614,6 +614,13 @@ impl MultiProvider {
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
+        // Provider capabilities are authoritative at this request chokepoint.
+        // Keep images in persisted history, but replace them in the ephemeral
+        // request snapshot when the selected model/provider is text-only (#755).
+        let filtered_messages =
+            image_clamp::filter_unsupported_outbound_images(messages, self.supports_image_input());
+        let messages: &[Message] = filtered_messages.as_deref().unwrap_or(messages);
+
         // Downscale any images whose pixel dimensions exceed provider per-image
         // limits before they reach the wire. Resuming a session with >20 large
         // screenshots otherwise trips Anthropic's many-image 2000px cap and the
