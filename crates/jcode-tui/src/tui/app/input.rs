@@ -1530,6 +1530,10 @@ impl App {
             .cloned()
             .collect();
         if incomplete.is_empty() {
+            // Completing or removing a todo list ends the prior poke cycle. If
+            // equivalent work appears later, it is a new cycle and deserves
+            // one fresh nudge rather than being mistaken for the old stall.
+            self.last_auto_poke_fingerprint = None;
             if todos.is_empty() {
                 // No todo list exists yet for this session. Auto-poke is armed
                 // by default (`features.auto_poke`), so disarming here would
