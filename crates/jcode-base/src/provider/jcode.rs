@@ -11,12 +11,21 @@ pub struct JcodeProvider {
 }
 
 impl JcodeProvider {
+    fn runtime_model_spec(model: &str) -> String {
+        // Subscription model ids overlap with direct providers (for example,
+        // `claude-*` and `gpt-*`). Passing a bare id to MultiProvider lets its
+        // family heuristic escape to the user's Anthropic/OpenAI credentials.
+        // Pin the managed OpenRouter slot, whose transport is configured below
+        // as `jcode-subscription`, for every curated model.
+        format!("openrouter:{}", model.trim())
+    }
+
     pub fn new() -> Self {
         crate::subscription_catalog::apply_runtime_env();
         Self::apply_runtime_profile();
         let inner = MultiProvider::new_fast();
         let default_model = crate::subscription_catalog::default_model().id.to_string();
-        let _ = inner.set_model(&default_model);
+        let _ = inner.set_model(&Self::runtime_model_spec(&default_model));
         Self {
             inner,
             selected_model: Arc::new(RwLock::new(default_model)),
@@ -119,7 +128,7 @@ impl Provider for JcodeProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         self.ensure_runtime_mode();
         ensure_model_allowed_for_subscription(model)?;
-        self.inner.set_model(model)?;
+        self.inner.set_model(&Self::runtime_model_spec(model))?;
         if let Ok(mut selected_model) = self.selected_model.write() {
             *selected_model = crate::subscription_catalog::canonical_model_id(model)
                 .unwrap_or(model)
@@ -173,7 +182,9 @@ impl Provider for JcodeProvider {
         self.ensure_runtime_mode();
         self.inner.on_auth_changed();
         let selected_model = self.model();
-        let _ = self.inner.set_model(&selected_model);
+        let _ = self
+            .inner
+            .set_model(&Self::runtime_model_spec(&selected_model));
     }
 
     fn auth_model_refresh_pending(&self) -> bool {
@@ -318,6 +329,22 @@ mod tests {
         });
 
         crate::subscription_catalog::clear_runtime_env();
+    }
+
+    #[test]
+    fn jcode_models_are_pinned_to_the_managed_transport() {
+        assert_eq!(
+            JcodeProvider::runtime_model_spec("claude-opus-4-8"),
+            "openrouter:claude-opus-4-8"
+        );
+        assert_eq!(
+            JcodeProvider::runtime_model_spec("gpt-5.5"),
+            "openrouter:gpt-5.5"
+        );
+        assert_eq!(
+            JcodeProvider::runtime_model_spec("minimax-m2.5"),
+            "openrouter:minimax-m2.5"
+        );
     }
 
     #[test]
