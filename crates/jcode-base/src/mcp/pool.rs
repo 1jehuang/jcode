@@ -452,6 +452,12 @@ mod tests {
         let pool = SharedMcpPool::from_default_config();
         let initially_loaded_first = pool.config().await.servers.contains_key("first");
 
+        std::fs::write(
+            first_project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"first-reloaded":{"command":"first-reloaded-server","shared":false}}}"#,
+        )
+        .expect("update first project config");
+
         std::env::set_current_dir(second_project.path()).expect("set second project cwd");
         let _ = pool.reload().await;
         let reloaded = pool.config().await;
@@ -464,7 +470,8 @@ mod tests {
         }
 
         assert!(initially_loaded_first);
-        assert!(reloaded.servers.contains_key("first"));
+        assert!(!reloaded.servers.contains_key("first"));
+        assert!(reloaded.servers.contains_key("first-reloaded"));
         assert!(!reloaded.servers.contains_key("second"));
     }
 

@@ -7,6 +7,7 @@ fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
     let previous_home = std::env::var_os("JCODE_HOME");
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
+    let other_project = tempfile::tempdir().expect("other project tempdir");
     crate::env::set_var("JCODE_HOME", home.path());
     std::env::set_current_dir(project.path()).expect("set project cwd");
     std::fs::write(
@@ -14,6 +15,11 @@ fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
         r#"{"mcpServers":{"cwd-only":{"command":"cwd-server"}}}"#,
     )
     .expect("write project MCP config");
+    std::fs::write(
+        other_project.path().join(".mcp.json"),
+        r#"{"mcpServers":{"other-cwd-only":{"command":"other-cwd-server"}}}"#,
+    )
+    .expect("write other project MCP config");
 
     let result = std::panic::catch_unwind(|| {
         let unbound = McpConfig::load_for_dir(None);
@@ -21,9 +27,16 @@ fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
 
         let default = McpConfig::load();
         assert!(default.servers.contains_key("cwd-only"));
+        assert!(!default.servers.contains_key("other-cwd-only"));
+
+        std::env::set_current_dir(other_project.path()).expect("set other project cwd");
+        let other_default = McpConfig::load();
+        assert!(!other_default.servers.contains_key("cwd-only"));
+        assert!(other_default.servers.contains_key("other-cwd-only"));
 
         let bound = McpConfig::load_for_dir(Some(project.path()));
         assert!(bound.servers.contains_key("cwd-only"));
+        assert!(!bound.servers.contains_key("other-cwd-only"));
     });
 
     std::env::set_current_dir(original_cwd).expect("restore cwd");
@@ -694,6 +707,54 @@ fn claude_only_config_never_creates_a_jcode_snapshot() {
         crate::env::remove_var("JCODE_HOME");
     }
     result.expect("Claude no-snapshot assertions");
+}
+
+#[test]
+fn legacy_claude_config_is_live_and_deletions_do_not_leave_a_snapshot() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let legacy_dir = home.path().join("external/.claude");
+    std::fs::create_dir_all(&legacy_dir).expect("create legacy Claude config dir");
+    let legacy_path = legacy_dir.join("mcp.json");
+    std::fs::write(
+        &legacy_path,
+        r#"{"mcpServers":{"alpha":{"command":"legacy-alpha"},"beta":{"command":"legacy-beta"}}}"#,
+    )
+    .expect("write legacy Claude config");
+
+    let result = std::panic::catch_unwind(|| {
+        let first = McpConfig::load_for_dir(None);
+        assert!(first.servers.contains_key("alpha"));
+        assert!(first.servers.contains_key("beta"));
+        assert!(!home.path().join("mcp.json").exists());
+
+        std::fs::write(
+            &legacy_path,
+            r#"{"mcpServers":{"alpha":{"command":"legacy-alpha-edited"}}}"#,
+        )
+        .expect("edit legacy Claude config");
+
+        let second = McpConfig::load_for_dir(None);
+        assert_eq!(second.servers["alpha"].command, "legacy-alpha-edited");
+        assert!(
+            !second.servers.contains_key("beta"),
+            "deleting a server from the live legacy source must remove it"
+        );
+        assert!(
+            !home.path().join("mcp.json").exists(),
+            "legacy Claude values must never be snapshotted"
+        );
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("legacy Claude live-source assertions");
 }
 
 #[test]
