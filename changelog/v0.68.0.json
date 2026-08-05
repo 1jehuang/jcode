@@ -1,0 +1,26 @@
+{
+  "version": "0.68.0",
+  "date": "2026-08-05",
+  "title": "Smarter provider compatibility and cloud onboarding",
+  "highlights": [
+    "Tool schemas now adapt to each provider automatically and recover from newly reported schema incompatibilities",
+    "Managed cloud activation is now the default remote setup flow",
+    "The TypeScript SDK now bundles platform-specific jcode runtimes for easier installation"
+  ],
+  "improvements": [
+    "Integration discovery can record intentional off-catalog selections",
+    "Client hooks can now be composed",
+    "Todo cards remain readable at narrow window widths",
+    "LaTeX rendering uses consistent high-contrast colors"
+  ],
+  "fixes": [
+    "Claude MCP configuration now stays live, loads project settings from the working directory, and expands environment variables",
+    "Provider credentials are no longer inherited by MCP servers unless configured explicitly",
+    "ACP resumes subscribe before attaching so early events are not missed",
+    "Favorite-model cycling now visits every configured favorite",
+    "Linux power inhibition no longer loops on authorization failures",
+    "Desktop session previews no longer interfere with live turns, and overview scrolling stops cleanly",
+    "macOS notification clicks now route to the correct session",
+    "Anthropic quota failures reroute to an available fallback model"
+  ]
+}
