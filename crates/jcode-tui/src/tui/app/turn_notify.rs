@@ -163,8 +163,11 @@ fn kitty_notification_sequence(notification: &TurnNotification, session_id: &str
     let title = encoder.encode(notification.title.as_bytes());
     let body = encoder.encode(notification_text(notification).as_bytes());
     let id = kitty_notification_id(session_id);
+    // Request focus explicitly instead of relying on Kitty's current default.
+    // This is the protocol guarantee that clicking the completed notification
+    // returns to the exact window that emitted it.
     format!(
-        "\x1b]99;i={id}:d=0:e=1:p=title;{title}\x1b\\\x1b]99;i={id}:d=1:e=1:p=body;{body}\x1b\\"
+        "\x1b]99;i={id}:d=0:e=1:p=title;{title}\x1b\\\x1b]99;i={id}:d=1:e=1:p=body:a=focus;{body}\x1b\\"
     )
 }
 
@@ -513,7 +516,7 @@ mod tests {
         };
         assert_eq!(
             kitty_notification_sequence(&n, "session:fox/123"),
-            "\x1b]99;i=jcode-turn-sessionfox123:d=0:e=1:p=title;amNvZGUgwrcgZm94\x1b\\\x1b]99;i=jcode-turn-sessionfox123:d=1:e=1:p=body;Mi8zIHRvZG9zCkZpbmlzaGVkIHBhcnNlcg==\x1b\\"
+            "\x1b]99;i=jcode-turn-sessionfox123:d=0:e=1:p=title;amNvZGUgwrcgZm94\x1b\\\x1b]99;i=jcode-turn-sessionfox123:d=1:e=1:p=body:a=focus;Mi8zIHRvZG9zCkZpbmlzaGVkIHBhcnNlcg==\x1b\\"
         );
     }
 
