@@ -71,9 +71,8 @@ impl App {
         let configured_base = crate::subscription_catalog::configured_api_base()
             .unwrap_or_else(|| crate::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string());
         let runtime_mode = crate::subscription_catalog::is_runtime_mode_enabled();
-        let cached_tier = crate::subscription_catalog::cached_tier();
 
-        let mut message = String::from("Jcode Subscription Status\n\n");
+        let mut message = String::from("Jcode Hosted Model Status\n\n");
         message.push_str(&format!(
             "  - Credentials: {}\n",
             if configured_key {
@@ -91,12 +90,7 @@ impl App {
                 " (default)"
             }
         ));
-        message.push_str(&format!(
-            "  - Tier: {}\n",
-            cached_tier
-                .map(|tier| tier.display_name().to_string())
-                .unwrap_or_else(|| "unknown (treated as Plus)".to_string())
-        ));
+        message.push_str("  - Billing: pay as you go, no subscription fee\n");
         message.push_str(&format!(
             "  - Runtime mode: {}\n\n",
             if runtime_mode {
@@ -113,11 +107,7 @@ impl App {
             } else {
                 ""
             };
-            let tier_suffix = if model.min_tier == crate::subscription_catalog::JcodeTier::Plus {
-                String::new()
-            } else {
-                format!(" [{}]", model.min_tier.display_name())
-            };
+            let tier_suffix = String::new();
             message.push_str(&format!(
                 "  - {} - {}{}{}\n      - {}\n      - {}\n",
                 model.display_name,
@@ -129,20 +119,19 @@ impl App {
             ));
         }
 
-        message.push_str("\nTiers\n\n");
-        for tier in crate::subscription_catalog::JcodeTier::ALL.iter().copied() {
-            message.push_str(&format!(
-                "  - {} - ${}/mo retail, about ${:.2} usable inference budget\n",
-                tier.display_name(),
-                tier.retail_price_usd(),
-                tier.usable_budget_usd()
-            ));
-        }
+        message.push_str("\nBilling\n\n");
+        message.push_str("  - Set the monthly spending limit you control in your Jcode account\n");
+        message.push_str("  - Email and account warnings are sent at usage milestones\n");
+        message.push_str("  - Warning milestones do not rate limit hosted requests\n");
+        message.push_str("  - Charges begin at $20, then use progressively larger tranches\n");
+        message.push_str("  - Any unbilled remainder is collected at your limit or month end\n");
 
         if configured_key {
-            message.push_str("\nFetching account status...");
+            message.push_str("\nFetching hosted usage and spending limit...");
         } else {
-            message.push_str("\nLog in with /login jcode to see account usage and tier.");
+            message.push_str(
+                "\nLog in with /login jcode to set a spending limit and connect hosted models.",
+            );
         }
 
         self.push_display_message(DisplayMessage::system(message));
@@ -156,10 +145,6 @@ impl App {
                 handle.spawn(async move {
                     match crate::subscription_api::fetch_subscription_me().await {
                         Ok(me) => {
-                            let tier_label = me
-                                .parsed_tier()
-                                .map(|tier| tier.display_name().to_string())
-                                .unwrap_or_else(|| me.tier.clone());
                             let resets = me
                                 .usage
                                 .resets_at
@@ -170,15 +155,19 @@ impl App {
                                 crate::bus::UiActivity::background(
                                     Some(session_id),
                                     format!(
-                                        "Jcode Subscription Account\n\n  - Email: {}\n  - Tier: {} ({})\n  - Usage: ${:.2} of ${:.2}{}",
+                                        "Jcode Hosted Model Account\n\n  - Email: {}\n  - Billing: {}\n  - Spend: ${:.2} of ${:.2} monthly limit\n  - Billed in tranches: ${:.2}{}{}",
                                         me.email,
-                                        tier_label,
                                         me.status,
                                         me.usage.used_usd,
                                         me.usage.budget_usd,
+                                        me.usage.billed_usd,
+                                        me.usage
+                                            .next_charge_at_usd
+                                            .map(|amount| format!("\n  - Next tranche at: ${amount:.2}"))
+                                            .unwrap_or_default(),
                                         resets
                                     ),
-                                    Some("Subscription: account status loaded"),
+                                    Some("Hosted usage: account status loaded"),
                                 ),
                             ));
                         }
@@ -636,7 +625,7 @@ impl App {
             let device = match crate::subscription_api::request_device_authorization(
                 &client,
                 &api_base,
-                Some(crate::subscription_catalog::JcodeTier::Pro),
+                None,
             )
             .await
             {
@@ -728,10 +717,10 @@ impl App {
             crate::auth::AuthStatus::invalidate_cache();
             publish(
                 format!(
-                    "Jcode Account Approved\n\nSigned in as {}. The key is stored with owner-only permissions. Waiting for an active paid plan on /v1/me...",
+                    "Jcode Account Approved\n\nSigned in as {}. The API key is stored with owner-only permissions. Finish setting your monthly spending limit in the browser; Jcode is checking /v1/me...",
                     approved.email
                 ),
-                "Jcode account: waiting for plan activation",
+                "Jcode account: waiting for spending limit",
             );
 
             match crate::subscription_api::poll_for_paid_activation(
@@ -745,13 +734,11 @@ impl App {
             {
                 ActivationOutcome::Active(me) => {
                     let message = format!(
-                        "Jcode Account Ready\n\n{} is active for {}. Models are being refreshed automatically.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout",
-                        me.parsed_tier()
-                            .map(|tier| tier.display_name().to_string())
-                            .unwrap_or(me.tier),
-                        me.email
+                        "Jcode Account Ready\n\nHosted models are enabled for {} with a ${:.2} monthly spending limit. Models are being refreshed automatically.\n\nUsage: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout",
+                        me.email,
+                        me.usage.budget_usd
                     );
-                    publish(message.clone(), "Jcode account plan active");
+                    publish(message.clone(), "Jcode hosted models ready");
 
                     // The device flow used to stop after saving the credential and
                     // publishing a status message. Unlike every other login flow it
@@ -759,7 +746,7 @@ impl App {
                     // running provider retained its pre-login routes until the user
                     // manually ran /refresh-model-list. Route activation also powers
                     // model-switch availability checks, which made every newly shown
-                    // subscription model appear unavailable in that stale runtime.
+                    // hosted model appear unavailable in that stale runtime.
                     crate::bus::Bus::global().publish(
                         crate::bus::BusEvent::LoginCompleted(crate::bus::LoginCompleted {
                             provider: "jcode".to_string(),
@@ -769,15 +756,15 @@ impl App {
                     );
                 }
                 ActivationOutcome::Canceled(_) => publish(
-                    "Jcode Account Login\n\nCheckout was canceled. The valid account key remains saved, but no paid plan is active.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout".to_string(),
-                    "Jcode account plan not active",
+                    "Jcode Account Login\n\nBilling setup was canceled. The valid account key remains saved, but hosted usage is not enabled.\n\nStatus: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout".to_string(),
+                    "Jcode hosted billing not active",
                 ),
                 ActivationOutcome::TimedOut { last_error_was_offline } => publish(
                     format!(
-                        "Jcode Account Login\n\nPlan activation was not confirmed before timeout{}. The valid account key remains saved.\n\nStatus: /account jcode status\nManage: /account jcode manage\nLogout: /account jcode logout",
+                        "Jcode Account Login\n\nA spending limit was not confirmed before timeout{}. The valid account key remains saved.\n\nStatus: /usage\nManage limit: /account jcode manage\nLogout: /account jcode logout",
                         if last_error_was_offline { " because the API remained unreachable" } else { "" }
                     ),
-                    "Jcode account activation pending",
+                    "Jcode hosted billing setup pending",
                 ),
                 ActivationOutcome::Revoked | ActivationOutcome::Denied => {
                     let _ = crate::subscription_catalog::clear_account_credentials();

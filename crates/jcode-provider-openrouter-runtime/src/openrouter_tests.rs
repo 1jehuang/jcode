@@ -2340,13 +2340,13 @@ fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
     );
 
     let provider = OpenRouterProvider::new().expect("build jcode subscription runtime");
-    assert_eq!(provider.runtime_display_name(), "Jcode Subscription");
-    assert_eq!(Provider::display_name(&provider), "Jcode Subscription");
+    assert_eq!(provider.runtime_display_name(), "Jcode Hosted Models");
+    assert_eq!(Provider::display_name(&provider), "Jcode Hosted Models");
     assert_eq!(Provider::name(&provider), "openrouter");
     assert_eq!(
         provider.direct_openai_compatible_route_parts(),
         Some((
-            "Jcode Subscription".to_string(),
+            "Jcode Hosted Models".to_string(),
             "jcode-subscription".to_string(),
             jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string(),
         ))

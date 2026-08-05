@@ -11,7 +11,7 @@ pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://api.jcode.sh/v1";
 pub const JCODE_PRICING_URL: &str = "https://jcode.sh/pricing";
 pub const JCODE_ACCOUNT_URL: &str = "https://jcode.sh/account";
-pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Subscription";
+pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Hosted Models";
 pub const JCODE_ROUTE_API_METHOD: &str = "jcode-subscription";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -344,11 +344,9 @@ pub fn is_curated_model(model: &str) -> bool {
     canonical_model_id(model).is_some()
 }
 
-/// The effective subscription tier for gating decisions.
-///
-/// `/v1/me` is the source of truth; the last-known tier is persisted to
-/// `jcode-subscription.env` (`JCODE_TIER`). Unknown/absent tier behaves like
-/// Plus for backward compatibility.
+/// Legacy tier metadata retained for compatibility with account servers that
+/// still return tier-shaped responses. Metered hosted billing does not use it
+/// for client-side model gates.
 pub fn effective_tier() -> JcodeTier {
     cached_tier().unwrap_or(JcodeTier::Plus)
 }
@@ -369,18 +367,17 @@ pub fn store_cached_tier(tier: Option<JcodeTier>) -> anyhow::Result<()> {
     )
 }
 
-/// Whether the current (cached) tier is allowed to use `model`.
+/// Whether `model` is in the hosted catalog. Spending limits and model policy
+/// are enforced by the router, never by stale client-side subscription tiers.
 /// Non-curated models return `false`.
 pub fn is_model_allowed_for_current_tier(model: &str) -> bool {
-    find_curated_model(model)
-        .map(|curated| effective_tier().allows(curated.min_tier))
-        .unwrap_or(false)
+    is_curated_model(model)
 }
 
 pub fn routing_policy_detail(model: &CuratedModel) -> String {
     match model.routing_policy {
         UpstreamRoutingPolicy::ServerManaged => {
-            "jcode subscription routing · managed server-side".to_string()
+            "Jcode hosted routing · managed server-side".to_string()
         }
     }
 }
@@ -398,7 +395,7 @@ pub fn has_credentials() -> bool {
 }
 
 /// Persist an account API key and its non-secret account metadata in jcode's
-/// owner-only subscription file.
+/// owner-only hosted-account file.
 pub fn persist_account_credentials(
     api_key: &str,
     account_id: Option<&str>,
@@ -445,7 +442,7 @@ pub fn account_credential_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::storage::app_config_dir()?.join(JCODE_ENV_FILE))
 }
 
-/// Re-harden and verify the subscription file after every credential mutation.
+/// Re-harden and verify the hosted account file after every credential mutation.
 /// This is deliberately an explicit postcondition even though the shared secret
 /// writer also applies owner-only permissions.
 pub fn ensure_account_credential_permissions() -> anyhow::Result<()> {
@@ -700,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_tier_defaults_to_plus_when_unknown() {
+    fn hosted_catalog_access_does_not_depend_on_legacy_cached_tier() {
         let _guard = crate::storage::lock_test_env();
         crate::env::remove_var(JCODE_TIER_ENV);
         let temp = tempfile::tempdir().expect("temp home");
@@ -711,7 +708,7 @@ mod tests {
         for model in EXPECTED_PLUS_MODELS {
             assert!(is_model_allowed_for_current_tier(model));
         }
-        assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
+        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
 
         crate::env::set_var(JCODE_TIER_ENV, "mystery");
         assert_eq!(cached_tier(), None);
@@ -723,14 +720,12 @@ mod tests {
             for model in EXPECTED_PLUS_MODELS {
                 assert!(is_model_allowed_for_current_tier(model));
             }
-            assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
+            assert!(is_model_allowed_for_current_tier("claude-fable-5"));
         }
 
         crate::env::set_var(JCODE_TIER_ENV, JcodeTier::Ultra.as_str());
         assert_eq!(effective_tier(), JcodeTier::Ultra);
-        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
-
-        crate::env::remove_var(JCODE_TIER_ENV);
+        assert!(!is_model_allowed_for_current_tier("not-a-hosted-model"));
         store_cached_tier(Some(JcodeTier::Flagship)).expect("persist tier");
         assert_eq!(cached_tier(), Some(JcodeTier::Flagship));
         assert!(is_model_allowed_for_current_tier("claude-fable-5"));
