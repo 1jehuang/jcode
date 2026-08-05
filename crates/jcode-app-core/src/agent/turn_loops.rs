@@ -31,6 +31,7 @@ impl Agent {
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
+        let mut fable_guardrail_reconsiderations = 0u32;
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -804,6 +805,12 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                if self.maybe_reconsider_fable_guardrail(
+                    stop_reason.as_deref(),
+                    &mut fable_guardrail_reconsiderations,
+                )? {
+                    continue;
+                }
                 if self.maybe_continue_empty_post_tool_response(
                     visible_text_is_empty,
                     prompt_has_recent_tool_result,

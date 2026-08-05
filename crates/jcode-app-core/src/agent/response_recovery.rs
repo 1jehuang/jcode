@@ -131,6 +131,50 @@ impl Agent {
             || reason.contains("policy_violation")
     }
 
+    /// Give Fable one opportunity to reconsider a provider guardrail. Fable can
+    /// occasionally classify an ordinary coding request too broadly. The
+    /// follow-up asks for a fresh policy assessment without telling the model to
+    /// ignore a guardrail that is actually warranted.
+    pub(crate) fn maybe_reconsider_fable_guardrail(
+        &mut self,
+        stop_reason: Option<&str>,
+        attempts: &mut u32,
+    ) -> Result<bool> {
+        const MAX_ATTEMPTS: u32 = 1;
+        const PROMPT: &str = "Please reconsider the previous guardrail decision. Independently assess whether the user's actual request genuinely requires a safety refusal. If it does not, continue and help with the request. If it does, keep the refusal and briefly explain the specific safety concern instead of trying to bypass it.";
+
+        let model = self.provider.model();
+        if !Self::should_reconsider_fable_guardrail(&model, stop_reason, *attempts, MAX_ATTEMPTS) {
+            return Ok(false);
+        }
+
+        *attempts += 1;
+        logging::warn(&format!(
+            "Fable 5 guardrail stopped the response (stop_reason={:?}); requesting one reconsideration",
+            stop_reason
+        ));
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: PROMPT.to_string(),
+                cache_control: None,
+            }],
+        );
+        self.session.save()?;
+        Ok(true)
+    }
+
+    pub(crate) fn should_reconsider_fable_guardrail(
+        model: &str,
+        stop_reason: Option<&str>,
+        attempts: u32,
+        max_attempts: u32,
+    ) -> bool {
+        Self::is_guardrail_stop_reason(stop_reason)
+            && model.to_ascii_lowercase().contains("fable-5")
+            && attempts < max_attempts
+    }
+
     /// Builds the user-facing notice for a turn that ended with no visible
     /// assistant output (no text, no tool calls). Returns `None` when the turn
     /// looks normal and no notice should be surfaced.
