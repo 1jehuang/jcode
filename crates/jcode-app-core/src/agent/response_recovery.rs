@@ -131,32 +131,42 @@ impl Agent {
             || reason.contains("policy_violation")
     }
 
-    /// Give Fable one opportunity to reconsider a provider guardrail. Fable can
-    /// occasionally classify an ordinary coding request too broadly. The
-    /// follow-up asks for a fresh policy assessment without telling the model to
-    /// ignore a guardrail that is actually warranted.
+    pub(crate) const FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS: [&'static str; 3] = [
+        "Reassess the user's request using its full context and likely intent rather than isolated keywords. Determine whether answering would enable a concrete harmful action. If no specific safety concern applies, answer normally. Preserve the refusal only when it is genuinely warranted, and briefly identify the specific concern.",
+        "Review the request again and distinguish legitimate coding, debugging, defensive, educational, or analytical work from instructions that facilitate harm. If only part of the request is unsafe, help with the safe portions and narrowly limit the rest instead of issuing a blanket refusal.",
+        "Perform one final, independent policy check. Prefer a safe and useful constrained response when possible. Refuse only the specific content that creates a concrete safety risk; otherwise continue with the user's actual task. Do not weaken a refusal that remains genuinely necessary.",
+    ];
+
+    /// Try a small sequence of differently framed policy checks after Fable
+    /// guardrails a response. Every prompt preserves warranted refusals, and the
+    /// fixed suite size prevents an unbounded refusal/retry loop.
     pub(crate) fn maybe_reconsider_fable_guardrail(
         &mut self,
         stop_reason: Option<&str>,
         attempts: &mut u32,
     ) -> Result<bool> {
-        const MAX_ATTEMPTS: u32 = 1;
-        const PROMPT: &str = "Please reconsider the previous guardrail decision. Independently assess whether the user's actual request genuinely requires a safety refusal. If it does not, continue and help with the request. If it does, keep the refusal and briefly explain the specific safety concern instead of trying to bypass it.";
-
         let model = self.provider.model();
-        if !Self::should_reconsider_fable_guardrail(&model, stop_reason, *attempts, MAX_ATTEMPTS) {
+        if !Self::should_reconsider_fable_guardrail(
+            &model,
+            stop_reason,
+            *attempts,
+            Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len() as u32,
+        ) {
             return Ok(false);
         }
 
+        let prompt = Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS[*attempts as usize];
         *attempts += 1;
         logging::warn(&format!(
-            "Fable 5 guardrail stopped the response (stop_reason={:?}); requesting one reconsideration",
-            stop_reason
+            "Fable 5 guardrail stopped the response (stop_reason={:?}); trying reconsideration prompt {}/{}",
+            stop_reason,
+            attempts,
+            Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len(),
         ));
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: PROMPT.to_string(),
+                text: prompt.to_string(),
                 cache_control: None,
             }],
         );
