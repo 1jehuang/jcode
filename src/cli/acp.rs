@@ -585,7 +585,9 @@ impl AcpRuntime {
         match apply_result {
             Ok(()) => {
                 let config_options = session_config_options(&*session.ui_state.lock().await);
-                self.write_result(id, json!({})).await?;
+                // The spec requires the full option set in the response itself.
+                self.write_result(id, json!({ "configOptions": config_options }))
+                    .await?;
                 self.write_notification(
                     "session/update",
                     json!({
