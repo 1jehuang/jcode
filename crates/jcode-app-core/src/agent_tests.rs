@@ -1381,6 +1381,40 @@ fn guardrail_stop_reason_detection() {
 }
 
 #[test]
+fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        0,
+        1,
+    ));
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "CLAUDE-FABLE-5-20260801",
+        Some("content_filter"),
+        0,
+        1,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        1,
+        1,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("end_turn"),
+        0,
+        1,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-opus-5",
+        Some("refusal"),
+        0,
+        1,
+    ));
+}
+
+#[test]
 fn guardrail_notice_for_refusal_stop() {
     let notice = Agent::provider_guardrail_notice(Some("refusal"), true, true)
         .expect("refusal with empty text must produce a notice");

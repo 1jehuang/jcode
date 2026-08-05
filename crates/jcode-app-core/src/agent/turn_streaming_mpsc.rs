@@ -96,6 +96,7 @@ impl Agent {
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
+        let mut fable_guardrail_reconsiderations = 0u32;
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -1143,6 +1144,15 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && self.maybe_reconsider_fable_guardrail(
+                        stop_reason.as_deref(),
+                        &mut fable_guardrail_reconsiderations,
+                    )?
+                {
+                    continue;
+                }
                 // Retry transient empty responses (dropped/empty upstream
                 // streams) before surfacing anything, matching the
                 // non-streaming loop's recovery behavior (issue #672).
