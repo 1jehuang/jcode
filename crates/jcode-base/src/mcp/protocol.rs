@@ -476,7 +476,8 @@ impl McpConfig {
     /// Load from default locations (merges jcode global + local, local overrides),
     /// resolving project-local config against the process working directory.
     pub fn load() -> Self {
-        Self::load_for_dir(None)
+        let cwd = std::env::current_dir().ok();
+        Self::load_for_dir(cwd.as_deref())
     }
 
     /// Load from default locations, resolving project-local config
