@@ -512,6 +512,15 @@ Claude Code compatibility:
 - `.mcp.json` at the repo root (Claude Code's project config)
 - `.claude/mcp.json` (legacy fallback)
 
+Claude Code config is read live on every load rather than copied into jcode's
+global config. Additions, edits, and deletions therefore take effect without
+leaving a stale snapshot (and inline environment values are not duplicated).
+For migration from Codex CLI, jcode still performs a one-time import from
+`~/.codex/config.toml` into `~/.jcode/mcp.json` when the latter does not exist.
+That imported file is then jcode-owned; later Codex changes are not synced
+automatically. Imported environment values are copied too and may contain
+secrets.
+
 Both the canonical `mcpServers` key and jcode's historical `servers` key are accepted. jcode currently supports stdio (command-based) servers only; HTTP/SSE entries (`"type": "http"`/`"sse"`) are recognized and skipped with a log line.
 
 Example MCP config:
@@ -528,8 +537,6 @@ Example MCP config:
   }
 }
 ```
-
-On first run, jcode also tries to import MCP servers from `~/.claude.json` (falling back to the legacy `~/.claude/mcp.json`) and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
 
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 
