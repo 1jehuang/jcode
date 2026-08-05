@@ -280,17 +280,6 @@ fn test_env_override_lifecycle_hooks() {
     );
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 250);
 
-    crate::env::set_var(
-        "JCODE_HOOK_TURN_END",
-        r#"["notify-one --direct", "notify-two 'quoted arg'"]"#,
-    );
-    let mut cfg = Config::default();
-    cfg.apply_env_overrides();
-    assert_eq!(
-        cfg.hooks.commands("turn_end"),
-        vec!["notify-one --direct", "notify-two 'quoted arg'"]
-    );
-
     // Empty env value disables a config-file hook.
     crate::env::set_var("JCODE_HOOK_TURN_END", " ");
     let mut cfg = Config::default();

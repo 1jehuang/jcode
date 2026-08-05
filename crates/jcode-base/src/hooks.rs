@@ -206,7 +206,6 @@ fn build_hook_process(
     {
         cmd.current_dir(cwd);
     }
-    crate::terminal_launch::apply_client_terminal_env(&mut cmd, &current_client_terminal_env());
     apply_event_env(&mut cmd, event);
     let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
         crate::terminal_launch::apply_client_terminal_env(&mut cmd, env);
@@ -298,7 +297,7 @@ async fn run_pre_tool_command(
         Ok(cmd) => cmd,
         Err(error) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' is invalid: {error} (continuing)"
+                "Hook 'pre_tool' command '{command_line}' is invalid: {error} (allowing tool call)"
             ));
             return GateDecision::Allow;
         }
@@ -314,7 +313,7 @@ async fn run_pre_tool_command(
         Ok(child) => child,
         Err(error) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' failed to start: {error} (continuing)"
+                "Hook 'pre_tool' command '{command_line}' failed to start: {error} (allowing tool call)"
             ));
             return GateDecision::Allow;
         }
@@ -333,13 +332,13 @@ async fn run_pre_tool_command(
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' failed: {error} (continuing)"
+                "Hook 'pre_tool' command '{command_line}' failed: {error} (allowing tool call)"
             ));
             return GateDecision::Allow;
         }
         Err(_elapsed) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' timed out after {}ms (continuing)",
+                "Hook 'pre_tool' command '{command_line}' timed out after {}ms (allowing tool call)",
                 timeout.as_millis()
             ));
             return GateDecision::Allow;
@@ -363,7 +362,7 @@ async fn run_pre_tool_command(
         }
         other => {
             crate::logging::warn(&format!(
-                "Hook 'pre_tool' command '{command_line}' exited with {other:?} (expected 0=allow or 2=block; continuing)"
+                "Hook 'pre_tool' command '{command_line}' exited with {other:?} (expected 0=allow or 2=block; allowing tool call)"
             ));
             GateDecision::Allow
         }
@@ -468,46 +467,6 @@ mod tests {
             let decision = run_pre_tool_gate("ses_g", None, "read", "{}").await;
             assert_eq!(decision, GateDecision::Allow);
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn pre_tool_gate_runs_command_array_until_one_blocks() {
-        let _guard = crate::storage::lock_test_env();
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let marker = temp.path().join("first-ran.txt");
-        let allow = write_executable_script(
-            temp.path(),
-            "first-allow.sh",
-            &format!(
-                "#!/bin/sh\nprintf ran > {}\nexit 0\n",
-                crate::terminal_launch::sh_escape(&marker.to_string_lossy())
-            ),
-        );
-        let block = write_executable_script(
-            temp.path(),
-            "second-block.sh",
-            "#!/bin/sh\necho 'blocked by second policy' >&2\nexit 2\n",
-        );
-        let commands = serde_json::to_string(&vec![
-            allow.to_string_lossy().into_owned(),
-            block.to_string_lossy().into_owned(),
-        ])
-        .expect("serialize hook command array");
-        let _env = gate_test_config(&commands, 5000);
-
-        let decision = run_pre_tool_gate("ses_multi", None, "bash", "{}").await;
-
-        assert_eq!(
-            decision,
-            GateDecision::Block {
-                reason: "blocked by second policy".to_string()
-            }
-        );
-        assert_eq!(
-            std::fs::read_to_string(marker).expect("first policy should execute"),
-            "ran"
-        );
     }
 
     #[cfg(unix)]

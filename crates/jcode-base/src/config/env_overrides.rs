@@ -449,15 +449,14 @@ impl Config {
                 } else {
                     Some(HookCommands::one(trimmed))
                 };
-                hooks.set_commands(event, commands);
             }
         }
-        hook_env_override(&mut self.hooks, "turn_start", "JCODE_HOOK_TURN_START");
-        hook_env_override(&mut self.hooks, "turn_end", "JCODE_HOOK_TURN_END");
-        hook_env_override(&mut self.hooks, "session_start", "JCODE_HOOK_SESSION_START");
-        hook_env_override(&mut self.hooks, "session_end", "JCODE_HOOK_SESSION_END");
-        hook_env_override(&mut self.hooks, "pre_tool", "JCODE_HOOK_PRE_TOOL");
-        hook_env_override(&mut self.hooks, "post_tool", "JCODE_HOOK_POST_TOOL");
+        hook_env_override(&mut self.hooks.turn_start, "JCODE_HOOK_TURN_START");
+        hook_env_override(&mut self.hooks.turn_end, "JCODE_HOOK_TURN_END");
+        hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
+        hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
+        hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 self.hooks.pre_tool_timeout_ms = parsed;
