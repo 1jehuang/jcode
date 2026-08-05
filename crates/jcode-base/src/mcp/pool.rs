@@ -502,6 +502,7 @@ mod tests {
                 shared: false,
                 transport: None,
                 url: None,
+                headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
             },

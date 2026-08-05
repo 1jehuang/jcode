@@ -134,6 +134,147 @@ fn test_mcp_http_server_is_not_stdio() {
 }
 
 #[test]
+fn environment_expansion_matches_claude_syntax_across_config_fields() {
+    let json = r#"{
+        "mcpServers": {
+            "probe": {
+                "command": "${BIN_DIR}/probe",
+                "args": ["--token=${TOKEN:-fallback-token}", "${MISSING_DEFAULT:-fallback}", "${MISSING}"],
+                "env": {
+                    "PROBE_PATH": "${BIN_DIR}/marker",
+                    "STILL_MISSING": "prefix-${MISSING}"
+                },
+                "type": "http",
+                "url": "${BASE_URL:-https://example.test}/mcp",
+                "headers": {"Authorization": "Bearer ${TOKEN}"}
+            }
+        }
+    }"#;
+    let mut config: McpConfig = serde_json::from_str(json).unwrap();
+
+    let warnings = config.expand_environment_variables_with(|variable| match variable {
+        "BIN_DIR" => Some("/opt/tools".to_string()),
+        "TOKEN" => Some("secret-token".to_string()),
+        _ => None,
+    });
+
+    let server = config.servers.get("probe").unwrap();
+    assert_eq!(server.command, "/opt/tools/probe");
+    assert_eq!(
+        server.args,
+        vec!["--token=secret-token", "fallback", "${MISSING}"]
+    );
+    assert_eq!(server.env["PROBE_PATH"], "/opt/tools/marker");
+    assert_eq!(server.env["STILL_MISSING"], "prefix-${MISSING}");
+    assert_eq!(server.url.as_deref(), Some("https://example.test/mcp"));
+    assert_eq!(server.headers["Authorization"], "Bearer secret-token");
+    assert_eq!(
+        warnings,
+        vec![UnresolvedEnvironmentVariable {
+            server: "probe".to_string(),
+            variable: "MISSING".to_string(),
+        }],
+        "an unresolved variable is preserved and warned once per server"
+    );
+}
+
+#[test]
+fn environment_expansion_preserves_malformed_and_unclosed_expressions() {
+    let mut unresolved = std::collections::BTreeSet::new();
+    let expanded = expand_environment_string(
+        "${1INVALID} ${:-no} ${UNCLOSED",
+        &|_| Some("unexpected".to_string()),
+        &mut unresolved,
+    );
+
+    assert_eq!(expanded, "${1INVALID} ${:-no} ${UNCLOSED");
+    assert!(unresolved.is_empty());
+}
+
+#[test]
+fn expansion_after_merge_ignores_shadowed_references() {
+    let mut merged = McpConfig::default();
+    merged.servers.insert(
+        "same-name".to_string(),
+        serde_json::from_value(serde_json::json!({"command": "${SHADOWED}"})).unwrap(),
+    );
+    let incoming = serde_json::from_value(serde_json::json!({
+        "same-name": {"command": "${WINNER}"}
+    }))
+    .unwrap();
+    McpConfig::merge_servers_preferring_runnable(&mut merged.servers, incoming);
+
+    let warnings = merged.expand_environment_variables_with(|variable| {
+        (variable == "WINNER").then(|| "winning-command".to_string())
+    });
+
+    assert_eq!(merged.servers["same-name"].command, "winning-command");
+    assert!(warnings.is_empty(), "shadowed definitions must not warn");
+}
+
+#[test]
+fn load_for_dir_expands_the_winning_merged_definition() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_value = std::env::var_os("JCODE_MCP_EXPANSION_TEST_VALUE");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_MCP_EXPANSION_TEST_VALUE", "expanded-value");
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"mcpServers":{"same-name":{"command":"${SHADOWED_MISSING}"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join(".mcp.json"),
+        r#"{"mcpServers":{"same-name":{"command":"project-bin","args":["${JCODE_MCP_EXPANSION_TEST_VALUE}"]}}}"#,
+    )
+    .unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        let server = &config.servers["same-name"];
+        assert_eq!(server.command, "project-bin");
+        assert_eq!(server.args, ["expanded-value"]);
+    });
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    match previous_value {
+        Some(value) => crate::env::set_var("JCODE_MCP_EXPANSION_TEST_VALUE", value),
+        None => crate::env::remove_var("JCODE_MCP_EXPANSION_TEST_VALUE"),
+    }
+    result.expect("merged config expansion assertions");
+}
+
+#[test]
+fn expanded_values_invalidate_schema_cache_fingerprint() {
+    let raw = r#"{"mcpServers":{"srv":{"command":"node","args":["${SCRIPT}"],"env":{"TOKEN":"${TOKEN}"}}}}"#;
+    let mut first: McpConfig = serde_json::from_str(raw).unwrap();
+    first.expand_environment_variables_with(|variable| match variable {
+        "SCRIPT" => Some("first.js".to_string()),
+        "TOKEN" => Some("token-one".to_string()),
+        _ => None,
+    });
+    let mut second: McpConfig = serde_json::from_str(raw).unwrap();
+    second.expand_environment_variables_with(|variable| match variable {
+        "SCRIPT" => Some("second.js".to_string()),
+        "TOKEN" => Some("token-two".to_string()),
+        _ => None,
+    });
+
+    assert_ne!(
+        crate::mcp::schema_cache::fingerprint_config(&first.servers["srv"]),
+        crate::mcp::schema_cache::fingerprint_config(&second.servers["srv"]),
+        "changing expanded environment values must invalidate cached schemas"
+    );
+}
+
+#[test]
 fn test_load_claude_json_global_and_project_servers() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cwd = temp.path().join("myproject");
