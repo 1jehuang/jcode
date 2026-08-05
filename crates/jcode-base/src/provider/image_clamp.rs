@@ -37,6 +37,40 @@
 use base64::Engine as _;
 use jcode_message_types::{ContentBlock, Message};
 
+/// Build a request-safe copy of `messages` when the selected provider/model
+/// cannot accept image input. Replacing each image with a small textual marker
+/// preserves message and tool-call ordering while ensuring no encoded image
+/// data reaches a text-only provider. Returns `None` when no rewrite is needed
+/// so vision-capable and image-free requests avoid cloning their history.
+pub(crate) fn filter_unsupported_outbound_images(
+    messages: &[Message],
+    supports_image_input: bool,
+) -> Option<Vec<Message>> {
+    if supports_image_input
+        || !messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+    {
+        return None;
+    }
+
+    let mut filtered = messages.to_vec();
+    for message in &mut filtered {
+        for block in &mut message.content {
+            if let ContentBlock::Image { media_type, .. } = block {
+                *block = ContentBlock::Text {
+                    text: format!(
+                        "[Image omitted: this provider/model does not support image input; media_type={media_type}]"
+                    ),
+                    cache_control: None,
+                };
+            }
+        }
+    }
+    Some(filtered)
+}
+
 /// Max edge (px) allowed when a request carries more than this many images.
 const MANY_IMAGE_THRESHOLD: usize = 20;
 /// Per-image max edge when a request carries `> MANY_IMAGE_THRESHOLD` images.
@@ -427,6 +461,56 @@ mod tests {
     fn no_images_returns_none() {
         let messages = vec![Message::user("hello")];
         assert!(clamp_outbound_images(&messages).is_none());
+    }
+
+    #[test]
+    fn text_only_provider_history_replaces_images_before_request() {
+        let mut message = image_message("encoded-image-data".to_string());
+        message.content.push(ContentBlock::Text {
+            text: "keep this text".to_string(),
+            cache_control: None,
+        });
+        let messages = vec![message];
+
+        let filtered = filter_unsupported_outbound_images(&messages, false)
+            .expect("text-only requests containing images must be rewritten");
+
+        assert!(filtered.iter().all(|message| {
+            message
+                .content
+                .iter()
+                .all(|block| !matches!(block, ContentBlock::Image { .. }))
+        }));
+        assert!(matches!(
+            &filtered[0].content[0],
+            ContentBlock::Text { text, .. }
+                if text == "[Image omitted: this provider/model does not support image input; media_type=image/png]"
+        ));
+        assert!(matches!(
+            &filtered[0].content[1],
+            ContentBlock::Text { text, .. } if text == "keep this text"
+        ));
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentBlock::Image { data, .. } if data == "encoded-image-data"
+        ));
+    }
+
+    #[test]
+    fn image_capable_provider_history_is_not_rewritten() {
+        let messages = vec![image_message("encoded-image-data".to_string())];
+
+        assert!(filter_unsupported_outbound_images(&messages, true).is_none());
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentBlock::Image { data, .. } if data == "encoded-image-data"
+        ));
+    }
+
+    #[test]
+    fn text_only_image_free_history_is_not_cloned() {
+        let messages = vec![Message::user("hello")];
+        assert!(filter_unsupported_outbound_images(&messages, false).is_none());
     }
 
     #[test]
