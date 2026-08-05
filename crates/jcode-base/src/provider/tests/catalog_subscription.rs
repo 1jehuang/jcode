@@ -260,7 +260,7 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
 }
 
 #[test]
-fn test_subscription_model_guard_gates_ultra_models_on_plus_tier() {
+fn test_hosted_model_guard_does_not_gate_models_by_legacy_tier() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::tempdir().expect("temp home");
     crate::env::set_var("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
@@ -268,15 +268,12 @@ fn test_subscription_model_guard_gates_ultra_models_on_plus_tier() {
     crate::subscription_catalog::clear_runtime_env();
     crate::subscription_catalog::apply_runtime_env();
 
-    // Unknown/absent tier behaves like Plus: Sol is available, while the
-    // Ultra-tier Fable model is rejected with an upgrade hint.
+    // Every curated model is available to metered accounts. The router owns
+    // spending-limit and model-policy enforcement.
     assert!(ensure_model_allowed_for_subscription("gpt-5.6-sol").is_ok());
-    let error = ensure_model_allowed_for_subscription("claude-fable-5")
-        .expect_err("fable should be gated on Plus");
-    assert!(error.to_string().contains("Ultra"), "{error}");
-    assert!(error.to_string().contains("Upgrade"), "{error}");
+    assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
 
-    // Ultra tier unlocks Fable too.
+    // Legacy cached tier metadata cannot change client-side availability.
     crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
     assert!(ensure_model_allowed_for_subscription("sol").is_ok());
@@ -304,7 +301,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
         "claude-fable-5".to_string(),
     ]);
 
-    // Plus (default) tier includes Sol and hides only Ultra-tier Fable.
+    // Every curated hosted model is shown, while unknown router models remain hidden.
     assert_eq!(
         filtered,
         vec![
@@ -312,6 +309,7 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
             "claude-sonnet-4-6".to_string(),
             "gpt-5.5".to_string(),
             "gpt-5.6-sol".to_string(),
+            "claude-fable-5".to_string(),
         ]
     );
 

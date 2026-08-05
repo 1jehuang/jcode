@@ -104,19 +104,15 @@ fn persist_approved_key(approved: &ApprovedAccountKey) -> Result<()> {
 }
 
 /// Full browser-first device login. No email or secret is requested in the
-/// terminal. A valid exchanged key is retained when plan activation times out or
-/// the user cancels activation polling.
+/// terminal. A valid exchanged key is retained when hosted billing activation
+/// times out or the user cancels activation polling.
 pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCompletion> {
     let client = crate::provider::shared_http_client();
     let api_base = subscription_api::configured_api_base();
-    let device = subscription_api::request_device_authorization(
-        &client,
-        &api_base,
-        Some(crate::subscription_catalog::JcodeTier::Pro),
-    )
-    .await
-    .map_err(anyhow::Error::new)
-    .context("Failed to start Jcode account login")?;
+    let device = subscription_api::request_device_authorization(&client, &api_base, None)
+        .await
+        .map_err(anyhow::Error::new)
+        .context("Failed to start Jcode account login")?;
 
     eprintln!("\nJcode Account Login");
     eprintln!("  Opening the secure account approval page:");
@@ -145,7 +141,7 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
     persist_approved_key(&approved)?;
     eprintln!("\n  Account approved for {}.", approved.email);
     eprintln!("  Credential saved securely with owner-only permissions.");
-    eprintln!("  Waiting for an active paid plan on /v1/me...");
+    eprintln!("  Waiting for hosted billing and your spending limit on /v1/me...");
 
     let activation = tokio::select! {
         result = subscription_api::poll_for_paid_activation(
@@ -169,19 +165,15 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
                 Some(&me.email),
                 Some(&me.tier),
             )?;
-            let tier = me
-                .parsed_tier()
-                .map(|tier| tier.display_name().to_string())
-                .unwrap_or(me.tier);
             eprintln!(
-                "  ✓ {} plan is active. Jcode account login is complete.",
-                tier
+                "  ✓ Hosted models are ready with a ${:.2} monthly spending limit.",
+                me.usage.budget_usd
             );
             LoginCompletion::Active
         }
         Some(ActivationOutcome::Canceled(_)) => {
             eprintln!(
-                "  Checkout was canceled. Your account key remains saved, but no paid plan is active."
+                "  Billing setup was canceled. Your account key remains saved, but hosted usage is not enabled."
             );
             print_recovery_actions();
             LoginCompletion::KeySavedPlanPending
@@ -191,10 +183,10 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
         }) => {
             if last_error_was_offline {
                 eprintln!(
-                    "  Plan activation could not be confirmed before timeout because the account API remained unreachable."
+                    "  Hosted billing could not be confirmed before timeout because the account API remained unreachable."
                 );
             } else {
-                eprintln!("  Plan activation was not detected before timeout.");
+                eprintln!("  A spending limit was not detected before timeout.");
             }
             eprintln!("  Your valid account key remains saved.");
             print_recovery_actions();
@@ -203,13 +195,13 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
         Some(ActivationOutcome::Revoked) => {
             crate::subscription_catalog::clear_account_credentials()?;
             anyhow::bail!(
-                "The newly issued account key was revoked before plan activation. Local credentials were cleared; run `jcode account login` again."
+                "The newly issued account key was revoked before hosted billing activation. Local credentials were cleared; run `jcode account login` again."
             );
         }
         Some(ActivationOutcome::Denied) => {
             crate::subscription_catalog::clear_account_credentials()?;
             anyhow::bail!(
-                "The account server denied plan activation checks. Local credentials were cleared; run `jcode account login` again."
+                "The account server denied hosted billing checks. Local credentials were cleared; run `jcode account login` again."
             );
         }
         None => {

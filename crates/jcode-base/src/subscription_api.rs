@@ -1,4 +1,4 @@
-//! Typed client for the Jcode account and subscription API.
+//! Typed client for the Jcode account and hosted-model billing API.
 //!
 //! All bearer credentials are sent in authorization headers or JSON response
 //! bodies. They are never placed in URLs, redirects, or diagnostic messages.
@@ -19,8 +19,16 @@ pub const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub struct SubscriptionUsage {
     #[serde(default)]
     pub used_usd: f64,
-    #[serde(default)]
+    /// User-selected monthly spending limit. `budget_usd` remains accepted for
+    /// compatibility with account servers deployed before metered billing.
+    #[serde(default, alias = "spend_limit_usd", alias = "limit_usd")]
     pub budget_usd: f64,
+    /// Amount already collected in billing tranches this month.
+    #[serde(default)]
+    pub billed_usd: f64,
+    /// Next usage amount at which a tranche will be collected, when supplied.
+    #[serde(default)]
+    pub next_charge_at_usd: Option<f64>,
     /// RFC 3339 timestamp for when the usage window resets.
     #[serde(default)]
     pub resets_at: Option<String>,
@@ -46,7 +54,8 @@ impl SubscriptionMe {
     }
 
     pub fn has_active_paid_plan(&self) -> bool {
-        self.status.eq_ignore_ascii_case("active") && self.parsed_tier().is_some()
+        self.status.eq_ignore_ascii_case("active")
+            && (self.usage.budget_usd > 0.0 || self.parsed_tier().is_some())
     }
 
     pub fn checkout_was_canceled(&self) -> bool {
@@ -551,6 +560,26 @@ mod tests {
     }
 
     #[test]
+    fn metered_account_parses_spending_limit_and_tranche_state_without_a_tier() {
+        let json = r#"{
+            "account_id": "acct_metered", "email": "dev@example.com",
+            "tier": "none", "status": "active",
+            "usage": {
+                "used_usd": 34.5,
+                "spend_limit_usd": 100.0,
+                "billed_usd": 20.0,
+                "next_charge_at_usd": 60.0
+            }
+        }"#;
+        let me: SubscriptionMe = serde_json::from_str(json).expect("parse metered account");
+        assert_eq!(me.parsed_tier(), None);
+        assert!(me.has_active_paid_plan());
+        assert_eq!(me.usage.budget_usd, 100.0);
+        assert_eq!(me.usage.billed_usd, 20.0);
+        assert_eq!(me.usage.next_charge_at_usd, Some(60.0));
+    }
+
+    #[test]
     fn polling_backoff_is_deterministic_and_bounded() {
         let mut state = PollingBackoff::new(Duration::from_secs(3));
         assert_eq!(state.delay(), Duration::from_secs(3));
@@ -579,6 +608,34 @@ mod tests {
         assert_eq!(result.device_code, "secret");
         assert_eq!(result.flow_id, "public-flow");
         assert!(!result.verification_uri_complete.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn metered_device_request_does_not_select_a_subscription_tier() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 8192];
+            let count = stream.read(&mut request).expect("read request");
+            request_tx
+                .send(String::from_utf8_lossy(&request[..count]).into_owned())
+                .expect("capture request");
+            let body = r#"{"device_code":"secret","flow_id":"public-flow","verification_uri":"https://jcode.sh/account","verification_uri_complete":"https://jcode.sh/account?flow=public-flow","expires_in":600,"interval":3}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+
+        request_device_authorization(&client(), &format!("http://{addr}/v1"), None)
+            .await
+            .expect("device auth");
+        let request = request_rx.recv().expect("captured request");
+        assert!(request.contains(r#"{"client_name":"jcode-cli"}"#));
+        assert!(!request.contains("requested_tier"), "{request}");
     }
 
     #[tokio::test]
