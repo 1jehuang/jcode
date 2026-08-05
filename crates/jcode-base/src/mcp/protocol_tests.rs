@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn load_for_dir_without_project_does_not_load_process_cwd_config() {
+fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
     let _guard = crate::storage::lock_test_env();
     let original_cwd = std::env::current_dir().expect("current cwd");
     let previous_home = std::env::var_os("JCODE_HOME");
@@ -18,6 +18,9 @@ fn load_for_dir_without_project_does_not_load_process_cwd_config() {
     let result = std::panic::catch_unwind(|| {
         let unbound = McpConfig::load_for_dir(None);
         assert!(!unbound.servers.contains_key("cwd-only"));
+
+        let default = McpConfig::load();
+        assert!(default.servers.contains_key("cwd-only"));
 
         let bound = McpConfig::load_for_dir(Some(project.path()));
         assert!(bound.servers.contains_key("cwd-only"));
