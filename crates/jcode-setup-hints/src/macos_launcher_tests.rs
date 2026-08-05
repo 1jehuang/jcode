@@ -140,3 +140,42 @@ fn macos_launcher_refreshes_when_icon_missing() {
         &legacy_app_dir,
     ));
 }
+
+#[test]
+fn macos_notification_bundle_is_faceless_and_uses_multicall_binary() {
+    let plist = macos_notification_info_plist();
+    assert!(plist.contains("<key>LSUIElement</key>\n    <true/>"));
+    assert!(plist.contains("<string>com.jcode.notifications</string>"));
+    assert!(plist.contains("<string>jcode-notification-broker</string>"));
+    assert!(plist.contains(jcode_build_meta::version()));
+}
+
+#[test]
+fn macos_notification_bundle_validity_is_version_gated() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app = temp.path().join(MACOS_NOTIFICATION_APP_NAME);
+    std::fs::create_dir_all(app.join("Contents/MacOS")).expect("create MacOS");
+    std::fs::create_dir_all(app.join("Contents/Resources")).expect("create Resources");
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        macos_notification_info_plist(),
+    )
+    .expect("write plist");
+    std::fs::write(macos_notification_broker_executable_path(&app), "binary")
+        .expect("write executable");
+    std::fs::write(
+        macos_notification_broker_icon_path(&app),
+        MACOS_APP_ICON_BYTES,
+    )
+    .expect("write icon");
+    std::fs::write(
+        macos_notification_broker_marker_path(&app),
+        jcode_build_meta::version(),
+    )
+    .expect("write version marker");
+    assert!(macos_notification_broker_is_valid(&app));
+
+    std::fs::write(macos_notification_broker_marker_path(&app), "0.0.0")
+        .expect("write stale marker");
+    assert!(!macos_notification_broker_is_valid(&app));
+}

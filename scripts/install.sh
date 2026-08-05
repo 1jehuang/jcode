@@ -334,6 +334,12 @@ fi
 
 if [ "$(uname -s)" = "Darwin" ]; then
   xattr -d com.apple.quarantine "$dest_version_dir/$bin_name" 2>/dev/null || true
+  # Generate the architecture-matched LSUIElement notification broker (and the
+  # normal Spotlight launcher) from the verified binary. Best-effort here: the
+  # first interactive jcode launch performs the same version-gated repair.
+  if "$launcher_path" setup-launcher </dev/null >/dev/null 2>&1; then
+    info "Installed macOS launcher and turn-notification broker."
+  fi
 fi
 
 hotkey_setup_ready=false

@@ -280,6 +280,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenuItem",
     "NSRunningApplication",
 ] }
+objc2-user-notifications = "0.3"
 
 [profile.release]
 opt-level = 1
