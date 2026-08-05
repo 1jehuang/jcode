@@ -920,6 +920,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             &agent,
             &client_event_tx,
             &processing_done_tx,
+            Vec::new(),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1019,6 +1020,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         &agent,
         &origin_tx,
         &processing_done_tx,
+        Vec::new(),
         &SwarmStatusRefs {
             members: &swarm_members,
             swarms_by_id: &swarms_by_id,
@@ -1142,6 +1144,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             &agent,
             &client_event_tx,
             &processing_done_tx,
+            Vec::new(),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1240,6 +1243,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                 &agent,
                 &client_event_tx,
                 &processing_done_tx,
+                Vec::new(),
                 &SwarmStatusRefs {
                     members: &swarm_members,
                     swarms_by_id: &swarms_by_id,
