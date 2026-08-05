@@ -535,6 +535,40 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 }
 
 #[test]
+fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        let pending = |content: &str| crate::todo::TodoItem {
+            id: "todo-1".to_string(),
+            content: content.to_string(),
+            status: "pending".to_string(),
+            priority: "high".to_string(),
+            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+            ..Default::default()
+        };
+
+        crate::todo::save_todos(&app.session.id, &[pending("Wait for worker")]).expect("save");
+        assert!(app.schedule_auto_poke_followup_if_needed());
+
+        // Simulate dispatch and completion of the automatically poked turn.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(
+            !app.schedule_auto_poke_followup_if_needed(),
+            "an unchanged list must not consume another model turn"
+        );
+
+        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
+            .expect("update");
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "changing the todo list must re-arm the automatic nudge"
+        );
+    });
+}
+
+#[test]
 fn completed_cycle_rearms_auto_poke_only_when_default_on() {
     with_temp_jcode_home(|| {
         let completed = |id: &str| crate::todo::TodoItem {

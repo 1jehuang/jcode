@@ -1632,6 +1632,17 @@ impl App {
             return false;
         }
 
+        let poke_message = super::commands::build_poke_message(&incomplete);
+        let fingerprint =
+            serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
+        if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
+            crate::logging::info(&format!(
+                "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
+                incomplete.len()
+            ));
+            return false;
+        }
+
         self.push_display_message(DisplayMessage::system(format!(
             "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
             incomplete.len(),
@@ -1651,8 +1662,8 @@ impl App {
         // Open todos mean the model is still iterating; completion-gate
         // exhaustion should only trip when the gate itself stops moving.
         self.todo_completion_gate_attempts = 0;
-        self.queued_messages
-            .push(super::commands::build_poke_message(&incomplete));
+        self.last_auto_poke_fingerprint = Some(fingerprint);
+        self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
     }

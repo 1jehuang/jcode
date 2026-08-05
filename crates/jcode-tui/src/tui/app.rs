@@ -950,6 +950,10 @@ pub struct App {
     /// has sent. Without a budget, a model that stops updating its todos gets
     /// nudged on every turn forever, silently burning an API call per tick.
     todo_completion_gate_attempts: u8,
+    /// Exact continuation sent for the last incomplete todo state. An unchanged
+    /// list must not trigger another automatic turn: the agent may be parked on
+    /// a worker, wake, or human decision, and repeated pokes cannot help.
+    last_auto_poke_fingerprint: Option<String>,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.
