@@ -1131,6 +1131,28 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn visual_line_move_follows_soft_wrapped_rows() {
+        // 20 chars, width 10 => two visual rows, no newline in the input.
+        let input = "abcdefghijklmnopqrst";
+        // Cursor at col 3 of row 1 (char 13) moving up lands on col 3 of row 0.
+        assert_eq!(visual_line_move(input, 13, 10, -1), Some(3));
+        // And back down again.
+        assert_eq!(visual_line_move(input, 3, 10, 1), Some(13));
+        // Already on the first/last row => None so history recall can take over.
+        assert_eq!(visual_line_move(input, 3, 10, -1), None);
+        assert_eq!(visual_line_move(input, 13, 10, 1), None);
+    }
+
+    #[test]
+    fn visual_line_move_clamps_to_shorter_target_row() {
+        let input = "abcdefghij\nxy";
+        // Cursor at end of the short second row, up goes to col 2 of row 0.
+        assert_eq!(visual_line_move(input, input.len(), 10, -1), Some(2));
+        // From far along row 0, down clamps to the end of the short row.
+        assert_eq!(visual_line_move(input, 8, 10, 1), Some(input.len()));
+    }
+
+    #[test]
     fn right_fact_stack_shifts_up_as_a_unit_when_bottom_row_is_occupied() {
         let area = Rect::new(0, 0, 40, 5);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
@@ -3105,4 +3127,62 @@ enum QueuedMsgType {
     Pending,
     Interleave,
     Queued,
+}
+
+/// The usable text width of one composer row, i.e. the width used by
+/// `wrap_input_segments` when the composer is rendered into `area_width`.
+/// Returns `None` when there is no room for text.
+pub(crate) fn composer_line_width(
+    app: &dyn TuiState,
+    area_width: u16,
+    next_prompt: usize,
+) -> Option<usize> {
+    let prompt_len = input_prompt_len(app, next_prompt);
+    let reserved = send_mode_reserved_width(app);
+    let width = (area_width as usize).saturating_sub(prompt_len + reserved);
+    (width > 0).then_some(width)
+}
+
+/// Move the cursor one *visual* (wrapped) row up (`delta = -1`) or down
+/// (`delta = 1`) within the composer, keeping the display column.
+///
+/// Returns the new byte offset, or `None` when the cursor is already on the
+/// first/last visual row (so callers can fall through to prompt history).
+pub(crate) fn visual_line_move(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    delta: isize,
+) -> Option<usize> {
+    use unicode_width::UnicodeWidthChar;
+
+    if line_width == 0 {
+        return None;
+    }
+    let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
+    let segments = wrap_input_segments(input, line_width);
+    if segments.len() < 2 {
+        return None;
+    }
+    let current = segments
+        .iter()
+        .position(|s| cursor_char_pos >= s.start_char && cursor_char_pos <= s.end_char)?;
+    let target_idx = current.checked_add_signed(delta)?;
+    let target = segments.get(target_idx)?;
+    let col = cursor_col_for_segment(&segments[current], cursor_char_pos);
+
+    // Walk the target row to the same display column.
+    let mut display = 0usize;
+    let mut chars_in = 0usize;
+    for ch in target.text.chars() {
+        if display >= col {
+            break;
+        }
+        display += ch.width().unwrap_or(0);
+        chars_in += 1;
+    }
+    Some(crate::tui::core::char_index_to_byte_offset(
+        input,
+        target.start_char + chars_in,
+    ))
 }

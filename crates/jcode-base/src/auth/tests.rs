@@ -903,3 +903,87 @@ fn browser_suppressed_inside_test_harness_without_env_overrides() {
         "browser opens must be suppressed in test binaries even without --no-browser/env vars"
     );
 }
+
+/// Antigravity/Gemini access tokens live about an hour and are refreshed
+/// transparently on the next request. Reporting `Expired` just because the
+/// cached access token aged out made a fully working provider render as broken
+/// in `/login`, the header, onboarding, and `jcode auth status`, which is what
+/// the "antigravity is not working" reports actually were. Only a missing or
+/// permanently rejected refresh token means the user must log in again.
+#[test]
+fn refreshable_token_state_covers_the_full_expiry_state_space() {
+    let never_rejected = |_: &str| false;
+    let always_rejected = |_: &str| true;
+
+    // (case, expired access token, refresh token, refresh token rejected) -> state
+    let cases: [(&str, bool, &str, bool, AuthState); 6] = [
+        (
+            "hourly access token expired but refresh works",
+            true,
+            "1//live-refresh-token",
+            false,
+            AuthState::Available,
+        ),
+        (
+            "fresh access token",
+            false,
+            "1//live-refresh-token",
+            false,
+            AuthState::Available,
+        ),
+        (
+            "fresh access token, no refresh token",
+            false,
+            "",
+            false,
+            AuthState::Available,
+        ),
+        (
+            "expired with no refresh token needs re-login",
+            true,
+            "   ",
+            false,
+            AuthState::Expired,
+        ),
+        (
+            "expired with revoked refresh token needs re-login",
+            true,
+            "1//revoked",
+            true,
+            AuthState::Expired,
+        ),
+        (
+            "fresh access token is trusted even if an old refresh token was rejected",
+            false,
+            "1//revoked",
+            true,
+            AuthState::Available,
+        ),
+    ];
+
+    for (case, expired, refresh_token, rejected, expected) in cases {
+        let observed = if rejected {
+            super::refreshable_token_state_with(
+                Ok((expired, refresh_token.to_string())),
+                always_rejected,
+            )
+        } else {
+            super::refreshable_token_state_with(
+                Ok((expired, refresh_token.to_string())),
+                never_rejected,
+            )
+        };
+        assert_eq!(observed, expected, "{case}");
+    }
+}
+
+#[test]
+fn missing_refreshable_credentials_are_not_configured() {
+    assert_eq!(
+        super::refreshable_token_state_with(
+            Err(anyhow::anyhow!("No Antigravity tokens found.")),
+            |_| false
+        ),
+        AuthState::NotConfigured
+    );
+}

@@ -1,4 +1,6 @@
-use jcode_message_types::{ContentBlock, Message, Role, ToolDefinition, sanitize_tool_id};
+use jcode_message_types::{
+    ContentBlock, Message, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition, sanitize_tool_id,
+};
 use jcode_provider_core::anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -15,6 +17,18 @@ pub(crate) const CONTINUATION_USER_TURN: &str = "Continue.";
 
 pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
     use std::collections::HashSet;
+
+    // Pre-pass: drop duplicate tool_results for the same tool_use_id.
+    //
+    // Anthropic rejects the whole request (400 "unexpected `tool_use_id` found
+    // in `tool_result` blocks") when a tool_use_id appears twice, because after
+    // same-role merging only the first result lines up with the tool_use in the
+    // preceding assistant message. Duplicates are produced by the missing
+    // tool-output repair racing a still-running tool: the repair inserts a
+    // synthetic placeholder result, then the real result lands moments later,
+    // and the conversation is permanently unsendable. Prefer the real output
+    // over the synthetic placeholder, and otherwise keep the first occurrence.
+    let messages = &dedupe_tool_results(messages);
 
     // First pass: collect all tool_use IDs and tool_result IDs
     let mut tool_use_ids: HashSet<String> = HashSet::new();
@@ -188,6 +202,91 @@ pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> 
     }
 
     merged
+}
+
+/// Returns true when a tool_result body is one of the synthetic placeholders
+/// injected by the missing tool-output repair paths rather than real output.
+fn is_placeholder_tool_result(content: &str, is_error: Option<bool>) -> bool {
+    is_error.unwrap_or(false)
+        && (content.contains(TOOL_OUTPUT_MISSING_TEXT)
+            || content.contains("[Session interrupted before tool execution completed]"))
+}
+
+/// Remove duplicate `tool_result` blocks so each `tool_use_id` is answered
+/// exactly once, preferring real output over a synthetic placeholder.
+/// Messages left with no content at all are dropped by the caller's
+/// `!content.is_empty()` guard.
+fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
+    use std::collections::HashMap;
+
+    // Winner position per tool_use_id: the first real result if one exists,
+    // otherwise the first occurrence at all.
+    let mut winner: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut winner_is_real: HashMap<&str, bool> = HashMap::new();
+    let mut duplicate_seen = false;
+
+    for (mi, msg) in messages.iter().enumerate() {
+        for (bi, block) in msg.content.iter().enumerate() {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            else {
+                continue;
+            };
+            let real = !is_placeholder_tool_result(content, *is_error);
+            match winner_is_real.get(tool_use_id.as_str()) {
+                None => {
+                    winner.insert(tool_use_id, (mi, bi));
+                    winner_is_real.insert(tool_use_id, real);
+                }
+                Some(false) if real => {
+                    // Upgrade a placeholder winner to the real output.
+                    winner.insert(tool_use_id, (mi, bi));
+                    winner_is_real.insert(tool_use_id, true);
+                    duplicate_seen = true;
+                }
+                Some(_) => duplicate_seen = true,
+            }
+        }
+    }
+
+    if !duplicate_seen {
+        return messages.to_vec();
+    }
+
+    let dropped = std::cell::Cell::new(0usize);
+    let out: Vec<Message> = messages
+        .iter()
+        .enumerate()
+        .map(|(mi, msg)| {
+            let mut msg = msg.clone();
+            let mut bi = 0usize;
+            msg.content.retain(|block| {
+                let index = bi;
+                bi += 1;
+                let ContentBlock::ToolResult { tool_use_id, .. } = block else {
+                    return true;
+                };
+                let keep = winner.get(tool_use_id.as_str()) == Some(&(mi, index));
+                if !keep {
+                    dropped.set(dropped.get() + 1);
+                }
+                keep
+            });
+            msg
+        })
+        .collect();
+
+    if dropped.get() > 0 {
+        jcode_logging::warn(&format!(
+            "[anthropic] Dropped {} duplicate tool_result block(s); each tool_use_id may be \
+             answered only once",
+            dropped.get()
+        ));
+    }
+    out
 }
 
 /// Convert our ContentBlock to Anthropic API format
@@ -1089,3 +1188,11 @@ mod oauth_tool_schema_tests;
 #[cfg(test)]
 #[path = "trailing_assistant_repair_tests.rs"]
 mod trailing_assistant_repair_tests;
+
+#[cfg(test)]
+#[path = "duplicate_tool_result_tests.rs"]
+mod duplicate_tool_result_tests;
+
+#[cfg(test)]
+#[path = "wedge_fixture_check.rs"]
+mod wedge_fixture_check;

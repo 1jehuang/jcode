@@ -307,8 +307,7 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
             ..
         }) => {
             assert_eq!(total_todos, 2);
-            assert_eq!(message, crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE);
-            assert!(!message.chars().any(|ch| ch.is_ascii_digit()));
+            assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
             assert!(message.contains("completion confidence"));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
@@ -335,10 +334,7 @@ fn run_auto_poke_followup_challenges_abrupt_confidence_once() {
             ..
         }) => {
             assert!(confidence_spike_challenge);
-            assert_eq!(
-                message,
-                crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE
-            );
+            assert!(message.starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE));
         }
         _ => panic!("expected confidence-spike challenge"),
     }

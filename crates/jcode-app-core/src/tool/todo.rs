@@ -1432,6 +1432,150 @@ mod tests {
         }
     }
 
+    /// Issue #695, the visibly-stale case. The todos panel renders the
+    /// ungrouped goal unconditionally (not only as a group header), so an
+    /// ungrouped goal left over from a previous flat todo list is exactly what
+    /// the reporter saw frozen in the panel.
+    #[tokio::test]
+    async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "issue-695-ungrouped";
+        let tool = TodoTool::new();
+
+        // Task one: a flat (ungrouped) list, so its goal is the ungrouped one.
+        tool.execute(
+            json!({
+                "todos": [{
+                    "content": "flat task one", "status": "in_progress",
+                    "priority": "high", "id": "t1", "confidence": 70,
+                }],
+                "plan": {"user_intention": "do task one", "understands_user_intent": 97},
+                "goals": [{"closed_feedback_loop": 97, "feedback_loop": "ran the checks"}],
+            }),
+            test_ctx(session),
+        )
+        .await
+        .expect("first write");
+        let stored = load_goals(session).expect("goals");
+        assert_eq!(stored.len(), 1);
+        assert!(
+            stored[0].group.is_none(),
+            "task one goal is the ungrouped one"
+        );
+
+        // Task two: a grouped list. The ungrouped goal now describes nothing.
+        tool.execute(
+            json!({
+                "todos": [{
+                    "content": "task two", "status": "in_progress", "priority": "high",
+                    "id": "t2", "group": "second task", "confidence": 70,
+                }],
+                "goals": [{"group": "second task", "closed_feedback_loop": 80,
+                           "feedback_loop": "run the new checks"}],
+            }),
+            test_ctx(session),
+        )
+        .await
+        .expect("second write");
+
+        let goals = load_goals(session).expect("goals");
+        assert!(
+            !goals.iter().any(|goal| goal.group.is_none()),
+            "the stale ungrouped goal must not stay in the panel: {goals:?}"
+        );
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].group.as_deref(), Some("second task"));
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    /// Issue #695, end to end through the real tool: finish task one, then
+    /// start task two. What the todos panel renders (stored todos + goals) must
+    /// describe task two only, with no leftovers from task one.
+    #[tokio::test]
+    async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "issue-695-new-task";
+        let tool = TodoTool::new();
+
+        // Task one, completed. `end_to_end_ownership` clears the completion
+        // gate so the write is actually stored.
+        tool.execute(
+            json!({
+                "todos": [{
+                    "content": "task one",
+                    "status": "completed",
+                    "priority": "high",
+                    "id": "t1",
+                    "group": "first task",
+                    "confidence": 90,
+                    "completion_confidence": 97,
+                }],
+                "plan": {"user_intention": "do task one", "understands_user_intent": 97},
+                "goals": [{
+                    "group": "first task",
+                    "closed_feedback_loop": 97,
+                    "end_to_end_ownership": 97,
+                    "feedback_loop": "ran the checks",
+                }],
+            }),
+            test_ctx(session),
+        )
+        .await
+        .expect("first task write should succeed");
+        assert_eq!(load_goals(session).expect("goals").len(), 1);
+
+        // Task two: a fresh todo list in a new group.
+        tool.execute(
+            json!({
+                "todos": [{
+                    "content": "task two",
+                    "status": "in_progress",
+                    "priority": "high",
+                    "id": "t2",
+                    "group": "second task",
+                    "confidence": 70,
+                }],
+                "goals": [{
+                    "group": "second task",
+                    "closed_feedback_loop": 80,
+                    "feedback_loop": "run the new checks",
+                }],
+            }),
+            test_ctx(session),
+        )
+        .await
+        .expect("second task write should succeed");
+
+        let todos = load_todos(session).expect("todos");
+        assert_eq!(todos.len(), 1, "panel must show only the current task");
+        assert_eq!(todos[0].group.as_deref(), Some("second task"));
+
+        let goals = load_goals(session).expect("goals");
+        assert_eq!(
+            goals.len(),
+            1,
+            "the finished task's goal must not linger in the panel: {goals:?}"
+        );
+        assert_eq!(goals[0].group.as_deref(), Some("second task"));
+
+        if let Some(home) = previous_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     /// End-to-end through the real tool, which is what the model actually sees.
     /// A first plan write with honestly-moderate scores must come back clean:
     /// this is the exact case that previously returned two nudges and spent the

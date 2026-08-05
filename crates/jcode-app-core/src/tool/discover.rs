@@ -1,3 +1,4 @@
+use super::discover_secrets::contains_recognizable_secret;
 use super::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -30,6 +31,34 @@ const DISCOVERY_QUERY_MIN_CHARS: usize = 20;
 const DISCOVERY_QUERY_MAX_CHARS: usize = 500;
 const DISCOVERY_REASON_MIN_CHARS: usize = 40;
 const DISCOVERY_REASON_MAX_CHARS: usize = 2_000;
+
+/// Telemetry reason for a `select` naming an entry the catalog does not carry.
+/// Kept distinct from transport failures so the rate of agents committing to
+/// off-catalog products is measurable rather than hidden in `http_error`.
+const OFF_CATALOG_FAILURE_REASON: &str = "off_catalog_select";
+
+/// True when a select response carries no usable tool entry (`{}`,
+/// `{"tool": null}`, or an empty object), which endpoints use instead of 404.
+fn listing_has_no_tool_entry(listing: &Value) -> bool {
+    match listing.get("tool") {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(entry)) => entry.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// Error shown when a select names something outside the catalog. It tells the
+/// agent the two legitimate recoveries: pick a listed entry, or record the gap.
+fn off_catalog_select_error(category: &str, tool_name: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "'{tool_name}' is not in the Jcode catalog for '{category}'. Only entries returned by \
+         action `browse` can be selected; this name did not come from a listing. Either select \
+         one of the listed entries, or, if none fits, call action `suggest` with \
+         `suggestion_kind: known_product`, `product_name: {tool_name}`, and the \
+         `prior_request_id` from your browse so maintainers see the gap. Do not install or \
+         configure '{tool_name}' from memory as if Discovery had vetted it."
+    )
+}
 
 fn discovery_benchmark_run() -> bool {
     std::env::var(DISCOVERY_BENCHMARK_ENV)
@@ -363,192 +392,6 @@ fn has_sufficient_detail(value: &str, field: &str) -> bool {
     words.len() >= min_words && unique.len() >= min_unique
 }
 
-/// A deliberately high-confidence last-line defense before model-authored
-/// Discovery text leaves the client. This complements, rather than replaces,
-/// the schema instruction to summarize the need instead of copying user data.
-fn contains_recognizable_secret(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if (lower.contains("-----begin ") && lower.contains("private key-----"))
-        || contains_credential_assignment(&lower)
-        || contains_email_address(value)
-        || contains_ssn(value)
-        || contains_credential_url(value)
-        || contains_international_phone_number(value)
-    {
-        return true;
-    }
-
-    if contains_prefixed_secret(value) || contains_payment_card_sequence(value) {
-        return true;
-    }
-
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| {
-            matches!(
-                c,
-                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
-            )
-        });
-        looks_like_jwt(token)
-    }) || contains_bearer_token(&lower)
-}
-
-fn contains_prefixed_secret(value: &str) -> bool {
-    const SECRET_PREFIXES: &[&str] = &[
-        "sk_live_",
-        "rk_live_",
-        "sk_test_",
-        "rk_test_",
-        "sk-proj-",
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "xoxa-",
-        "xoxr-",
-        "npm_",
-        "jck_live_",
-    ];
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && !"_-".contains(c));
-        let lower = token.to_ascii_lowercase();
-        SECRET_PREFIXES
-            .iter()
-            .any(|prefix| lower.starts_with(prefix) && token.len() >= prefix.len() + 8)
-            || (token.starts_with("AKIA") && token.len() == 20)
-            || (token.starts_with("AIza") && token.len() >= 35)
-    })
-}
-
-fn contains_credential_assignment(lower: &str) -> bool {
-    const LABELS: &[&str] = &[
-        "api_key",
-        "api-key",
-        "apikey",
-        "access_token",
-        "auth_token",
-        "client_secret",
-        "secret_key",
-        "password",
-        "passwd",
-    ];
-    LABELS.iter().any(|label| {
-        lower.match_indices(label).any(|(index, _)| {
-            let rest = &lower[index + label.len()..];
-            let rest = rest.trim_start();
-            let Some(rest) = rest.strip_prefix(['=', ':']) else {
-                return false;
-            };
-            let candidate =
-                rest.trim_start_matches(|c: char| c.is_whitespace() || "'\"`".contains(c));
-            candidate
-                .split(|c: char| c.is_whitespace() || "'\"`,;".contains(c))
-                .next()
-                .is_some_and(|token| token.len() >= 8)
-        })
-    })
-}
-
-fn contains_bearer_token(lower: &str) -> bool {
-    lower.match_indices("bearer ").any(|(index, _)| {
-        lower[index + "bearer ".len()..]
-            .split_whitespace()
-            .next()
-            .is_some_and(|token| token.trim_matches(|c: char| ",;.'\"`".contains(c)).len() >= 12)
-    })
-}
-
-fn contains_email_address(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| ",;:()[]{}<>\"'`".contains(c));
-        let Some((local, domain)) = token.split_once('@') else {
-            return false;
-        };
-        !local.is_empty()
-            && domain
-                .rsplit_once('.')
-                .is_some_and(|(host, suffix)| !host.is_empty() && suffix.len() >= 2)
-    })
-}
-
-fn contains_ssn(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '-');
-        let parts: Vec<&str> = token.split('-').collect();
-        parts.len() == 3
-            && parts[0].len() == 3
-            && parts[1].len() == 2
-            && parts[2].len() == 4
-            && parts
-                .iter()
-                .all(|part| part.chars().all(|c| c.is_ascii_digit()))
-    })
-}
-
-fn contains_credential_url(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let Some((_, rest)) = token.split_once("://") else {
-            return false;
-        };
-        let authority = rest.split('/').next().unwrap_or_default();
-        authority.contains('@')
-            && authority
-                .split('@')
-                .next()
-                .is_some_and(|user| user.contains(':'))
-    })
-}
-
-fn contains_international_phone_number(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        if !token.starts_with('+') {
-            return false;
-        }
-        let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
-        (10..=15).contains(&digits)
-            && token
-                .chars()
-                .all(|c| c.is_ascii_digit() || "+-().".contains(c))
-    })
-}
-
-fn looks_like_jwt(token: &str) -> bool {
-    token.len() >= 40 && token.starts_with("eyJ") && token.matches('.').count() == 2
-}
-
-fn contains_payment_card_sequence(value: &str) -> bool {
-    value
-        .split(|c: char| !c.is_ascii_digit() && c != '-' && c != ' ')
-        .any(|candidate| looks_like_payment_card(candidate.trim()))
-}
-
-fn looks_like_payment_card(candidate: &str) -> bool {
-    let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
-    if !(13..=19).contains(&digits.len())
-        || candidate
-            .chars()
-            .any(|c| !c.is_ascii_digit() && c != '-' && c != ' ')
-    {
-        return false;
-    }
-    let mut sum = 0u32;
-    let parity = digits.len() % 2;
-    for (index, byte) in digits.bytes().enumerate() {
-        let mut digit = u32::from(byte - b'0');
-        if index % 2 == parity {
-            digit *= 2;
-            if digit > 9 {
-                digit -= 9;
-            }
-        }
-        sum += digit;
-    }
-    sum.is_multiple_of(10)
-}
-
 #[async_trait]
 impl Tool for DiscoverToolsTool {
     fn name(&self) -> &str {
@@ -836,6 +679,29 @@ impl Tool for DiscoverToolsTool {
             let fetched = match fetch_listing(&discovery_request, Some(&tool_name)).await {
                 Ok(result) => result,
                 Err(err) => {
+                    // A 404 on select means the agent committed to a name the
+                    // catalog does not carry (usually a product it recalled
+                    // from training, not one it saw in browse). That is a
+                    // distinct behavior from a broken endpoint, so it gets its
+                    // own outcome and its own recovery instruction.
+                    if err.http_status == Some(404) {
+                        record_discovery_telemetry(
+                            &request_id,
+                            started_at,
+                            &endpoint,
+                            "select",
+                            Some(&category),
+                            Some(tool_name.as_str()),
+                            "off_catalog_select",
+                            Some(OFF_CATALOG_FAILURE_REASON),
+                            err.http_status,
+                            err.response_bytes,
+                            Some(0),
+                            query_present,
+                            reason_present,
+                        );
+                        return Err(off_catalog_select_error(&category, &tool_name));
+                    }
                     record_discovery_telemetry(
                         &request_id,
                         started_at,
@@ -854,6 +720,26 @@ impl Tool for DiscoverToolsTool {
                     return Err(err.into());
                 }
             };
+            // Endpoints may also answer 200 with an empty entry. Same meaning:
+            // the selected name is not in the catalog.
+            if listing_has_no_tool_entry(&fetched.listing) {
+                record_discovery_telemetry(
+                    &request_id,
+                    started_at,
+                    &endpoint,
+                    "select",
+                    Some(&category),
+                    Some(tool_name.as_str()),
+                    "off_catalog_select",
+                    Some(OFF_CATALOG_FAILURE_REASON),
+                    Some(fetched.http_status),
+                    Some(fetched.response_bytes),
+                    Some(0),
+                    query_present,
+                    reason_present,
+                );
+                return Err(off_catalog_select_error(&category, &tool_name));
+            }
             let rendered = match render_selection(&category, &tool_name, &fetched.listing) {
                 Ok(rendered) => rendered,
                 Err(err) => {
@@ -1411,9 +1297,6 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
         if let Some(url) = tool.get("url").and_then(|v| v.as_str()) {
             out.push_str(&format!(" ({url})"));
         }
-        if let Some(setup) = tool.get("setup").and_then(|v| v.as_str()) {
-            out.push_str(&format!("\n  setup: {setup}"));
-        }
     }
     out.push_str(
         "\n\nOnly use one of these if it is genuinely the best option for the task. \
@@ -1590,6 +1473,36 @@ mod tests {
         assert!(out.contains("recommendations must be based only on fit"));
     }
 
+    /// The browse listing must not carry setup instructions. When it did, the
+    /// agent had everything it needed and never called `select`: measured
+    /// select rate was 0% across every model (docs/DISCOVERY_RATE_BENCHMARK.md).
+    /// Withholding setup is what makes the second half of browse-then-select
+    /// happen at all.
+    #[test]
+    fn render_listing_withholds_setup_and_directs_to_select() {
+        let listing = json!({
+            "tools": [
+                {
+                    "name": "agentcard",
+                    "blurb": "virtual payment cards",
+                    "url": "https://agentcard.example",
+                    "setup": "npx -y agentcard-mcp@1.0.0 then export AGENTCARD_KEY",
+                },
+            ]
+        });
+        let out =
+            render_listing("payments", &listing, "11111111-2222-4333-8444-555555555555").unwrap();
+        assert!(
+            !out.contains("agentcard-mcp@1.0.0"),
+            "browse must not leak setup instructions: {out}"
+        );
+        assert!(!out.contains("AGENTCARD_KEY"));
+        assert!(!out.contains("setup:"));
+        assert!(out.contains("Next step"));
+        assert!(out.contains("action `select`"));
+        assert!(out.contains("Setup instructions are only in that select response"));
+    }
+
     #[test]
     fn render_listing_rejects_missing_tools() {
         assert!(
@@ -1715,6 +1628,29 @@ mod tests {
         );
     }
 
+    /// A select naming something the catalog does not carry is a distinct
+    /// behavior (the agent committed to a remembered product) and must not be
+    /// reported as a generic endpoint failure.
+    #[test]
+    fn empty_select_response_is_off_catalog() {
+        assert!(listing_has_no_tool_entry(&json!({})));
+        assert!(listing_has_no_tool_entry(&json!({"tool": null})));
+        assert!(listing_has_no_tool_entry(&json!({"tool": {}})));
+        assert!(!listing_has_no_tool_entry(&json!({"tool": {"name": "x"}})));
+    }
+
+    #[test]
+    fn off_catalog_error_names_both_recoveries() {
+        let message = off_catalog_select_error("payments", "stripe").to_string();
+        assert!(message.contains("not in the Jcode catalog"));
+        assert!(message.contains("stripe"));
+        assert!(message.contains("action `suggest`"));
+        assert!(message.contains("known_product"));
+        assert!(message.contains("prior_request_id"));
+        // Must not tempt the agent into setting it up from memory.
+        assert!(message.contains("Do not install"));
+    }
+
     #[test]
     fn schema_is_compact_and_self_contained() {
         let tool = DiscoverToolsTool::new();
@@ -1745,6 +1681,7 @@ mod tests {
         );
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
+        assert!(schema.contains("select the one you commit to (it carries setup)"));
         assert!(schema.contains("May be shared with partners"));
         assert!(schema.contains("never secrets or personal data"));
         assert!(schema.contains("Why the chosen integration fits"));
@@ -2298,6 +2235,14 @@ mod tests {
                 .output
                 .contains("recommendations must be based only on fit")
         );
+        // End to end, not just in render_listing: a browse must never hand the
+        // agent runnable setup, or it has no reason to call select.
+        assert!(
+            !output.output.contains("npx agentcard-mcp"),
+            "browse leaked setup instructions: {}",
+            output.output
+        );
+        assert!(output.output.contains("action `select`"));
         let title = output.title.unwrap();
         assert_eq!(title, "payments", "{title}");
         let meta = output.metadata.unwrap();

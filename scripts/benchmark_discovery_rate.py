@@ -10,6 +10,10 @@ listing", this runner asks the two questions that define the intended policy:
    that commitment go through `integration_tools` action=select, or does it bypass
    Discovery entirely by installing an SDK, hitting a vendor URL, or connecting
    an MCP server directly?
+3. Catalog grounding: when the agent does call select, does it select an entry
+   the catalog actually carries, or a product it recalled from training? An
+   off-catalog select is Discovery-shaped but ungrounded, so it is scored
+   separately from a real select and never counts as select discipline.
 
 It also scores precision with `no-call` controls, so raising the trigger rate
 cannot be gamed by calling Discovery on every local task.
@@ -84,9 +88,14 @@ VENDOR_CLIS = (
     "vercel|stripe|supabase|neonctl|railway|flyctl|heroku|wrangler|doctl|netlify|"
     "planetscale|pscale|sentry-cli|datadog-ci|clerk|auth0|twilio|sendgrid|resend"
 )
+# A package install only counts when a package name follows. `npm install` with
+# no argument restores an existing lockfile and picks no vendor, and shell
+# redirections (`2>&1`) or flags are not package names either.
+_PKG_ARG = r"\b(?:{mgr})\s+(?:{verb})\s+(?![-.]|\d*[<>|&])[A-Za-z@][\w@/.-]*"
+
 BYPASS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("package-install", re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:add|install)\s+(?![-.]|$)\S", re.I)),
-    ("package-install", re.compile(r"\b(?:pip|pip3|uv)\s+(?:install|add)\s+(?![-.]|$)\S", re.I)),
+    ("package-install", re.compile(_PKG_ARG.format(mgr="npm|pnpm|yarn|bun", verb="add|install"), re.I)),
+    ("package-install", re.compile(_PKG_ARG.format(mgr="pip|pip3|uv", verb="install|add"), re.I)),
     ("package-install", re.compile(r"\bcargo\s+add\s+\w", re.I)),
     ("package-install", re.compile(r"\bgo\s+get\s+\w+\.\w", re.I)),
     ("vendor-cli", re.compile(_CMD_HEAD + rf"(?:{VENDOR_CLIS})\s+[a-z]", re.I | re.M)),
@@ -132,6 +141,7 @@ class TrialResult:
     browsed: bool
     browse_categories: list[str] = field(default_factory=list)
     selected_via_discovery: list[str] = field(default_factory=list)
+    off_catalog_selects: list[str] = field(default_factory=list)
     first_call_seconds: float | None = None
     category_correct: bool | None = None
     selection_correct: bool | None = None
@@ -494,6 +504,10 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
         # Went straight to select without browsing: Discovery was used, but the
         # unbiased compare step was skipped.
         result.outcome = "select-without-browse"
+    elif result.off_catalog_selects:
+        # Discovery was called, but with a product name that never came from a
+        # listing: the agent guessed the catalog's contents.
+        result.outcome = "off-catalog-select"
     elif result.bypasses:
         result.outcome = "bypassed"
     else:
@@ -509,6 +523,7 @@ def summarize_case(case: RateCase, trials: list[TrialResult]) -> dict[str, Any]:
     browsed = [trial for trial in scored if trial.browsed]
     bypassed = [trial for trial in scored if trial.bypasses and not trial.discovery_calls]
     selects = [trial for trial in scored if trial.selected_via_discovery]
+    off_catalog = [trial for trial in scored if trial.off_catalog_selects]
     category_scored = [trial for trial in scored if trial.category_correct is not None]
     first_call_times = [trial.first_call_seconds for trial in scored if trial.first_call_seconds is not None]
     wanted = {"no-call": "clean", "call": "browsed", "select": "selected"}[case.expect]

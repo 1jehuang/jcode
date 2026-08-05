@@ -87,8 +87,11 @@ impl App {
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
     /// so without this poll a config.toml keybinding edit would only take
     /// effect after a restart. Called from the idle tick in both local and
-    /// remote run loops; the generation check makes the no-change path a
-    /// single atomic load. Returns true when bindings were re-parsed.
+    /// remote run loops, and again immediately before dispatching a key press
+    /// so an edit lands on the very next keystroke even when the run loop is
+    /// sitting at the 5s deep-idle cadence. The generation check makes the
+    /// no-change path a single atomic load. Returns true when bindings were
+    /// re-parsed.
     pub(super) fn refresh_keybindings_if_config_reloaded(&mut self) -> bool {
         // config() performs the throttled file-fingerprint staleness check and
         // bumps the reload generation when config.toml changed on disk.
@@ -109,6 +112,10 @@ impl App {
         self.fallback_switch_key = keybind::load_fallback_switch_key();
         self.scroll_keys = keybind::load_scroll_keys();
         crate::logging::info("KEYBINDINGS: reloaded from config change");
+        // Confirm the pickup to the user. Without this, an edit that is
+        // already live is indistinguishable from one that silently did
+        // nothing, which is the main source of "did that actually apply?".
+        self.set_status_notice("Config reloaded from disk");
         true
     }
 

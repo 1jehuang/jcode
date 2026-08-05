@@ -8,12 +8,15 @@ mod browser;
 mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
+mod config_edit_notice;
 mod conversation_search;
 mod debug_socket;
 mod discover;
+mod discover_secrets;
 mod edit;
 mod gmail;
 mod goal;
+pub mod inflight;
 mod invalid;
 mod ls;
 pub mod mcp;
@@ -614,6 +617,11 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        // Mark this call in-flight for the whole execution so the missing
+        // tool-output repair paths do not mistake a slow tool for an
+        // interrupted one and inject a duplicate synthetic result. See
+        // `tool::inflight`.
+        let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name(name);
         if let Some(policy) = session_tool_policy(&ctx.session_id) {

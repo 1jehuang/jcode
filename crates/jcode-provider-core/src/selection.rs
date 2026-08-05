@@ -202,6 +202,29 @@ pub fn model_name_for_provider(provider: ActiveProvider, model: &str) -> Cow<'_,
     Cow::Borrowed(model)
 }
 
+/// Strip a provider runtime's own routing prefix from a model id.
+///
+/// Session restore and the model picker speak in routing specs such as
+/// `antigravity:gemini-3-flash`. `MultiProvider` peels the prefix off before
+/// delegating, but `--provider <name>` hands the concrete runtime back to the
+/// agent directly, so the prefixed spec reaches `Provider::set_model`
+/// untouched. Storing it verbatim makes every later turn ask the backend for a
+/// model whose id contains our prefix, which the backend has never heard of
+/// (Antigravity answers HTTP 404 "Requested entity was not found." on turn 2
+/// of any resumed session).
+///
+/// A runtime only ever puts a bare model id on the wire, so each runtime calls
+/// this with its own prefix when accepting a model id. Only the runtime's own
+/// prefix is stripped: a foreign prefix is a real routing error and must stay
+/// visible rather than being silently reinterpreted as a local model.
+pub fn strip_own_model_prefix<'a>(model: &'a str, own_prefix: &str) -> &'a str {
+    let model = model.trim();
+    match model.strip_prefix(own_prefix) {
+        Some(rest) if !own_prefix.is_empty() => rest.trim(),
+        _ => model,
+    }
+}
+
 pub fn dedupe_model_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
     use std::collections::HashMap;
 
@@ -675,5 +698,87 @@ mod tests {
         assert_eq!(sequence.first(), Some(&ActiveProvider::OpenRouter));
         assert!(sequence.contains(&ActiveProvider::Claude));
         assert!(sequence.contains(&ActiveProvider::Cursor));
+    }
+
+    /// Regression: `--provider antigravity` (and the other direct runtimes)
+    /// hand `Provider::set_model` a routing spec like
+    /// `antigravity:gemini-3-flash` on session restore. Storing that verbatim
+    /// made every resumed turn request a model whose id carried our prefix, and
+    /// the backend answered HTTP 404 "Requested entity was not found." So turn
+    /// 1 of a session worked and turn 2 always failed, for every model.
+    #[test]
+    fn strip_own_model_prefix_covers_the_routing_spec_state_space() {
+        // (case, input, own prefix) -> stored model id
+        let cases: [(&str, &str, &str, &str); 9] = [
+            (
+                "own prefix is stripped",
+                "antigravity:gemini-3-flash",
+                "antigravity:",
+                "gemini-3-flash",
+            ),
+            (
+                "bare id is unchanged",
+                "gemini-3-flash",
+                "antigravity:",
+                "gemini-3-flash",
+            ),
+            (
+                "surrounding whitespace is trimmed",
+                "  antigravity:gemini-3-flash  ",
+                "antigravity:",
+                "gemini-3-flash",
+            ),
+            (
+                "whitespace after the prefix is trimmed",
+                "antigravity: gemini-3-flash",
+                "antigravity:",
+                "gemini-3-flash",
+            ),
+            (
+                "only one level of our own prefix is peeled",
+                "antigravity:antigravity:gemini-3-flash",
+                "antigravity:",
+                "antigravity:gemini-3-flash",
+            ),
+            (
+                "a foreign prefix is a routing error and stays visible",
+                "openrouter:gemini-3-flash",
+                "antigravity:",
+                "openrouter:gemini-3-flash",
+            ),
+            (
+                "model ids containing a colon are otherwise untouched",
+                "some:model",
+                "antigravity:",
+                "some:model",
+            ),
+            (
+                "gemini runtime",
+                "gemini:gemini-2.5-pro",
+                "gemini:",
+                "gemini-2.5-pro",
+            ),
+            ("copilot runtime", "copilot:gpt-5", "copilot:", "gpt-5"),
+        ];
+
+        for (case, input, own_prefix, expected) in cases {
+            assert_eq!(
+                strip_own_model_prefix(input, own_prefix),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    /// A prefix-only spec must not silently become a valid empty model id; the
+    /// runtimes rely on the emptiness check to reject it.
+    #[test]
+    fn strip_own_model_prefix_leaves_prefix_only_input_empty() {
+        assert_eq!(strip_own_model_prefix("antigravity:", "antigravity:"), "");
+        assert_eq!(
+            strip_own_model_prefix("antigravity:   ", "antigravity:"),
+            ""
+        );
+        assert_eq!(strip_own_model_prefix("   ", "antigravity:"), "");
     }
 }
