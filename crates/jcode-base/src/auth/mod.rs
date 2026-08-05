@@ -948,8 +948,11 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         probe_copilot_status(&mut status)
     });
     record_auth_probe_step(&mut timings, "antigravity", || {
-        status.antigravity =
-            token_state(antigravity::load_tokens().map(|tokens| tokens.is_expired()))
+        status.antigravity = refreshable_token_state(
+            "antigravity",
+            antigravity::load_tokens()
+                .map(|tokens| (tokens.is_expired(), tokens.refresh_token.clone())),
+        )
     });
     record_auth_probe_step(&mut timings, "gemini", || {
         // An official Gemini Developer API key is a static credential with no
@@ -958,7 +961,11 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         status.gemini = if gemini::has_api_key() {
             AuthState::Available
         } else {
-            token_state(gemini::load_tokens().map(|tokens| tokens.is_expired()))
+            refreshable_token_state(
+                "gemini",
+                gemini::load_tokens()
+                    .map(|tokens| (tokens.is_expired(), tokens.refresh_token.clone())),
+            )
         }
     });
     record_auth_probe_step(&mut timings, "cursor", || {
@@ -983,6 +990,46 @@ fn token_state(result: anyhow::Result<bool>) -> AuthState {
     match result {
         Ok(is_expired) => {
             if is_expired {
+                AuthState::Expired
+            } else {
+                AuthState::Available
+            }
+        }
+        Err(_) => AuthState::NotConfigured,
+    }
+}
+
+/// Auth state for an OAuth credential that refreshes automatically.
+///
+/// A short-lived access token is *not* a broken login. Antigravity/Gemini
+/// access tokens expire roughly hourly and the provider transparently
+/// refreshes them on the next request, so reporting `Expired` purely because
+/// the cached access token aged out makes a perfectly working provider look
+/// dead in `/login`, the header, onboarding, and `jcode auth status`.
+///
+/// Only report `Expired` when the refresh token itself is missing or was
+/// already permanently rejected (revoked / `invalid_grant`), which is the case
+/// where the user genuinely has to log in again.
+fn refreshable_token_state(provider_id: &str, result: anyhow::Result<(bool, String)>) -> AuthState {
+    refreshable_token_state_with(result, |refresh_token| {
+        crate::auth::refresh_state::refresh_token_is_known_rejected(provider_id, refresh_token)
+    })
+}
+
+/// Pure decision core of [`refreshable_token_state`], with the persisted
+/// "this refresh token was permanently rejected" lookup injected so it can be
+/// unit tested without touching `$HOME`.
+fn refreshable_token_state_with(
+    result: anyhow::Result<(bool, String)>,
+    is_known_rejected: impl Fn(&str) -> bool,
+) -> AuthState {
+    match result {
+        Ok((is_expired, refresh_token)) => {
+            if !is_expired {
+                return AuthState::Available;
+            }
+            let refresh_token = refresh_token.trim();
+            if refresh_token.is_empty() || is_known_rejected(refresh_token) {
                 AuthState::Expired
             } else {
                 AuthState::Available

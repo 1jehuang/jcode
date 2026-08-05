@@ -54,7 +54,7 @@ pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
     dedupe_model_routes, explicit_model_provider_prefix, fallback_sequence,
     model_name_for_provider, parse_provider_hint, provider_from_model_key, provider_key,
-    provider_label,
+    provider_label, strip_own_model_prefix,
 };
 
 use anyhow::Result;

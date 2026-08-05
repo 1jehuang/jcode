@@ -157,6 +157,13 @@ impl Tool for MultiEditTool {
             output.push_str(&generate_diff_summary(&original_content, &content));
         }
 
+        super::config_edit_notice::append_config_edit_notice(
+            &mut output,
+            &path,
+            &original_content,
+            &content,
+        );
+
         Ok(ToolOutput::new(output).with_title(params.file_path.clone()))
     }
 }

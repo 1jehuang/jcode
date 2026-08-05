@@ -135,3 +135,137 @@ python scripts/benchmark_discovery_rate.py --output target/discovery-rate/after.
 
 Prompts are held fixed across such experiments. Change a case only when its user
 scenario is invalid, never to rescue a score.
+
+## Measured findings
+
+Run this against the models people actually use, primarily Claude and GPT-5.6.
+Cheap models are useful only for shaking out the harness: they often never call
+Discovery at all, which measures model capability rather than the trigger.
+
+Baselines collected while building this benchmark, all on the default full
+toolset so Discovery competes with bash, browser, and web tools:
+
+| model | scored trials | browse recall | bypass | select |
+| --- | --- | --- | --- | --- |
+| claude-haiku-4-5 | 11 | 18% | 45% | 0% |
+| glm-4.7-flash | 12 | 38% | 0% | 0% |
+| gpt-oss-120b (cerebras) | 24 | 0% | 11% | 0% |
+| gemini-2.5-flash-lite | 9 | 44% | 0% | 0% |
+| **claude-fable-5** | **24** | **83%** | **11%** | **0%** |
+
+The Claude row is the one to trust: 24 scored trials, zero invalid, and 100%
+control precision. It reframes the problem.
+
+Three things stand out.
+
+**On a capable model the browse trigger already mostly works.** Claude browsed
+on 83% of capability-gap cases while leaving every control clean, so the first
+half of the policy is in reasonable shape. Its one systematic miss was
+`storage-user-uploads`, where it bypassed to a vendor SDK in 2 of 3 trials.
+
+**Installed skills can preempt Discovery.** Claude's only systematic miss was
+`storage-user-uploads`. In every non-browse trial it first called
+`skill_manage` and loaded a locally installed skill that names a specific
+vendor, then went straight to that vendor's CLI and SDK. Discovery never got a
+chance. Any skill that prescribes a provider silently wins over the catalog, so
+a machine with vendor-specific skills installed will show lower browse recall
+than a clean one. Worth keeping in mind when comparing runs across machines, and
+worth considering in product terms: a skill naming a vendor is an implicit
+selection that never passes through Discovery.
+
+**Triggering is strongly model-dependent.** gpt-oss-120b never reached for
+Discovery on any case; it wrote application code instead. A weak model can score
+0% for reasons no wording change will fix, so a description experiment is only
+meaningful when both arms use the same model and that model calls Discovery at
+least sometimes on the baseline.
+
+**Select rate is 0% everywhere, including Claude.** Not one trial across any
+model reached `action=select`, even when Claude browsed successfully on 20 of 24
+trials. Agents that browse summarize the listing and stop. This, not the browse
+trigger, is the real gap: the intended policy is browse then select, and on the
+strongest model tested the second half never happened once.
+
+**Bypass is the dominant failure mode on capable models.** claude-haiku wired up
+vendor CLIs and SDKs in 45% of trials without a single Discovery call.
+
+### Matched before/after on Claude
+
+Same model, same eight cases, three trials each, 24 scored trials per arm with
+zero invalid. Preserved in `docs/discovery-baselines/claude-fable-5-{before,after}.json`.
+
+| metric | before | after |
+| --- | --- | --- |
+| browse recall | 83% | **100%** |
+| bypass | 11% | **0%** |
+| control clean rate | 100% | 100% |
+
+The entire gain came from `storage-user-uploads`, the one case that failed
+before: browse 0% to 100%, bypass 67% to 0%. Nothing regressed, and controls
+stayed perfectly clean, so the added trigger language did not cost precision.
+
+**Select needs a populated catalog.** Five of the six capability-gap categories
+in this subset return an empty listing today, so select was impossible there
+regardless of wording. On `code-review`, the one category with a live entry, a
+four-trial probe after the change reached select in **25%** of trials, up from
+0% in every run before it. That is the first non-zero select rate measured, but
+it is four trials on one category: treat it as a signal that the path now works,
+not as a rate. Re-measure once more categories carry listings.
+
+### What changed as a result
+
+Two fixes landed against these numbers.
+
+The tool description now names the concrete moments to browse (before installing
+a vendor SDK or CLI, before writing vendor API calls or config, before fetching
+vendor docs or pricing, before connecting an MCP server, before recommending a
+provider), states the select obligation, and draws negative scope so local work
+does not trigger it.
+
+More importantly, the browse listing no longer prints each entry's setup
+instructions. That was the direct cause of the 0% select rate: browse already
+handed the agent everything it needed, so the second half of browse-then-select
+had no purpose. Setup now lives only in the select response.
+`scripts/verify_discovery_select.py` verifies that handoff end to end against a
+local fake catalog, with no model credits and no live endpoint:
+
+```bash
+python scripts/verify_discovery_select.py ./target/selfdev/jcode
+```
+
+That script also covers off-catalog selects. The endpoint signals "no such
+entry" either with a 404 or with a 200 carrying an empty entry; both are
+reported to the agent as a distinct, actionable error naming `action=suggest`,
+rather than as a generic endpoint failure it might retry or route around. The
+same distinction is recorded in telemetry as
+`outcome=off_catalog_select` / `failure_reason=off_catalog_select`.
+
+The description change has not yet been confirmed by a matched live run. Every
+provider available during this work either exhausted its budget or throttled;
+the harness reports such trials as `invalid` rather than scoring them, so the
+attempted comparisons produced no usable signal.
+
+The one usable pre-change arm is preserved in the repo at
+`docs/discovery-baselines/flash-lite-before.json` (gemini-2.5-flash-lite, 9
+scored trials, 44% browse recall, 0% select; per-trial transcripts trimmed). Because that arm is already measured,
+finishing the comparison only needs the post-change arm, which halves the quota
+cost:
+
+```bash
+JCODE_BIN=<after-bin> python scripts/benchmark_discovery_rate.py \
+  --provider gemini-api --model gemini-2.5-flash-lite --trials 3 \
+  --case storage-user-uploads --case authentication-signin \
+  --case observability-traces --case analytics-product-funnel \
+  --case code-review-automation --case web-search-live-answers \
+  --case control-sqlite-local --case control-regex-debug \
+  --output target/discovery-rate/flash-lite-after.json
+```
+
+Compare `summary.recall_browse_rate` and `summary.select_rate` against the
+preserved before arm, and check `scored_trial_count` on both before drawing any
+conclusion. Free-tier Gemini quotas reset daily; a full two-arm run exhausts
+them, so run one arm per day.
+
+Single-trial runs are noise. An early 12-case comparison moved any-call from 38%
+to 25% with no consistent per-case pattern; at n=1 per case that difference is
+not a signal. Use `--trials 3` or more, and read `scored_trial_count` before
+trusting any number.

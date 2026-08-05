@@ -140,11 +140,18 @@ impl Tool for EditTool {
         let end_line = start_line + params.new_string.lines().count().saturating_sub(1);
         let context = extract_context(&new_content, start_line, end_line, 3);
 
-        Ok(ToolOutput::new(format!(
+        let mut body = format!(
             "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}",
             params.file_path, occurrences, diff, context.0, context.1, context.2
-        ))
-        .with_title(params.file_path.clone()))
+        );
+        super::config_edit_notice::append_config_edit_notice(
+            &mut body,
+            &path,
+            &content,
+            &new_content,
+        );
+
+        Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
     }
 }
 

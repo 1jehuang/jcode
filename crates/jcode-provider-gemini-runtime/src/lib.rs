@@ -1012,7 +1012,9 @@ impl Provider for GeminiProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        let trimmed = model.trim();
+        // See `strip_own_model_prefix`: `--provider gemini` routes through this
+        // runtime directly, so session restore hands it `gemini:<model>`.
+        let trimmed = jcode_provider_core::strip_own_model_prefix(model, "gemini:");
         if trimmed.is_empty() {
             anyhow::bail!("Gemini model cannot be empty");
         }
