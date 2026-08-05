@@ -537,7 +537,7 @@ pub(super) async fn handle_client(
                 last_seen: connected_at,
                 is_processing: false,
                 current_tool_name: None,
-                terminal_env: Vec::new(),
+                terminal_env: active_terminal_env.clone(),
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -1420,18 +1420,18 @@ pub(super) async fn handle_client(
                     });
                     continue;
                 }
+                // An empty snapshot is authoritative too. It must clear all
+                // terminal vars inherited by the daemon rather than retaining
+                // a prior pane's values.
+                active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.client_instance_id = client_instance_id.clone();
-                        // Record the client's terminal env so spawn/focus hooks
-                        // target the client's terminal, not the server's stale
-                        // startup env (#405). Only overwrite when the client sent
-                        // something, so reconnects without env don't clobber it.
-                        if !terminal_env.is_empty() {
-                            info.terminal_env = terminal_env.clone();
-                        }
+                        // Record the authoritative snapshot even when it is
+                        // empty so stale pane variables are not retained.
+                        info.terminal_env = active_terminal_env.clone();
                     }
                 }
                 active_terminal_env = terminal_env.clone();
@@ -3277,6 +3277,24 @@ pub(super) async fn process_message_streaming_mpsc(
         );
     }
     result
+}
+
+/// Process a client-originated turn with that client's terminal identity. The
+/// task-local scope flows through turn, pre-tool, and post-tool hooks without
+/// mutating process-global environment shared by other client tasks.
+async fn process_message_streaming_mpsc_with_terminal_env(
+    agent: Arc<Mutex<Agent>>,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    client_terminal_env: Vec<(String, String)>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    crate::hooks::with_client_terminal_env(
+        client_terminal_env,
+        process_message_streaming_mpsc(agent, content, images, system_reminder, event_tx),
+    )
+    .await
 }
 
 #[cfg(test)]
