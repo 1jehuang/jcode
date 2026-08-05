@@ -3,9 +3,10 @@
 ## Development Workflow
 
 - **Stay on your own branch** - Do not take, cherry-pick, merge, or copy code from other
-  people's or other agents' branches. Only work from your branch and its base (e.g. `main`).
-  If you need something that lives on another branch, tell the user and let them decide;
-  never pull it in yourself.
+  people's or other agents' branches unless the source branch belongs to a repository
+  maintainer and the user explicitly asks you to integrate it. Only work from your branch
+  and its base (e.g. `main`) otherwise. Never integrate branches owned by non-maintainers
+  or other agents yourself; tell the user and let them decide how to proceed.
 
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
