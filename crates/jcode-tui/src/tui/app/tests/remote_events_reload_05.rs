@@ -565,6 +565,17 @@ fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
             app.schedule_auto_poke_followup_if_needed(),
             "changing the todo list must re-arm the automatic nudge"
         );
+
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        crate::todo::save_todos(&app.session.id, &[]).expect("finish cycle");
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
+            .expect("start equivalent new cycle");
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "an equivalent todo in a new cycle must receive one fresh nudge"
+        );
     });
 }
 
