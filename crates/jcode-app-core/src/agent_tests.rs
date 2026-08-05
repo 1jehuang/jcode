@@ -1381,7 +1381,7 @@ fn guardrail_stop_reason_detection() {
 }
 
 #[test]
-fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
+fn fable_guardrail_reconsideration_is_narrow_and_bounded() {
     assert!(Agent::should_reconsider_fable_guardrail(
         "claude-fable-5",
         Some("refusal"),
@@ -1394,11 +1394,23 @@ fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
         0,
         1,
     ));
-    assert!(!Agent::should_reconsider_fable_guardrail(
+    assert!(Agent::should_reconsider_fable_guardrail(
         "claude-fable-5",
         Some("refusal"),
         1,
-        1,
+        3,
+    ));
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        2,
+        3,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        3,
+        3,
     ));
     assert!(!Agent::should_reconsider_fable_guardrail(
         "claude-fable-5",
@@ -1412,6 +1424,17 @@ fn fable_guardrail_reconsideration_is_narrow_and_one_shot() {
         0,
         1,
     ));
+}
+
+#[test]
+fn fable_guardrail_prompt_suite_is_distinct_and_safety_preserving() {
+    let prompts = Agent::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS;
+    assert_eq!(prompts.len(), 3);
+    assert_ne!(prompts[0], prompts[1]);
+    assert_ne!(prompts[1], prompts[2]);
+    assert!(prompts[0].contains("full context"));
+    assert!(prompts[1].contains("safe portions"));
+    assert!(prompts[2].contains("Do not weaken a refusal"));
 }
 
 #[test]
@@ -1621,7 +1644,7 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
 #[derive(Clone, Default)]
 struct FableGuardrailProvider {
     calls: Arc<std::sync::Mutex<usize>>,
-    reconsideration_seen: Arc<std::sync::Mutex<bool>>,
+    prompts_seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -1638,15 +1661,18 @@ impl Provider for FableGuardrailProvider {
             *calls += 1;
             *calls
         };
-        if call == 2 {
-            *self.reconsideration_seen.lock().unwrap() = messages.iter().any(|message| {
-                message_text(message).contains("genuinely requires a safety refusal")
-            });
+        if call > 1 {
+            let prompt = messages
+                .last()
+                .map(message_text)
+                .unwrap_or_default()
+                .to_string();
+            self.prompts_seen.lock().unwrap().push(prompt);
         }
 
         let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
         tokio::spawn(async move {
-            if call == 1 {
+            if call <= 3 {
                 let _ = tx
                     .send(Ok(StreamEvent::MessageEnd {
                         stop_reason: Some("refusal".to_string()),
@@ -1686,7 +1712,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     let _guard = crate::storage::lock_test_env();
     let fable = FableGuardrailProvider::default();
     let calls = fable.calls.clone();
-    let reconsideration_seen = fable.reconsideration_seen.clone();
+    let prompts_seen = fable.prompts_seen.clone();
     let provider: Arc<dyn Provider> = Arc::new(fable);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
@@ -1704,8 +1730,12 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         }
     }
 
-    assert_eq!(*calls.lock().unwrap(), 2);
-    assert!(*reconsideration_seen.lock().unwrap());
+    assert_eq!(*calls.lock().unwrap(), 4);
+    let prompts = prompts_seen.lock().unwrap();
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[0].contains("concrete harmful action"));
+    assert!(prompts[1].contains("safe portions"));
+    assert!(prompts[2].contains("final, independent policy check"));
     assert!(
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
