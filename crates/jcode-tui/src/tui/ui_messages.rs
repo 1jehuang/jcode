@@ -1452,7 +1452,7 @@ fn push_todo_goal_details(
     goal: Option<&crate::todo::TodoGoal>,
     base_indent: &str,
     inner_width: usize,
-    compact_details: bool,
+    _compact_details: bool,
 ) {
     let Some(goal) = goal else {
         return;
@@ -1484,21 +1484,6 @@ fn push_todo_goal_details(
             spans.extend(scores);
             lines.push(todo_card_line(spans, base_indent, inner_width));
         }
-    }
-    if let Some(value) = goal
-        .feedback_loop
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        push_todo_detail(
-            lines,
-            "Feedback",
-            value,
-            base_indent,
-            inner_width,
-            compact_details,
-        );
     }
 }
 
@@ -1592,6 +1577,19 @@ fn render_todo_goal_updates(
     let mut lines = Vec::new();
 
     for update in updates {
+        // Narrative assessment fields remain available in the dedicated todos
+        // view. Inline tool cards only show the compact state transitions so a
+        // long feedback loop or stopping rationale cannot dominate the chat.
+        let visible_fields = update.fields.iter().filter(|field| {
+            !matches!(
+                field,
+                crate::todo::TodoGoalField::FeedbackLoop
+                    | crate::todo::TodoGoalField::StoppingEvidence
+            )
+        });
+        if visible_fields.clone().next().is_none() {
+            continue;
+        }
         let goal = update.after.as_ref().or(update.before.as_ref());
         let label = goal
             .and_then(|goal| goal.group.as_deref())
@@ -1610,7 +1608,7 @@ fn render_todo_goal_updates(
             inner_width,
         ));
 
-        for field in &update.fields {
+        for field in visible_fields {
             match field {
                 crate::todo::TodoGoalField::ClosedFeedbackLoop => push_todo_score_update(
                     &mut lines,
@@ -1676,26 +1674,8 @@ fn render_todo_goal_updates(
                     base_indent,
                     inner_width,
                 ),
-                crate::todo::TodoGoalField::FeedbackLoop => push_todo_text_update(
-                    &mut lines,
-                    "Feedback",
-                    update
-                        .after
-                        .as_ref()
-                        .and_then(|goal| goal.feedback_loop.as_deref()),
-                    base_indent,
-                    inner_width,
-                ),
-                crate::todo::TodoGoalField::StoppingEvidence => push_todo_text_update(
-                    &mut lines,
-                    "Stopping evidence",
-                    update
-                        .after
-                        .as_ref()
-                        .and_then(|goal| goal.stopping_evidence.as_deref()),
-                    base_indent,
-                    inner_width,
-                ),
+                crate::todo::TodoGoalField::FeedbackLoop
+                | crate::todo::TodoGoalField::StoppingEvidence => unreachable!(),
             }
         }
     }

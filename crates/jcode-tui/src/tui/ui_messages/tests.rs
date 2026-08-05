@@ -543,7 +543,7 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
 }
 
 #[test]
-fn render_todos_message_shows_goal_scores_and_feedback() {
+fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     let todos = vec![crate::todo::TodoItem {
         id: "1".to_string(),
         content: "Render the card".to_string(),
@@ -591,10 +591,8 @@ fn render_todos_message_shows_goal_scores_and_feedback() {
         plain.contains("User intention · Keep the agent aligned with the user's request"),
         "{plain}"
     );
-    assert!(
-        plain.contains("Feedback · Inspect a debug frame"),
-        "{plain}"
-    );
+    assert!(!plain.contains("Feedback ·"), "{plain}");
+    assert!(!plain.contains("Inspect a debug frame"), "{plain}");
     assert!(plain.contains("● Render the card · plausible"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
 }
@@ -645,8 +643,8 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
             .iter()
             .filter(|line| line.contains("Feedback"))
             .count(),
-        1,
-        "{}",
+        0,
+        "verbose goal feedback should stay out of inline cards: {}",
         narrow.join("\n")
     );
     assert!(
@@ -912,10 +910,9 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         plain.contains("Closed feedback loop strong → closed"),
         "{plain}"
     );
+    assert!(!plain.contains("Feedback ·"), "{plain}");
     assert!(
-        plain.contains(
-            "Feedback · Render before and after fixtures and assert unchanged fields are absent"
-        ),
+        !plain.contains("assert unchanged fields are absent"),
         "{plain}"
     );
     assert!(
@@ -925,6 +922,41 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
     assert!(!plain.contains("Alignment score"), "{plain}");
     assert!(!plain.contains("Keep the todo card concise"), "{plain}");
     assert!(!plain.contains("See current work at a glance"), "{plain}");
+}
+
+#[test]
+fn render_goal_update_size_is_bounded_when_narrative_evidence_is_long() {
+    let long_text = "verbose evidence ".repeat(600);
+    let goal = crate::todo::TodoGoal {
+        group: Some("compact assessment".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
+        delivery_state: Some(crate::todo::DeliveryState::Integrated),
+        autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+        iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+        feedback_loop: Some(long_text.clone()),
+        stopping_evidence: Some(long_text),
+        ..Default::default()
+    };
+    let update = crate::todo::TodoGoalChange {
+        before: None,
+        after: Some(goal),
+        fields: vec![
+            crate::todo::TodoGoalField::ClosedFeedbackLoop,
+            crate::todo::TodoGoalField::DeliveryState,
+            crate::todo::TodoGoalField::Autonomy,
+            crate::todo::TodoGoalField::IterationMaturity,
+            crate::todo::TodoGoalField::FeedbackLoop,
+            crate::todo::TodoGoalField::StoppingEvidence,
+        ],
+    };
+
+    let lines = render_todo_goal_updates(&[update], 95);
+    let plain = lines.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
+
+    assert_eq!(lines.len(), 5, "narrative text must not add rows:\n{plain}");
+    assert!(!plain.contains("Feedback"), "{plain}");
+    assert!(!plain.contains("Stopping evidence"), "{plain}");
+    assert!(!plain.contains("verbose evidence"), "{plain}");
 }
 
 #[test]
