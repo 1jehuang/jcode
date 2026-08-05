@@ -93,6 +93,80 @@ const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-clim
 /// the assessment category without disclosing the score or threshold.
 pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state, autonomy, iteration maturity, or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, validate the complete workflow and consequential adjacent necessary follow-through, and continue exercising the feedback loop while gains or material hypotheses remain. Reassess the goal honestly from concrete evidence, then call the todo tool again with an updated `delivery_state`, `autonomy`, and `iteration_maturity`, plus any required `stopping_evidence`.";
 
+/// Build an ownership continuation that identifies every failing goal and field.
+/// The generic prefix remains stable for persisted-message classification, while
+/// the appended diagnostics let the model deliberately satisfy the gate instead
+/// of guessing which of several assessments was rejected.
+pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[TodoGoal]) -> String {
+    let mut groups: Vec<Option<String>> = Vec::new();
+    for todo in todos {
+        let group = normalized_group(todo.group.as_deref());
+        if group_is_complete(todos, &group) && !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+
+    let mut message = String::from(TODO_OWNERSHIP_CONTINUATION_MESSAGE);
+    for group in groups {
+        let label = group.as_deref().unwrap_or("ungrouped goal");
+        let Some(goal) = goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == group)
+        else {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": no goal assessment was recorded. Record delivery_state, autonomy, and iteration_maturity.",
+                label
+            ));
+            continue;
+        };
+        if !goal
+            .delivery_state
+            .is_some_and(|state| state >= required_delivery_state(goal.difficulty))
+        {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": delivery_state must be workflow_validated or outcome_delivered.",
+                label
+            ));
+        }
+        if !goal
+            .autonomy
+            .is_some_and(|state| state >= Autonomy::NecessaryFollowthrough)
+        {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": autonomy must be necessary_followthrough or higher.",
+                label
+            ));
+        }
+        if !goal
+            .iteration_maturity
+            .is_some_and(IterationMaturity::permits_completion)
+        {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": iteration_maturity must state a terminal basis for stopping, such as outcome_reached, constraints_exhausted, plateau_confirmed, or budget_exhausted.",
+                label
+            ));
+        }
+        if matches!(
+            goal.iteration_maturity,
+            Some(
+                IterationMaturity::PlateauConfirmed
+                    | IterationMaturity::ConstraintsExhausted
+                    | IterationMaturity::BudgetExhausted
+            )
+        ) && !goal
+            .stopping_evidence
+            .as_deref()
+            .is_some_and(|evidence| !evidence.trim().is_empty())
+        {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": stopping_evidence is required for the selected iteration_maturity; name the attempts, constraint, or budget that justifies stopping.",
+                label
+            ));
+        }
+    }
+    message
+}
+
 /// Legacy ownership-gate wording (pre delivery_state rename). Kept only so
 /// persisted transcripts still classify it as a synthetic gate message.
 const LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your end-to-end ownership is not high enough to finish this goal.";
@@ -1546,6 +1620,32 @@ mod tests {
         // Every gate message that requires a specific field should name it, so
         // this property is asserted for the sibling gates too.
         assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("completion_confidence"));
+    }
+
+    #[test]
+    fn ownership_continuation_identifies_each_failing_field_and_goal() {
+        let todos = vec![todo("work", "completed", Some("ship"))];
+        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::Integrated));
+        goal.autonomy = Some(Autonomy::RequestedOnly);
+        goal.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
+        goal.stopping_evidence = None;
+
+        let message = build_todo_ownership_continuation_message(&todos, &[goal]);
+        assert!(message.contains("Goal \"ship\""));
+        assert!(message.contains("delivery_state must be workflow_validated"));
+        assert!(message.contains("autonomy must be necessary_followthrough"));
+        assert!(message.contains("stopping_evidence is required"));
+        // PlateauConfirmed is terminal, so it must not also be diagnosed as an
+        // iteration_maturity failure. Its missing evidence is the exact defect.
+        assert!(!message.contains("iteration_maturity must state a terminal basis"));
+        assert!(is_auto_poke_message(&message));
+    }
+
+    #[test]
+    fn ownership_continuation_reports_missing_goal_assessment() {
+        let todos = vec![todo("work", "completed", Some("ship"))];
+        let message = build_todo_ownership_continuation_message(&todos, &[]);
+        assert!(message.contains("Goal \"ship\": no goal assessment was recorded"));
     }
 
     #[test]

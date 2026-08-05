@@ -1561,7 +1561,9 @@ impl App {
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
                 self.queued_messages
-                    .push(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE.to_string());
+                    .push(crate::todo::build_todo_ownership_continuation_message(
+                        &todos, &goals,
+                    ));
                 self.pending_queued_dispatch = true;
                 return true;
             }
@@ -1593,7 +1595,9 @@ impl App {
                 self.pending_queued_dispatch = true;
                 return true;
             }
-            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
+            if (ownership_needs_followup
+                || confidence_summary.completion_confidence_needs_validation
+                || needs_spike_challenge)
                 && !gate_budget_left
             {
                 // The gate keeps failing but the model is no longer making
